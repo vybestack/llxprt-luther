@@ -295,9 +295,9 @@ External tool requirements (must be on PATH at runtime):
 - `llxprt` (the llxprt-code CLI binary)
 - `node`/`npm` (for the verify checks on the target project)
 
-## Open questions
+## Resolved questions
 
-1. **Issue selection: "lowest module"** — Modules are release milestones (e.g., 0.10.0). Is this a GitHub milestone? A label like `release:0.10.0`? How does Luther query for "lowest-numbered module"?
-2. **llxprt output capture** — `llxprt --profile-load {profile} -p "{goal}" --yolo` writes to stdout. For steps like `create_plan`, does llxprt write the plan to stdout, or does the prompt instruct it to write a file (e.g., `.luther/plan.md`)? The `--output-format json` flag exists — should we use it for structured output?
-3. **Pass/fail string format** — For `evaluate_plan` and `evaluate_impl`, the prompt should specify exact strings. Proposed: `PLAN_APPROVED` / `PLAN_NEEDS_REVISION` and `IMPL_APPROVED` / `IMPL_NEEDS_WORK`. The ShellExecutor's `outcome_on_stdout` maps these to success/fixable. Are these strings acceptable?
-4. **llxprt session summary** — llxprt has `--session-summary <file>` which writes a summary. Could this be useful for capturing structured output from LLM steps?
+1. **Issue selection: "lowest module"** — Modules are GitHub milestones (e.g., `0.10.0` with 88 open issues, `0.11.0` with 55). The `select_issue` step queries `gh issue list --milestone "0.10.0" --state open --json number,title,assignees`, picks the lowest-numbered unassigned issue. If no unassigned issues remain in the lowest milestone, move to the next.
+2. **llxprt output capture** — LLM steps instruct llxprt to write output to files in the working directory (e.g., "write your plan to .luther/plan.md"). File writing is reliable across all models. No stdout capture or `--output-format` needed for content. Stdout is only scanned for pass/fail signal strings.
+3. **Pass/fail string format** — Evaluation prompts specify exact strings: `PLAN_APPROVED` / `PLAN_NEEDS_REVISION` and `IMPL_APPROVED` / `IMPL_NEEDS_WORK`. ShellExecutor's `outcome_on_stdout` maps these to success/fixable.
+4. **Push and PR are separate steps** — `push_changes` is a pure git operation. `create_pr` is a pure gh operation. Two steps, two executors (both via ShellExecutor).
