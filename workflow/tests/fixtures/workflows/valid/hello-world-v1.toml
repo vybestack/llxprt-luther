@@ -1,0 +1,87 @@
+# Hello-World Workflow Type Definition
+# @plan:PLAN-20260408-STEP-EXEC.P07
+#
+# A simple proof-of-concept workflow that creates a Rust project,
+# writes a test + implementation, and runs cargo test.
+
+workflow_type_id = "hello-world-v1"
+
+[[steps]]
+step_id = "init_project"
+step_type = "shell"
+description = "Initialize a new Rust project with cargo init"
+
+[steps.parameters]
+command = "cargo init --name hello_world {work_dir}"
+
+[[steps]]
+step_id = "write_test"
+step_type = "write_file"
+description = "Write a test file for the greeting function"
+
+[steps.parameters]
+path = "tests/greeting_test.rs"
+content = """
+#[test]
+fn test_greet() {
+    assert_eq!(hello_world::greet("World"), "Hello, World!");
+}
+"""
+
+[[steps]]
+step_id = "write_impl"
+step_type = "write_file"
+description = "Write the implementation of the greeting function"
+
+[steps.parameters]
+path = "src/lib.rs"
+content = """
+pub fn greet(name: &str) -> String {
+    format!("Hello, {}!", name)
+}
+"""
+
+[[steps]]
+step_id = "run_tests"
+step_type = "shell"
+description = "Run cargo test to verify the implementation"
+
+[steps.parameters]
+command = "cargo test"
+
+[[steps]]
+step_id = "complete"
+step_type = "shell"
+description = "Echo completion message"
+
+[steps.parameters]
+command = "echo done"
+
+[[transitions]]
+from = "init_project"
+to = "write_test"
+condition = "success"
+
+[[transitions]]
+from = "write_test"
+to = "write_impl"
+condition = "success"
+
+[[transitions]]
+from = "write_impl"
+to = "run_tests"
+condition = "success"
+
+[[transitions]]
+from = "run_tests"
+to = "complete"
+condition = "success"
+
+[[transitions]]
+from = "run_tests"
+to = "write_impl"
+condition = "fixable"
+
+[guards]
+max_retries = 2
+timeout_seconds = 300

@@ -1,0 +1,9 @@
+[alias]
+xtask = "run --quiet --manifest-path xtask/Cargo.toml --"
+qa = "xtask qa"
+coverage = "xtask coverage"
+complexity = "xtask complexity"
+release-package = "xtask release-package"
+release-publish = "xtask release-publish"
+release-update-tap = "xtask release-update-tap"
+release-all = "xtask release"

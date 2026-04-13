@@ -1,0 +1,116 @@
+# Issue Fix Workflow Type Definition
+# @plan:PLAN-20260404-INITIAL-RUNTIME.P03
+
+workflow_type_id = "issue-fix-v1"
+
+[[steps]]
+step_id = "scan"
+step_type = "analysis"
+description = "Scan repository for issue context and codebase structure"
+
+[[steps]]
+step_id = "plan"
+step_type = "planning"
+description = "Generate implementation plan based on issue analysis"
+
+[[steps]]
+step_id = "review"
+step_type = "approval"
+description = "Review plan before implementation"
+
+[[steps]]
+step_id = "implement"
+step_type = "execution"
+description = "Implement the fix according to plan"
+
+[[steps]]
+step_id = "test"
+step_type = "verification"
+description = "Run tests to verify the fix"
+
+[[steps]]
+step_id = "commit"
+step_type = "vcs"
+description = "Commit changes to version control"
+
+[[steps]]
+step_id = "submit"
+step_type = "vcs"
+description = "Submit pull request or equivalent"
+
+[[steps]]
+step_id = "diagnose"
+step_type = "analysis"
+description = "Diagnose failures when tests or validation fails"
+
+[[steps]]
+step_id = "remediate"
+step_type = "execution"
+description = "Apply fixes for identified issues"
+
+[[steps]]
+step_id = "abandon"
+step_type = "cleanup"
+description = "Clean up and abandon the workflow run"
+
+[[steps]]
+step_id = "log"
+step_type = "record"
+description = "Log workflow completion and outcomes"
+
+[[transitions]]
+from = "scan"
+to = "plan"
+
+[[transitions]]
+from = "plan"
+to = "review"
+
+[[transitions]]
+from = "review"
+to = "implement"
+condition = "approved"
+
+[[transitions]]
+from = "review"
+to = "abandon"
+condition = "rejected"
+
+[[transitions]]
+from = "implement"
+to = "test"
+
+[[transitions]]
+from = "test"
+to = "commit"
+condition = "passed"
+
+[[transitions]]
+from = "test"
+to = "diagnose"
+condition = "failed"
+
+[[transitions]]
+from = "diagnose"
+to = "remediate"
+
+[[transitions]]
+from = "remediate"
+to = "test"
+
+[[transitions]]
+from = "commit"
+to = "submit"
+
+[[transitions]]
+from = "submit"
+to = "log"
+
+[[transitions]]
+from = "abandon"
+to = "log"
+
+[guards]
+max_retries = 3
+timeout_seconds = 3600
+require_approval = true

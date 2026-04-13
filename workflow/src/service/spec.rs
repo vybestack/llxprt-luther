@@ -1,0 +1,392 @@
+//! Service specification - plist and systemd unit generation.
+//!
+/// @plan:PLAN-20260404-INITIAL-RUNTIME.P10
+
+use std::path::PathBuf;
+
+/// Service specification for daemon/service installation.
+#[derive(Debug, Clone)]
+pub struct ServiceSpec {
+    /// Service name (used for plist/unit file naming)
+    pub name: String,
+    /// Human-readable label
+    pub label: String,
+    /// Path to the binary executable
+    pub binary_path: PathBuf,
+    /// Command line arguments
+    pub args: Vec<String>,
+    /// Working directory for the service
+    pub working_dir: PathBuf,
+    /// Environment variables
+    pub environment: Vec<(String, String)>,
+    /// Log file path (optional)
+    pub log_path: Option<PathBuf>,
+    /// Error log file path (optional)
+    pub error_log_path: Option<PathBuf>,
+    /// Whether to keep alive (restart on exit)
+    pub keep_alive: bool,
+    /// Whether to run at load
+    pub run_at_load: bool,
+    /// User to run as (for systemd)
+    pub user: Option<String>,
+    /// Group to run as (for systemd)
+    pub group: Option<String>,
+}
+
+impl ServiceSpec {
+    /// Create a new service specification.
+    #[must_use]
+    pub fn new(name: impl Into<String>, binary_path: impl Into<PathBuf>) -> Self {
+        let name = name.into();
+        Self {
+            name: name.clone(),
+            label: format!("com.luther.{}", name),
+            binary_path: binary_path.into(),
+            args: Vec::new(),
+            working_dir: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            environment: Vec::new(),
+            log_path: None,
+            error_log_path: None,
+            keep_alive: true,
+            run_at_load: true,
+            user: None,
+            group: None,
+        }
+    }
+
+    /// Set the label.
+    #[must_use]
+    pub fn with_label(mut self, label: impl Into<String>) -> Self {
+        self.label = label.into();
+        self
+    }
+
+    /// Add a command line argument.
+    #[must_use]
+    pub fn with_arg(mut self, arg: impl Into<String>) -> Self {
+        self.args.push(arg.into());
+        self
+    }
+
+    /// Set the working directory.
+    #[must_use]
+    pub fn with_working_dir(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.working_dir = dir.into();
+        self
+    }
+
+    /// Add an environment variable.
+    #[must_use]
+    pub fn with_env(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.environment.push((key.into(), value.into()));
+        self
+    }
+
+    /// Set the log file path.
+    #[must_use]
+    pub fn with_log_path(mut self, path: impl Into<PathBuf>) -> Self {
+        self.log_path = Some(path.into());
+        self
+    }
+
+    /// Set the error log file path.
+    #[must_use]
+    pub fn with_error_log_path(mut self, path: impl Into<PathBuf>) -> Self {
+        self.error_log_path = Some(path.into());
+        self
+    }
+
+    /// Set keep alive behavior.
+    #[must_use]
+    pub fn with_keep_alive(mut self, keep_alive: bool) -> Self {
+        self.keep_alive = keep_alive;
+        self
+    }
+
+    /// Set run at load behavior.
+    #[must_use]
+    pub fn with_run_at_load(mut self, run_at_load: bool) -> Self {
+        self.run_at_load = run_at_load;
+        self
+    }
+
+    /// Set the user to run as.
+    #[must_use]
+    pub fn with_user(mut self, user: impl Into<String>) -> Self {
+        self.user = Some(user.into());
+        self
+    }
+
+    /// Set the group to run as.
+    #[must_use]
+    pub fn with_group(mut self, group: impl Into<String>) -> Self {
+        self.group = Some(group.into());
+        self
+    }
+
+    /// Get the plist file name.
+    pub fn plist_file_name(&self) -> String {
+        format!("{}.plist", self.label)
+    }
+
+    /// Get the systemd unit file name.
+    pub fn unit_file_name(&self) -> String {
+        format!("{}.service", self.name)
+    }
+}
+
+/// Generate a launchd plist from a service specification.
+///
+/// # Arguments
+/// * `spec` - The service specification
+///
+/// # Returns
+/// String containing the XML plist content
+pub fn generate_launchd_plist(spec: &ServiceSpec) -> String {
+    let binary_path_str = spec.binary_path.to_string_lossy();
+    let working_dir_str = spec.working_dir.to_string_lossy();
+
+    let mut plist = format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>{}</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>{}</string>"#,
+        escape_xml(&spec.label),
+        escape_xml(&binary_path_str)
+    );
+
+    // Add arguments
+    for arg in &spec.args {
+        plist.push_str(&format!("\n        <string>{}</string>", escape_xml(arg)));
+    }
+
+    plist.push_str("\n    </array>");
+
+    // Working directory
+    plist.push_str(&format!(
+        "\n    <key>WorkingDirectory</key>\n    <string>{}</string>",
+        escape_xml(&working_dir_str)
+    ));
+
+    // Environment variables
+    if !spec.environment.is_empty() {
+        plist.push_str("\n    <key>EnvironmentVariables</key>\n    <dict>");
+        for (key, value) in &spec.environment {
+            plist.push_str(&format!(
+                "\n        <key>{}</key>\n        <string>{}</string>",
+                escape_xml(key),
+                escape_xml(value)
+            ));
+        }
+        plist.push_str("\n    </dict>");
+    }
+
+    // Standard output log
+    if let Some(log_path) = &spec.log_path {
+        plist.push_str(&format!(
+            "\n    <key>StandardOutPath</key>\n    <string>{}</string>",
+            escape_xml(&log_path.to_string_lossy())
+        ));
+    }
+
+    // Standard error log
+    if let Some(error_log_path) = &spec.error_log_path {
+        plist.push_str(&format!(
+            "\n    <key>StandardErrorPath</key>\n    <string>{}</string>",
+            escape_xml(&error_log_path.to_string_lossy())
+        ));
+    }
+
+    // Keep alive
+    if spec.keep_alive {
+        plist.push_str("\n    <key>KeepAlive</key>\n    <true/>");
+    }
+
+    // Run at load
+    if spec.run_at_load {
+        plist.push_str("\n    <key>RunAtLoad</key>\n    <true/>");
+    }
+
+    // End plist
+    plist.push_str("\n</dict>\n</plist>");
+
+    plist
+}
+
+/// Generate a systemd unit file from a service specification.
+///
+/// # Arguments
+/// * `spec` - The service specification
+///
+/// # Returns
+/// String containing the unit file content
+pub fn generate_systemd_unit(spec: &ServiceSpec) -> String {
+    let binary_path_str = spec.binary_path.to_string_lossy();
+    let working_dir_str = spec.working_dir.to_string_lossy();
+
+    // Build the exec start line
+    let mut exec_start = binary_path_str.to_string();
+    for arg in &spec.args {
+        // Properly escape special characters for systemd
+        let escaped_arg = if arg.contains(' ') || arg.contains('\t') {
+            format!("\"{}\"", arg.replace('\\', "\\\\").replace('"', "\\\""))
+        } else {
+            arg.clone()
+        };
+        exec_start.push(' ');
+        exec_start.push_str(&escaped_arg);
+    }
+
+    let mut unit = format!(
+        "[Unit]
+Description={}
+After=network.target
+
+[Service]
+Type=simple
+ExecStart={}
+WorkingDirectory={}",
+        spec.label, exec_start, working_dir_str
+    );
+
+    // User and group
+    if let Some(user) = &spec.user {
+        unit.push_str(&format!("\nUser={}", user));
+    }
+    if let Some(group) = &spec.group {
+        unit.push_str(&format!("\nGroup={}", group));
+    }
+
+    // Restart policy
+    if spec.keep_alive {
+        unit.push_str("\nRestart=on-failure");
+        unit.push_str("\nRestartSec=5");
+    }
+
+    // Environment variables
+    if !spec.environment.is_empty() {
+        for (key, value) in &spec.environment {
+            unit.push_str(&format!("\nEnvironment=\"{}={}\"", key, value));
+        }
+    }
+
+    // Standard output
+    if let Some(log_path) = &spec.log_path {
+        unit.push_str(&format!(
+            "\nStandardOutput=append:{}",
+            log_path.to_string_lossy()
+        ));
+    }
+
+    // Standard error
+    if let Some(error_log_path) = &spec.error_log_path {
+        unit.push_str(&format!(
+            "\nStandardError=append:{}",
+            error_log_path.to_string_lossy()
+        ));
+    }
+
+    // Install section
+    unit.push_str("\n\n[Install]\nWantedBy=default.target");
+
+    unit
+}
+
+/// Escape XML special characters.
+fn escape_xml(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_generate_launchd_plist() {
+        let spec = ServiceSpec::new("luther-monitor", "/usr/local/bin/luther")
+            .with_label("com.luther.monitor")
+            .with_arg("--daemon")
+            .with_working_dir("/var/lib/luther")
+            .with_env("LUTHER_HOME", "/var/lib/luther");
+
+        let plist = generate_launchd_plist(&spec);
+
+        assert!(plist.contains("<?xml version="));
+        assert!(plist.contains("com.luther.monitor"));
+        assert!(plist.contains("/usr/local/bin/luther"));
+        assert!(plist.contains("--daemon"));
+        assert!(plist.contains("/var/lib/luther"));
+        assert!(plist.contains("LUTHER_HOME"));
+        assert!(plist.contains("<key>KeepAlive</key>"));
+    }
+
+    #[test]
+    fn test_generate_systemd_unit() {
+        let spec = ServiceSpec::new("luther-monitor", "/usr/local/bin/luther")
+            .with_label("Luther Monitor Service")
+            .with_arg("--daemon")
+            .with_working_dir("/var/lib/luther")
+            .with_env("LUTHER_HOME", "/var/lib/luther")
+            .with_user("luther")
+            .with_group("luther");
+
+        let unit = generate_systemd_unit(&spec);
+
+        assert!(unit.contains("[Unit]"));
+        assert!(unit.contains("[Service]"));
+        assert!(unit.contains("[Install]"));
+        assert!(unit.contains("Luther Monitor Service"));
+        assert!(unit.contains("/usr/local/bin/luther"));
+        assert!(unit.contains("--daemon"));
+        assert!(unit.contains("/var/lib/luther"));
+        assert!(unit.contains("User=luther"));
+        assert!(unit.contains("Group=luther"));
+        assert!(unit.contains("Restart=on-failure"));
+    }
+
+    #[test]
+    fn test_service_spec_builder() {
+        let spec = ServiceSpec::new("test", "/bin/test")
+            .with_label("com.test.service")
+            .with_arg("arg1")
+            .with_arg("arg2")
+            .with_working_dir("/tmp")
+            .with_env("KEY", "value")
+            .with_keep_alive(false)
+            .with_run_at_load(false)
+            .with_user("user1")
+            .with_group("group1");
+
+        assert_eq!(spec.name, "test");
+        assert_eq!(spec.label, "com.test.service");
+        assert_eq!(spec.args, vec!["arg1", "arg2"]);
+        assert_eq!(spec.working_dir, PathBuf::from("/tmp"));
+        assert_eq!(spec.environment, vec![("KEY".to_string(), "value".to_string())]);
+        assert!(!spec.keep_alive);
+        assert!(!spec.run_at_load);
+        assert_eq!(spec.user, Some("user1".to_string()));
+        assert_eq!(spec.group, Some("group1".to_string()));
+    }
+
+    #[test]
+    fn test_plist_file_name() {
+        let spec = ServiceSpec::new("test", "/bin/test")
+            .with_label("com.luther.test");
+        assert_eq!(spec.plist_file_name(), "com.luther.test.plist");
+    }
+
+    #[test]
+    fn test_unit_file_name() {
+        let spec = ServiceSpec::new("test", "/bin/test");
+        assert_eq!(spec.unit_file_name(), "test.service");
+    }
+}

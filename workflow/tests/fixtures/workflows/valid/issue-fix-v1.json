@@ -1,0 +1,79 @@
+{
+  "workflow_type_id": "issue-fix-v1",
+  "steps": [
+    {
+      "step_id": "scan",
+      "step_type": "analysis",
+      "description": "Scan repository for issue context and codebase structure"
+    },
+    {
+      "step_id": "plan",
+      "step_type": "planning",
+      "description": "Generate implementation plan based on issue analysis"
+    },
+    {
+      "step_id": "review",
+      "step_type": "approval",
+      "description": "Review plan before implementation"
+    },
+    {
+      "step_id": "implement",
+      "step_type": "execution",
+      "description": "Implement the fix according to plan"
+    },
+    {
+      "step_id": "test",
+      "step_type": "verification",
+      "description": "Run tests to verify the fix"
+    },
+    {
+      "step_id": "commit",
+      "step_type": "vcs",
+      "description": "Commit changes to version control"
+    },
+    {
+      "step_id": "submit",
+      "step_type": "vcs",
+      "description": "Submit pull request or equivalent"
+    },
+    {
+      "step_id": "diagnose",
+      "step_type": "analysis",
+      "description": "Diagnose failures when tests or validation fails"
+    },
+    {
+      "step_id": "remediate",
+      "step_type": "execution",
+      "description": "Apply fixes for identified issues"
+    },
+    {
+      "step_id": "abandon",
+      "step_type": "cleanup",
+      "description": "Clean up and abandon the workflow run"
+    },
+    {
+      "step_id": "log",
+      "step_type": "record",
+      "description": "Log workflow completion and outcomes"
+    }
+  ],
+  "transitions": [
+    { "from": "scan", "to": "plan" },
+    { "from": "plan", "to": "review" },
+    { "from": "review", "to": "implement", "condition": "approved" },
+    { "from": "review", "to": "abandon", "condition": "rejected" },
+    { "from": "implement", "to": "test" },
+    { "from": "test", "to": "commit", "condition": "passed" },
+    { "from": "test", "to": "diagnose", "condition": "failed" },
+    { "from": "diagnose", "to": "remediate" },
+    { "from": "remediate", "to": "test" },
+    { "from": "commit", "to": "submit" },
+    { "from": "submit", "to": "log" },
+    { "from": "abandon", "to": "log" }
+  ],
+  "guards": {
+    "max_retries": 3,
+    "timeout_seconds": 3600,
+    "require_approval": true
+  }
+}

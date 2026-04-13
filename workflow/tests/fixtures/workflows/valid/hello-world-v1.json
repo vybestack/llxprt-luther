@@ -1,0 +1,58 @@
+{
+  "workflow_type_id": "hello-world-v1",
+  "steps": [
+    {
+      "step_id": "init_project",
+      "step_type": "shell",
+      "description": "Initialize a new Rust project with cargo init",
+      "parameters": {
+        "command": "cargo init --name hello_world {work_dir}"
+      }
+    },
+    {
+      "step_id": "write_test",
+      "step_type": "write_file",
+      "description": "Write a test file for the greeting function",
+      "parameters": {
+        "path": "tests/greeting_test.rs",
+        "content": "#[test]\nfn test_greet() {\n    assert_eq!(hello_world::greet(\"World\"), \"Hello, World!\");\n}\n"
+      }
+    },
+    {
+      "step_id": "write_impl",
+      "step_type": "write_file",
+      "description": "Write the implementation of the greeting function",
+      "parameters": {
+        "path": "src/lib.rs",
+        "content": "pub fn greet(name: &str) -> String {\n    format!(\"Hello, {}!\", name)\n}\n"
+      }
+    },
+    {
+      "step_id": "run_tests",
+      "step_type": "shell",
+      "description": "Run cargo test to verify the implementation",
+      "parameters": {
+        "command": "cargo test"
+      }
+    },
+    {
+      "step_id": "complete",
+      "step_type": "shell",
+      "description": "Echo completion message",
+      "parameters": {
+        "command": "echo done"
+      }
+    }
+  ],
+  "transitions": [
+    {"from": "init_project", "to": "write_test", "condition": "success"},
+    {"from": "write_test", "to": "write_impl", "condition": "success"},
+    {"from": "write_impl", "to": "run_tests", "condition": "success"},
+    {"from": "run_tests", "to": "complete", "condition": "success"},
+    {"from": "run_tests", "to": "write_impl", "condition": "fixable"}
+  ],
+  "guards": {
+    "max_retries": 2,
+    "timeout_seconds": 300
+  }
+}
