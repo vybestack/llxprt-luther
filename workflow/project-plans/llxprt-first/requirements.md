@@ -32,6 +32,9 @@ If a `stdin_file` is specified and the file does not exist or cannot be read, th
 ### REQ-LF-SHELL-009 (Unwanted behavior)
 If `output_format: "json"` is specified with a `context_map` and a dot-path key does not exist in the parsed JSON, then the ShellExecutor shall return a `Fatal` outcome identifying the missing path and the available top-level keys.
 
+### REQ-LF-SHELL-010 (Optional feature)
+Where a step's parameters include an `exit_code_map`, the ShellExecutor shall map specific non-zero exit codes to specific `StepOutcome` values. Unmapped non-zero exit codes still default to `Fixable`. Exit code 0 is never mapped (always `Success` unless overridden by `outcome_on_stdout`).
+
 ### REQ-LF-SHELL-005 (Optional feature)
 Where a step's parameters include `outcome_on_stdout`, the ShellExecutor shall scan stdout for the configured string keys and map the first match to the corresponding `StepOutcome` value.
 
