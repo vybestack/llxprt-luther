@@ -26,6 +26,12 @@ Where a step's parameters include a `stdin` field, the ShellExecutor shall pipe 
 ### REQ-LF-SHELL-004 (Optional feature)
 Where a step's parameters include a `stdin_file` field, the ShellExecutor shall read the specified file (relative to work_dir) and pipe its contents to the command's standard input.
 
+### REQ-LF-SHELL-008 (Unwanted behavior)
+If a `stdin_file` is specified and the file does not exist or cannot be read, then the ShellExecutor shall return a `Fatal` outcome with a diagnostic identifying the missing file.
+
+### REQ-LF-SHELL-009 (Unwanted behavior)
+If `output_format: "json"` is specified with a `context_map` and a dot-path key does not exist in the parsed JSON, then the ShellExecutor shall return a `Fatal` outcome identifying the missing path and the available top-level keys.
+
 ### REQ-LF-SHELL-005 (Optional feature)
 Where a step's parameters include `outcome_on_stdout`, the ShellExecutor shall scan stdout for the configured string keys and map the first match to the corresponding `StepOutcome` value.
 
@@ -86,8 +92,8 @@ Built-in variables (`work_dir`, `run_id`) shall remain resolvable without a name
 
 ## 4) Per-edge loop limits
 
-### REQ-LF-LOOP-001 (Optional feature)
-Where a `TransitionDef` includes a `max_iterations` field, the engine shall track and enforce loop counts independently for that specific transition edge.
+### REQ-LF-LOOP-001 (Ubiquitous)
+The engine shall support an optional `max_iterations` field on `TransitionDef` and track and enforce loop counts independently for each transition edge that specifies one.
 
 ### REQ-LF-LOOP-002 (Ubiquitous)
 The engine shall track loop counts per transition edge, keyed by `from:to` step pair, not as a single global counter.
@@ -148,7 +154,23 @@ If no unassigned issues exist in any milestone, then the select_issue step shall
 
 ---
 
-## 8) Workspace setup
+## 8) Fetch issue
+
+### REQ-LF-FETCH-001 (Event-driven)
+When the fetch_issue step runs, it shall retrieve the issue body and all comments from GitHub using `gh issue view --json`.
+
+### REQ-LF-FETCH-002 (Event-driven)
+When the issue data is retrieved, the step shall write the issue body to `.luther/issue.md` and all comments to `.luther/comments.md` in the working directory.
+
+### REQ-LF-FETCH-003 (Event-driven)
+When the issue data is retrieved, the step shall set context variables `issue_number`, `issue_title`, and `issue_url` for use by later steps.
+
+### REQ-LF-FETCH-004 (Unwanted behavior)
+If the issue cannot be retrieved (network error, invalid issue number, permission denied), then the step shall return `Fatal` with diagnostic output.
+
+---
+
+## 9) Workspace setup
 
 ### REQ-LF-WS-001 (Event-driven)
 When the setup_workspace step runs, it shall check out the target repository into the configured working directory.
@@ -159,9 +181,12 @@ When the workspace is ready, the step shall create a branch named `issue{number}
 ### REQ-LF-WS-003 (Unwanted behavior)
 If git checkout or branch creation fails, then the step shall return `Fatal` with diagnostic output.
 
+### REQ-LF-WS-004 (Event-driven)
+When the workspace is set up, the step shall create the `.luther/` subdirectory in the working directory for workflow artifact files.
+
 ---
 
-## 9) Planning loop
+## 10) Planning loop
 
 ### REQ-LF-PLAN-001 (Event-driven)
 When the create_plan step runs, it shall invoke `llxprt --profile-load {resolved_profile} -p "{goal}" --yolo` in the working directory.
@@ -180,7 +205,7 @@ If the plan loop exceeds 5 iterations, then the engine shall abandon the run via
 
 ---
 
-## 10) Implementation and evaluation
+## 11) Implementation and evaluation
 
 ### REQ-LF-IMPL-001 (Event-driven)
 When the implement step runs, it shall invoke llxprt with the implementing profile, providing the approved plan as input (via file reference in the prompt).
@@ -193,7 +218,7 @@ When evaluate_impl returns `IMPL_NEEDS_WORK`, the engine shall route to remediat
 
 ---
 
-## 11) Test and remediation loop
+## 12) Test and remediation loop
 
 ### REQ-LF-TEST-001 (Event-driven)
 When the run_tests step runs, the VerifyExecutor shall execute the configured check suite against the target project in the working directory.
@@ -206,13 +231,13 @@ If the test/remediate loop exceeds 5 iterations, then the engine shall abandon t
 
 ---
 
-## 12) PR submission
+## 13) PR submission
 
 ### REQ-LF-PR-001 (Event-driven)
 When the push_changes step runs, it shall execute `git add -A`, `git commit`, and `git push` as a shell command.
 
 ### REQ-LF-PR-002 (Event-driven)
-When the generate_pr_description step runs, it shall invoke llxprt to produce a PR title and body that includes "Fixes #{issue_number}".
+When the generate_pr_description step runs, it shall invoke llxprt to produce a PR description that includes "Fixes #{issue_number}", writing the output to `.luther/pr-description.md` in the working directory.
 
 ### REQ-LF-PR-003 (Event-driven)
 When the create_pr step runs, it shall execute `gh pr create` with the generated title and body.
@@ -222,7 +247,7 @@ The push_changes step (git) and create_pr step (gh) shall be separate workflow s
 
 ---
 
-## 13) Failure and abandonment
+## 14) Failure and abandonment
 
 ### REQ-LF-FAIL-001 (Unwanted behavior)
 If any step returns `Fatal`, then the engine shall route to the abandon_and_log terminal step.
@@ -233,9 +258,15 @@ When the abandon_and_log step runs, it shall comment on the GitHub issue explain
 ### REQ-LF-FAIL-003 (Event-driven)
 When the abandon_and_log step runs, it shall remove the "Luther working" label from the issue.
 
+### REQ-LF-FAIL-004 (Event-driven)
+When the abandon_and_log step runs, it shall unassign the configured user from the issue.
+
+### REQ-LF-FAIL-005 (Event-driven)
+When a run completes (success or abandonment), the engine shall record the outcome, run_id, issue number, and step reached in the run metadata store.
+
 ---
 
-## 14) Engine/workflow separation
+## 15) Engine/workflow separation
 
 ### REQ-LF-SEP-001 (Ubiquitous)
 The workflow engine shall contain no GitHub-specific, llxprt-specific, or Node/TypeScript-specific code. All domain operations shall be performed by executors dispatched via the registry.
@@ -248,7 +279,7 @@ The workflow type definition and workflow instance config shall be pure TOML dat
 
 ---
 
-## 15) Scope boundary
+## 16) Scope boundary
 
 ### REQ-LF-SCOPE-001 (Ubiquitous)
 This plan shall stop at PR creation. CI watching, review parsing, and review remediation are out of scope.
