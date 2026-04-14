@@ -1,4 +1,4 @@
-# Phase 18: End-to-End Workflow Integration Test
+# Phase 18: End-to-End Workflow Integration Tests
 
 ## Phase ID
 
@@ -12,93 +12,57 @@
 
 ## Purpose
 
-Write end-to-end integration tests that load the actual workflow TOML and config files, create a mock workspace, and validate the complete workflow graph routes correctly. These tests verify the workflow definition is structurally sound and the engine can execute it with mock executors.
+Write two categories of end-to-end integration tests:
 
-The tests do NOT call real `gh`, `llxprt`, `git`, or `npm` commands — they use mock executors that return configurable outcomes to exercise the workflow graph routing. The goal is to prove the TOML definition is correct and complete, not to test the actual tools.
+1. **Graph routing tests** — Load real TOML fixtures, use mock executors, verify the workflow graph routes correctly for all outcome combinations. These prove the TOML definition is structurally sound.
+
+2. **Live integration tests** — Actually call `gh` against the real GitHub repo to verify that issue listing, issue fetching, and comment retrieval work with real data. These prove the shell commands in the TOML are correct and that the system can interact with GitHub. These tests are gated behind `#[ignore]` so they don't run in CI without explicit opt-in (`cargo test -- --ignored`).
+
+The tests do NOT hardcode issue numbers, milestone names, or content — they assert structural properties (got results, fields present, files created) so they remain stable as the repo evolves.
 
 ## Requirements Implemented (Expanded)
 
-### REQ-LF-ISSUE-001 through REQ-LF-ISSUE-004: Issue selection graph routing
+### REQ-LF-ISSUE-001 through REQ-LF-ISSUE-004: Issue selection
 
-**Behavior**:
+**Graph routing behavior**:
 - GIVEN: Workflow loaded from TOML
-- WHEN: `select_issue` returns Success
-- THEN: Engine transitions to `fetch_issue`
-- WHEN: `select_issue` returns Fatal
-- THEN: Engine transitions to `abandon_and_log`
+- WHEN: `select_issue` returns Success → engine transitions to `setup_workspace`
+- WHEN: `select_issue` returns Fatal → engine transitions to `abandon_and_log`
 
-### REQ-LF-FETCH-001 through REQ-LF-FETCH-003: Fetch issue routing
+**Live integration behavior**:
+- GIVEN: The real vybestack/llxprt-code repo (read from workflow config, not hardcoded)
+- WHEN: We run the `gh` command from select_issue's TOML against it
+- THEN: We get valid JSON with at least one issue number and title
 
-**Behavior**:
-- GIVEN: Engine at `fetch_issue`
-- WHEN: Step returns Success
-- THEN: Engine transitions to `setup_workspace`
-- WHEN: Step returns Fatal
-- THEN: Engine transitions to `abandon_and_log`
+### REQ-LF-FETCH-001 through REQ-LF-FETCH-004: Fetch issue data
 
-### REQ-LF-WS-001 through REQ-LF-WS-003: Workspace setup routing
+**Live integration behavior**:
+- GIVEN: A known-valid issue number from the repo
+- WHEN: We run the `gh issue view` command from the TOML
+- THEN: We get JSON with title, body, comments, and url fields
+- AND: The body is non-empty text, comments is an array
 
-**Behavior**:
-- GIVEN: Engine at `setup_workspace`
-- WHEN: Step returns Success
-- THEN: Engine transitions to `create_plan`
+### REQ-LF-WS-001 through REQ-LF-WS-004: Workspace setup
 
-### REQ-LF-PLAN-001 through REQ-LF-PLAN-005: Planning loop routing
+**Live integration behavior**:
+- GIVEN: A temp directory as work_dir
+- WHEN: We run the workspace setup commands
+- THEN: A `.git/` directory exists, a branch was created, `.luther/` directory exists
 
-**Behavior**:
-- GIVEN: Engine at `evaluate_plan`
-- WHEN: Step returns Success (PLAN_APPROVED mapped via outcome_on_stdout)
-- THEN: Engine transitions to `implement`
-- WHEN: Step returns Fixable (PLAN_NEEDS_REVISION)
-- THEN: Engine loops back to `create_plan`
-- WHEN: Loop exceeds 5 iterations
-- THEN: Engine returns Abandoned
+### All other routing requirements (PLAN, IMPL, TEST, PR, FAIL)
 
-### REQ-LF-IMPL-001 through REQ-LF-IMPL-003: Implementation routing
-
-**Behavior**:
-- GIVEN: Engine at `evaluate_impl`
-- WHEN: Success → transitions to `run_tests`
-- WHEN: Fixable → loops back to `implement`
-
-### REQ-LF-TEST-001 through REQ-LF-TEST-003: Test/remediation loop routing
-
-**Behavior**:
-- GIVEN: Engine at `run_tests`
-- WHEN: Success → transitions to `push_changes`
-- WHEN: Fixable → transitions to `remediate`
-- GIVEN: Engine at `remediate`, step returns Success
-- THEN: Loops back to `run_tests`
-- WHEN: Loop exceeds 5 iterations → Abandoned
-
-### REQ-LF-PR-001 through REQ-LF-PR-004: PR submission routing
-
-**Behavior**:
-- GIVEN: Engine at `push_changes`
-- WHEN: Success → `generate_pr_description` → `create_pr` → `log_completion`
-- All three are separate steps with individual transitions
-
-### REQ-LF-FAIL-001 through REQ-LF-FAIL-004: Failure routing
-
-**Behavior**:
-- GIVEN: Any step returns Fatal
-- THEN: Engine routes to `abandon_and_log`
-- GIVEN: Engine at `abandon_and_log`
-- WHEN: Step completes
-- THEN: Workflow terminates (no further transitions)
+Same graph routing tests as before — mock executors return configurable outcomes to exercise every transition path.
 
 ## Implementation Tasks
 
 ### Files to Create
 
-- `tests/e2e_workflow_integration.rs`
-  - MUST include: `/// @plan:PLAN-20260408-LLXPRT-FIRST.P18`
-  - MUST include: `/// @requirement:REQ-LF-XXX` on every test
-  - Tests load TOML fixtures and exercise the engine with configurable mock executors
+- `tests/e2e_workflow_integration.rs` — Graph routing tests (always run)
+- `tests/live_workflow_integration.rs` — Real `gh`/`git` integration tests (`#[ignore]` by default)
 
-### Test Strategy
+### Test File 1: `tests/e2e_workflow_integration.rs` — Graph Routing
 
-Tests use a `ConfigurableExecutor` — a test executor that can be configured per step to return specific `StepOutcome` values. The executor is registered for all step_types used in the workflow TOML (`"shell"`, `"verify"`). Tests load the workflow type and config from test fixtures, create `WorkflowInstance`, register the configurable executor, and call `runner.run()`.
+These tests use `ConfigurableExecutor` (mock) to exercise the workflow graph. They prove the TOML definition routes correctly.
 
 #### ConfigurableExecutor Design
 
@@ -111,97 +75,123 @@ struct ConfigurableExecutor {
 }
 ```
 
-Each step_id maps to a `Vec<StepOutcome>` — the executor returns outcomes in sequence for successive calls to the same step. This allows testing loops (first call returns Fixable, second returns Success).
-
-### Test List
+#### Test List (13 tests)
 
 1. **`test_happy_path_all_steps_succeed`** (REQ-LF-ISSUE through REQ-LF-PR)
-   - Load workflow TOML and config from fixtures
    - All steps return Success
-   - Assert `RunOutcome::Success`
-   - Assert engine visited all 14 steps in order (via event log or step execution count)
+   - Assert `RunOutcome::Success`, all 14 steps visited in order
 
 2. **`test_plan_loop_fixable_then_approved`** (REQ-LF-PLAN-003, REQ-LF-PLAN-004)
-   - Load workflow from fixtures
    - `evaluate_plan` returns Fixable twice, then Success
-   - Assert `RunOutcome::Success`
-   - Assert `create_plan` was called 3 times total (initial + 2 loop-backs)
+   - Assert `create_plan` called 3 times
 
 3. **`test_plan_loop_exceeds_limit_abandons`** (REQ-LF-PLAN-005)
-   - Load workflow from fixtures
    - `evaluate_plan` always returns Fixable
    - Assert `RunOutcome::Abandoned`
-   - Assert reason identifies the evaluate_plan→create_plan edge
 
 4. **`test_test_remediation_loop_fixable_then_passes`** (REQ-LF-TEST-001, REQ-LF-TEST-002)
-   - Load workflow from fixtures
    - `run_tests` returns Fixable twice, then Success
-   - Assert `RunOutcome::Success`
-   - Assert `remediate` was called 2 times
+   - Assert `remediate` called 2 times
 
 5. **`test_test_remediation_loop_exceeds_limit_abandons`** (REQ-LF-TEST-003)
-   - Load workflow from fixtures
    - `run_tests` always returns Fixable
    - Assert `RunOutcome::Abandoned`
-   - Assert reason identifies the remediate→run_tests edge
 
 6. **`test_impl_evaluation_loop`** (REQ-LF-IMPL-002, REQ-LF-IMPL-003)
-   - Load workflow from fixtures
    - `evaluate_impl` returns Fixable once, then Success
-   - Assert `RunOutcome::Success`
-   - Assert `implement` was called twice
+   - Assert `implement` called twice
 
 7. **`test_fatal_at_select_issue_routes_to_abandon_and_log`** (REQ-LF-FAIL-001, REQ-LF-ISSUE-004)
-   - Load workflow from fixtures
-   - `select_issue` returns Fatal, `abandon_and_log` returns Success
-   - Assert the engine transitions from `select_issue` to `abandon_and_log` via the fatal transition in the TOML
-   - Assert `RunOutcome::Success` (the `abandon_and_log` step executed and the workflow reached a terminal state)
-   - Verify `abandon_and_log` was actually called (via ConfigurableExecutor call counts)
+   - `select_issue` returns Fatal
+   - Assert engine routes to `abandon_and_log`
 
 8. **`test_fatal_at_any_step_routes_to_abandon_and_log`** (REQ-LF-FAIL-001)
-   - For each of several key steps (fetch_issue, setup_workspace, implement, run_tests, push_changes):
-     - Set that step to return Fatal, `abandon_and_log` returns Success, all others Success
-     - Assert the engine routes through `abandon_and_log` (not immediate `RunOutcome::Failure`)
-     - Assert `abandon_and_log` was executed in each case
+   - For several key steps: set to Fatal, verify routing to `abandon_and_log`
 
 9. **`test_workflow_type_loads_from_toml`** (REQ-LF-SEP-003)
-   - Load `llxprt-issue-fix-v1.toml` from test fixtures via `resolve_workflow_type()`
-   - Assert workflow_type_id is `"llxprt-issue-fix-v1"`
-   - Assert 14 steps present
-   - Assert transitions include per-edge `max_iterations` on loop-back edges
-   - Assert specific step_ids exist: `select_issue`, `create_plan`, `evaluate_plan`, `run_tests`, `create_pr`, `abandon_and_log`
+   - Load TOML, assert 14 steps, transitions include per-edge limits
 
 10. **`test_workflow_config_loads_from_toml`** (REQ-LF-PROF-002)
-    - Load `llxprt-code.toml` from test fixtures via `resolve_workflow_config()`
-    - Assert config_id is `"llxprt-code"`
-    - Assert `variables` contains `profile_planning`, `profile_evaluating`, `target_repo`, `assignee`
-    - Assert guard limits are set
+    - Load config, assert variables contain `profile_planning`, `profile_evaluating`, `target_repo`, `work_dir`
 
 11. **`test_workflow_graph_completeness`** (REQ-LF-FAIL-001)
-    - Load workflow type from fixtures
-    - For each non-terminal step, assert there exists at least one `fatal` → `abandon_and_log` transition
-    - For each non-terminal step, assert there exists at least one non-fatal outgoing transition
-    - Assert `abandon_and_log` and `log_completion` have no outgoing transitions (terminal)
+    - Every non-terminal step has a `fatal` → `abandon_and_log` transition
 
 12. **`test_config_variables_injected_into_context`** (REQ-LF-PROF-003)
-    - Load config with `variables` section
-    - Create EngineRunner from the loaded config
-    - Run with all-success mock executors
-    - Verify that profile variables were available during step execution
-    - (Can be tested by having a mock executor that checks context for specific variable names)
+    - Mock executor checks context for profile variables during execution
 
-13. **`test_run_completion_records_metadata_in_e2e`** (REQ-LF-FAIL-005)
-    - Load workflow from fixtures, use `EngineRunner::with_db_path()` with a temp database
-    - Run the happy path (all steps succeed)
-    - Query the run metadata store for the run_id
-    - Assert a completion record exists with outcome = "success" and the run_id
+13. **`test_run_completion_records_metadata`** (REQ-LF-FAIL-005)
+    - Run happy path with temp DB, verify run metadata record exists
+
+### Test File 2: `tests/live_workflow_integration.rs` — Real Integration
+
+These tests call real external tools (`gh`, `git`). They are `#[ignore]` by default and require:
+- `gh` CLI authenticated
+- Network access to GitHub
+- Run with: `cargo test --test live_workflow_integration -- --ignored`
+
+**Critical design rule**: These tests read `target_repo` and all other repo-specific values from the TOML config fixture (`tests/fixtures/workflow-configs/valid/llxprt-code.toml`). Nothing is hardcoded in the test Rust source. If someone creates a different workflow config for a different repo, the same test structure should work.
+
+#### Test List (6 tests)
+
+1. **`test_can_list_issues_from_repo`** (REQ-LF-ISSUE-001, REQ-LF-ISSUE-002)
+   - Load `target_repo` from the workflow config TOML fixture
+   - Run: `gh issue list --repo {target_repo} --state open --json number,title --limit 5`
+   - Assert: stdout parses as JSON array
+   - Assert: at least 1 issue returned (the repo has 100+ open issues)
+   - Assert: each entry has `number` (integer) and `title` (non-empty string)
+   - Does NOT assert specific issue numbers or titles (those change)
+
+2. **`test_can_list_milestones_from_repo`** (REQ-LF-ISSUE-001)
+   - Load `target_repo` from config
+   - Run: `gh api repos/{target_repo}/milestones --jq '.[].title'`
+   - Assert: at least 1 milestone returned
+   - Does NOT assert specific milestone names
+
+3. **`test_can_fetch_issue_details`** (REQ-LF-FETCH-001, REQ-LF-FETCH-002)
+   - Load `target_repo` from config
+   - First get any valid issue number: `gh issue list --repo {target_repo} --state open --json number --limit 1`
+   - Then fetch it: `gh issue view {number} --repo {target_repo} --json title,body,comments,url`
+   - Assert: JSON has `title` (non-empty), `body` (string), `comments` (array), `url` (string containing "github.com")
+   - Does NOT assert content of body or comments
+
+4. **`test_fetch_writes_issue_files`** (REQ-LF-FETCH-002, REQ-LF-DATA-002)
+   - Load `target_repo` from config
+   - Create a temp directory as work_dir, create `.luther/` in it
+   - Get any valid issue number, then run the full fetch_issue command from the TOML (with interpolation of `{issue_number}` and `{target_repo}`)
+   - Assert: `.luther/issue.md` exists and is non-empty
+   - Assert: `.luther/issue-raw.json` exists and is valid JSON
+   - Assert: stdout JSON has `title` and `url` keys (for context_map)
+   - Does NOT assert file content
+
+5. **`test_workspace_setup_creates_clone`** (REQ-LF-WS-001, REQ-LF-WS-002, REQ-LF-WS-004)
+   - Load `target_repo` from config
+   - Create a temp directory, set `work_dir` to a subpath that doesn't exist yet
+   - Run the setup_workspace shell commands (with `{work_dir}`, `{target_repo}`, `{base_branch}`, `{issue_number}` interpolated from config + a test issue number)
+   - Assert: `{work_dir}/.git/` exists
+   - Assert: `{work_dir}/.luther/` exists
+   - Assert: current branch is `issue{issue_number}` (via `git -C {work_dir} branch --show-current`)
+   - Cleanup: `rm -rf` the temp dir
+
+6. **`test_workspace_setup_reuses_existing_clone`** (REQ-LF-WS-001)
+   - Same as above but run the setup commands TWICE
+   - Second run should succeed (fetch+reset path, not clone path)
+   - Assert: `.git/` still exists, branch is correct
+
+#### Key Design Constraints for Live Tests
+
+- **All repo-specific values come from the TOML config** — `target_repo`, `base_branch`, `assignee`, etc. Tests load them from `tests/fixtures/workflow-configs/valid/llxprt-code.toml`. The test code itself contains NO repo URLs, org names, or profile names.
+- **Assertions are structural, not content-specific** — never assert specific issue titles, body text, or comment content. Assert types, non-emptiness, field presence, valid JSON structure.
+- **`#[ignore]` on all live tests** — they require network, `gh` auth, and may be slow. Run explicitly with `--ignored`.
+- **Temp directories for all filesystem operations** — use `tempfile::TempDir` for workspace tests. Clean up always.
+- **Shell commands extracted from TOML** — ideally, tests read the actual step commands from the loaded workflow type TOML and interpolate variables, rather than duplicating the commands in Rust. This ensures the tests validate the SAME commands that the workflow will actually run. If that's too complex, the commands can be written in the test but must match the TOML exactly (verified by the Phase 18a checklist).
 
 ### Required Code Markers
 
 ```rust
 /// @plan:PLAN-20260408-LLXPRT-FIRST.P18
 /// @requirement:REQ-LF-XXX
-#[test]
+#[test]  // or #[ignore] for live tests
 fn test_name() { ... }
 ```
 
@@ -210,29 +200,37 @@ fn test_name() { ... }
 ### Automated Checks
 
 ```bash
-# Plan markers
+# Plan markers — graph routing tests
 grep -c "@plan:PLAN-20260408-LLXPRT-FIRST.P18" tests/e2e_workflow_integration.rs
 # Expected: 13+
 
-# Requirement coverage
-grep -c "@requirement:REQ-LF" tests/e2e_workflow_integration.rs
-# Expected: 13+
+# Plan markers — live tests
+grep -c "@plan:PLAN-20260408-LLXPRT-FIRST.P18" tests/live_workflow_integration.rs
+# Expected: 6+
 
-# All E2E tests pass
+# Graph routing tests pass
 cargo test --test e2e_workflow_integration 2>&1 | grep "test result"
 # Expected: 13 passed, 0 failed
+
+# Live tests are ignored by default
+cargo test --test live_workflow_integration 2>&1 | grep "test result"
+# Expected: 0 passed, 0 failed, 6 ignored
+
+# Live tests pass when explicitly run (requires gh auth + network)
+cargo test --test live_workflow_integration -- --ignored 2>&1 | grep "test result"
+# Expected: 6 passed, 0 failed
+
+# No hardcoded repo names in test source
+grep -n "vybestack\|llxprt-code\|acoliver" tests/live_workflow_integration.rs
+# Expected: no output (all values loaded from TOML config)
+
+# No hardcoded profile names in test source
+grep -n "opusthinking\|deepthinker\|typescriptexpert" tests/live_workflow_integration.rs
+# Expected: no output
 
 # Full test suite
 cargo test 2>&1 | grep "test result"
 # Expected: 0 failures
-
-# Tests load from TOML fixtures (not programmatic construction)
-grep "resolve_workflow_type\|resolve_workflow_config" tests/e2e_workflow_integration.rs
-# Expected: found (tests load from TOML)
-
-# No external tool invocations
-grep "Command::new\|process::Command" tests/e2e_workflow_integration.rs
-# Expected: no output (tests use mock executors, not real commands)
 
 # Clippy
 cargo clippy -- -D warnings
@@ -240,55 +238,48 @@ cargo clippy -- -D warnings
 
 ### Structural Verification Checklist
 
-- [ ] Test file created: `tests/e2e_workflow_integration.rs`
-- [ ] All 13 tests have plan markers
-- [ ] All tests have requirement markers
-- [ ] Tests load TOML from test fixtures (not hardcoded in code)
-- [ ] Tests use ConfigurableExecutor (configurable outcomes per step)
-- [ ] No real external commands (gh, git, llxprt, npm) invoked
+- [ ] `tests/e2e_workflow_integration.rs` created with 13 graph routing tests
+- [ ] `tests/live_workflow_integration.rs` created with 6 live integration tests
+- [ ] All live tests have `#[ignore]` attribute
+- [ ] Live tests load repo-specific values from TOML config fixture, not hardcoded
+- [ ] No hardcoded repo names, profile names, or org names in test Rust source
+- [ ] Graph routing tests use ConfigurableExecutor (configurable outcomes per step)
 - [ ] No `#[should_panic]` tests
-- [ ] Tests compile and pass
+- [ ] All non-ignored tests compile and pass
 
 ### Semantic Verification Checklist
 
-1. **Do the tests verify real workflow graph routing?**
-   - [ ] Happy path visits all 15 steps in correct order
-   - [ ] Plan loop iterates correct number of times before succeeding or abandoning
-   - [ ] Test/remediation loop iterates correctly
-   - [ ] Impl evaluation loop iterates correctly
-   - [ ] Fatal at any step terminates correctly
+1. **Graph routing tests verify real TOML-driven routing**
+   - [ ] Happy path visits all 14 steps in correct order
+   - [ ] All three loop paths (plan, impl, test) tested for success and abandon
+   - [ ] Fatal at any step terminates correctly via transition table
+   - [ ] Config variables flow into context
 
-2. **Are tests behavioral per goodtests.md?**
-   - [ ] Tests assert on RunOutcome and step execution counts, not internal engine state
-   - [ ] Tests would fail if a transition was missing from the TOML
-   - [ ] Tests would fail if per-edge max_iterations was wrong
-   - [ ] No tautologies — outcomes depend on real engine transition resolution
+2. **Live tests verify real external tool interaction**
+   - [ ] Can list issues from the actual repo
+   - [ ] Can list milestones from the actual repo
+   - [ ] Can fetch issue details with title, body, comments
+   - [ ] fetch_issue command writes .luther/issue.md correctly
+   - [ ] Workspace setup creates clone, branch, and .luther/ directory
+   - [ ] Workspace setup works on second run (reuse path)
 
-3. **Do tests cover the requirement groups?**
-   - [ ] REQ-LF-ISSUE: select_issue routing (success and fatal)
-   - [ ] REQ-LF-FETCH: fetch_issue routing
-   - [ ] REQ-LF-WS: setup_workspace routing
-   - [ ] REQ-LF-PLAN: Planning loop with bounded iterations
-   - [ ] REQ-LF-IMPL: Implementation evaluation routing
-   - [ ] REQ-LF-TEST: Test/remediation loop with bounded iterations
-   - [ ] REQ-LF-PR: PR submission routing (push → description → create_pr → log)
-   - [ ] REQ-LF-FAIL: Fatal routing to abandon_and_log
-   - [ ] REQ-LF-PROF: Config variables and profile resolution
-   - [ ] REQ-LF-SEP: TOML loads and parses correctly
+3. **No domain leakage in test infrastructure**
+   - [ ] ConfigurableExecutor is generic (usable with any workflow)
+   - [ ] Live test helpers read config from TOML (swappable for different projects)
 
 ## Success Criteria
 
-- 13 behavioral E2E tests pass
-- All tests load real TOML fixtures
-- Complete workflow graph routing verified
-- All requirement groups covered
-- No external tool dependencies in tests
+- 13 graph routing tests pass (always)
+- 6 live integration tests pass when run with `--ignored`
+- Complete workflow graph routing verified through mock tests
+- Real GitHub integration verified through live tests
+- All repo-specific values come from config, not Rust source
 
 ## Failure Recovery
 
 If this phase fails:
 
-1. Rollback: `rm tests/e2e_workflow_integration.rs`
+1. Rollback: `rm tests/e2e_workflow_integration.rs tests/live_workflow_integration.rs`
 2. Verify: `cargo test` still passes
 
 ## Phase Completion Marker

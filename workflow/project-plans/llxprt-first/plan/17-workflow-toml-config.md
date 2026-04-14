@@ -195,10 +195,12 @@ max_cost = 50.0
 [variables]
 target_repo = "vybestack/llxprt-code"
 assignee = "acoliver"
+work_dir = "/tmp/luther-workspaces/llxprt-code"
+base_branch = "main"
 profile_planning = "opusthinking"
-profile_evaluating = "gpt54xhigh"
-profile_implementing = "opusthinking"
-profile_remediating = "sonnetthinking"
+profile_evaluating = "deepthinker"
+profile_implementing = "typescriptexpert"
+profile_remediating = "typescriptexpert"
 luther_label = "Luther working"
 ```
 
@@ -575,7 +577,7 @@ grep -c "@plan:PLAN-20260408-LLXPRT-FIRST.P17" config/workflow-configs/llxprt-co
 # Expected: 1+
 
 # No hardcoded profile names in workflow type
-grep -i "opusthinking\|gpt54xhigh\|sonnetthinking" config/workflows/llxprt-issue-fix-v1.toml
+grep -i "opusthinking\|deepthinker\|typescriptexpert" config/workflows/llxprt-issue-fix-v1.toml
 # Expected: no output (profiles are in config, not workflow type)
 
 # Profile variables are in workflow type
@@ -625,7 +627,7 @@ grep "\[variables\]" config/workflow-configs/llxprt-code.toml
 - [ ] Workflow type file: No hardcoded profile names — only `{profile_*}` variables
 - [ ] Workflow type file: No hardcoded repo or assignee — only `{target_repo}`, `{assignee}` variables
 - [ ] Config file: `[variables]` section with all profile mappings
-- [ ] Config file: `[variables]` section with `target_repo`, `assignee`, `luther_label`
+- [ ] Config file: `[variables]` section with `target_repo`, `assignee`, `work_dir`, `base_branch`, `luther_label`
 - [ ] Config file: `[guards]` with appropriate limits
 - [ ] Config file: `workflow_type_id` matches workflow type file
 - [ ] Test fixtures are exact copies of config files

@@ -2,7 +2,7 @@
 
 Plan ID: `PLAN-20260408-LLXPRT-FIRST`
 Generated: 2026-04-08
-Total Phases: 38 (P00a through P19, including verification sub-phases)
+Total Phases: 44 (P00a through P21a, including verification sub-phases)
 Source Specification: `project-plans/llxprt-first/overview.md`
 Requirements Document: `project-plans/llxprt-first/requirements.md`
 
@@ -79,9 +79,13 @@ Before implementing ANY phase, ensure you have:
 | 16a | P16a | Engine Integration — Verification | Verification | Full integration verification |
 | 17 | P17 | Workflow TOML + Config Files | Data | Create llxprt-issue-fix workflow definition and config |
 | 17a | P17a | Workflow TOML Verification | Verification | TOML loads and validates, all steps/transitions present |
-| 18 | P18 | End-to-End Workflow Integration Test | E2E Test | Full workflow parsing + engine run with mock executors |
-| 18a | P18a | End-to-End Verification | Verification | All E2E tests pass, all requirement groups covered |
-| 19 | P19 | Engine/Workflow Separation Verification | Verification | Engine compiles without workflow files, no domain leakage |
+| 18 | P18 | End-to-End Workflow Integration Test | E2E Test | Graph routing tests (mock) + live integration tests (real gh/git) |
+| 18a | P18a | End-to-End Verification | Verification | All routing tests pass, live tests pass with --ignored |
+| 20 | P20 | CLI Production Wiring | Implementation | Resolve from config/ not tests/fixtures, add --config-dir flag |
+| 20a | P20a | CLI Production Wiring Verification | Verification | Dry run works, resolution tests pass |
+| 21 | P21 | Smoke Test | E2E Test | Real e2e: select_issue → setup_workspace → fetch_issue against real GitHub |
+| 21a | P21a | Smoke Test Verification | Verification | Smoke test passes, files created, cleanup works |
+| 19 | P19 | Engine/Workflow Separation Verification | Verification | Engine compiles without workflow files, no domain leakage (final gate) |
 
 ## Risk Register
 
@@ -120,6 +124,9 @@ Cross-phase rollback is NOT supported. Phases must succeed sequentially.
 | `src/persistence/checkpoint.rs` | P12–P14 | Per-edge loop counts in StateSnapshot |
 | `src/engine/executors/mod.rs` | P06, P15 | Register VerifyExecutor |
 | `src/engine/transition.rs` | P12 | `max_iterations` on local TransitionDef |
+| `src/cli/mod.rs` | P20 | `--config-dir` flag on RunArgs |
+| `src/main.rs` | P20 | Config resolution from `config/` instead of `tests/fixtures` |
+| `src/workflow/config_loader.rs` | P20 | Resolve from `{root}/workflows/` with `valid/` fallback |
 
 ### New Files Created
 
@@ -131,7 +138,10 @@ Cross-phase rollback is NOT supported. Phases must succeed sequentially.
 | `tests/namespaced_context_tests.rs` | P10 | Namespaced context tests |
 | `tests/per_edge_loop_tests.rs` | P13 | Per-edge loop limit tests |
 | `tests/engine_integration_llxprt_first.rs` | P16 | Engine integration tests (programmatic) |
-| `tests/e2e_workflow_integration.rs` | P18 | E2E tests loading TOML fixtures |
+| `tests/e2e_workflow_integration.rs` | P18 | Graph routing tests loading TOML fixtures |
+| `tests/live_workflow_integration.rs` | P18 | Live `gh`/`git` integration tests (#[ignore]) |
+| `tests/cli_config_resolution_integration.rs` | P20 | CLI config resolution tests |
+| `tests/smoke_test.rs` | P21 | End-to-end smoke test (#[ignore]) |
 | `config/workflows/llxprt-issue-fix-v1.toml` | P17 | Workflow type definition |
 | `config/workflow-configs/llxprt-code.toml` | P17 | Workflow instance config |
 | `tests/fixtures/workflows/valid/llxprt-issue-fix-v1.toml` | P17 | Test fixture copy |
@@ -139,9 +149,11 @@ Cross-phase rollback is NOT supported. Phases must succeed sequentially.
 
 ### User Access Points
 
-- CLI: `luther run --workflow llxprt-issue-fix-v1 --config llxprt-code` (existing CLI path)
+- CLI: `luther-workflow run --workflow-type llxprt-issue-fix-v1 --config llxprt-code` (wired in P20)
+- CLI: `luther-workflow run --workflow-type llxprt-issue-fix-v1 --config llxprt-code --dry-run` (print steps without executing)
+- CLI: `luther-workflow run --workflow-type X --config Y --config-dir /custom/path` (custom config root)
 - Engine: `EngineRunner::new(instance, ExecutorRegistry::with_defaults())` — VerifyExecutor auto-registered
-- All new features are exercised through existing workflow execution path — no new entry points needed
+- Config resolution: defaults to `config/` relative to cwd (P20), falls back to `{root}/workflows/valid/` for test fixtures
 
 ## Phase Dependency Graph
 
@@ -153,11 +165,13 @@ P00a (Preflight)
               │     └─► P06 → P06a → P07 → P07a → P08 → P08a  (VerifyExecutor: stub → TDD → impl)
               │           └─► P09 → P09a → P10 → P10a → P11 → P11a  (Namespaced Context: stub → TDD → impl)
               │                 └─► P12 → P12a → P13 → P13a → P14 → P14a  (Per-edge Loops: stub → TDD → impl)
-              │                       └─► P15 → P15a  (Engine Integration: stub + wiring)
+              │                       └─► P15 → P15a  (Engine Integration: stub + wiring + work_dir)
               │                             └─► P16 → P16a  (Engine Integration: TDD + impl)
               │                                   └─► P17 → P17a  (Workflow TOML + Config)
-              │                                         └─► P18 → P18a  (E2E Workflow Tests)
-              │                                               └─► P19  (Separation Verification)
+              │                                         └─► P18 → P18a  (E2E: graph routing + live gh tests)
+              │                                               └─► P20 → P20a  (CLI production wiring)
+              │                                                     └─► P21 → P21a  (Smoke test: real e2e)
+              │                                                           └─► P19  (Separation Verification — final gate)
 ```
 
 All phases are sequential. Each phase requires the previous verification phase to pass.

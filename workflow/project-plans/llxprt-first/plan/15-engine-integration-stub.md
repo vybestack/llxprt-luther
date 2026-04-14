@@ -103,6 +103,29 @@ It also adds a `variables` section to `WorkflowConfig` so that workflow instance
   - ADD marker: `/// @plan:PLAN-20260408-LLXPRT-FIRST.P15`
   - ADD marker: `/// @requirement:REQ-LF-FAIL-001`
 
+### Work directory initialization from config variables (REQ-LF-WS-001)
+
+- `src/engine/runner.rs` — `EngineRunner::new()` and `EngineRunner::with_db_path()`
+  - After loading config variables into context, check if `work_dir` is set in the variables
+  - If present, resolve it to an absolute path and set it on the StepContext via `set_work_dir()`
+  - If the directory does not exist, **create it** (including parents) via `std::fs::create_dir_all()`
+  - This is generic engine behavior: the config can optionally specify a working directory. If it does, the engine ensures it exists and uses it. If it doesn't, the engine uses its default work_dir (typically the current directory or a temp path).
+  - The engine knows nothing about *why* the work_dir is set — it's just a config variable that happens to control where steps execute. The workflow's `setup_workspace` step (in the TOML) handles git clone/checkout within that directory.
+  - Implementation:
+    ```rust
+    // After loading config variables into context:
+    if let Some(work_dir) = instance.config.variables.get("work_dir") {
+        let path = std::path::PathBuf::from(work_dir);
+        std::fs::create_dir_all(&path)
+            .map_err(|e| EngineError::InvalidState(
+                format!("Failed to create work_dir '{}': {}", work_dir, e)
+            ))?;
+        context.set_work_dir(path);
+    }
+    ```
+  - ADD marker: `/// @plan:PLAN-20260408-LLXPRT-FIRST.P15`
+  - ADD marker: `/// @requirement:REQ-LF-WS-001`
+
 ### Fix: set_work_dir() must preserve seeded context variables (REQ-LF-PROF-003)
 
 - `src/engine/runner.rs` — `EngineRunner::set_work_dir()`

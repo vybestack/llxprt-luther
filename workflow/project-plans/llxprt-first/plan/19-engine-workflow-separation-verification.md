@@ -6,8 +6,8 @@
 
 ## Prerequisites
 
-- Required: Phase 18a (E2E Verification) completed
-- All previous phases complete: components implemented, TOML files created, E2E tests passing
+- Required: Phase 21a (Smoke Test Verification) completed
+- All previous phases complete: components implemented, TOML files created, E2E tests passing, CLI wired, smoke test passing
 
 ## Purpose
 

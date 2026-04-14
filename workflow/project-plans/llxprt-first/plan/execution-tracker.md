@@ -35,15 +35,19 @@ Plan ID: `PLAN-20260408-LLXPRT-FIRST`
 | 13a | P13a | PENDING | | | | Per-edge Loop Limits — TDD verification |
 | 14 | P14 | PENDING | | | | Per-edge Loop Limits — Implementation |
 | 14a | P14a | PENDING | | | | Per-edge Loop Limits — Impl verification |
-| 15 | P15 | PENDING | | | | Engine Integration — Stub |
+| 15 | P15 | PENDING | | | | Engine Integration — Stub (+ work_dir handling) |
 | 15a | P15a | PENDING | | | | Engine Integration — Stub verification |
 | 16 | P16 | PENDING | | | | Engine Integration — TDD + Impl |
 | 16a | P16a | PENDING | | | | Engine Integration — Verification |
 | 17 | P17 | PENDING | | | | Workflow TOML + Config |
 | 17a | P17a | PENDING | | | | Workflow TOML verification |
-| 18 | P18 | PENDING | | | | E2E Workflow Integration Test |
+| 18 | P18 | PENDING | | | | E2E: graph routing + live gh integration tests |
 | 18a | P18a | PENDING | | | | E2E verification |
-| 19 | P19 | PENDING | | | | Engine/Workflow Separation Verification |
+| 20 | P20 | PENDING | | | | CLI production wiring (config/ resolution) |
+| 20a | P20a | PENDING | | | | CLI production wiring verification |
+| 21 | P21 | PENDING | | | | Smoke test (real e2e: select → setup → fetch) |
+| 21a | P21a | PENDING | | | | Smoke test verification |
+| 19 | P19 | PENDING | | | | Engine/Workflow Separation Verification (final gate) |
 
 ## Completion Markers
 
@@ -63,5 +67,7 @@ Plan ID: `PLAN-20260408-LLXPRT-FIRST`
 | P11 | 184 | 12 (namespaced_context_tests) |
 | P14 | 194 | 10 (per_edge_loop_tests) |
 | P16 | 208 | 14 (engine_integration_llxprt_first) |
-| P18 | 221 | 13 (e2e_workflow_integration) |
-| **Total** | **~221** | **~77 new tests** |
+| P18 | 227 | 13 (e2e_workflow_integration) + 6 ignored (live_workflow_integration) |
+| P20 | 231 | 4 (cli_config_resolution_integration) |
+| P21 | 233 | 2 ignored (smoke_test) |
+| **Total** | **~233** | **~89 new tests (81 always-run, 8 ignored/live)** |
