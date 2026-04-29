@@ -34,6 +34,7 @@ pub enum Commands {
 
 /// Arguments for the run command.
 /// @plan:PLAN-20260404-INITIAL-RUNTIME.P12
+/// @plan:PLAN-20260408-LLXPRT-FIRST.P20
 #[derive(Args, Debug)]
 pub struct RunArgs {
     /// Path to config file
@@ -45,6 +46,9 @@ pub struct RunArgs {
     /// Workflow type ID
     #[arg(short, long, value_name = "ID")]
     pub workflow_type: Option<String>,
+    /// Directory containing workflows/ and workflow-configs/ subdirectories
+    #[arg(long, value_name = "DIR")]
+    pub config_dir: Option<PathBuf>,
 }
 
 /// Arguments for the status command.
@@ -92,14 +96,17 @@ mod tests {
     #[test]
     fn run_args_parsing() {
         // @plan:PLAN-20260404-INITIAL-RUNTIME.P12
+        // @plan:PLAN-20260408-LLXPRT-FIRST.P20
         let args = RunArgs {
             config: Some(PathBuf::from("/test/config.toml")),
             dry_run: true,
             workflow_type: Some("test-type".to_string()),
+            config_dir: None,
         };
         assert!(args.dry_run);
         assert_eq!(args.config, Some(PathBuf::from("/test/config.toml")));
         assert_eq!(args.workflow_type, Some("test-type".to_string()));
+        assert!(args.config_dir.is_none());
     }
 
     #[test]

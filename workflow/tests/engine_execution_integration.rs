@@ -55,18 +55,21 @@ fn test_workflow_type() -> WorkflowType {
                 from: "step_a".to_string(),
                 to: "step_b".to_string(),
                 condition: Some("success".to_string()),
+                max_iterations: None,
             },
             // B -> C on success
             luther_workflow::workflow::schema::TransitionDef {
                 from: "step_b".to_string(),
                 to: "step_c".to_string(),
                 condition: Some("success".to_string()),
+                max_iterations: None,
             },
             // B -> terminal on fatal
             luther_workflow::workflow::schema::TransitionDef {
                 from: "step_b".to_string(),
                 to: "terminal_failure".to_string(),
                 condition: Some("fatal".to_string()),
+                max_iterations: None,
             },
         ],
         guards: Default::default(),
@@ -97,6 +100,7 @@ fn test_workflow_config() -> WorkflowConfig {
             max_tokens: Some(10000),
             max_cost: Some(10.0),
         },
+        variables: std::collections::HashMap::new(),
     }
 }
 
@@ -115,7 +119,7 @@ fn test_step_transition_uses_structured_outcome() {
     
     // WHEN: create engine runner and execute step A with Success outcome
     let registry = test_registry();
-    let mut runner = EngineRunner::new(instance, registry);
+    let mut runner = EngineRunner::new(instance, registry).expect("Failed to create EngineRunner");
     
     // Execute the current step (step_a)
     let outcome = runner.execute_step("step_a").expect("execute_step should return an outcome");
@@ -129,6 +133,7 @@ fn test_step_transition_uses_structured_outcome() {
             from: "step_a".to_string(),
             to: "step_b".to_string(),
             condition: Some("success".to_string()),
+            max_iterations: None,
         },
     ];
     let next_step = luther_workflow::engine::transition::resolve_transition("step_a", &outcome, &transitions);
@@ -160,7 +165,7 @@ fn test_fatal_error_routes_to_terminal() {
     
     // WHEN: create engine runner simulating that step_b returns Fatal
     let registry = test_registry();
-    let mut runner = EngineRunner::new(instance, registry);
+    let mut runner = EngineRunner::new(instance, registry).expect("Failed to create EngineRunner");
     
     // Transition to step_b
     runner.execute_step("step_a").ok();
@@ -174,11 +179,13 @@ fn test_fatal_error_routes_to_terminal() {
             from: "step_b".to_string(),
             to: "step_c".to_string(),
             condition: Some("success".to_string()),
+            max_iterations: None,
         },
         TransitionDef {
             from: "step_b".to_string(),
             to: "terminal_failure".to_string(),
             condition: Some("fatal".to_string()),
+            max_iterations: None,
         },
     ];
     
@@ -231,23 +238,26 @@ fn test_loop_back_transition_increments_counter() {
         from: "diagnose".to_string(),
         to: "remediate".to_string(),
         condition: Some("fixable".to_string()),
+        max_iterations: None,
     });
     workflow_type.transitions.push(luther_workflow::workflow::schema::TransitionDef {
         from: "remediate".to_string(),
         to: "test".to_string(),
         condition: Some("success".to_string()),
+        max_iterations: None,
     });
     // Loop back: test -> diagnose on failure (fixable)
     workflow_type.transitions.push(luther_workflow::workflow::schema::TransitionDef {
         from: "test".to_string(),
         to: "diagnose".to_string(),
         condition: Some("fixable".to_string()),
+        max_iterations: None,
     });
     
     let config = test_workflow_config();
     let instance = WorkflowInstance::create(workflow_type, config);
     let registry = test_registry();
-    let mut runner = EngineRunner::new(instance, registry);
+    let mut runner = EngineRunner::new(instance, registry).expect("Failed to create EngineRunner");
     
     // WHEN: simulate a fixable outcome at test step
     let fixable_outcome = StepOutcome::Fixable;
@@ -257,11 +267,13 @@ fn test_loop_back_transition_increments_counter() {
             from: "test".to_string(),
             to: "commit".to_string(),
             condition: Some("success".to_string()),
+            max_iterations: None,
         },
         TransitionDef {
             from: "test".to_string(),
             to: "diagnose".to_string(),
             condition: Some("fixable".to_string()),
+            max_iterations: None,
         },
     ];
     
@@ -295,7 +307,7 @@ fn test_loop_limit_exceeded_abandons() {
     
     let instance = WorkflowInstance::create(workflow_type, config);
     let registry = test_registry();
-    let mut runner = EngineRunner::new(instance, registry);
+    let mut runner = EngineRunner::new(instance, registry).expect("Failed to create EngineRunner");
     
     // Simulate having looped 3 times already
     // The engine should have a way to set or track this
@@ -306,11 +318,13 @@ fn test_loop_limit_exceeded_abandons() {
             from: "diagnose".to_string(),
             to: "remediate".to_string(),
             condition: Some("fixable".to_string()),
+            max_iterations: None,
         },
         TransitionDef {
             from: "diagnose".to_string(),
             to: "abandon".to_string(),
             condition: Some("abandon".to_string()),
+            max_iterations: None,
         },
     ];
     

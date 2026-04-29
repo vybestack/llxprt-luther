@@ -39,96 +39,151 @@ pub enum ConfigErrorKind {
 /// Result type for config operations.
 pub type Result<T> = std::result::Result<T, ConfigError>;
 
-/// Resolve a workflow type by its ID from the fixture root.
-/// Tries .toml first, then falls back to .json.
+/// Resolve a workflow type by its ID from the config root.
+/// Checks production layout first (flat), then test fixture layout (valid/ subdirectory).
+/// Tries .toml first, then falls back to .json for both layouts.
 /// @plan:PLAN-20260404-INITIAL-RUNTIME.P05
+/// @plan:PLAN-20260408-LLXPRT-FIRST.P20
 /// @requirement:REQ-EARS-WF-004
-pub fn resolve_workflow_type(id: &str, fixture_root: &Path) -> Result<WorkflowType> {
-    // Build paths for both TOML and JSON versions
-    let workflows_dir = fixture_root.join("workflows/valid");
-    let toml_path = workflows_dir.join(format!("{}.toml", id));
-    let json_path = workflows_dir.join(format!("{}.json", id));
+pub fn resolve_workflow_type(id: &str, root: &Path) -> Result<WorkflowType> {
+    // Production layout: {root}/workflows/{id}.{ext}
+    let prod_dir = root.join("workflows");
+    let prod_toml = prod_dir.join(format!("{}.toml", id));
+    let prod_json = prod_dir.join(format!("{}.json", id));
 
-    // Try TOML first
-    if toml_path.exists() {
-        let content = std::fs::read_to_string(&toml_path).map_err(|e| ConfigError {
+    // Test fixture layout: {root}/workflows/valid/{id}.{ext}
+    let valid_dir = root.join("workflows/valid");
+    let valid_toml = valid_dir.join(format!("{}.toml", id));
+    let valid_json = valid_dir.join(format!("{}.json", id));
+
+    // Try production layout TOML first
+    if prod_toml.exists() {
+        let content = std::fs::read_to_string(&prod_toml).map_err(|e| ConfigError {
             message: format!("Failed to read workflow type file: {}", e),
-            source_path: Some(toml_path.to_string_lossy().to_string()),
+            source_path: Some(prod_toml.to_string_lossy().to_string()),
             kind: ConfigErrorKind::NotFound,
         })?;
         return parse_workflow_type_toml(&content);
     }
 
-    // Fall back to JSON
-    if json_path.exists() {
-        let content = std::fs::read_to_string(&json_path).map_err(|e| ConfigError {
+    // Try production layout JSON
+    if prod_json.exists() {
+        let content = std::fs::read_to_string(&prod_json).map_err(|e| ConfigError {
             message: format!("Failed to read workflow type file: {}", e),
-            source_path: Some(json_path.to_string_lossy().to_string()),
+            source_path: Some(prod_json.to_string_lossy().to_string()),
             kind: ConfigErrorKind::NotFound,
         })?;
         return parse_workflow_type_json(&content);
     }
 
-    // Neither file exists
+    // Fall back to test fixture layout TOML
+    if valid_toml.exists() {
+        let content = std::fs::read_to_string(&valid_toml).map_err(|e| ConfigError {
+            message: format!("Failed to read workflow type file: {}", e),
+            source_path: Some(valid_toml.to_string_lossy().to_string()),
+            kind: ConfigErrorKind::NotFound,
+        })?;
+        return parse_workflow_type_toml(&content);
+    }
+
+    // Fall back to test fixture layout JSON
+    if valid_json.exists() {
+        let content = std::fs::read_to_string(&valid_json).map_err(|e| ConfigError {
+            message: format!("Failed to read workflow type file: {}", e),
+            source_path: Some(valid_json.to_string_lossy().to_string()),
+            kind: ConfigErrorKind::NotFound,
+        })?;
+        return parse_workflow_type_json(&content);
+    }
+
+    // Neither file exists in any location
     Err(ConfigError {
         message: format!("Workflow type '{}' not found (tried .toml and .json)", id),
-        source_path: Some(workflows_dir.to_string_lossy().to_string()),
+        source_path: Some(prod_dir.to_string_lossy().to_string()),
         kind: ConfigErrorKind::NotFound,
     })
 }
 
-/// Resolve a workflow config by its ID from the fixture root.
-/// Tries .toml first, then falls back to .json.
+/// Resolve a workflow config by its ID from the config root.
+/// Checks production layout first (flat), then test fixture layout (valid/ subdirectory).
+/// Tries .toml first, then falls back to .json for both layouts.
 /// @plan:PLAN-20260404-INITIAL-RUNTIME.P05
+/// @plan:PLAN-20260408-LLXPRT-FIRST.P20
 /// @requirement:REQ-EARS-WF-004
-pub fn resolve_workflow_config(id: &str, fixture_root: &Path) -> Result<WorkflowConfig> {
-    // Build paths for both TOML and JSON versions
-    let configs_dir = fixture_root.join("workflow-configs/valid");
-    let toml_path = configs_dir.join(format!("{}.toml", id));
-    let json_path = configs_dir.join(format!("{}.json", id));
+pub fn resolve_workflow_config(id: &str, root: &Path) -> Result<WorkflowConfig> {
+    // Production layout: {root}/workflow-configs/{id}.{ext}
+    let prod_dir = root.join("workflow-configs");
+    let prod_toml = prod_dir.join(format!("{}.toml", id));
+    let prod_json = prod_dir.join(format!("{}.json", id));
 
-    // Try TOML first
-    if toml_path.exists() {
-        let content = std::fs::read_to_string(&toml_path).map_err(|e| ConfigError {
+    // Test fixture layout: {root}/workflow-configs/valid/{id}.{ext}
+    let valid_dir = root.join("workflow-configs/valid");
+    let valid_toml = valid_dir.join(format!("{}.toml", id));
+    let valid_json = valid_dir.join(format!("{}.json", id));
+
+    // Try production layout TOML first
+    if prod_toml.exists() {
+        let content = std::fs::read_to_string(&prod_toml).map_err(|e| ConfigError {
             message: format!("Failed to read workflow config file: {}", e),
-            source_path: Some(toml_path.to_string_lossy().to_string()),
+            source_path: Some(prod_toml.to_string_lossy().to_string()),
             kind: ConfigErrorKind::NotFound,
         })?;
         return parse_workflow_config_toml(&content);
     }
 
-    // Fall back to JSON
-    if json_path.exists() {
-        let content = std::fs::read_to_string(&json_path).map_err(|e| ConfigError {
+    // Try production layout JSON
+    if prod_json.exists() {
+        let content = std::fs::read_to_string(&prod_json).map_err(|e| ConfigError {
             message: format!("Failed to read workflow config file: {}", e),
-            source_path: Some(json_path.to_string_lossy().to_string()),
+            source_path: Some(prod_json.to_string_lossy().to_string()),
             kind: ConfigErrorKind::NotFound,
         })?;
         return parse_workflow_config_json(&content);
     }
 
-    // Neither file exists
+    // Fall back to test fixture layout TOML
+    if valid_toml.exists() {
+        let content = std::fs::read_to_string(&valid_toml).map_err(|e| ConfigError {
+            message: format!("Failed to read workflow config file: {}", e),
+            source_path: Some(valid_toml.to_string_lossy().to_string()),
+            kind: ConfigErrorKind::NotFound,
+        })?;
+        return parse_workflow_config_toml(&content);
+    }
+
+    // Fall back to test fixture layout JSON
+    if valid_json.exists() {
+        let content = std::fs::read_to_string(&valid_json).map_err(|e| ConfigError {
+            message: format!("Failed to read workflow config file: {}", e),
+            source_path: Some(valid_json.to_string_lossy().to_string()),
+            kind: ConfigErrorKind::NotFound,
+        })?;
+        return parse_workflow_config_json(&content);
+    }
+
+    // Neither file exists in any location
     Err(ConfigError {
         message: format!("Workflow config '{}' not found (tried .toml and .json)", id),
-        source_path: Some(configs_dir.to_string_lossy().to_string()),
+        source_path: Some(prod_dir.to_string_lossy().to_string()),
         kind: ConfigErrorKind::NotFound,
     })
 }
 
 /// Resolve both workflow type and config, returning a bound WorkflowRunRef.
 /// @plan:PLAN-20260404-INITIAL-RUNTIME.P05
+/// @plan:PLAN-20260408-LLXPRT-FIRST.P20
 /// @requirement:REQ-EARS-WF-004,REQ-EARS-ENG-001
 pub fn resolve_workflow(
     workflow_type_id: &str,
     config_id: &str,
     run_id: &str,
-    fixture_root: &Path,
+    root: &Path,
 ) -> Result<(WorkflowType, WorkflowConfig, WorkflowRunRef)> {
     // Resolve workflow type first
-    let workflow_type = resolve_workflow_type(workflow_type_id, fixture_root)?;
+    let workflow_type = resolve_workflow_type(workflow_type_id, root)?;
 
     // Then resolve workflow config
-    let config = resolve_workflow_config(config_id, fixture_root)?;
+    let config = resolve_workflow_config(config_id, root)?;
 
     // Validate that config matches the workflow type
     validate_config_matches_type(&config, &workflow_type)?;

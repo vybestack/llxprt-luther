@@ -173,4 +173,44 @@ impl SqliteStore {
     pub fn conn(&self) -> &Connection {
         &self.conn
     }
+
+    /// Create a store from an existing connection (for use with borrowed connections).
+    /// @plan:PLAN-20260408-LLXPRT-FIRST.P15
+    pub fn from_connection_ref(conn: &Connection) -> SqliteStoreRef<'_> {
+        SqliteStoreRef { conn }
+    }
+}
+
+/// Reference-based SQLite store for use with borrowed connections.
+/// @plan:PLAN-20260408-LLXPRT-FIRST.P15
+pub struct SqliteStoreRef<'a> {
+    pub conn: &'a Connection,
+}
+
+impl<'a> SqliteStoreRef<'a> {
+    /// Persist a new run metadata record.
+    /// @plan:PLAN-20260408-LLXPRT-FIRST.P15
+    pub fn persist_run(&self, metadata: &RunMetadata) -> SqliteResult<()> {
+        self.conn.execute(
+            "INSERT INTO runs (run_id, workflow_type_id, config_id, status, created_at, updated_at, current_step)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT(run_id) DO UPDATE SET
+                workflow_type_id = excluded.workflow_type_id,
+                config_id = excluded.config_id,
+                status = excluded.status,
+                created_at = excluded.created_at,
+                updated_at = excluded.updated_at,
+                current_step = excluded.current_step",
+            params![
+                metadata.run_id,
+                metadata.workflow_type_id,
+                metadata.config_id,
+                metadata.status.to_string(),
+                metadata.created_at.to_rfc3339(),
+                metadata.updated_at.map(|t| t.to_rfc3339()),
+                metadata.current_step,
+            ],
+        )?;
+        Ok(())
+    }
 }

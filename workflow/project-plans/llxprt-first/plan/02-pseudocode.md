@@ -90,9 +90,17 @@ File: `src/engine/executors/shell.rs`
 068
 069    // --- Outcome determination ---
 070    IF exit_code != Some(0) THEN
-071      // Non-zero exit: Fixable regardless of stdout patterns (REQ-LF-SHELL-007)
-072      RETURN Ok(StepOutcome::Fixable)
-073    END IF
+071      // Check exit_code_map first (REQ-LF-SHELL-010)
+072      IF params HAS "exit_code_map" THEN
+073        map = params["exit_code_map"] AS HashMap<i32, String>
+074        IF map CONTAINS exit_code.unwrap() THEN
+075          outcome = parse_outcome_name(map[exit_code.unwrap()])
+076          RETURN Ok(outcome)
+077        END IF
+078      END IF
+079      // Unmapped non-zero exit: Fixable (REQ-LF-SHELL-007)
+080      RETURN Ok(StepOutcome::Fixable)
+081    END IF
 074
 075    IF params HAS "outcome_on_stdout" THEN
 076      FOR EACH (pattern_string, outcome_name) IN params["outcome_on_stdout"] DO
@@ -654,7 +662,7 @@ File: `config/workflow-configs/llxprt-code.toml` (data, not code)
 
 | Component | Lines | File |
 |---|---|---|
-| ShellExecutor.execute() | 001-086 | shell.rs |
+| ShellExecutor.execute() | 001-093 | shell.rs |
 | extract_dot_path() | 088-097 | shell.rs |
 | json_value_to_string() | 099-107 | shell.rs |
 | parse_outcome_name() | 109-118 | shell.rs |

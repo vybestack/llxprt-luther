@@ -78,6 +78,7 @@ fn test_workflow_config() -> WorkflowConfig {
             max_tokens: Some(10000),
             max_cost: Some(10.0),
         },
+        variables: std::collections::HashMap::new(),
     }
 }
 
@@ -181,7 +182,7 @@ fn test_persistence_error_halts_execution() {
     let config = test_workflow_config();
     let instance = WorkflowInstance::create(workflow_type, config);
     let registry = test_registry();
-    let mut runner = EngineRunner::new(instance, registry);
+    let mut runner = EngineRunner::new(instance, registry).expect("Failed to create EngineRunner");
     
     // WHEN: simulate a run with persistence failure
     // The engine should stop and return PersistenceError

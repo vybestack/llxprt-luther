@@ -38,9 +38,13 @@ async fn main() {
 
 /// Handle the run command.
 /// @plan:PLAN-20260404-INITIAL-RUNTIME.P12
+/// @plan:PLAN-20260408-LLXPRT-FIRST.P20
 async fn handle_run_command(args: &luther_workflow::cli::RunArgs) {
-    // 1. Load config from path (or default fixture root)
-    let fixture_root = std::path::PathBuf::from("tests/fixtures");
+    // 1. Determine config root directory (production or custom)
+    let config_root = args
+        .config_dir
+        .clone()
+        .unwrap_or_else(|| std::path::PathBuf::from("config"));
 
     let (workflow_type, config, run_ref) = if let Some(config_path) = &args.config {
         // Load from specified path
@@ -54,7 +58,7 @@ async fn handle_run_command(args: &luther_workflow::cli::RunArgs) {
             .clone()
             .unwrap_or_else(|| "test-workflow".to_string());
 
-        let workflow_type = match resolve_workflow_type(&workflow_type_id, &fixture_root) {
+        let workflow_type = match resolve_workflow_type(&workflow_type_id, &config_root) {
             Ok(wt) => wt,
             Err(e) => {
                 eprintln!("Error: Failed to resolve workflow type '{}': {}", workflow_type_id, e);
@@ -62,7 +66,7 @@ async fn handle_run_command(args: &luther_workflow::cli::RunArgs) {
             }
         };
 
-        let config = match resolve_workflow_config(&config_id, &fixture_root) {
+        let config = match resolve_workflow_config(&config_id, &config_root) {
             Ok(cfg) => cfg,
             Err(e) => {
                 eprintln!("Error: Failed to resolve config '{}': {}", config_id, e);
@@ -85,7 +89,7 @@ async fn handle_run_command(args: &luther_workflow::cli::RunArgs) {
         let config_id = "test-config".to_string();
         let run_id = uuid::Uuid::new_v4().to_string();
 
-        match resolve_workflow(&workflow_type_id, &config_id, &run_id, &fixture_root) {
+        match resolve_workflow(&workflow_type_id, &config_id, &run_id, &config_root) {
             Ok((wt, cfg, rr)) => (wt, cfg, rr),
             Err(e) => {
                 eprintln!("Error: Failed to resolve workflow: {}", e);
@@ -122,7 +126,13 @@ async fn handle_run_command(args: &luther_workflow::cli::RunArgs) {
     // 4. Create EngineRunner with default registry
     let instance = WorkflowInstance::create(workflow_type, config);
     let registry = luther_workflow::engine::executor::ExecutorRegistry::with_defaults();
-    let mut runner = EngineRunner::new(instance, registry);
+    let mut runner = match EngineRunner::new(instance, registry) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("Error: Failed to create engine runner: {}", e);
+            process::exit(1);
+        }
+    };
 
     // 5. Execute workflow
     println!("Executing workflow...");

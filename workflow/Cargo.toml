@@ -12,6 +12,7 @@ license = "MIT"
 [dependencies]
 anyhow = "1"
 chrono = "0.4"
+regex = "1.11"
 clap = { version = "4", features = ["derive"] }
 dagrs = "0.8"
 serde = { version = "1", features = ["derive"] }

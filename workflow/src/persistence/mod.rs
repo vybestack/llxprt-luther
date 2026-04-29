@@ -9,7 +9,7 @@ pub mod sqlite;
 pub use artifacts::{ArtifactRecord, default_artifacts_root, get_artifacts_dir, list_artifacts, read_artifact, write_artifact};
 pub use checkpoint::{save_checkpoint, save_checkpoint_with_conn, load_checkpoint, load_checkpoint_with_conn, list_checkpoints, Checkpoint, PersistenceError, StateSnapshot, EventRecord, append_event, append_event_with_conn, load_events};
 pub use run_metadata::{run_metadata_from_ref, RunMetadata, RunStatus};
-pub use sqlite::SqliteStore;
+pub use sqlite::{SqliteStore, SqliteStoreRef};
 
 use std::path::Path;
 use rusqlite::Connection;

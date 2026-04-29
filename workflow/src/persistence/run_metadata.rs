@@ -123,3 +123,22 @@ pub fn run_metadata_from_ref(run_ref: &WorkflowRunRef) -> RunMetadata {
         &run_ref.config_id,
     )
 }
+
+/// Initialize the runs table for run metadata storage.
+/// @plan:PLAN-20260408-LLXPRT-FIRST.P16
+/// @requirement:REQ-LF-FAIL-005
+pub fn init_runs_table(conn: &rusqlite::Connection) -> Result<(), rusqlite::Error> {
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS runs (
+            run_id TEXT PRIMARY KEY,
+            workflow_type_id TEXT NOT NULL,
+            config_id TEXT NOT NULL,
+            status TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT,
+            current_step TEXT
+        )",
+        [],
+    )?;
+    Ok(())
+}

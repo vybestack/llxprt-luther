@@ -2,6 +2,7 @@
 /// Workflow execution engine - runs workflow instances step by step.
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::path::Path;
 
 use rusqlite::Connection;
@@ -12,7 +13,7 @@ use crate::engine::instance::WorkflowInstance;
 use crate::engine::transition::{resolve_transition_schema, StepOutcome};
 use crate::persistence::{
     append_event_with_conn, load_checkpoint_with_conn, save_checkpoint_with_conn, Checkpoint,
-    PersistenceError, StateSnapshot,
+    PersistenceError, RunMetadata, RunStatus, SqliteStoreRef, StateSnapshot,
 };
 
 /// Errors that can occur during workflow execution.
@@ -67,14 +68,15 @@ pub enum RunOutcome {
 /// Manages the execution lifecycle of a workflow instance.
 /// @plan:PLAN-20260404-INITIAL-RUNTIME.P08
 /// @plan:PLAN-20260408-STEP-EXEC.P06
-/// @requirement:REQ-EARS-ENG-002,REQ-EARS-ENG-004,REQ-EARS-ROUTE-004
+/// @plan:PLAN-20260408-LLXPRT-FIRST.P12
+/// @requirement:REQ-EARS-ENG-002,REQ-EARS-ENG-004,REQ-EARS-ROUTE-004,REQ-LF-LOOP-002
 pub struct EngineRunner {
     /// The workflow instance being executed.
     instance: WorkflowInstance,
     /// Current retry count for the current step.
     retry_count: u32,
-    /// Remediation loop counter for tracking cycles.
-    loop_count: u32,
+    /// Per-edge loop counter keyed by "from:to" step pair.
+    edge_loop_counts: HashMap<String, u32>,
     /// Maximum retries allowed from config.
     max_retries: u32,
     /// Maximum remediation loops allowed.
@@ -94,35 +96,58 @@ impl EngineRunner {
     /// @plan:PLAN-20260404-INITIAL-RUNTIME.P08
     /// @plan:PLAN-20260408-STEP-EXEC.P06
     /// @requirement:REQ-EARS-ENG-001
-    pub fn new(instance: WorkflowInstance, registry: ExecutorRegistry) -> Self {
+    pub fn new(instance: WorkflowInstance, registry: ExecutorRegistry) -> Result<Self, EngineError> {
         let max_retries = instance.config.runtime.max_retries;
         let max_loops = instance.config.guard_limits.max_iterations.unwrap_or(10);
 
         // Create an in-memory SQLite connection for persistence
         let conn = Connection::open_in_memory()
-            .expect("Failed to create in-memory database for runner");
+            .map_err(|e| EngineError::PersistenceError(
+                format!("Failed to create in-memory database: {e}")
+            ))?;
 
         // Initialize checkpoint schema
         crate::persistence::checkpoint::init_checkpoint_table(&conn)
-            .expect("Failed to initialize checkpoint schema");
+            .map_err(|e| EngineError::PersistenceError(
+                format!("Failed to initialize checkpoint schema: {e}")
+            ))?;
 
         // Create working directory path: tempdir/run_id
         let work_dir = std::env::temp_dir().join(&instance.run_id);
 
         // Initialize StepContext with work_dir and run_id
-        let context = StepContext::new(work_dir, instance.run_id.clone());
+        let mut context = StepContext::new(work_dir, instance.run_id.clone());
 
-        Self {
+        // Load config variables into context
+        /// @plan:PLAN-20260408-LLXPRT-FIRST.P15
+        /// @requirement:REQ-LF-PROF-003
+        for (key, value) in &instance.config.variables {
+            context.set(key, value);
+        }
+
+        // If work_dir is specified in config variables, create it and set it
+        /// @plan:PLAN-20260408-LLXPRT-FIRST.P15
+        /// @requirement:REQ-LF-WS-001
+        if let Some(work_dir_str) = instance.config.variables.get("work_dir") {
+            let path = std::path::PathBuf::from(work_dir_str);
+            std::fs::create_dir_all(&path)
+                .map_err(|e| EngineError::InvalidState(
+                    format!("Failed to create work_dir '{work_dir_str}': {e}")
+                ))?;
+            context.set_work_dir(path);
+        }
+
+        Ok(Self {
             instance,
             retry_count: 0,
-            loop_count: 0,
+            edge_loop_counts: HashMap::new(),
             max_retries,
             max_loops,
             conn: RefCell::new(conn),
             interrupted: RefCell::new(false),
             registry,
             context,
-        }
+        })
     }
 
     /// Create a new engine runner for the given workflow instance with a custom database path.
@@ -141,27 +166,58 @@ impl EngineRunner {
             EngineError::PersistenceError(format!("Failed to open database: {}", e))
         })?;
 
+        // Initialize checkpoint schema
+        crate::persistence::checkpoint::init_checkpoint_table(&conn)
+            .map_err(|e| EngineError::PersistenceError(
+                format!("Failed to initialize checkpoint schema: {e}")
+            ))?;
+
+        // Initialize runs table schema for metadata
+        crate::persistence::run_metadata::init_runs_table(&conn)
+            .map_err(|e| EngineError::PersistenceError(
+                format!("Failed to initialize runs schema: {e}")
+            ))?;
+
         // Try to load existing checkpoint for resume
-        let (retry_count, loop_count) =
+        let (retry_count, edge_loop_counts) =
             if let Ok(Some(checkpoint)) = load_checkpoint_with_conn(&conn, &instance.run_id) {
                 (
                     checkpoint.state_snapshot.retry_count,
-                    checkpoint.state_snapshot.loop_count,
+                    checkpoint.state_snapshot.edge_loop_counts.clone(),
                 )
             } else {
-                (0, 0)
+                (0, HashMap::new())
             };
 
         // Create working directory path: tempdir/run_id
         let work_dir = std::env::temp_dir().join(&instance.run_id);
 
         // Initialize StepContext with work_dir and run_id
-        let context = StepContext::new(work_dir, instance.run_id.clone());
+        let mut context = StepContext::new(work_dir, instance.run_id.clone());
+
+        // Load config variables into context
+        /// @plan:PLAN-20260408-LLXPRT-FIRST.P15
+        /// @requirement:REQ-LF-PROF-003
+        for (key, value) in &instance.config.variables {
+            context.set(key, value);
+        }
+
+        // If work_dir is specified in config variables, create it and set it
+        /// @plan:PLAN-20260408-LLXPRT-FIRST.P15
+        /// @requirement:REQ-LF-WS-001
+        if let Some(work_dir_str) = instance.config.variables.get("work_dir") {
+            let path = std::path::PathBuf::from(work_dir_str);
+            std::fs::create_dir_all(&path)
+                .map_err(|e| EngineError::InvalidState(
+                    format!("Failed to create work_dir '{}': {}", work_dir_str, e)
+                ))?;
+            context.set_work_dir(path);
+        }
 
         Ok(Self {
             instance,
             retry_count,
-            loop_count,
+            edge_loop_counts,
             max_retries,
             max_loops,
             conn: RefCell::new(conn),
@@ -174,7 +230,9 @@ impl EngineRunner {
     /// Execute the workflow instance.
     /// Runs through steps, handling transitions and outcomes.
     /// @plan:PLAN-20260404-INITIAL-RUNTIME.P08
-    /// @requirement:REQ-EARS-ENG-002,REQ-EARS-ENG-003,REQ-EARS-ROUTE-001
+    /// @plan:PLAN-20260408-LLXPRT-FIRST.P14
+    /// @plan:PLAN-20260408-LLXPRT-FIRST.P15
+    /// @requirement:REQ-EARS-ENG-002,REQ-EARS-ENG-003,REQ-EARS-ROUTE-001,REQ-LF-LOOP-001,REQ-LF-LOOP-002,REQ-LF-LOOP-003,REQ-LF-LOOP-004,REQ-LF-FAIL-001,REQ-LF-FAIL-005
     pub fn run(&mut self) -> Result<RunOutcome, EngineError> {
         // Check if we should resume from a checkpoint
         let conn = self.conn.borrow();
@@ -182,7 +240,7 @@ impl EngineRunner {
             // Resume from checkpoint
             self.instance.transition_to(&checkpoint.step_id);
             self.retry_count = checkpoint.state_snapshot.retry_count;
-            self.loop_count = checkpoint.state_snapshot.loop_count;
+            self.edge_loop_counts = checkpoint.state_snapshot.edge_loop_counts.clone();
         }
         drop(conn);
 
@@ -194,13 +252,34 @@ impl EngineRunner {
                 let checkpoint = self.create_checkpoint(&current_step_id, "interrupted");
                 let conn = self.conn.borrow();
                 save_checkpoint_with_conn(&conn, &checkpoint)?;
-                return Ok(RunOutcome::Interrupted {
-                    step_id: current_step_id,
-                });
+                let run_outcome = RunOutcome::Interrupted {
+                    step_id: current_step_id.clone(),
+                };
+                let _ = self.record_run_completion(&run_outcome, &current_step_id);
+                return Ok(run_outcome);
             }
+
+            // Set current step on context for namespaced storage
+            self.context.set_current_step_id(&current_step_id);
+
+            eprintln!("[engine] Executing step: {}", current_step_id);
 
             // Execute the current step
             let outcome = self.execute_step(&current_step_id)?;
+
+            eprintln!("[engine] Step '{}' outcome: {}", current_step_id, outcome);
+            if outcome != StepOutcome::Success {
+                if let Some(stderr) = self.context.get("stderr") {
+                    if !stderr.is_empty() {
+                        eprintln!("[engine] stderr: {}", &stderr[..stderr.len().min(500)]);
+                    }
+                }
+                if let Some(stdout) = self.context.get("stdout") {
+                    if !stdout.is_empty() {
+                        eprintln!("[engine] stdout: {}", &stdout[..stdout.len().min(500)]);
+                    }
+                }
+            }
 
             // Persist checkpoint and event
             let checkpoint = self.create_checkpoint(&current_step_id, "completed");
@@ -215,48 +294,103 @@ impl EngineRunner {
             )?;
             drop(conn);
 
-            // Check for terminal outcomes
-            match outcome {
-                StepOutcome::Fatal => {
-                    return Ok(RunOutcome::Failure {
-                        step_id: current_step_id,
-                        reason: "Fatal error occurred".to_string(),
-                    });
-                }
-                StepOutcome::Abandon => {
-                    return Ok(RunOutcome::Abandoned {
-                        step_id: current_step_id,
-                        reason: "Loop limit exceeded".to_string(),
-                    });
-                }
-                _ => {}
+            // Check for Abandon outcome (early return - terminal)
+            /// @plan:PLAN-20260408-LLXPRT-FIRST.P15
+            /// @requirement:REQ-LF-FAIL-001
+            if outcome == StepOutcome::Abandon {
+                let run_outcome = RunOutcome::Abandoned {
+                    step_id: current_step_id.clone(),
+                    reason: "Loop limit exceeded".to_string(),
+                };
+                let _ = self.record_run_completion(&run_outcome, &current_step_id);
+                return Ok(run_outcome);
             }
 
-            // Resolve the next step
+            // Resolve the next step based on outcome
+            /// @plan:PLAN-20260408-LLXPRT-FIRST.P15
+            /// @requirement:REQ-LF-FAIL-001
             let next_step = self.resolve_next_step(&current_step_id, &outcome)?;
 
             match next_step {
                 Some(next_step_id) => {
+                    // Compute edge key and find transition definition for per-edge limit
+                    let edge_key = format!("{}:{}", current_step_id, next_step_id);
+                    let transition_def = self.find_transition(&current_step_id, &outcome);
+                    let edge_limit = transition_def
+                        .and_then(|t| t.max_iterations)
+                        .unwrap_or(self.max_loops);
+
                     // Check if this is a loop back (next step is earlier in the workflow)
                     if self.is_loop_back(&current_step_id, &next_step_id) {
-                        if self.loop_count >= self.max_loops {
-                            // Loop limit exceeded
-                            return Ok(RunOutcome::Abandoned {
-                                step_id: current_step_id,
-                                reason: "Loop limit exceeded".to_string(),
-                            });
+                        let current_count = self.edge_loop_counts.get(&edge_key).copied().unwrap_or(0);
+                        if current_count >= edge_limit {
+                            // Per-edge loop limit exceeded
+                            let run_outcome = RunOutcome::Abandoned {
+                                step_id: current_step_id.clone(),
+                                reason: format!(
+                                    "Per-edge loop limit ({}) exceeded on edge {}",
+                                    edge_limit, edge_key
+                                ),
+                            };
+                            let _ = self.record_run_completion(&run_outcome, &current_step_id);
+                            return Ok(run_outcome);
                         }
-                        self.loop_count += 1;
+                        self.edge_loop_counts.insert(edge_key, current_count + 1);
                     }
                     current_step_id = next_step_id;
                     self.instance.transition_to(&current_step_id);
                 }
                 None => {
-                    // No next step - workflow complete
-                    return Ok(RunOutcome::Success);
+                    // No transition found - determine outcome based on step outcome
+                    /// @plan:PLAN-20260408-LLXPRT-FIRST.P15
+                    /// @requirement:REQ-LF-FAIL-001
+                    let run_outcome = match outcome {
+                        StepOutcome::Success => RunOutcome::Success,
+                        StepOutcome::Fatal => RunOutcome::Failure {
+                            step_id: current_step_id.clone(),
+                            reason: "Fatal error occurred".to_string(),
+                        },
+                        StepOutcome::Fixable => RunOutcome::Failure {
+                            step_id: current_step_id.clone(),
+                            reason: "Fixable error with no recovery transition".to_string(),
+                        },
+                        _ => RunOutcome::Failure {
+                            step_id: current_step_id.clone(),
+                            reason: "Unexpected outcome".to_string(),
+                        },
+                    };
+                    let _ = self.record_run_completion(&run_outcome, &current_step_id);
+                    return Ok(run_outcome);
                 }
             }
         }
+    }
+
+    /// Find the transition definition matching the given from step and outcome.
+    /// Returns Option<&TransitionDef> to access max_iterations for per-edge loop limits.
+    /// @plan:PLAN-20260408-LLXPRT-FIRST.P14
+    /// @requirement:REQ-LF-LOOP-001,REQ-LF-LOOP-004
+    fn find_transition(
+        &self,
+        from: &str,
+        outcome: &StepOutcome,
+    ) -> Option<&crate::workflow::schema::TransitionDef> {
+        let outcome_str = outcome.to_string();
+        let transitions = &self.instance.workflow_type.transitions;
+
+        for t in transitions {
+            if t.from == from {
+                // Match by condition or default to Success when condition is None
+                if let Some(ref cond) = t.condition {
+                    if cond == &outcome_str {
+                        return Some(t);
+                    }
+                } else if *outcome == StepOutcome::Success {
+                    return Some(t);
+                }
+            }
+        }
+        None
     }
 
     /// Execute a single step and return its outcome.
@@ -316,16 +450,19 @@ impl EngineRunner {
         &self.instance.run_id
     }
 
-    /// Get the loop count (for testing).
+    /// Get the total loop count across all edges (for backward compat and testing).
     /// @plan:PLAN-20260404-INITIAL-RUNTIME.P08
+    /// @plan:PLAN-20260408-LLXPRT-FIRST.P12
     pub fn loop_count(&self) -> u32 {
-        self.loop_count
+        self.edge_loop_counts.values().sum()
     }
 
     /// Set the working directory for step execution context.
     /// @plan:PLAN-20260408-STEP-EXEC.P07
+    /// @plan:PLAN-20260408-LLXPRT-FIRST.P15
+    /// @requirement:REQ-LF-PROF-003
     pub fn set_work_dir(&mut self, work_dir: std::path::PathBuf) {
-        self.context = StepContext::new(work_dir, self.instance.run_id.clone());
+        self.context.set_work_dir(work_dir);
     }
 
     /// Try to resume from a checkpoint in the shared default database.
@@ -341,7 +478,7 @@ impl EngineRunner {
             // Resume from checkpoint
             self.instance.transition_to(&cp.step_id);
             self.retry_count = cp.state_snapshot.retry_count;
-            self.loop_count = cp.state_snapshot.loop_count;
+            self.edge_loop_counts = cp.state_snapshot.edge_loop_counts.clone();
             Ok(true)
         } else {
             Ok(false)
@@ -349,10 +486,12 @@ impl EngineRunner {
     }
 
     /// Create a checkpoint for the current state.
+    /// @plan:PLAN-20260408-LLXPRT-FIRST.P12
     fn create_checkpoint(&self, step_id: &str, status: &str) -> Checkpoint {
         let snapshot = StateSnapshot {
             retry_count: self.retry_count,
-            loop_count: self.loop_count,
+            loop_count: self.loop_count(),
+            edge_loop_counts: self.edge_loop_counts.clone(),
             context: std::collections::HashMap::new(),
             status: status.to_string(),
         };
@@ -387,6 +526,40 @@ impl EngineRunner {
             (Some(curr), Some(next)) => next <= curr,
             _ => false,
         }
+    }
+
+    /// Record run completion metadata to the persistence store.
+    /// @plan:PLAN-20260408-LLXPRT-FIRST.P15
+    /// @requirement:REQ-LF-FAIL-005
+    fn record_run_completion(&self, outcome: &RunOutcome, final_step_id: &str) -> Result<(), EngineError> {
+        // Get issue_number from context if available
+        let _issue_number = self.context.get("issue_number").map(|s| s.to_string());
+
+        // Determine RunStatus based on outcome
+        let status = match outcome {
+            RunOutcome::Success => RunStatus::Completed,
+            RunOutcome::Failure { .. } => RunStatus::Failed,
+            RunOutcome::Abandoned { .. } => RunStatus::Abandoned,
+            RunOutcome::Interrupted { .. } => RunStatus::Paused,
+        };
+
+        // Create run metadata
+        let mut metadata = RunMetadata::new(
+            &self.instance.run_id,
+            &self.instance.workflow_type.workflow_type_id,
+            &self.instance.config.config_id,
+        );
+        metadata.status = status;
+        metadata.set_current_step(final_step_id);
+
+        // Persist to the runner's connection
+        let conn = self.conn.borrow();
+        let store = SqliteStoreRef { conn: &conn };
+        store.persist_run(&metadata).map_err(|e| {
+            EngineError::PersistenceError(format!("Failed to record run completion: {}", e))
+        })?;
+
+        Ok(())
     }
 }
 
@@ -455,11 +628,12 @@ mod tests {
                 max_tokens: Some(10000),
                 max_cost: Some(10.0),
             },
+            variables: std::collections::HashMap::new(),
         };
 
         let instance = WorkflowInstance::create(workflow_type, config);
         let registry = crate::engine::executor::ExecutorRegistry::with_defaults();
-        let runner = EngineRunner::new(instance, registry);
+        let runner = EngineRunner::new(instance, registry).expect("Failed to create EngineRunner");
         assert!(!runner.run_id().is_empty());
     }
 }

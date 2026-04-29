@@ -1,6 +1,8 @@
 /// @plan:PLAN-20260404-INITIAL-RUNTIME.P03
 /// Schema definitions for workflow types, configurations, and runtime references.
 
+use std::collections::HashMap;
+
 /// Declarative topology and transitions for a workflow type.
 /// @plan:PLAN-20260404-INITIAL-RUNTIME.P03
 /// @requirement:REQ-EARS-WF-001,REQ-EARS-WF-006
@@ -26,6 +28,11 @@ pub struct WorkflowConfig {
     pub repo: RepoConfig,
     #[serde(rename = "guards", alias = "guard_limits")]
     pub guard_limits: GuardLimits,
+    /// Config variables loaded into StepContext at run start.
+    /// @plan:PLAN-20260408-LLXPRT-FIRST.P15
+    /// @requirement:REQ-LF-PROF-003
+    #[serde(default)]
+    pub variables: HashMap<String, String>,
 }
 
 /// Bound runtime identity for a workflow run.
@@ -66,11 +73,15 @@ pub struct StepDef {
 
 /// Definition of a transition between steps.
 /// @plan:PLAN-20260404-INITIAL-RUNTIME.P03
+/// @plan:PLAN-20260408-LLXPRT-FIRST.P12
+/// @requirement:REQ-LF-LOOP-001
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct TransitionDef {
     pub from: String,
     pub to: String,
     pub condition: Option<String>,
+    #[serde(default)]
+    pub max_iterations: Option<u32>,
 }
 
 /// Guard configuration for workflow transitions.

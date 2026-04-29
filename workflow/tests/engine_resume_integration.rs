@@ -54,11 +54,13 @@ fn test_workflow_type() -> WorkflowType {
                 from: "step_a".to_string(),
                 to: "step_b".to_string(),
                 condition: Some("success".to_string()),
+                max_iterations: None,
             },
             luther_workflow::workflow::schema::TransitionDef {
                 from: "step_b".to_string(),
                 to: "step_c".to_string(),
                 condition: Some("success".to_string()),
+                max_iterations: None,
             },
         ],
         guards: Default::default(),
@@ -89,6 +91,7 @@ fn test_workflow_config() -> WorkflowConfig {
             max_tokens: Some(10000),
             max_cost: Some(10.0),
         },
+        variables: std::collections::HashMap::new(),
     }
 }
 
@@ -122,7 +125,7 @@ fn test_resume_from_checkpoint_continues_at_step() {
         &run_id
     );
     let registry = test_registry();
-    let mut resumed_runner = EngineRunner::new(resumed_instance, registry);
+    let mut resumed_runner = EngineRunner::new(resumed_instance, registry).expect("Failed to create EngineRunner");
     
     // Attempt to resume from checkpoint
     let resumed = resumed_runner.try_resume().expect("try_resume should not fail");
@@ -174,7 +177,7 @@ fn test_interrupt_persists_resumable_checkpoint() {
     let instance = WorkflowInstance::create(workflow_type, config);
     let run_id = instance.run_id.clone();
     
-    let mut runner = EngineRunner::new(instance, test_registry());
+    let mut runner = EngineRunner::new(instance, test_registry()).expect("Failed to create EngineRunner");
     
     // Start execution
     let _ = runner.execute_step("step_a");
@@ -238,6 +241,7 @@ fn test_resume_preserves_loop_and_retry_counters() {
         loop_count: 2,
         context: HashMap::new(),
         status: "interrupted".to_string(),
+        edge_loop_counts: HashMap::new(),
     };
     let checkpoint = Checkpoint::with_snapshot(&run_id, "step_b", snapshot);
     
@@ -250,7 +254,7 @@ fn test_resume_preserves_loop_and_retry_counters() {
         config, 
         &run_id
     );
-    let mut runner = EngineRunner::new(resumed_instance, test_registry());
+    let mut runner = EngineRunner::new(resumed_instance, test_registry()).expect("Failed to create EngineRunner");
     
     // Load the checkpoint
     let loaded = load_checkpoint(&run_id);

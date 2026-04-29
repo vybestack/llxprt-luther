@@ -50,6 +50,7 @@ impl std::fmt::Display for StepOutcome {
 /// Definition of a transition in the workflow type.
 /// Specifies where to go from a step based on an outcome.
 /// @plan:PLAN-20260404-INITIAL-RUNTIME.P06
+/// @plan:PLAN-20260408-LLXPRT-FIRST.P12
 /// @requirement:REQ-EARS-ROUTE-001,REQ-EARS-ROUTE-002
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TransitionDef {
@@ -60,6 +61,9 @@ pub struct TransitionDef {
     /// Optional condition - when this transition applies.
     /// Maps to StepOutcome as: "success", "retryable", "fatal", "fixable", "abandon".
     pub condition: Option<String>,
+    /// Optional per-edge loop limit.
+    #[serde(default)]
+    pub max_iterations: Option<u32>,
 }
 
 /// A resolved transition from one step to another.
@@ -187,6 +191,7 @@ mod tests {
             from: "build".to_string(),
             to: "test".to_string(),
             condition: Some("success".to_string()),
+            max_iterations: None,
         };
         assert_eq!(t.from, "build");
         assert_eq!(t.to, "test");

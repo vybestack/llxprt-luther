@@ -78,26 +78,31 @@ fn hello_world_workflow_type(work_dir: &std::path::Path) -> WorkflowType {
                 from: "init_project".to_string(),
                 to: "write_test".to_string(),
                 condition: Some("success".to_string()),
+                max_iterations: None,
             },
             TransitionDef {
                 from: "write_test".to_string(),
                 to: "write_impl".to_string(),
                 condition: Some("success".to_string()),
+                max_iterations: None,
             },
             TransitionDef {
                 from: "write_impl".to_string(),
                 to: "run_tests".to_string(),
                 condition: Some("success".to_string()),
+                max_iterations: None,
             },
             TransitionDef {
                 from: "run_tests".to_string(),
                 to: "complete".to_string(),
                 condition: Some("success".to_string()),
+                max_iterations: None,
             },
             TransitionDef {
                 from: "run_tests".to_string(),
                 to: "write_impl".to_string(),
                 condition: Some("fixable".to_string()),
+                max_iterations: None,
             },
         ],
         guards: GuardConfig::default(),
@@ -127,6 +132,7 @@ fn hello_world_config() -> WorkflowConfig {
             max_tokens: Some(1000),
             max_cost: Some(1.0),
         },
+        variables: std::collections::HashMap::new(),
     }
 }
 
@@ -145,7 +151,7 @@ fn test_hello_world_workflow_end_to_end() {
 
     let instance = WorkflowInstance::create(workflow_type, config);
     let registry = hello_world_registry();
-    let mut runner = EngineRunner::new(instance, registry);
+    let mut runner = EngineRunner::new(instance, registry).expect("Failed to create EngineRunner");
 
     // Override the context work_dir to point to our temp dir
     runner.set_work_dir(work_dir.clone());
@@ -199,6 +205,7 @@ fn test_engine_dispatches_to_shell_executor() {
             from: "step_a".to_string(),
             to: "step_b".to_string(),
             condition: Some("success".to_string()),
+            max_iterations: None,
         }],
         guards: GuardConfig::default(),
     };
@@ -206,7 +213,7 @@ fn test_engine_dispatches_to_shell_executor() {
     let config = hello_world_config();
     let instance = WorkflowInstance::create(workflow_type, config);
     let registry = hello_world_registry();
-    let mut runner = EngineRunner::new(instance, registry);
+    let mut runner = EngineRunner::new(instance, registry).expect("Failed to create EngineRunner");
     runner.set_work_dir(work_dir);
 
     let outcome = runner.run().expect("Should not error");
@@ -241,7 +248,7 @@ fn test_engine_dispatches_to_write_file_executor() {
     let config = hello_world_config();
     let instance = WorkflowInstance::create(workflow_type, config);
     let registry = hello_world_registry();
-    let mut runner = EngineRunner::new(instance, registry);
+    let mut runner = EngineRunner::new(instance, registry).expect("Failed to create EngineRunner");
     runner.set_work_dir(work_dir.clone());
 
     let outcome = runner.run().expect("Should not error");
@@ -284,6 +291,7 @@ fn test_context_passes_between_steps_through_engine() {
             from: "produce".to_string(),
             to: "consume".to_string(),
             condition: Some("success".to_string()),
+            max_iterations: None,
         }],
         guards: GuardConfig::default(),
     };
@@ -291,7 +299,7 @@ fn test_context_passes_between_steps_through_engine() {
     let config = hello_world_config();
     let instance = WorkflowInstance::create(workflow_type, config);
     let registry = hello_world_registry();
-    let mut runner = EngineRunner::new(instance, registry);
+    let mut runner = EngineRunner::new(instance, registry).expect("Failed to create EngineRunner");
     runner.set_work_dir(work_dir.clone());
 
     let outcome = runner.run().expect("Should not error");
@@ -330,7 +338,7 @@ fn test_unregistered_step_type_through_engine_produces_failure() {
     let config = hello_world_config();
     let instance = WorkflowInstance::create(workflow_type, config);
     let registry = hello_world_registry(); // has shell + write_file, NOT nonexistent_executor
-    let mut runner = EngineRunner::new(instance, registry);
+    let mut runner = EngineRunner::new(instance, registry).expect("Failed to create EngineRunner");
     runner.set_work_dir(work_dir);
 
     let result = runner.run();

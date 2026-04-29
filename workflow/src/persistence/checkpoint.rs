@@ -95,13 +95,16 @@ pub struct Checkpoint {
 /// Snapshot of workflow execution state.
 /// Contains data needed to resume execution from this point.
 /// @plan:PLAN-20260404-INITIAL-RUNTIME.P08
-/// @requirement:REQ-EARS-PERSIST-002
+/// @plan:PLAN-20260408-LLXPRT-FIRST.P12
+/// @requirement:REQ-EARS-PERSIST-002,REQ-LF-LOOP-005
 #[derive(Debug, Clone)]
 pub struct StateSnapshot {
     /// Current retry count for the current step.
     pub retry_count: u32,
     /// Remediation loop counter.
     pub loop_count: u32,
+    /// Per-edge loop counts keyed by "from:to" step pair.
+    pub edge_loop_counts: HashMap<String, u32>,
     /// Additional context data (step-specific state).
     pub context: HashMap<String, serde_json::Value>,
     /// Status of the checkpoint (e.g., "completed", "interrupted").
@@ -113,6 +116,7 @@ impl Default for StateSnapshot {
         Self {
             retry_count: 0,
             loop_count: 0,
+            edge_loop_counts: HashMap::new(),
             context: HashMap::new(),
             status: "running".to_string(),
         }
@@ -165,7 +169,8 @@ impl Checkpoint {
 
 /// Save a checkpoint to persistent storage using a specific connection.
 /// @plan:PLAN-20260404-INITIAL-RUNTIME.P08
-/// @requirement:REQ-EARS-ENG-002,REQ-EARS-PERSIST-002,REQ-EARS-PERSIST-004
+/// @plan:PLAN-20260408-LLXPRT-FIRST.P14
+/// @requirement:REQ-EARS-ENG-002,REQ-EARS-PERSIST-002,REQ-EARS-PERSIST-004,REQ-LF-LOOP-005
 pub fn save_checkpoint_with_conn(
     conn: &Connection,
     checkpoint: &Checkpoint,
@@ -185,11 +190,22 @@ pub fn save_checkpoint_with_conn(
         [],
     )?;
 
+    // Build context with edge_loop_counts stored under reserved key
+    let mut context_data = checkpoint.state_snapshot.context.clone();
+    context_data.insert(
+        "__edge_loop_counts".to_string(),
+        serde_json::to_value(&checkpoint.state_snapshot.edge_loop_counts).map_err(|e| {
+            PersistenceError::Serialization(format!(
+                "Failed to serialize edge_loop_counts: {}",
+                e
+            ))
+        })?,
+    );
+
     // Serialize context to JSON
-    let context_json =
-        serde_json::to_string(&checkpoint.state_snapshot.context).map_err(|e| {
-            PersistenceError::Serialization(format!("Failed to serialize context: {}", e))
-        })?;
+    let context_json = serde_json::to_string(&context_data).map_err(|e| {
+        PersistenceError::Serialization(format!("Failed to serialize context: {}", e))
+    })?;
 
     // Insert or replace the checkpoint
     conn.execute(
@@ -238,7 +254,8 @@ pub fn save_checkpoint(
 
 /// Load the checkpoint for a run using a specific connection.
 /// @plan:PLAN-20260404-INITIAL-RUNTIME.P08
-/// @requirement:REQ-EARS-ENG-004,REQ-EARS-PERSIST-002
+/// @plan:PLAN-20260408-LLXPRT-FIRST.P14
+/// @requirement:REQ-EARS-ENG-004,REQ-EARS-PERSIST-002,REQ-LF-LOOP-005
 pub fn load_checkpoint_with_conn(
     conn: &Connection,
     run_id: &str,
@@ -260,6 +277,12 @@ pub fn load_checkpoint_with_conn(
                 PersistenceError::Serialization(format!("Failed to deserialize context: {}", e))
             })?;
 
+        // Extract edge_loop_counts from context blob under reserved key
+        let edge_loop_counts = context
+            .get("__edge_loop_counts")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default();
+
         let timestamp_str: String = row.get(6)?;
         let timestamp = timestamp_str.parse().map_err(|_| {
             PersistenceError::Database("Invalid timestamp format".to_string())
@@ -271,6 +294,7 @@ pub fn load_checkpoint_with_conn(
             state_snapshot: StateSnapshot {
                 retry_count: row.get::<_, i64>(2)? as u32,
                 loop_count: row.get::<_, i64>(3)? as u32,
+                edge_loop_counts,
                 context,
                 status: row.get(5)?,
             },
@@ -301,6 +325,8 @@ pub fn load_checkpoint(_run_id: &str) -> Result<Option<Checkpoint>, PersistenceE
 
 /// List all checkpoints for a run.
 /// @plan:PLAN-20260404-INITIAL-RUNTIME.P08
+/// @plan:PLAN-20260408-LLXPRT-FIRST.P14
+/// @requirement:REQ-EARS-PERSIST-002,REQ-LF-LOOP-005
 pub fn list_checkpoints(
     conn: &Connection,
     run_id: &str,
@@ -326,6 +352,12 @@ pub fn list_checkpoints(
                 )
             })?;
 
+        // Extract edge_loop_counts from context blob under reserved key
+        let edge_loop_counts = context
+            .get("__edge_loop_counts")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default();
+
         let timestamp_str: String = row.get(6)?;
         let timestamp = timestamp_str.parse().map_err(|_| {
             rusqlite::Error::FromSqlConversionFailure(
@@ -344,6 +376,7 @@ pub fn list_checkpoints(
             state_snapshot: StateSnapshot {
                 retry_count: row.get::<_, i64>(2)? as u32,
                 loop_count: row.get::<_, i64>(3)? as u32,
+                edge_loop_counts,
                 context,
                 status: row.get(5)?,
             },
@@ -515,6 +548,7 @@ mod tests {
         let snapshot = StateSnapshot {
             retry_count: 2,
             loop_count: 1,
+            edge_loop_counts: HashMap::new(),
             context: HashMap::new(),
             status: "running".to_string(),
         };
@@ -564,6 +598,7 @@ mod tests {
         let snapshot = StateSnapshot {
             retry_count: 3,
             loop_count: 2,
+            edge_loop_counts: HashMap::new(),
             context: HashMap::new(),
             status: "interrupted".to_string(),
         };
