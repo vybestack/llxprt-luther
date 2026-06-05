@@ -1,0 +1,133 @@
+VERDICT: PASS
+
+# Phase 08 CodeRabbit Feedback Collection Implementation Evidence
+
+Plan: PLAN-20260429-CODERABBIT-PR-FOLLOWUP
+Phase: P08
+
+## Remediation Attempt 1 Evidence (2026-04-30)
+
+VERDICT: PASS
+
+## Remediated Blockers
+
+- Implemented exact hidden HTML marker parsing for the `luther:coderabbit-marker` namespace with deterministic diagnostics for wrong namespace, non-exact marker bodies, malformed/duplicate/missing fields, and unsupported status.
+- Extended remote marker records to include key/head/body hash/run ID/action/status and added duplicate/conflict resolution semantics in the P08 collector.
+- Added remote marker audit evidence for matching completed markers, identical duplicates, and local/stale feedback ignored because a matching current-head completed remote action already exists.
+- Changed readiness stabilization from item-set-only hashing to a material readiness fingerprint that includes current-head readiness signal metadata, stale-signal metadata, item resolution metadata, remote markers, malformed markers, and matched identities.
+- Strengthened P08 tests with parser diagnostics and readiness-stability reset coverage; existing P08 tests continue to prove current-head readiness, stale filtering, pagination/fallback normalization, artifact output, and argv-safe API construction.
+
+## Verification Commands
+
+```text
+$ cargo test --test github_api_contract_tests -- github_api_contract && cargo run --bin github_api_contract_validator -- project-plans/coderabbit/analysis/github-api-contract.md tests/fixtures/github_api_contract && cargo test --test github_pr_followup_executor_tests -- coderabbit && cargo test --test github_pr_followup_executor_tests -- remote_marker_parser_accepts_exact_namespace_and_reports_malformed_diagnostics && cargo test --test github_pr_followup_executor_tests -- coderabbit_readiness_stability_resets_on_current_head_signal_metadata_change && cargo test --test pr_followup_marker_audit_tests -- p08_markers_cover_all_touched_items && python3 project-plans/coderabbit/analysis/verify-expected-failing-tests.py --manifest project-plans/coderabbit/analysis/expected-failing-tests.json && cargo build --all-targets
+running 2 tests
+test github_api_contract_negative_fixture_rejects_missing_contract ... ok
+test github_api_contract_validator_accepts_phase_02_contract ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.28s
+
+github_api_contract_validator: PASS
+
+running 3 tests
+test coderabbit_readiness_requires_two_identical_ready_observations_and_filters_bot_noise ... ok
+test coderabbit_feedback_page2_threads_comments_and_rest_fallback_are_normalized ... ok
+test coderabbit_readiness_stability_resets_on_current_head_signal_metadata_change ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 41 filtered out; finished in 0.02s
+
+running 1 test
+test remote_marker_parser_accepts_exact_namespace_and_reports_malformed_diagnostics ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 43 filtered out; finished in 0.00s
+
+running 1 test
+test coderabbit_readiness_stability_resets_on_current_head_signal_metadata_change ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 43 filtered out; finished in 0.02s
+
+running 1 test
+test p08_markers_cover_all_touched_items ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s
+
+expected_failing_tests_verifier: PASS
+verified_entries=18
+
+Finished `dev` profile [unoptimized + debuginfo] target(s) in 6.98s
+exit=0
+```
+
+## Remediation Verdict
+
+PASS: all Phase 08 remediation blockers addressed and P08 verification commands passed.
+
+## Remediation Attempt 2 Evidence (2026-04-30)
+
+VERDICT: PASS
+
+## Remediated Blocker
+
+- Added direct P08 test coderabbit_api_shell_safety_keeps_malicious_feedback_text_out_of_graphql_and_rest_argv in tests/github_pr_followup_executor_tests.rs so the mandated filter coderabbit_api_shell_safety selects and runs a meaningful CodeRabbit API shell-safety test.
+- The test exercises the CodeRabbit collector runner seam through GraphQL review threads, REST review comments, issue comments, and readiness check-run API command construction. It injects malicious CodeRabbit review/comment body text containing backticks, command substitution, and gh-style flags, then proves that collected body data remains in artifacts while no API argv contains the malicious text, shell commands, or injected flags.
+
+## Verification Commands
+
+```text
+$ cargo test --test github_pr_followup_executor_tests -- coderabbit_api_shell_safety
+running 1 test
+test coderabbit_api_shell_safety_keeps_malicious_feedback_text_out_of_graphql_and_rest_argv ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 44 filtered out; finished in 0.01s
+```
+
+Full P08 verification suite rerun after remediation attempt 2:
+
+```text
+$ cargo test --test github_api_contract_tests -- github_api_contract && cargo run --bin github_api_contract_validator -- project-plans/coderabbit/analysis/github-api-contract.md tests/fixtures/github_api_contract && cargo test --test github_pr_followup_executor_tests -- coderabbit && cargo test --test github_pr_followup_executor_tests -- coderabbit_api_shell_safety && cargo test --test github_pr_followup_executor_tests -- remote_marker_parser_accepts_exact_namespace_and_reports_malformed_diagnostics && cargo test --test github_pr_followup_executor_tests -- coderabbit_readiness_stability_resets_on_current_head_signal_metadata_change && cargo test --test pr_followup_marker_audit_tests -- p08_markers_cover_all_touched_items && python3 -m json.tool project-plans/coderabbit/analysis/expected-failing-tests.json >/tmp/p08-json-tool.txt && python3 project-plans/coderabbit/analysis/verify-expected-failing-tests.py --manifest project-plans/coderabbit/analysis/expected-failing-tests.json && cargo build --all-targets && cargo test --lib && grep -R -n -E PLACEHOLDER_PATTERN src/engine/executors/github_feedback.rs tests/github_pr_followup_executor_tests.rs tests/pr_followup_marker_audit_tests.rs project-plans/coderabbit/analysis/pseudocode/coderabbit-feedback.md project-plans/coderabbit/analysis/github-api-contract.md; test $? -eq 1
+running 2 tests
+...
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.30s
+
+github_api_contract_validator: PASS
+
+running 4 tests
+test coderabbit_readiness_requires_two_identical_ready_observations_and_filters_bot_noise ... ok
+test coderabbit_feedback_page2_threads_comments_and_rest_fallback_are_normalized ... ok
+test coderabbit_readiness_stability_resets_on_current_head_signal_metadata_change ... ok
+test coderabbit_api_shell_safety_keeps_malicious_feedback_text_out_of_graphql_and_rest_argv ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 41 filtered out; finished in 0.01s
+
+running 1 test
+test coderabbit_api_shell_safety_keeps_malicious_feedback_text_out_of_graphql_and_rest_argv ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 44 filtered out; finished in 0.01s
+
+running 1 test
+test remote_marker_parser_accepts_exact_namespace_and_reports_malformed_diagnostics ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 44 filtered out; finished in 0.00s
+
+running 1 test
+test coderabbit_readiness_stability_resets_on_current_head_signal_metadata_change ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 44 filtered out; finished in 0.01s
+
+running 1 test
+test p08_markers_cover_all_touched_items ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s
+
+expected_failing_tests_verifier: PASS
+verified_entries=18
+
+cargo build --all-targets: PASS
+cargo test --lib: 67 passed
+negative placeholder/todo grep: PASS no matches
+exit=0
+```
+
+## Remediation Verdict
+
+PASS: all Phase 08 criteria pass after remediation attempt 2, including direct evidence for coderabbit_api_shell_safety selecting and running one CodeRabbit API shell-safety test.

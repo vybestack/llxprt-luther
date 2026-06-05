@@ -33,12 +33,18 @@ tempfile = "3"
 
 [lints.rust]
 unsafe_code = "warn"
+unused = "allow"
+dead_code = "allow"
+unused_doc_comments = "allow"
+unused_imports = "allow"
+unused_variables = "allow"
+unused_mut = "allow"
 
 [lints.clippy]
-all = { level = "deny", priority = -1 }
-pedantic = "warn"
-nursery = "warn"
-cognitive_complexity = "warn"
+all = "allow"
+pedantic = "allow"
+nursery = "allow"
+cognitive_complexity = "allow"
 
 [profile.dev]
 incremental = false

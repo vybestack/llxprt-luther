@@ -1,14 +1,20 @@
 //! Service module - IPC service and daemon management.
 //!
 /// @plan:PLAN-20260404-INITIAL-RUNTIME.P09
-
 pub mod launchd;
 pub mod spec;
 pub mod systemd;
 
-pub use launchd::{install_launchd_service, uninstall_launchd_service, start_launchd_service, stop_launchd_service, is_service_installed as is_launchd_service_installed, LaunchdError};
-pub use spec::{ServiceSpec, generate_launchd_plist, generate_systemd_unit};
-pub use systemd::{install_systemd_service, uninstall_systemd_service, start_systemd_service, stop_systemd_service, restart_systemd_service, is_service_installed as is_systemd_service_installed, is_systemd_available, SystemdError};
+pub use launchd::{
+    install_launchd_service, is_service_installed as is_launchd_service_installed,
+    start_launchd_service, stop_launchd_service, uninstall_launchd_service, LaunchdError,
+};
+pub use spec::{generate_launchd_plist, generate_systemd_unit, ServiceSpec};
+pub use systemd::{
+    install_systemd_service, is_service_installed as is_systemd_service_installed,
+    is_systemd_available, restart_systemd_service, start_systemd_service, stop_systemd_service,
+    uninstall_systemd_service, SystemdError,
+};
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -112,10 +118,10 @@ impl Service {
     /// Start the service.
     pub async fn start(config: ServiceConfig) -> Result<Self, ServiceError> {
         let instance_id = format!("service-{}", std::process::id());
-        
+
         // If not foreground mode, this would daemonize
         // For now, we always run in foreground for testing
-        
+
         Ok(Self {
             config,
             state: Arc::new(Mutex::new(ServiceState::Running)),
@@ -143,7 +149,7 @@ impl Service {
     pub async fn get_status(&self) -> Result<ServiceStatus, ServiceError> {
         let uptime = self.start_time.elapsed().as_secs() as i64;
         let state = *self.state.lock().await;
-        
+
         Ok(ServiceStatus {
             state,
             instance_id: self.instance_id.clone(),
@@ -153,26 +159,23 @@ impl Service {
     }
 
     /// Simulate a failure for testing.
-    pub async fn simulate_failure(&mut self, failure_type: FailureType) -> Result<(), ServiceError> {
+    pub async fn simulate_failure(
+        &mut self,
+        failure_type: FailureType,
+    ) -> Result<(), ServiceError> {
         let mut state = self.state.lock().await;
         *state = ServiceState::Error;
-        
+
         match failure_type {
-            FailureType::InternalError => {
-                Err(ServiceError::General {
-                    message: "Simulated internal error".to_string(),
-                })
-            }
-            FailureType::IoError => {
-                Err(ServiceError::General {
-                    message: "Simulated I/O error".to_string(),
-                })
-            }
-            FailureType::Timeout => {
-                Err(ServiceError::General {
-                    message: "Simulated timeout error".to_string(),
-                })
-            }
+            FailureType::InternalError => Err(ServiceError::General {
+                message: "Simulated internal error".to_string(),
+            }),
+            FailureType::IoError => Err(ServiceError::General {
+                message: "Simulated I/O error".to_string(),
+            }),
+            FailureType::Timeout => Err(ServiceError::General {
+                message: "Simulated timeout error".to_string(),
+            }),
         }
     }
 
@@ -215,10 +218,7 @@ impl IpcClient {
     }
 
     /// Get service status via IPC.
-    pub async fn get_status(
-        &self,
-        request: StatusRequest,
-    ) -> Result<StatusResponse, ServiceError> {
+    pub async fn get_status(&self, request: StatusRequest) -> Result<StatusResponse, ServiceError> {
         // Mock implementation for testing
         Ok(StatusResponse {
             instance_id: format!("ipc-client-{}", std::process::id()),

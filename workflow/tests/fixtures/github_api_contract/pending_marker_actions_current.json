@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "run_id": "run-123",
+  "repository_owner": "example",
+  "repository_name": "workflow",
+  "pr_number": 1910,
+  "head_ref": "luther/issue-1234",
+  "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "base_ref": "main",
+  "base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "artifact_sequence": 9,
+  "write_sequence": 1,
+  "producer_step_id": "build_remediation_plan",
+  "pending_actions": [
+    {
+      "action_id": "act-thread-1-fixed-comment",
+      "action_kind": "comment_fixed",
+      "item_id": "thread:PRRT_thread_1",
+      "stable_marker_key": "thread:PRRT_thread_1",
+      "source_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "remediation_input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "remediation_output_head_sha": "cccccccccccccccccccccccccccccccccccccccc",
+      "body_hash": "sha256:body1",
+      "idempotency_key": "comment_fixed:thread:PRRT_thread_1:sha256:body1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:cccccccccccccccccccccccccccccccccccccccc:run-123",
+      "comment_body_template_id": "coderabbit_fixed_v1",
+      "comment_body_artifact_path": "comments/act-thread-1-fixed-comment.md",
+      "resolution_required": true,
+      "status": "pending",
+      "reason": "fixed"
+    }
+  ]
+}

@@ -2,7 +2,10 @@
 /// @plan:PLAN-20260408-LLXPRT-FIRST.P09
 /// @requirement:REQ-LF-CTX-001,REQ-LF-CTX-002,REQ-LF-CTX-003,REQ-LF-CTX-004
 /// Executor module - step execution trait, registry, and context.
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
+/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P09
+/// @requirement:REQ-PRFU-011,REQ-PRFU-012
+/// @pseudocode lines 1-23
 use std::path::PathBuf;
 
 use crate::engine::runner::EngineError;
@@ -42,7 +45,10 @@ impl StepContext {
     pub fn new(work_dir: PathBuf, run_id: String) -> Self {
         let mut variables = HashMap::new();
         // Store built-ins as bare keys for backward compatibility
-        variables.insert("work_dir".to_string(), work_dir.to_string_lossy().to_string());
+        variables.insert(
+            "work_dir".to_string(),
+            work_dir.to_string_lossy().to_string(),
+        );
         variables.insert("run_id".to_string(), run_id.clone());
 
         Self {
@@ -129,7 +135,8 @@ impl StepContext {
             self.step_order.push(step_id.to_string());
         }
         // Store as context variable so executors can know which step they're executing
-        self.variables.insert("current_step_id".to_string(), step_id.to_string());
+        self.variables
+            .insert("current_step_id".to_string(), step_id.to_string());
     }
 
     /// Set the working directory for step execution.
@@ -139,14 +146,17 @@ impl StepContext {
     pub fn set_work_dir(&mut self, work_dir: PathBuf) {
         self.work_dir = work_dir;
         // Update the flat variable for backward compatibility
-        self.variables.insert("work_dir".to_string(), self.work_dir.to_string_lossy().to_string());
+        self.variables.insert(
+            "work_dir".to_string(),
+            self.work_dir.to_string_lossy().to_string(),
+        );
     }
 }
 
-/// Interpolate `{key}` and `{step_id.key}` placeholders in a template string.
+/// Interpolate `{key}` and `{step_id.key}` template tokens in a template string.
 ///
 /// Replaces all occurrences of `{key}` with the corresponding value from context.
-/// Handles both namespaced (`{step_id.variable}`) and bare (`{variable}`) placeholders.
+/// Handles both namespaced (`{step_id.variable}`) and bare (`{variable}`) template tokens.
 /// Undefined keys are left as-is (no error, no replacement).
 /// No nested/recursive resolution - only one pass.
 /// @plan:PLAN-20260408-STEP-EXEC.P05
@@ -199,9 +209,9 @@ pub fn interpolate_string(template: &str, context: &StepContext) -> String {
 
     // Iterate over all keys and replace
     for key in all_keys {
-        let placeholder = format!("{{{key}}}");
+        let template_token = format!("{{{key}}}");
         if let Some(value) = context.get(&key) {
-            result = result.replace(&placeholder, value);
+            result = result.replace(&template_token, value);
         }
     }
 
@@ -248,6 +258,24 @@ impl ExecutorRegistry {
         self.executors.insert(step_type.to_string(), executor);
     }
 
+    /// Return whether an executor is registered for `step_type` without dispatching it.
+    /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P03
+    /// @requirement:REQ-PRFU-020
+    /// @pseudocode lines 1-53
+    #[must_use]
+    pub fn contains_step_type(&self, step_type: &str) -> bool {
+        self.executors.contains_key(step_type)
+    }
+
+    /// Return all registered step types without dispatching any executor.
+    /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P03
+    /// @requirement:REQ-PRFU-020
+    /// @pseudocode lines 1-53
+    #[must_use]
+    pub fn registered_step_types(&self) -> BTreeSet<String> {
+        self.executors.keys().cloned().collect()
+    }
+
     /// Dispatch execution to the appropriate executor.
     ///
     /// # Arguments
@@ -282,16 +310,73 @@ impl ExecutorRegistry {
     /// Registers: `shell`, `write_file`, `verify`, and `noop` executors.
     /// @plan:PLAN-20260408-STEP-EXEC.P05
     /// @plan:PLAN-20260408-LLXPRT-FIRST.P15
-    /// @requirement:REQ-LF-SEP-001
+    /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P03
+    /// @requirement:REQ-LF-SEP-001,REQ-PRFU-020
+    /// @pseudocode lines 1-53
     #[must_use]
     pub fn with_defaults() -> Self {
         let mut registry = Self::new();
         registry.register("shell", Box::new(crate::engine::executors::ShellExecutor));
-        registry.register("write_file", Box::new(crate::engine::executors::WriteFileExecutor));
+        registry.register(
+            "write_file",
+            Box::new(crate::engine::executors::WriteFileExecutor),
+        );
         registry.register("verify", Box::new(crate::engine::executors::VerifyExecutor));
         registry.register("llxprt", Box::new(crate::engine::executors::LlxprtExecutor));
 
         registry.register("noop", Box::new(crate::engine::executors::NoOpExecutor));
+        registry.register(
+            "github_pr_identity",
+            Box::new(crate::engine::executors::GithubPrIdentityExecutor),
+        );
+        registry.register(
+            "post_pr_iteration_guard",
+            Box::new(crate::engine::executors::PostPrIterationGuardExecutor),
+        );
+        registry.register(
+            "github_pr_checks",
+            Box::new(crate::engine::executors::GithubPrChecksExecutor),
+        );
+        registry.register(
+            "github_check_failures",
+            Box::new(crate::engine::executors::GithubCheckFailuresExecutor),
+        );
+        registry.register(
+            "github_coderabbit_feedback",
+            Box::new(crate::engine::executors::GithubCodeRabbitFeedbackExecutor),
+        );
+        registry.register(
+            "feedback_evaluator",
+            Box::new(crate::engine::executors::FeedbackEvaluatorExecutor::default()),
+        );
+        registry.register(
+            "pr_remediation_plan",
+            Box::new(crate::engine::executors::PrRemediationPlanExecutor),
+        );
+        registry.register(
+            "pr_followup_remediation",
+            Box::new(crate::engine::executors::PrFollowupRemediationExecutor),
+        );
+        registry.register(
+            "pr_remediation_result",
+            Box::new(crate::engine::executors::PrRemediationResultExecutor),
+        );
+        registry.register(
+            "run_post_pr_tests",
+            Box::new(crate::engine::executors::RunPostPrTestsExecutor),
+        );
+        registry.register(
+            "push_remediation_changes",
+            Box::new(crate::engine::executors::PushRemediationChangesExecutor),
+        );
+        registry.register(
+            "github_feedback_marker",
+            Box::new(crate::engine::executors::GithubFeedbackMarkerExecutor),
+        );
+        registry.register(
+            "post_pr_failure_terminal",
+            Box::new(crate::engine::executors::PostPrFailureTerminalExecutor),
+        );
         registry
     }
 }

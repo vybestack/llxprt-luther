@@ -1,14 +1,13 @@
 //! Monitor process management - singleton locks and process lifecycle.
 //!
 /// @plan:PLAN-20260404-INITIAL-RUNTIME.P10
-
 use std::fs;
 use std::path::Path;
 use std::process::Command;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::Mutex;
 use thiserror::Error;
+use tokio::sync::Mutex;
 
 /// Configuration for monitor process behavior.
 #[derive(Debug, Clone)]
@@ -123,16 +122,19 @@ pub fn acquire_singleton_lock(scope: &str) -> Result<SingletonGuard, MonitorErro
             message: format!("Failed to read lock file: {}", e),
         })?;
 
-        let pid: u32 = contents.trim().parse().map_err(|_| MonitorError::LockError {
-            message: "Lock file contains invalid PID".to_string(),
-        })?;
+        let pid: u32 = contents
+            .trim()
+            .parse()
+            .map_err(|_| MonitorError::LockError {
+                message: "Lock file contains invalid PID".to_string(),
+            })?;
 
         // Check if process is still alive
         // On Linux, check /proc/PID
         // On macOS and other Unix systems, try to send signal 0 to check if process exists
         #[cfg(target_os = "linux")]
         let process_exists = Path::new(&format!("/proc/{}", pid)).exists();
-        
+
         #[cfg(not(target_os = "linux"))]
         let process_exists = {
             Command::new("kill")
@@ -146,11 +148,13 @@ pub fn acquire_singleton_lock(scope: &str) -> Result<SingletonGuard, MonitorErro
         if process_exists && pid != std::process::id() {
             return Err(MonitorError::LockHeld { pid });
         }
-        
+
         // If the lock is held by THIS process, we also cannot acquire it again
         // (this handles the test case of starting two monitors in the same process)
         if pid == std::process::id() {
-            return Err(MonitorError::LockHeld { pid: std::process::id() });
+            return Err(MonitorError::LockHeld {
+                pid: std::process::id(),
+            });
         }
 
         // Process is dead, we can steal the lock
@@ -302,11 +306,26 @@ mod tests {
 
     #[test]
     fn test_calculate_backoff_exponential() {
-        assert_eq!(calculate_backoff("exponential", 1, 60, 1), Duration::from_secs(1));
-        assert_eq!(calculate_backoff("exponential", 1, 60, 2), Duration::from_secs(2));
-        assert_eq!(calculate_backoff("exponential", 1, 60, 3), Duration::from_secs(4));
-        assert_eq!(calculate_backoff("exponential", 1, 60, 6), Duration::from_secs(32));
-        assert_eq!(calculate_backoff("exponential", 1, 60, 10), Duration::from_secs(60)); // Capped at max
+        assert_eq!(
+            calculate_backoff("exponential", 1, 60, 1),
+            Duration::from_secs(1)
+        );
+        assert_eq!(
+            calculate_backoff("exponential", 1, 60, 2),
+            Duration::from_secs(2)
+        );
+        assert_eq!(
+            calculate_backoff("exponential", 1, 60, 3),
+            Duration::from_secs(4)
+        );
+        assert_eq!(
+            calculate_backoff("exponential", 1, 60, 6),
+            Duration::from_secs(32)
+        );
+        assert_eq!(
+            calculate_backoff("exponential", 1, 60, 10),
+            Duration::from_secs(60)
+        ); // Capped at max
     }
 
     #[test]

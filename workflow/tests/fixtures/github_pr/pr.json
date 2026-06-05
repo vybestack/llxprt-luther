@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "run_id": "run-20260430-p01-fixture",
+  "repository_owner": "luther",
+  "repository_name": "workflow",
+  "pr_number": 1910,
+  "head_ref": "luther/issue-1234",
+  "head_sha": "1111111111111111111111111111111111111111",
+  "base_ref": "main",
+  "base_sha": "0000000000000000000000000000000000000000",
+  "artifact_sequence": 1,
+  "write_sequence": 1,
+  "history_metadata": {
+    "canonical_path": "tests/fixtures/github_pr/current/pr.json",
+    "history_path": "tests/fixtures/github_pr/history/pr/1-1-capture_pr_identity.json",
+    "artifact_family": "pr",
+    "is_canonical": true,
+    "history_written_at": "2026-04-30T00:00:00Z"
+  },
+  "step_order_index": 1,
+  "producer_step_id": "capture_pr_identity",
+  "pr_url": "https://github.com/luther/workflow/pull/1910",
+  "capture_state": "captured",
+  "captured_at": "2026-04-30T00:00:00Z",
+  "source": "gh_pr_view",
+  "source_pr_node_id": "PR_kwDOExample",
+  "source_head_repository_owner": "luther",
+  "source_head_repository_name": "workflow"
+}

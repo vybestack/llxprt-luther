@@ -1,0 +1,11 @@
+{
+  "id": 8401,
+  "node_id": "IC_created_8401",
+  "html_url": "https://github.com/example/workflow/pull/1910#issuecomment-8401",
+  "body": "<!-- luther:coderabbit-marker action=comment_fixed key=thread:PRRT_thread_1 -->\nApplied the requested fix.",
+  "user": {
+    "login": "luther-bot",
+    "type": "Bot"
+  },
+  "created_at": "2026-04-29T18:20:00Z"
+}

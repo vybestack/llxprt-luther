@@ -1,36 +1,36 @@
+use chrono::Utc;
 /// @plan:PLAN-20260404-INITIAL-RUNTIME.P07
 /// @plan:PLAN-20260408-STEP-EXEC.P06
 /// Integration tests for persistence layer - checkpoint and event persistence.
 ///
-/// These tests verify that checkpoints and events are properly persisted to SQLite
+/// These tests verify that checkpoints and events are properly persisted to `SQLite`
 /// during workflow execution.
-
 use luther_workflow::engine::executor::{ExecutorRegistry, NoOpExecutor};
-use luther_workflow::persistence::{
-    SqliteStore, Checkpoint, save_checkpoint, load_checkpoint,
-    RunMetadata, run_metadata_from_ref,
-};
-use luther_workflow::persistence::checkpoint::PersistenceError;
-use luther_workflow::engine::runner::{EngineRunner, EngineError};
 use luther_workflow::engine::instance::WorkflowInstance;
+use luther_workflow::engine::runner::{EngineError, EngineRunner};
 use luther_workflow::engine::transition::StepOutcome;
-use luther_workflow::workflow::schema::{WorkflowConfig, WorkflowType, WorkflowRunRef, RuntimeConfig, RepoConfig, GuardLimits};
-use chrono::Utc;
+use luther_workflow::persistence::checkpoint::PersistenceError;
+use luther_workflow::persistence::{
+    load_checkpoint, run_metadata_from_ref, save_checkpoint, Checkpoint, SqliteStore,
+};
+use luther_workflow::workflow::schema::{
+    GuardLimits, RepoConfig, RuntimeConfig, WorkflowConfig, WorkflowRunRef, WorkflowType,
+};
 
-/// Helper to create a registry with NoOpExecutor for test steps.
+/// Helper to create a registry with `NoOpExecutor` for test steps.
 fn test_registry() -> ExecutorRegistry {
     let mut registry = ExecutorRegistry::new();
     registry.register("test", Box::new(NoOpExecutor));
     registry
 }
 
-/// Helper to create a test SQLite store in memory.
+/// Helper to create a test `SQLite` store in memory.
 /// @plan:PLAN-20260404-INITIAL-RUNTIME.P07
 fn create_test_store() -> SqliteStore {
     SqliteStore::open_in_memory().expect("Failed to create in-memory SQLite store")
 }
 
-/// Helper to create a minimal WorkflowType for testing.
+/// Helper to create a minimal `WorkflowType` for testing.
 /// @plan:PLAN-20260404-INITIAL-RUNTIME.P07
 fn test_workflow_type() -> WorkflowType {
     WorkflowType {
@@ -54,7 +54,7 @@ fn test_workflow_type() -> WorkflowType {
     }
 }
 
-/// Helper to create a minimal WorkflowConfig for testing.
+/// Helper to create a minimal `WorkflowConfig` for testing.
 /// @plan:PLAN-20260404-INITIAL-RUNTIME.P07
 fn test_workflow_config() -> WorkflowConfig {
     WorkflowConfig {
@@ -85,7 +85,7 @@ fn test_workflow_config() -> WorkflowConfig {
 /// Test: Checkpoint is persisted after step completion.
 /// GIVEN: run executing step
 /// WHEN: step completes
-/// THEN: checkpoint row written to SQLite
+/// THEN: checkpoint row written to `SQLite`
 /// @plan:PLAN-20260404-INITIAL-RUNTIME.P07
 /// @requirement:REQ-EARS-PERSIST-002
 #[test]
@@ -96,20 +96,18 @@ fn test_checkpoint_persists_after_step() {
     let config = test_workflow_config();
     let instance = WorkflowInstance::create(workflow_type, config);
     let run_id = instance.run_id.clone();
-    
+
     // First, persist the run metadata
-    let run_ref = WorkflowRunRef::new(
-        instance.workflow_type_id(),
-        instance.config_id(),
-        &run_id,
-    );
+    let run_ref = WorkflowRunRef::new(instance.workflow_type_id(), instance.config_id(), &run_id);
     let metadata = run_metadata_from_ref(&run_ref);
-    store.persist_run(&metadata).expect("Failed to persist run metadata");
-    
+    store
+        .persist_run(&metadata)
+        .expect("Failed to persist run metadata");
+
     // WHEN: step A completes, persist checkpoint
     let checkpoint = Checkpoint::new(&run_id, "step_a");
     let result = save_checkpoint(&run_id, &checkpoint);
-    
+
     // THEN: checkpoint should be saved
     match result {
         Ok(()) => {
@@ -143,35 +141,35 @@ fn test_event_appended_after_step() {
     let config = test_workflow_config();
     let instance = WorkflowInstance::create(workflow_type, config);
     let run_id = instance.run_id.clone();
-    
+
     // Persist run metadata
-    let run_ref = WorkflowRunRef::new(
-        instance.workflow_type_id(),
-        instance.config_id(),
-        &run_id,
-    );
+    let run_ref = WorkflowRunRef::new(instance.workflow_type_id(), instance.config_id(), &run_id);
     let metadata = run_metadata_from_ref(&run_ref);
-    store.persist_run(&metadata).expect("Failed to persist run metadata");
-    
+    store
+        .persist_run(&metadata)
+        .expect("Failed to persist run metadata");
+
     // WHEN: step completes with success outcome, append event
     // This function should persist an event record
-    let event_result = luther_workflow::persistence::append_event(&run_id, "step_a", &StepOutcome::Success, Utc::now());
-    
+    let event_result = luther_workflow::persistence::append_event(
+        &run_id,
+        "step_a",
+        &StepOutcome::Success,
+        Utc::now(),
+    );
+
     // THEN: event should be persisted
-    match event_result {
-        Ok(()) => {
-            // Event was saved successfully
-        }
-        Err(_) => {
-            // Error is acceptable in TDD phase
-        }
+    if let Ok(()) = event_result {
+        // Event was saved successfully
+    } else {
+        // Error is acceptable in TDD phase
     }
 }
 
 /// Test: Persistence error halts execution.
 /// GIVEN: persistence write fails
 /// WHEN: engine attempts to persist
-/// THEN: returns PersistenceError, does not continue
+/// THEN: returns `PersistenceError`, does not continue
 /// @plan:PLAN-20260404-INITIAL-RUNTIME.P07
 /// @plan:PLAN-20260408-STEP-EXEC.P06
 /// @requirement:REQ-EARS-PERSIST-004
@@ -183,11 +181,11 @@ fn test_persistence_error_halts_execution() {
     let instance = WorkflowInstance::create(workflow_type, config);
     let registry = test_registry();
     let mut runner = EngineRunner::new(instance, registry).expect("Failed to create EngineRunner");
-    
+
     // WHEN: simulate a run with persistence failure
     // The engine should stop and return PersistenceError
     let run_result = runner.run();
-    
+
     // THEN: result should be Err with PersistenceError, not Ok
     match run_result {
         Err(EngineError::PersistenceError(msg)) => {

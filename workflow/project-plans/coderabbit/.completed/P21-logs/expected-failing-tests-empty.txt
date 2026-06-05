@@ -1,0 +1,14 @@
+{
+  "allowed_groups": [
+    "graph/fake E2E",
+    "artifact store",
+    "GitHub API",
+    "evaluator",
+    "remediation validator",
+    "marker/idempotency",
+    "shell safety"
+  ],
+  "entries": [],
+  "schema_version": 1
+}
+expected-failing-tests.json must be empty before P21 completion

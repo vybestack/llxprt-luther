@@ -1,0 +1,10 @@
+{
+  "source": "check_run",
+  "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "bot_login": "coderabbitai[bot]",
+  "status": "in_progress",
+  "conclusion": null,
+  "review_state": null,
+  "summary_body": "CodeRabbit is reviewing this pull request.",
+  "items": []
+}

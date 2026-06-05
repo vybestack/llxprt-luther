@@ -1,0 +1,71 @@
+VERDICT: PASS
+
+# Phase 14 Evidence — Remediation Attempt 1
+
+Plan: PLAN-20260429-CODERABBIT-PR-FOLLOWUP
+Phase: P14 — Remediation Change Push Executor Implementation
+Remediation attempt: 1 of 3 after P14A FAIL
+
+## Remediation Summary
+
+- Enforced P13 local verification success before any `push_remediation_changes` success path.
+  - `post-pr-test-result.json` must be readable through the current PR binding.
+  - `test_state` must be `passed`.
+  - Artifact binding must match the current run/repository/PR/head/base context.
+  - `plan_artifact_sequence`, `remediation_result_artifact_sequence`, and retry-scope run/repo/PR/head/plan bindings must match the current plan/result context.
+  - Missing, stale, malformed, unbound, or non-passed local verification now writes `push-remediation-result.json` with `push_state=fatal` and does not inspect, stage, commit, or push.
+- Fixed remote-head verification to use the configured `remote_name` used by `git push`, rather than hardcoded `origin`.
+- Strengthened P14 tests:
+  - non-passed local verification blocks no-change, excluded-only, and commit/push success paths before any git runner call;
+  - non-origin `remote_name` is used for both pre/post remote-head verification and push;
+  - existing push-state test now writes a binding-valid passed local verification artifact.
+
+## Files Updated
+
+- `src/engine/executors/pr_remediation.rs`
+- `tests/github_pr_followup_executor_tests.rs`
+- `project-plans/coderabbit/execution-tracker.md`
+- `project-plans/coderabbit/.completed/P14`
+
+## Exact Verification Command and Output
+
+```text
+$ cargo fmt --check && grep -R "@plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P14" src/engine && cargo test --test pr_followup_marker_audit_tests -- p14_markers_cover_all_touched_items && cargo test --test github_pr_followup_executor_tests -- push_remediation_changes
+src/engine/executors/mod.rs:/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P14
+src/engine/executors/pr_remediation.rs:/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P14
+src/engine/executors/pr_remediation.rs:/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P14
+src/engine/executors/pr_remediation.rs:/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P14
+src/engine/executors/pr_remediation.rs:/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P14
+src/engine/executors/pr_remediation.rs:/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P14
+src/engine/executors/pr_remediation.rs:/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P14
+src/engine/executors/pr_remediation.rs:/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P14
+src/engine/executors/pr_remediation.rs:/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P14
+src/engine/executors/pr_remediation.rs:/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P14
+src/engine/executors/pr_remediation.rs:/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P14
+src/engine/executors/pr_remediation.rs:/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P14
+
+running 1 test
+test p14_markers_cover_all_touched_items ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 11 filtered out; finished in 0.01s
+
+running 3 tests
+test push_remediation_changes_uses_configured_remote_for_push_and_remote_head_verification ... ok
+test push_remediation_changes_records_safe_staging_remote_heads_and_verified_push_state ... ok
+test push_remediation_changes_requires_passed_local_verification_before_success_paths ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 57 filtered out; finished in 0.02s
+
+Exit Code: 0
+```
+
+The command emitted existing compiler warnings only; no errors were emitted.
+
+## Semantic Verification Against P14A Blockers
+
+1. P13 local verification is now a hard precondition before every push executor success path. The test `push_remediation_changes_requires_passed_local_verification_before_success_paths` covers no-change, excluded-only, and commit/push scenarios with non-passed local verification and asserts Fatal plus zero git runner calls.
+2. Remote-head verification now accepts `remote_name` and uses it in `git ls-remote --heads <remote_name> <remote_ref>`. The test `push_remediation_changes_uses_configured_remote_for_push_and_remote_head_verification` proves `upstream` is used for both remote-head calls and the push call.
+
+## Blocking Issues
+
+None.

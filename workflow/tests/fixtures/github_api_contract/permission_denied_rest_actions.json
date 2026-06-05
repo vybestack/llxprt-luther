@@ -1,0 +1,11 @@
+{
+  "message": "Resource not accessible by integration",
+  "documentation_url": "https://docs.github.com/rest/actions/workflow-jobs#download-job-logs-for-a-workflow-run",
+  "status": "403",
+  "metadata": {
+    "operation": "rest_actions_job_logs",
+    "required_scope_or_permission": "Actions read and repo read",
+    "account_login": "acoliver",
+    "token_type": "classic_oauth"
+  }
+}

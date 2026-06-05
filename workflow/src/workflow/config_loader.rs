@@ -1,6 +1,5 @@
 /// @plan:PLAN-20260404-INITIAL-RUNTIME.P05
 /// Configuration loading and resolution for workflow types and configs.
-
 use std::path::Path;
 
 use crate::workflow::schema::{WorkflowConfig, WorkflowRunRef, WorkflowType};
@@ -332,7 +331,10 @@ pub fn validate_workflow_config(config: &WorkflowConfig) -> Result<()> {
 /// Validate that a workflow config matches its referenced workflow type.
 /// @plan:PLAN-20260404-INITIAL-RUNTIME.P05
 /// @requirement:REQ-EARS-WF-005
-pub fn validate_config_matches_type(config: &WorkflowConfig, workflow_type: &WorkflowType) -> Result<()> {
+pub fn validate_config_matches_type(
+    config: &WorkflowConfig,
+    workflow_type: &WorkflowType,
+) -> Result<()> {
     if config.workflow_type_id != workflow_type.workflow_type_id {
         return Err(ConfigError {
             message: format!(

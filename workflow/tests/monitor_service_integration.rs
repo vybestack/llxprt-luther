@@ -25,9 +25,18 @@ async fn test_monitor_heartbeat_metadata() {
         .expect("Monitor stopped unexpectedly");
 
     // THEN: heartbeat contains required metadata
-    assert!(!heartbeat.instance_id.is_empty(), "Heartbeat should include instance ID");
-    assert!(heartbeat.timestamp > 0, "Heartbeat should include timestamp");
-    assert!(heartbeat.uptime_secs >= 0, "Heartbeat should include uptime");
+    assert!(
+        !heartbeat.instance_id.is_empty(),
+        "Heartbeat should include instance ID"
+    );
+    assert!(
+        heartbeat.timestamp > 0,
+        "Heartbeat should include timestamp"
+    );
+    assert!(
+        heartbeat.uptime_secs >= 0,
+        "Heartbeat should include uptime"
+    );
     assert!(heartbeat.version >= 0, "Heartbeat should include version");
 }
 
@@ -52,9 +61,17 @@ async fn test_monitor_shutdown_graceful() {
         .expect("Shutdown timed out");
 
     // THEN: all workers complete, resources released
-    assert!(shutdown_result.is_ok(), "Graceful shutdown should succeed: {:?}", shutdown_result.err());
+    assert!(
+        shutdown_result.is_ok(),
+        "Graceful shutdown should succeed: {:?}",
+        shutdown_result.err()
+    );
     assert!(monitor.is_shutdown(), "Monitor should be in shutdown state");
-    assert_eq!(monitor.active_workers(), 0, "All workers should be terminated");
+    assert_eq!(
+        monitor.active_workers(),
+        0,
+        "All workers should be terminated"
+    );
 }
 
 /// @plan:PLAN-20260404-INITIAL-RUNTIME.P09
@@ -70,20 +87,22 @@ async fn test_single_instance_mode() {
         .expect("First monitor should start in single-instance mode");
 
     // WHEN: attempting to start second monitor
-    let second_result = luther_workflow::monitor::Monitor::start_single_instance(config)
-        .await;
+    let second_result = luther_workflow::monitor::Monitor::start_single_instance(config).await;
 
     // THEN: second monitor fails with AlreadyRunning error
-    assert!(second_result.is_err(), "Second monitor should fail in single-instance mode");
+    assert!(
+        second_result.is_err(),
+        "Second monitor should fail in single-instance mode"
+    );
     match second_result {
         Err(e) => {
             let error_str = e.to_string().to_lowercase();
             assert!(
-                error_str.contains("already running") || 
-                error_str.contains("single instance") ||
-                error_str.contains("lock") ||
-                error_str.contains("held"),
-                "Error should indicate single instance conflict: {}", e
+                error_str.contains("already running")
+                    || error_str.contains("single instance")
+                    || error_str.contains("lock")
+                    || error_str.contains("held"),
+                "Error should indicate single instance conflict: {e}"
             );
         }
         Ok(_) => panic!("Expected second monitor to fail"),
@@ -118,7 +137,7 @@ async fn test_config_profile_selection() {
     // WHEN: selecting profiles
     let dev_profile = luther_workflow::monitor::select_profile("development", &profiles)
         .expect("Should find development profile");
-    
+
     let prod_profile = luther_workflow::monitor::select_profile("production", &profiles)
         .expect("Should find production profile");
 
@@ -126,11 +145,11 @@ async fn test_config_profile_selection() {
     assert_eq!(dev_profile.name, "development");
     assert_eq!(dev_profile.max_concurrent_runs, 2);
     assert_eq!(dev_profile.resource_limits.max_memory_mb, 1024);
-    
+
     assert_eq!(prod_profile.name, "production");
     assert_eq!(prod_profile.max_concurrent_runs, 10);
     assert_eq!(prod_profile.resource_limits.max_memory_mb, 4096);
-    
+
     // Non-existent profile should fail
     let missing = luther_workflow::monitor::select_profile("staging", &profiles);
     assert!(missing.is_err(), "Should fail for non-existent profile");

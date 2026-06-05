@@ -1,0 +1,44 @@
+{
+  "data": {
+    "repository": {
+      "pullRequest": {
+        "reviewThreads": {
+          "pageInfo": {
+            "hasNextPage": false,
+            "endCursor": "cursor-page-2"
+          },
+          "nodes": [
+            {
+              "id": "PRRT_thread_2",
+              "isResolved": false,
+              "isOutdated": false,
+              "path": "src/main.rs",
+              "line": 10,
+              "startLine": 10,
+              "comments": {
+                "nodes": [
+                  {
+                    "id": "PRRC_comment_2",
+                    "databaseId": 8002,
+                    "body": "This second-page comment must be collected.",
+                    "url": "https://github.com/example/workflow/pull/1910#discussion_r8002",
+                    "path": "src/main.rs",
+                    "line": 10,
+                    "author": {
+                      "login": "coderabbitai[bot]"
+                    },
+                    "createdAt": "2026-04-29T17:11:00Z",
+                    "updatedAt": "2026-04-29T17:11:00Z",
+                    "commit": {
+                      "oid": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                    }
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      }
+    }
+  }
+}

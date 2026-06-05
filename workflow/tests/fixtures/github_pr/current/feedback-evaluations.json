@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "run_id": "run-20260430-p01-fixture",
+  "repository_owner": "luther",
+  "repository_name": "workflow",
+  "pr_number": 1910,
+  "head_ref": "luther/issue-1234",
+  "head_sha": "1111111111111111111111111111111111111111",
+  "base_ref": "main",
+  "base_sha": "0000000000000000000000000000000000000000",
+  "artifact_sequence": 6,
+  "write_sequence": 1,
+  "history_metadata": {
+    "canonical_path": "tests/fixtures/github_pr/current/feedback-evaluations.json",
+    "history_path": "tests/fixtures/github_pr/history/feedback-evaluations/6-1-evaluate_coderabbit_feedback.json",
+    "artifact_family": "feedback-evaluations",
+    "is_canonical": true,
+    "history_written_at": "2026-04-30T00:14:00Z"
+  },
+  "step_order_index": 6,
+  "producer_step_id": "evaluate_coderabbit_feedback",
+  "items_seen": 1,
+  "accepted_results": [
+    {
+      "item_id": "cr-thread-1",
+      "stable_marker_key": "thread:PRRT_example:sha256:body",
+      "body_hash": "sha256:body",
+      "head_sha": "1111111111111111111111111111111111111111",
+      "decision": "valid",
+      "reason": "The requested regression covers behavior changed by this PR.",
+      "recommended_action": "Add the regression test requested by CodeRabbit.",
+      "accepted_at": "2026-04-30T00:14:00Z",
+      "attempt_count": 1,
+      "source": "new",
+      "reuse_state": "not_reused"
+    }
+  ],
+  "rejected_attempts": [],
+  "unevaluated_items": [],
+  "budget_exhausted_items": [],
+  "max_attempts_per_item": 3,
+  "evaluation_state": "complete",
+  "reused_results_count": 0
+}

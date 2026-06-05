@@ -1,15 +1,14 @@
 //! Monitor heartbeat management - state persistence and health tracking.
 //!
 /// @plan:PLAN-20260404-INITIAL-RUNTIME.P10
-
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 use thiserror::Error;
 use tokio::fs;
 use tokio::sync::Mutex;
-use std::sync::Arc;
 
 use crate::runtime_paths::get_data_dir;
 
@@ -145,7 +144,10 @@ pub async fn write_heartbeat(run_id: &str, state: &MonitorState) -> Result<(), H
 ///
 /// # Returns
 /// Result indicating success or failure
-pub async fn write_heartbeat_full(run_id: &str, heartbeat: &Heartbeat) -> Result<(), HeartbeatError> {
+pub async fn write_heartbeat_full(
+    run_id: &str,
+    heartbeat: &Heartbeat,
+) -> Result<(), HeartbeatError> {
     let path = get_heartbeat_path(run_id);
 
     // Ensure directory exists
@@ -262,7 +264,7 @@ impl HeartbeatWriter {
     /// Write current heartbeat to disk.
     pub async fn write(&self) -> Result<(), HeartbeatError> {
         let uptime = Utc::now().signed_duration_since(self.start_time);
-        
+
         let heartbeat = Heartbeat {
             instance_id: self.instance_id.clone(),
             timestamp: Utc::now().timestamp(),
@@ -280,7 +282,8 @@ impl HeartbeatWriter {
     /// Start periodic heartbeat writing with the given interval.
     pub fn start_periodic(self, interval_secs: u64) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
-            let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(interval_secs));
+            let mut interval =
+                tokio::time::interval(tokio::time::Duration::from_secs(interval_secs));
             loop {
                 interval.tick().await;
                 if let Err(e) = self.write().await {

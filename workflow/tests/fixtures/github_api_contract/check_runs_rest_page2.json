@@ -1,0 +1,26 @@
+{
+  "total_count": 3,
+  "check_runs": [
+    {
+      "id": 5003,
+      "name": "integration",
+      "status": "completed",
+      "conclusion": "failure",
+      "details_url": "https://github.com/example/workflow/actions/runs/3003/job/4003",
+      "html_url": "https://github.com/example/workflow/runs/5003",
+      "started_at": "2026-04-29T17:02:00Z",
+      "completed_at": "2026-04-29T17:06:00Z",
+      "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "app": {
+        "slug": "github-actions"
+      },
+      "check_suite": {
+        "id": 7003
+      },
+      "output": {
+        "title": "integration failed",
+        "summary": "test failure"
+      }
+    }
+  ]
+}

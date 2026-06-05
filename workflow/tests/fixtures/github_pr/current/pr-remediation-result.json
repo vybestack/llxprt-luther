@@ -1,0 +1,101 @@
+{
+  "schema_version": 1,
+  "run_id": "run-20260430-p01-fixture",
+  "repository_owner": "luther",
+  "repository_name": "workflow",
+  "pr_number": 1910,
+  "head_ref": "luther/issue-1234",
+  "head_sha": "1111111111111111111111111111111111111111",
+  "base_ref": "main",
+  "base_sha": "0000000000000000000000000000000000000000",
+  "artifact_sequence": 8,
+  "write_sequence": 1,
+  "history_metadata": {
+    "canonical_path": "tests/fixtures/github_pr/current/pr-remediation-result.json",
+    "history_path": "tests/fixtures/github_pr/history/pr-remediation-result/8-1-validate_remediation_result.json",
+    "artifact_family": "pr-remediation-result",
+    "is_canonical": true,
+    "history_written_at": "2026-04-30T00:20:00Z"
+  },
+  "step_order_index": 9,
+  "producer_step_id": "validate_remediation_result",
+  "input_head_sha": "1111111111111111111111111111111111111111",
+  "output_head_sha": "2222222222222222222222222222222222222222",
+  "overall_status": "fixed",
+  "results": [
+    {
+      "source_type": "ci_failure",
+      "source_id": "ci:check-1",
+      "status": "fixed",
+      "action": "Updated the failing assertion and reran the integration test.",
+      "evidence": {
+        "kind": "command",
+        "current_head_sha": "2222222222222222222222222222222222222222",
+        "commands": [
+          {
+            "argv": [
+              "cargo",
+              "test",
+              "--test",
+              "integration"
+            ],
+            "status": "passed"
+          }
+        ],
+        "paths": [
+          "tests/integration.rs"
+        ],
+        "api_lookups": [],
+        "check_runs": []
+      },
+      "evidence_paths": [
+        "tests/integration.rs"
+      ]
+    },
+    {
+      "source_type": "coderabbit_feedback",
+      "source_id": "cr-thread-1",
+      "status": "changed",
+      "action": "Added the requested regression test.",
+      "evidence": {
+        "kind": "path",
+        "current_head_sha": "2222222222222222222222222222222222222222",
+        "paths": [
+          "tests/regression.rs"
+        ],
+        "commands": [],
+        "api_lookups": [],
+        "check_runs": []
+      },
+      "evidence_paths": [
+        "tests/regression.rs"
+      ]
+    }
+  ],
+  "verification_commands": [
+    {
+      "argv": [
+        "cargo",
+        "test"
+      ],
+      "status": "passed"
+    }
+  ],
+  "success_file_path": null,
+  "validation_state": "valid",
+  "validation_retry_index": 0,
+  "max_validation_retries": 2,
+  "remediation_attempt_index": 0,
+  "max_remediation_attempts": 2,
+  "retry_scope": {
+    "run_id": "run-20260430-p01-fixture",
+    "repository_owner": "luther",
+    "repository_name": "workflow",
+    "pr_number": 1910,
+    "input_head_sha": "1111111111111111111111111111111111111111",
+    "plan_artifact_sequence": 7
+  },
+  "plan_artifact_sequence": 7,
+  "unsuccessful_statuses": [],
+  "no_change_after_remediation": false
+}

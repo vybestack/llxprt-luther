@@ -1,6 +1,5 @@
 /// @plan:PLAN-20260404-INITIAL-RUNTIME.P05
 /// Workflow instance management - binds workflow type and config into an executable runtime object.
-
 use uuid::Uuid;
 
 use crate::workflow::schema::{WorkflowConfig, WorkflowType};

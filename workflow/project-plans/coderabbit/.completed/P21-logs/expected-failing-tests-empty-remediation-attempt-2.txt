@@ -1,0 +1,4 @@
+### expected failing tests manifest empty remediation attempt 2
+[]
+manifest_empty=true
+exit=0

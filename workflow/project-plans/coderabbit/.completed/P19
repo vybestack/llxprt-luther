@@ -1,0 +1,313 @@
+VERDICT: PASS
+
+
+# Remediation Attempt 1 Evidence
+
+## Verdict
+
+PASS
+
+## Earliest-Owner Corrections Applied
+
+- Added `tests/workflow_shell_safety_tests.rs` as workflow-level shell-safety coverage owned by the earlier P16/P17 workflow/TOML safety gap, with substantive tests for production/fixture body-file handling, adversarial CodeRabbit/metacharacter non-execution in workflow shell text, and machine-checked static command allowlist coverage.
+- Replaced production and fixture workflow `gh issue comment ... --body "..."` issue-abandon commands with temporary body-file handling using `mktemp`, `printf`, cleanup trap, and `gh issue comment --body-file`. Fixture TOML and generated JSON are in sync; `python3 junk/regen_fixtures.py` regenerated `tests/fixtures/workflows/valid/llxprt-issue-fix-v1.json`.
+- Updated the P19 positive safe-body grep command in `project-plans/coderabbit/implementation-plan.md` to portable BSD/GNU form `grep -R -e "--body-file\|api .*--input\|safe_body_file" ...`. The original exact command failed on BSD grep because the pattern begins with `--body-file`; the portable form preserves the same assertion and passed.
+
+## Remediation Attempt 1 Command Evidence
+
+Full command output: `project-plans/coderabbit/.completed/P19-remediation-attempt-1.command-output.md`.
+
+All required P19 commands passed in remediation attempt 1, including:
+
+- `cargo test --test workflow_shell_safety_tests -- production_and_fixture_workflows_use_safe_body_handling`
+- `cargo test --test workflow_shell_safety_tests -- coderabbit_text_metacharacters_cannot_execute`
+- `cargo test --test workflow_shell_safety_tests -- static_command_allowlist_is_machine_checked`
+- `! grep -R "gh .*--body \"" src/engine/executors tests config/workflows --include="*.rs" --include="*.toml" --include="*.json"`
+- `grep -R -e "--body-file\|api .*--input\|safe_body_file" src/engine/executors tests config/workflows --include="*.rs" --include="*.toml" --include="*.json"`
+- `cargo build --all-targets`
+- `cargo test --lib`
+- GitHub API contract tests and validator
+- PR follow-up executor idempotency and shell-safety tests
+
+---
+
+# Phase 19 Evidence - Security and Idempotency Audit Only
+
+## Files Created/Updated With Purpose
+
+- `project-plans/coderabbit/.completed/P19`: this audit evidence file.
+- `tests/pr_followup_marker_audit_tests.rs`: added P19 marker audit metadata/test only; no new required behavior and no first-owned failing behavior tests.
+- `project-plans/coderabbit/execution-tracker.md`: recorded P19 FAIL status and blockers.
+
+## Security and Idempotency Audit Notes
+
+- `src/engine/executors/github_pr.rs`: PR identity/check/CI command invocations use `Command::new(program).args(args)` through `GithubPrCommandRunner` and build `gh` argv vectors for `pr view`, `pr checks`, REST check-runs, and Actions job/log collection. No CodeRabbit or LLM text is inserted into shell strings by this module.
+- `src/engine/executors/github_feedback.rs`: CodeRabbit collection queries are argv-based through the GitHub command runner. Marker execution reads local `pr-feedback-marker-report.json` before actions, queries remote issue comments before actions, parses hidden marker comments, and derives completion keys from stable marker key, source head SHA, remediation output head, body hash, action, and run id. Marker comment creation writes deterministic body JSON to a file and invokes `gh api ... --input <file>` rather than interpolating body text into a shell command.
+- `src/engine/executors/feedback_eval.rs`: the production feedback evaluator process uses `Command::new(program).args(args)` with structured request JSON written to stdin; raw LLM output is persisted through the artifact store as bounded JSON data and is not embedded in argv.
+- `src/engine/executors/pr_remediation.rs`: remediation wrapper, post-PR test runner, and push runner use argv request structs and `Command::new(&request.argv[0]).args(...)`; stdin is null. Structured artifacts are written via `PrFollowupArtifactStore`.
+- `src/engine/executors/pr_followup_artifacts.rs` and `src/engine/executors/pr_followup_types.rs`: artifact paths are rooted under the configured artifact root with current/history namespaces; writes are atomic; store reads validate binding fields, family, sequence, and metadata. Shared binding/types derive serde serialization/deserialization and equality.
+- Already-existing executor tests confirm idempotency and shell safety for GitHub PR argv, CodeRabbit API argv, feedback evaluator stdin/artifacts, remediation wrapper argv, marker comment body files/API input, and post-PR test/push argv. `cargo test --test github_pr_followup_executor_tests -- idempotency` and `-- shell_safety` passed.
+- P19 did not add required behavior and did not add P19-owned expected-failing manifest entries. The expected-failing manifest remains empty and validates successfully.
+
+## Shell-Safety Audit Note: New PR Follow-Through vs Pre-Existing Workflow Shell Interpolation
+
+- New PR follow-through executor paths audited above use argv vectors, stdin JSON, artifact files, and `gh api --input` for untrusted GitHub/LLM/CodeRabbit text; the targeted executor shell-safety tests passed.
+- Pre-existing workflow shell interpolation is separate and must not be conflated with new PR follow-through executor safety. The required P19 negative grep found existing `gh issue comment ... --body "..."` shell commands in production and fixture workflow TOML for issue-abandon text. These commands are outside the new PR follow-through marker/comment-body path but still cause the exact mandatory P19 grep gate to fail.
+
+## Blocking Issues
+
+1. The required test target `workflow_shell_safety_tests` does not exist. All three mandatory commands fail with `error: no test target named workflow_shell_safety_tests`. Earliest insufficient owner phase: P16/P17 workflow/TOML assertion ownership, with P04 as the original shared shell-safety fixture/test ownership if the missing file was intended as shared TDD coverage.
+2. The mandatory raw `gh --body` negative grep fails because existing workflow TOML files contain `gh issue comment ... --body "Luther abandoning this issue: ..."`. Earliest insufficient owner phase: P16/P17 workflow/TOML safety gate for workflow-level shell handling, not P19.
+3. The mandatory positive grep command as written fails on BSD grep because the pattern begins with `--body-file` and no `-e`/`--` delimiter is provided. A portable rerun using `grep -R -e` succeeds and finds existing `--body-file` PR creation paths, but the exact required command exits 2.
+
+## Commands Run and Exact Outputs
+
+### Command: test -f project-plans/coderabbit/.completed/P18
+```text
+$ test -f project-plans/coderabbit/.completed/P18
+exit=0
+```
+
+### Command: grep -E "^## Verdict: PASS|^VERDICT: PASS" project-plans/coderabbit/.completed/P18A.md
+```text
+$ grep -E "^## Verdict: PASS|^VERDICT: PASS" project-plans/coderabbit/.completed/P18A.md
+## Verdict: PASS
+VERDICT: PASS
+exit=0
+```
+
+### Command: grep P18 tracker row showing PASS
+```text
+$ grep -n "P18.*PASS\|Phase 18.*PASS" project-plans/coderabbit/execution-tracker.md
+36:| P18 | PASS | 1 | 2026-04-30 | 2026-04-30 P18A PASS | project-plans/coderabbit/.completed/P18, project-plans/coderabbit/.completed/P18A.md, tests/pr_followup_workflow_integration.rs, tests/pr_followup_marker_audit_tests.rs |
+exit=0
+```
+
+### Command: cargo test --test github_api_contract_tests -- github_api_contract
+```text
+running 2 tests
+test github_api_contract_negative_fixture_rejects_missing_contract ... ok
+test github_api_contract_validator_accepts_phase_02_contract ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.50s
+
+exit=0
+```
+
+### Command: cargo run --bin github_api_contract_validator -- project-plans/coderabbit/analysis/github-api-contract.md tests/fixtures/github_api_contract
+```text
+github_api_contract_validator: PASS
+exit=0
+```
+
+### Command: cargo test --test pr_followup_marker_audit_tests -- p19_markers_cover_all_touched_items
+```text
+running 1 test
+test p19_markers_cover_all_touched_items ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 16 filtered out; finished in 0.00s
+
+exit=0
+```
+
+### Command: negative grep for placeholder/TBD markers from plan
+```text
+$ ! grep -R "@pseudocode lines X-Y\|@pseudocode TBD\|@pseudocode placeholder\|TODO API\|json_path TBD\|fixture TBD\|assertion TBD" src/engine tests project-plans/coderabbit/analysis
+exit=0
+```
+
+### Command: cargo test --test github_pr_followup_executor_tests -- idempotency
+```text
+running 1 test
+test marker_idempotency_avoids_duplicate_comments_using_local_and_remote_markers ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 66 filtered out; finished in 0.01s
+
+exit=0
+```
+
+### Command: cargo test --test github_pr_followup_executor_tests -- shell_safety
+```text
+running 6 tests
+test github_pr_command_runner_shell_safety_uses_argv_not_raw_interpolated_text ... ok
+test post_pr_tests_and_push_shell_safety_use_configured_argv_without_shell_injection ... ok
+test marker_comment_shell_safety_uses_body_files_or_graphql_variables ... ok
+test coderabbit_api_shell_safety_keeps_malicious_feedback_text_out_of_graphql_and_rest_argv ... ok
+test feedback_evaluator_command_shell_safety_writes_raw_llm_text_to_bounded_artifacts ... ok
+test remediation_wrapper_shell_safety_passes_plan_and_result_paths_as_argv ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 61 filtered out; finished in 1.32s
+
+exit=0
+```
+
+### Command: cargo test --test workflow_shell_safety_tests -- production_and_fixture_workflows_use_safe_body_handling
+```text
+$ cargo test --test workflow_shell_safety_tests -- production_and_fixture_workflows_use_safe_body_handling
+error: no test target named `workflow_shell_safety_tests` in default-run packages
+help: available test targets:
+    cli_config_resolution_integration
+    cli_e2e_integration
+    config_binding_integration
+    config_binding_json_parity_integration
+    e2e_workflow_integration
+    engine_execution_integration
+    engine_integration_llxprt_first
+    engine_resume_integration
+    executor_unit_tests
+    github_api_contract_tests
+    github_pr_followup_executor_tests
+    hello_world_workflow_integration
+    live_workflow_integration
+    monitor_service_integration
+    monitor_singleton_and_restart_integration
+    namespaced_context_tests
+    per_edge_loop_tests
+    persistence_integration
+    pr_followup_marker_audit_tests
+    pr_followup_workflow_integration
+    quality_release_guardrails
+    repo_prep_integration
+    service_ipc_contract_integration
+    shell_enhanced_tests
+    smoke_test
+    verify_executor_tests
+exit=101
+```
+
+### Command: cargo test --test workflow_shell_safety_tests -- coderabbit_text_metacharacters_cannot_execute
+```text
+$ cargo test --test workflow_shell_safety_tests -- coderabbit_text_metacharacters_cannot_execute
+error: no test target named `workflow_shell_safety_tests` in default-run packages
+help: available test targets:
+    cli_config_resolution_integration
+    cli_e2e_integration
+    config_binding_integration
+    config_binding_json_parity_integration
+    e2e_workflow_integration
+    engine_execution_integration
+    engine_integration_llxprt_first
+    engine_resume_integration
+    executor_unit_tests
+    github_api_contract_tests
+    github_pr_followup_executor_tests
+    hello_world_workflow_integration
+    live_workflow_integration
+    monitor_service_integration
+    monitor_singleton_and_restart_integration
+    namespaced_context_tests
+    per_edge_loop_tests
+    persistence_integration
+    pr_followup_marker_audit_tests
+    pr_followup_workflow_integration
+    quality_release_guardrails
+    repo_prep_integration
+    service_ipc_contract_integration
+    shell_enhanced_tests
+    smoke_test
+    verify_executor_tests
+exit=101
+```
+
+### Command: cargo test --test workflow_shell_safety_tests -- static_command_allowlist_is_machine_checked
+```text
+$ cargo test --test workflow_shell_safety_tests -- static_command_allowlist_is_machine_checked
+error: no test target named `workflow_shell_safety_tests` in default-run packages
+help: available test targets:
+    cli_config_resolution_integration
+    cli_e2e_integration
+    config_binding_integration
+    config_binding_json_parity_integration
+    e2e_workflow_integration
+    engine_execution_integration
+    engine_integration_llxprt_first
+    engine_resume_integration
+    executor_unit_tests
+    github_api_contract_tests
+    github_pr_followup_executor_tests
+    hello_world_workflow_integration
+    live_workflow_integration
+    monitor_service_integration
+    monitor_singleton_and_restart_integration
+    namespaced_context_tests
+    per_edge_loop_tests
+    persistence_integration
+    pr_followup_marker_audit_tests
+    pr_followup_workflow_integration
+    quality_release_guardrails
+    repo_prep_integration
+    service_ipc_contract_integration
+    shell_enhanced_tests
+    smoke_test
+    verify_executor_tests
+exit=101
+```
+
+### Command: ! grep -R "gh .*--body \"" src/engine/executors tests config/workflows --include="*.rs" --include="*.toml" --include="*.json"
+```text
+$ ! grep -R "gh .*--body \\\"" src/engine/executors tests config/workflows --include="*.rs" --include="*.toml" --include="*.json"
+tests/fixtures/workflows/valid/llxprt-issue-fix-v1.toml:gh issue comment {issue_number} --repo {target_repo} --body "Luther abandoning this issue: workflow failed at step {current_step_id}."
+tests/fixtures/workflows/invalid/p16-duplicate-create-pr-success.toml:gh issue comment {issue_number} --repo {target_repo} --body "Luther abandoning this issue: workflow failed at step {current_step_id}."
+tests/fixtures/workflows/invalid/p16-post-pr-fatal-to-abandon.toml:gh issue comment {issue_number} --repo {target_repo} --body "Luther abandoning this issue: workflow failed at step {current_step_id}."
+tests/fixtures/workflows/invalid/p16-duplicate-build-remediation-plan-success.toml:gh issue comment {issue_number} --repo {target_repo} --body "Luther abandoning this issue: workflow failed at step {current_step_id}."
+tests/fixtures/workflows/invalid/p16-duplicate-watch-pr-checks-fatal.toml:gh issue comment {issue_number} --repo {target_repo} --body "Luther abandoning this issue: workflow failed at step {current_step_id}."
+config/workflows/llxprt-issue-fix-v1.toml:gh issue comment {issue_number} --repo {target_repo} --body "Luther abandoning this issue: workflow failed at step {current_step_id}."
+exit=1
+```
+
+### Command: grep -R "--body-file\|api .*--input\|safe_body_file" src/engine/executors tests config/workflows --include="*.rs" --include="*.toml" --include="*.json"
+```text
+$ grep -R "--body-file\|api .*--input\|safe_body_file" src/engine/executors tests config/workflows --include="*.rs" --include="*.toml" --include="*.json"
+grep: unrecognized option `--body-file\|api .*--input\|safe_body_file'
+usage: grep [-abcdDEFGHhIiJLlMmnOopqRSsUVvwXxZ] [-A num] [-B num] [-C[num]]
+	[-e pattern] [-f file] [--binary-files=value] [--color=when]
+	[--context[=num]] [--directories=action] [--label] [--line-buffered]
+	[--null] [pattern] [file ...]
+exit=2
+```
+
+### Portable rerun for same positive safe-body grep evidence
+```text
+$ grep -R -e "--body-file\|api .*--input\|safe_body_file" src/engine/executors tests config/workflows --include="*.rs" --include="*.toml" --include="*.json"; echo exit=$?
+tests/fixtures/workflows/valid/llxprt-issue-fix-v1.toml:gh pr create --repo {target_repo} --title "Fix #{issue_number}: {issue_title}" --body-file {artifact_dir}/pr-description.md --base {base_branch} --head issue{issue_number}
+tests/fixtures/workflows/valid/llxprt-issue-fix-v1.json:        "command": "gh pr create --repo {target_repo} --title \"Fix #{issue_number}: {issue_title}\" --body-file {artifact_dir}/pr-description.md --base {base_branch} --head issue{issue_number}\n",
+tests/fixtures/workflows/invalid/p16-duplicate-create-pr-success.toml:gh pr create --repo {target_repo} --title "Fix #{issue_number}: {issue_title}" --body-file {artifact_dir}/pr-description.md --base {base_branch} --head issue{issue_number}
+tests/fixtures/workflows/invalid/p16-post-pr-fatal-to-abandon.toml:gh pr create --repo {target_repo} --title "Fix #{issue_number}: {issue_title}" --body-file {artifact_dir}/pr-description.md --base {base_branch} --head issue{issue_number}
+tests/fixtures/workflows/invalid/p16-duplicate-build-remediation-plan-success.toml:gh pr create --repo {target_repo} --title "Fix #{issue_number}: {issue_title}" --body-file {artifact_dir}/pr-description.md --base {base_branch} --head issue{issue_number}
+tests/fixtures/workflows/invalid/p16-duplicate-watch-pr-checks-fatal.toml:gh pr create --repo {target_repo} --title "Fix #{issue_number}: {issue_title}" --body-file {artifact_dir}/pr-description.md --base {base_branch} --head issue{issue_number}
+config/workflows/llxprt-issue-fix-v1.toml:gh pr create --repo {target_repo} --title "Fix #{issue_number}: {issue_title}" --body-file {artifact_dir}/pr-description.md --base {base_branch} --head issue{issue_number}
+exit=0
+```
+
+### Expected-failing manifest validator/verifier applicability and no P19 entries
+```text
+$ python3 project-plans/coderabbit/analysis/validate-expected-failing-tests.py project-plans/coderabbit/analysis/expected-failing-tests.json
+expected_failing_tests_manifest: PASS
+entries=0
+exit=0
+
+$ grep -R "P19\|p19\|Phase 19" project-plans/coderabbit/analysis/expected-failing-tests.json
+exit=1
+```
+
+### Command: cargo build --all-targets
+```text
+Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.05s
+exit=0
+```
+
+### Command: cargo test --lib
+```text
+running 67 tests
+[67 tests ok]
+
+test result: ok. 67 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.10s
+
+exit=0
+```
+
+### Command: negative greps for todo!/unimplemented! in relevant touched files
+```text
+$ ! grep -R "todo!\|unimplemented!" src/engine/executors/github_pr.rs src/engine/executors/github_feedback.rs src/engine/executors/feedback_eval.rs src/engine/executors/pr_remediation.rs src/engine/executors/pr_followup_artifacts.rs src/engine/executors/pr_followup_types.rs tests/github_pr_followup_executor_tests.rs tests/pr_followup_marker_audit_tests.rs tests/e2e_workflow_integration.rs config/workflows/llxprt-issue-fix-v1.toml
+exit=0
+```

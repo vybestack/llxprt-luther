@@ -1,6 +1,5 @@
 /// @plan:PLAN-20260404-INITIAL-RUNTIME.P08
 /// Workflow execution engine - runs workflow instances step by step.
-
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::Path;
@@ -15,6 +14,7 @@ use crate::persistence::{
     append_event_with_conn, load_checkpoint_with_conn, save_checkpoint_with_conn, Checkpoint,
     PersistenceError, RunMetadata, RunStatus, SqliteStoreRef, StateSnapshot,
 };
+use crate::workflow::schema::TransitionDef;
 
 /// Errors that can occur during workflow execution.
 /// @plan:PLAN-20260404-INITIAL-RUNTIME.P08
@@ -25,7 +25,10 @@ pub enum EngineError {
     StepExecutionError { step_id: String, message: String },
 
     #[error("transition not found from {step_id} with outcome {outcome:?}")]
-    TransitionNotFound { step_id: String, outcome: StepOutcome },
+    TransitionNotFound {
+        step_id: String,
+        outcome: StepOutcome,
+    },
 
     #[error("loop limit exceeded at step {step_id}")]
     LoopLimitExceeded { step_id: String },
@@ -84,7 +87,7 @@ pub struct EngineRunner {
     /// SQLite connection for persistence.
     conn: RefCell<Connection>,
     /// Flag indicating if an interrupt was received.
-    interrupted: RefCell<bool>,
+    interrupted: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// Executor registry for dispatching step execution.
     registry: ExecutorRegistry,
     /// Step execution context for variable storage and interpolation.
@@ -96,21 +99,22 @@ impl EngineRunner {
     /// @plan:PLAN-20260404-INITIAL-RUNTIME.P08
     /// @plan:PLAN-20260408-STEP-EXEC.P06
     /// @requirement:REQ-EARS-ENG-001
-    pub fn new(instance: WorkflowInstance, registry: ExecutorRegistry) -> Result<Self, EngineError> {
+    pub fn new(
+        instance: WorkflowInstance,
+        registry: ExecutorRegistry,
+    ) -> Result<Self, EngineError> {
         let max_retries = instance.config.runtime.max_retries;
         let max_loops = instance.config.guard_limits.max_iterations.unwrap_or(10);
 
         // Create an in-memory SQLite connection for persistence
-        let conn = Connection::open_in_memory()
-            .map_err(|e| EngineError::PersistenceError(
-                format!("Failed to create in-memory database: {e}")
-            ))?;
+        let conn = Connection::open_in_memory().map_err(|e| {
+            EngineError::PersistenceError(format!("Failed to create in-memory database: {e}"))
+        })?;
 
         // Initialize checkpoint schema
-        crate::persistence::checkpoint::init_checkpoint_table(&conn)
-            .map_err(|e| EngineError::PersistenceError(
-                format!("Failed to initialize checkpoint schema: {e}")
-            ))?;
+        crate::persistence::checkpoint::init_checkpoint_table(&conn).map_err(|e| {
+            EngineError::PersistenceError(format!("Failed to initialize checkpoint schema: {e}"))
+        })?;
 
         // Create working directory path: tempdir/run_id
         let work_dir = std::env::temp_dir().join(&instance.run_id);
@@ -130,10 +134,11 @@ impl EngineRunner {
         /// @requirement:REQ-LF-WS-001
         if let Some(work_dir_str) = instance.config.variables.get("work_dir") {
             let path = std::path::PathBuf::from(work_dir_str);
-            std::fs::create_dir_all(&path)
-                .map_err(|e| EngineError::InvalidState(
-                    format!("Failed to create work_dir '{work_dir_str}': {e}")
-                ))?;
+            std::fs::create_dir_all(&path).map_err(|e| {
+                EngineError::InvalidState(format!(
+                    "Failed to create work_dir '{work_dir_str}': {e}"
+                ))
+            })?;
             context.set_work_dir(path);
         }
 
@@ -144,7 +149,7 @@ impl EngineRunner {
             max_retries,
             max_loops,
             conn: RefCell::new(conn),
-            interrupted: RefCell::new(false),
+            interrupted: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             registry,
             context,
         })
@@ -167,16 +172,14 @@ impl EngineRunner {
         })?;
 
         // Initialize checkpoint schema
-        crate::persistence::checkpoint::init_checkpoint_table(&conn)
-            .map_err(|e| EngineError::PersistenceError(
-                format!("Failed to initialize checkpoint schema: {e}")
-            ))?;
+        crate::persistence::checkpoint::init_checkpoint_table(&conn).map_err(|e| {
+            EngineError::PersistenceError(format!("Failed to initialize checkpoint schema: {e}"))
+        })?;
 
         // Initialize runs table schema for metadata
-        crate::persistence::run_metadata::init_runs_table(&conn)
-            .map_err(|e| EngineError::PersistenceError(
-                format!("Failed to initialize runs schema: {e}")
-            ))?;
+        crate::persistence::run_metadata::init_runs_table(&conn).map_err(|e| {
+            EngineError::PersistenceError(format!("Failed to initialize runs schema: {e}"))
+        })?;
 
         // Try to load existing checkpoint for resume
         let (retry_count, edge_loop_counts) =
@@ -207,10 +210,12 @@ impl EngineRunner {
         /// @requirement:REQ-LF-WS-001
         if let Some(work_dir_str) = instance.config.variables.get("work_dir") {
             let path = std::path::PathBuf::from(work_dir_str);
-            std::fs::create_dir_all(&path)
-                .map_err(|e| EngineError::InvalidState(
-                    format!("Failed to create work_dir '{}': {}", work_dir_str, e)
-                ))?;
+            std::fs::create_dir_all(&path).map_err(|e| {
+                EngineError::InvalidState(format!(
+                    "Failed to create work_dir '{}': {}",
+                    work_dir_str, e
+                ))
+            })?;
             context.set_work_dir(path);
         }
 
@@ -221,7 +226,7 @@ impl EngineRunner {
             max_retries,
             max_loops,
             conn: RefCell::new(conn),
-            interrupted: RefCell::new(false),
+            interrupted: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             registry,
             context,
         })
@@ -248,7 +253,7 @@ impl EngineRunner {
 
         loop {
             // Check for interrupt
-            if *self.interrupted.borrow() {
+            if self.interrupted.load(std::sync::atomic::Ordering::SeqCst) {
                 let checkpoint = self.create_checkpoint(&current_step_id, "interrupted");
                 let conn = self.conn.borrow();
                 save_checkpoint_with_conn(&conn, &checkpoint)?;
@@ -320,9 +325,9 @@ impl EngineRunner {
                         .and_then(|t| t.max_iterations)
                         .unwrap_or(self.max_loops);
 
-                    // Check if this is a loop back (next step is earlier in the workflow)
-                    if self.is_loop_back(&current_step_id, &next_step_id) {
-                        let current_count = self.edge_loop_counts.get(&edge_key).copied().unwrap_or(0);
+                    if self.is_limited_transition(&current_step_id, &next_step_id, transition_def) {
+                        let current_count =
+                            self.edge_loop_counts.get(&edge_key).copied().unwrap_or(0);
                         if current_count >= edge_limit {
                             // Per-edge loop limit exceeded
                             let run_outcome = RunOutcome::Abandoned {
@@ -337,6 +342,7 @@ impl EngineRunner {
                         }
                         self.edge_loop_counts.insert(edge_key, current_count + 1);
                     }
+
                     current_step_id = next_step_id;
                     self.instance.transition_to(&current_step_id);
                 }
@@ -370,12 +376,9 @@ impl EngineRunner {
     /// Returns Option<&TransitionDef> to access max_iterations for per-edge loop limits.
     /// @plan:PLAN-20260408-LLXPRT-FIRST.P14
     /// @requirement:REQ-LF-LOOP-001,REQ-LF-LOOP-004
-    fn find_transition(
-        &self,
-        from: &str,
-        outcome: &StepOutcome,
-    ) -> Option<&crate::workflow::schema::TransitionDef> {
+    fn find_transition(&self, from: &str, outcome: &StepOutcome) -> Option<&TransitionDef> {
         let outcome_str = outcome.to_string();
+
         let transitions = &self.instance.workflow_type.transitions;
 
         for t in transitions {
@@ -409,10 +412,10 @@ impl EngineRunner {
 
         // Get the step_type and parameters from the StepDef
         let step_type = &step_def.step_type;
-        let params = step_def.parameters.as_ref().map_or(
-            &serde_json::Value::Null,
-            |p| p,
-        );
+        let params = step_def
+            .parameters
+            .as_ref()
+            .map_or(&serde_json::Value::Null, |p| p);
 
         // Dispatch to the registry for execution
         self.registry.dispatch(step_type, &mut self.context, params)
@@ -425,7 +428,8 @@ impl EngineRunner {
         let current_step_id = self.instance.current_state.clone();
 
         // Mark as interrupted
-        *self.interrupted.borrow_mut() = true;
+        self.interrupted
+            .store(true, std::sync::atomic::Ordering::SeqCst);
 
         // Persist interrupt checkpoint
         let checkpoint = self.create_checkpoint(&current_step_id, "interrupted");
@@ -436,6 +440,13 @@ impl EngineRunner {
         Ok(RunOutcome::Interrupted {
             step_id: current_step_id,
         })
+    }
+
+    /// Return a signal handle that can request interruption from another thread.
+    /// @plan:PLAN-20260404-INITIAL-RUNTIME.P08
+    /// @requirement:REQ-EARS-ENG-004
+    pub fn interrupt_handle(&self) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+        self.interrupted.clone()
     }
 
     /// Get the current step being executed.
@@ -473,7 +484,7 @@ impl EngineRunner {
         // Try to load checkpoint from the shared default connection
         let checkpoint = crate::persistence::load_checkpoint(&self.instance.run_id)
             .map_err(|e| EngineError::PersistenceError(e.to_string()))?;
-        
+
         if let Some(cp) = checkpoint {
             // Resume from checkpoint
             self.instance.transition_to(&cp.step_id);
@@ -514,6 +525,18 @@ impl EngineRunner {
         Ok(next_step)
     }
 
+    fn is_limited_transition(
+        &self,
+        current_step: &str,
+        next_step: &str,
+        transition: Option<&TransitionDef>,
+    ) -> bool {
+        self.is_loop_back(current_step, next_step)
+            || transition
+                .and_then(|transition| transition.max_iterations)
+                .is_some()
+    }
+
     /// Check if transitioning to the next step is a loop back.
     fn is_loop_back(&self, current_step: &str, next_step: &str) -> bool {
         // Get the index of each step in the workflow
@@ -531,7 +554,11 @@ impl EngineRunner {
     /// Record run completion metadata to the persistence store.
     /// @plan:PLAN-20260408-LLXPRT-FIRST.P15
     /// @requirement:REQ-LF-FAIL-005
-    fn record_run_completion(&self, outcome: &RunOutcome, final_step_id: &str) -> Result<(), EngineError> {
+    fn record_run_completion(
+        &self,
+        outcome: &RunOutcome,
+        final_step_id: &str,
+    ) -> Result<(), EngineError> {
         // Get issue_number from context if available
         let _issue_number = self.context.get("issue_number").map(|s| s.to_string());
 
@@ -598,7 +625,9 @@ mod tests {
     fn engine_runner_can_be_created() {
         // @plan:PLAN-20260404-INITIAL-RUNTIME.P08
         // @plan:PLAN-20260408-STEP-EXEC.P06
-        use crate::workflow::schema::{GuardLimits, RepoConfig, RuntimeConfig, WorkflowConfig, WorkflowType};
+        use crate::workflow::schema::{
+            GuardLimits, RepoConfig, RuntimeConfig, WorkflowConfig, WorkflowType,
+        };
 
         let workflow_type = WorkflowType {
             workflow_type_id: "test".to_string(),

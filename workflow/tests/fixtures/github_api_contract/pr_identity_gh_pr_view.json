@@ -1,0 +1,11 @@
+{
+  "number": 1910,
+  "url": "https://github.com/example/workflow/pull/1910",
+  "headRefName": "luther/issue-1234",
+  "headRefOid": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "baseRefName": "main",
+  "baseRefOid": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "state": "OPEN",
+  "isDraft": false,
+  "id": "PR_kwDOExample"
+}

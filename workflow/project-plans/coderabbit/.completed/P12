@@ -1,0 +1,199 @@
+VERDICT: PASS
+
+# Phase 12 Evidence
+
+Plan: PLAN-20260429-CODERABBIT-PR-FOLLOWUP
+Phase: P12 — PR Follow-up Llxprt Remediation Wrapper Implementation
+
+## Files Created/Updated
+
+- `src/engine/executors/pr_remediation.rs`: implemented `PrFollowupRemediationExecutor`, owned `PrFollowupLlxprtCommandRunner` seam, `LlxprtInvocationRequest`, `LlxprtInvocationResult`, process runner, prompt rendering, `pr-remediation-llxprt-run.json`, and validator-readable failure `pr-remediation-result.json` bridge.
+- `src/engine/executors/mod.rs`: re-exported P12 owned runner/result/request types and injected executor wrapper.
+- `tests/github_pr_followup_executor_tests.rs`: added P12 fake owned runner tests for process evidence, exact prompt contract, and no StepOutcome inference; existing P04 wrapper filters now pass.
+- `tests/pr_followup_marker_audit_tests.rs`: added P12 touched-file marker audit.
+- `project-plans/coderabbit/analysis/expected-failing-tests.json`: removed P12-owned expected-failing entries; remaining 10 entries are P13/P14/P15/P17 later-phase failures.
+- `project-plans/coderabbit/execution-tracker.md`: updated P12 to PASS.
+- `project-plans/coderabbit/.completed/P12`: this evidence file.
+
+## Manifest Diff/Summary
+
+- Removed `remediation_wrapper_writes_validator_readable_failure_artifact_for_timeout_or_spawn_failure` (`owner_phase: P12`).
+- Removed `remediation_wrapper_shell_safety_passes_plan_and_result_paths_as_argv` (`owner_phase: P12`).
+- Expected-failing verifier passed with 10 remaining concrete later-phase entries: P13, P14, P15, and P17.
+
+## Exact Commands and Outputs
+
+### Prerequisite checks
+
+```text
+$ test -f project-plans/coderabbit/.completed/P11
+exit=0
+```
+
+```text
+$ test -f project-plans/coderabbit/analysis/llxprt-remediation-seam.md
+exit=0
+```
+
+```text
+$ grep -E "^## Verdict: PASS|^VERDICT: PASS" project-plans/coderabbit/.completed/P11A.md
+## Verdict: PASS
+VERDICT: PASS
+exit=0
+```
+
+```text
+$ grep -E "\\| P11 \\|.*PASS" project-plans/coderabbit/execution-tracker.md
+| P11 | PASS | 3 | 2026-04-30 | 2026-04-30 remediation attempt 2 PASS after P11A FAIL | project-plans/coderabbit/.completed/P11, project-plans/coderabbit/.completed/P11A.md, src/engine/executors/pr_remediation.rs, tests/github_pr_followup_executor_tests.rs, tests/pr_followup_marker_audit_tests.rs, project-plans/coderabbit/analysis/expected-failing-tests.json |
+exit=0
+```
+
+Additional prerequisite gate run:
+
+```text
+$ test -f project-plans/coderabbit/.completed/P11 && test -f project-plans/coderabbit/.completed/P11A.md && grep -E "^## Verdict: PASS|^VERDICT: PASS" project-plans/coderabbit/.completed/P11A.md && ! grep -Ei "conditional|partial|mostly" project-plans/coderabbit/.completed/P11A.md && grep -E "\\| P11 \\|.*PASS" project-plans/coderabbit/execution-tracker.md && test -f project-plans/coderabbit/analysis/llxprt-remediation-seam.md
+## Verdict: PASS
+VERDICT: PASS
+| P11 | PASS | 3 | 2026-04-30 | 2026-04-30 remediation attempt 2 PASS after P11A FAIL | project-plans/coderabbit/.completed/P11, project-plans/coderabbit/.completed/P11A.md, src/engine/executors/pr_remediation.rs, tests/github_pr_followup_executor_tests.rs, tests/pr_followup_marker_audit_tests.rs, project-plans/coderabbit/analysis/expected-failing-tests.json |
+exit=0
+```
+
+### GitHub API contract tests
+
+```text
+$ cargo test --test github_api_contract_tests -- github_api_contract
+running 2 tests
+test github_api_contract_negative_fixture_rejects_missing_contract ... ok
+test github_api_contract_validator_accepts_phase_02_contract ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.39s
+exit=0
+```
+
+### GitHub API contract validator
+
+```text
+$ cargo run --bin github_api_contract_validator -- project-plans/coderabbit/analysis/github-api-contract.md tests/fixtures/github_api_contract
+github_api_contract_validator: PASS
+exit=0
+```
+
+### P12 marker audit
+
+```text
+$ cargo test --test pr_followup_marker_audit_tests -- p12_markers_cover_all_touched_items
+running 1 test
+test p12_markers_cover_all_touched_items ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; finished in 0.01s
+exit=0
+```
+
+### P12 remediation wrapper tests
+
+```text
+$ cargo test --test github_pr_followup_executor_tests -- pr_followup_remediation_wrapper
+running 1 test
+test pr_followup_remediation_wrapper_records_owned_process_evidence ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 57 filtered out; finished in 0.02s
+exit=0
+```
+
+```text
+$ cargo test --test github_pr_followup_executor_tests -- remediation_wrapper
+running 2 tests
+test remediation_wrapper_shell_safety_passes_plan_and_result_paths_as_argv ... ok
+test pr_followup_remediation_wrapper_records_owned_process_evidence ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 56 filtered out; finished in 0.01s
+exit=0
+```
+
+```text
+$ cargo test --test github_pr_followup_executor_tests -- remediate_pr_followup_prompt_contract
+running 1 test
+test remediate_pr_followup_prompt_contract ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 57 filtered out; finished in 0.02s
+exit=0
+```
+
+```text
+$ cargo test --test github_pr_followup_executor_tests -- pr_followup_llxprt_wrapper_uses_owned_invocation_result_not_step_outcome_inference
+running 1 test
+test pr_followup_llxprt_wrapper_uses_owned_invocation_result_not_step_outcome_inference ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 57 filtered out; finished in 0.02s
+exit=0
+```
+
+### Expected-failing manifest verifier
+
+```text
+$ python3 project-plans/coderabbit/analysis/verify-expected-failing-tests.py --manifest project-plans/coderabbit/analysis/expected-failing-tests.json
+expected_failing_tests_verifier: PASS
+verified_entries=10
+verified github_pr_followup_executor_tests::run_post_pr_tests_fixable_failures_use_artifact_backed_retry_cap
+verified github_pr_followup_executor_tests::push_remediation_changes_records_safe_staging_remote_heads_and_verified_push_state
+verified github_pr_followup_executor_tests::marker_idempotency_avoids_duplicate_comments_using_local_and_remote_markers
+verified github_pr_followup_executor_tests::pending_marker_actions_carry_forward_across_head_change
+verified github_pr_followup_executor_tests::marker_comment_shell_safety_uses_body_files_or_graphql_variables
+verified github_pr_followup_executor_tests::post_pr_test_and_push_shell_safety_use_configured_argv_without_shell_injection
+verified e2e_workflow_integration::post_pr_no_direct_create_pr_to_log_completion
+verified e2e_workflow_integration::post_pr_failure_terminal_is_terminal_and_fatal_routes_target_it
+verified e2e_workflow_integration::post_pr_required_routing_contract_and_reachability_are_present
+verified e2e_workflow_integration::post_pr_steps_have_artifact_root_parameters
+exit=0
+```
+
+### Build all targets
+
+```text
+$ cargo build --all-targets
+Finished `dev` profile [unoptimized + debuginfo] target(s) in 6.46s
+exit=0
+```
+
+The command emitted existing warnings only; no errors.
+
+### Library tests
+
+```text
+$ cargo test --lib
+running 67 tests
+...
+test result: ok. 67 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.14s
+exit=0
+```
+
+### Negative greps
+
+```text
+$ ! grep -R "@pseudocode lines X-Y\|@pseudocode TBD\|@pseudocode placeholder\|TODO API\|json_path TBD\|fixture TBD\|assertion TBD" src/engine tests project-plans/coderabbit/analysis
+exit=0
+```
+
+```text
+$ ! grep -rn -E "(todo!|unimplemented!|placeholder|not yet implemented|will be implemented)" src/engine/executors/pr_remediation.rs src/engine/executors/mod.rs tests/github_pr_followup_executor_tests.rs
+exit=0
+```
+
+Note: a broader grep including `tests/pr_followup_marker_audit_tests.rs` matched its intentional forbidden-token audit string fragments (`TBD`) and was therefore not used as the implementation-placeholder verdict. The plan-wide exact forbidden placeholder grep above passed.
+
+## Semantic Verification Against Phase 12 Criteria
+
+- `PrFollowupRemediationExecutor` is the post-PR llxprt invocation path and no longer returns the P03 fatal stub.
+- A concrete owned invocation seam exists: `PrFollowupLlxprtCommandRunner` returns owned `LlxprtInvocationResult` with argv, working directory, exit code/signal, process class, stdout/stderr excerpts and log paths, success/result file evidence, changed paths, and spawn error classification.
+- Tests inject fake owned results through `PrFollowupRemediationExecutorWithRunner`; assertions read `pr-remediation-llxprt-run.json` and prove persisted process evidence comes from the owned result, not `LlxprtExecutor::execute` StepOutcome inference.
+- Prompt contract test proves exact required instructions: fix only `must_fix`; do not fix `mark_invalid`, `out_of_scope`, or `needs_user_judgment`; write `pr-remediation-result.json`; use canonical statuses `fixed | changed | already_satisfied | not_reproduced | not_fixed | skipped | failed`; include structured evidence; no free-form-only completion.
+- Timeout/spawn/fatal/retryable/success-without-result classes are represented in `remediation_invocation_state`; missing result creates a validator-readable `pr-remediation-result.json` with `failed` results before wrapper routing.
+- Wrapper returns `StepOutcome::Success` when validator-readable artifact exists; `Fatal` only remains for no readable artifact after best effort.
+- `pr-remediation-llxprt-run.json` records process evidence and changed-path evidence for both success and failure classes.
+- Wrapper routing does not treat raw process success as product success; tests prove retryable process class still routes wrapper `Success` for validator classification.
+- P12 entries were removed from expected-failing manifest; verifier passed with only later-phase concrete failures.
+- Adjacent P12 markers with requirement and exact pseudocode ranges were added for touched production/test items; P12 marker audit passed.
+
+## Blocking Issues
+
+None.

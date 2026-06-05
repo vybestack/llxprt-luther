@@ -1,0 +1,65 @@
+VERDICT: PASS
+
+# Phase 15 Evidence — Feedback Marker Implementation Remediation Attempt 2
+
+Remediated the P15 attempt-2 blockers in production marker behavior:
+
+- `mark_coderabbit_feedback` now reconciles current `coderabbit-feedback.json` and `feedback-evaluations.json` via `PrFollowupArtifactStore` before processing pending marker actions, deriving current invalid/out_of_scope actions and explicit needs-user-judgment skip/escalation records without duplicating carried-forward actions.
+- Remote hidden marker resume reconstructs both comment and resolution idempotency keys from marker fields, so remote-marker-only resume suppresses duplicate comment and duplicate resolution attempts.
+- Fixed/valid marker actions now require marker-side validator-approved remediation evidence before comment/resolve; missing or stale action evidence fails fatally without posting or resolving.
+- Needs-user-judgment escalation is explicitly gated by `post_needs_user_judgment_comments`; absent/false records deterministic skipped reason and returns non-success without resolving, while true posts idempotently and still never resolves.
+- REQ-PRFU-026 policy behavior is covered for valid fixed, invalid, out_of_scope, needs_user_judgment, remote idempotency, and comment-success/resolution-failure partial retryable handling.
+
+## Files Updated
+
+- `src/engine/executors/github_feedback.rs`
+- `src/engine/executors/pr_remediation.rs`
+- `tests/github_pr_followup_executor_tests.rs`
+- `project-plans/coderabbit/.completed/P15`
+- `project-plans/coderabbit/execution-tracker.md`
+
+## Verification Commands
+
+```text
+cargo test --test pr_followup_marker_audit_tests -- p15_markers_cover_all_touched_items && cargo test --test github_pr_followup_executor_tests -- marker && cargo test --test github_pr_followup_executor_tests -- shell_safety && cargo build --all-targets && cargo test --lib && python3 project-plans/coderabbit/analysis/verify-expected-failing-tests.py --manifest project-plans/coderabbit/analysis/expected-failing-tests.json
+```
+
+Result: PASS
+
+Key passing outputs:
+
+```text
+running 1 test
+test p15_markers_cover_all_touched_items ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 12 filtered out
+```
+
+```text
+running 14 tests
+test marker_executor_derives_current_invalid_actions_without_pending_artifact ... ok
+test marker_remote_only_resume_skips_duplicate_fixed_resolution_attempt ... ok
+test marker_rejects_fixed_action_without_validator_success_evidence ... ok
+test marker_needs_user_judgment_comments_are_explicitly_config_gated ... ok
+test marker_comment_success_resolution_failure_is_partial_retryable ... ok
+
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 53 filtered out
+```
+
+```text
+running 6 tests
+... shell safety tests ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 61 filtered out
+```
+
+```text
+cargo build --all-targets: PASS
+cargo test --lib: 67 passed; 0 failed
+expected_failing_tests_verifier: PASS
+verified_entries=4
+```
+
+## Verdict
+
+PASS

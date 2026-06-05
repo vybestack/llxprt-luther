@@ -1,0 +1,3 @@
+### P21 deferred implementation negative grep remediation attempt 2
+command: ! grep -rn -E "(// TODO|// FIXME|// HACK|placeholder|not yet|will be|@pseudocode lines X-Y|@pseudocode TBD|TODO API|json_path TBD|fixture TBD|assertion TBD)" src/engine/executors src/engine/executor.rs tests project-plans/coderabbit/analysis --include="*.rs" --include="*.md" --include="*.json"
+exit=0

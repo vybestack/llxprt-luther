@@ -1,0 +1,126 @@
+{
+  "schema_version": 1,
+  "run_id": "run-20260430-p01-fixture",
+  "repository_owner": "luther",
+  "repository_name": "workflow",
+  "pr_number": 1910,
+  "head_ref": "luther/issue-1234",
+  "head_sha": "1111111111111111111111111111111111111111",
+  "base_ref": "main",
+  "base_sha": "0000000000000000000000000000000000000000",
+  "artifact_sequence": 2,
+  "write_sequence": 2,
+  "history_metadata": {
+    "canonical_path": "tests/fixtures/github_pr/current/pr-check-status.json",
+    "history_path": "tests/fixtures/github_pr/history/pr-check-status/2-2-watch_pr_checks.json",
+    "artifact_family": "pr-check-status",
+    "is_canonical": true,
+    "history_written_at": "2026-04-30T00:05:00Z"
+  },
+  "step_order_index": 3,
+  "producer_step_id": "watch_pr_checks",
+  "semantic_state": "failed",
+  "failure_reason": "current_head_terminal_failure",
+  "failure_sequence": 1,
+  "produced_at": "2026-04-30T00:05:00Z",
+  "failure_details": {
+    "failed_count": 1
+  },
+  "poll_attempts": 2,
+  "max_attempts": 12,
+  "poll_interval_seconds": 300,
+  "max_duration_seconds": 3600,
+  "overall_state": "failed",
+  "fatal_source": null,
+  "observed_at": "2026-04-30T00:05:00Z",
+  "poll_observations": [
+    {
+      "attempt_number": 1,
+      "observed_at": "2026-04-30T00:00:00Z",
+      "head_sha": "1111111111111111111111111111111111111111",
+      "current_head_checks": [
+        {
+          "check_id": "check-1",
+          "name": "ci/test",
+          "status": "in_progress",
+          "conclusion": null,
+          "state": "pending",
+          "bucket": "pending",
+          "url": "https://github.com/luther/workflow/actions/runs/10",
+          "workflow_name": "CI",
+          "run_id": "10",
+          "job_id": "100",
+          "started_at": "2026-04-30T00:00:00Z",
+          "completed_at": null,
+          "head_sha": "1111111111111111111111111111111111111111",
+          "app_slug": "github-actions",
+          "source": "gh_pr_checks_json"
+        }
+      ],
+      "stale_checks": [],
+      "classification": "pending",
+      "terminal_counts": {
+        "passed": 0,
+        "failed": 0,
+        "pending": 1,
+        "unknown": 0,
+        "stale": 0
+      },
+      "write_sequence": 1
+    },
+    {
+      "attempt_number": 2,
+      "observed_at": "2026-04-30T00:05:00Z",
+      "head_sha": "1111111111111111111111111111111111111111",
+      "current_head_checks": [
+        {
+          "check_id": "check-1",
+          "name": "ci/test",
+          "status": "completed",
+          "conclusion": "failure",
+          "state": "failed",
+          "bucket": "fail",
+          "url": "https://github.com/luther/workflow/actions/runs/10",
+          "workflow_name": "CI",
+          "run_id": "10",
+          "job_id": "100",
+          "started_at": "2026-04-30T00:00:00Z",
+          "completed_at": "2026-04-30T00:05:00Z",
+          "head_sha": "1111111111111111111111111111111111111111",
+          "app_slug": "github-actions",
+          "source": "gh_pr_checks_json"
+        }
+      ],
+      "stale_checks": [],
+      "classification": "failed",
+      "terminal_counts": {
+        "passed": 0,
+        "failed": 1,
+        "pending": 0,
+        "unknown": 0,
+        "stale": 0
+      },
+      "write_sequence": 2
+    }
+  ],
+  "checks": [
+    {
+      "check_id": "check-1",
+      "name": "ci/test",
+      "status": "completed",
+      "conclusion": "failure",
+      "state": "failed",
+      "bucket": "fail",
+      "url": "https://github.com/luther/workflow/actions/runs/10",
+      "workflow_name": "CI",
+      "run_id": "10",
+      "job_id": "100",
+      "started_at": "2026-04-30T00:00:00Z",
+      "completed_at": "2026-04-30T00:05:00Z",
+      "head_sha": "1111111111111111111111111111111111111111",
+      "app_slug": "github-actions",
+      "source": "gh_pr_checks_json"
+    }
+  ],
+  "stale_checks": []
+}

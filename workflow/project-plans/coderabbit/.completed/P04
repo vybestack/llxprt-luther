@@ -1,0 +1,410 @@
+VERDICT: PASS
+
+# Phase 04 Remediation Attempt 1 Evidence
+
+Remediated: 2026-04-30
+
+## Remediation Summary
+
+- Replaced the hard-coded `assert!(false, ...)` evaluator reuse test with an executor behavior expectation against `FeedbackEvaluatorExecutor` returning `StepOutcome::Success` for unchanged accepted state reuse.
+- Replaced malicious-text `is_empty()` assertions with shell-safety contract assertions that fail because unsafe raw text is present in command/prompt argv, and would pass when future implementation uses body files, structured fields, or bounded artifact files.
+- Left production PR follow-through behavior and workflow TOML unchanged.
+- `expected-failing-tests.json` assertion strings remained accurate for the behavior-verifying tests and the verifier confirmed all 29 manifest entries fail for expected assertion text only.
+
+## Remediation Commands Run
+
+```bash
+python3 -m json.tool project-plans/coderabbit/analysis/expected-failing-tests.json >/tmp/p04-remediation-json.txt
+cargo test --test github_pr_followup_executor_tests -- --list >/tmp/p04-remediation-github-pr-list.txt
+cargo test --test e2e_workflow_integration -- --list >/tmp/p04-remediation-e2e-list.txt
+python3 project-plans/coderabbit/analysis/verify-expected-failing-tests.py --manifest project-plans/coderabbit/analysis/expected-failing-tests.json > /tmp/p04-remediation-expected-failing-verifier.txt
+cargo build --all-targets > /tmp/p04-remediation-cargo-build-all-targets.txt 2>&1
+grep -RIn "assert!(false\|assert!( *false\|TBD\|TODO\|unimplemented!\|todo!\|placeholder\|not yet implemented" tests/github_pr_followup_executor_tests.rs tests/e2e_workflow_integration.rs project-plans/coderabbit/analysis/verify-expected-failing-tests.py project-plans/coderabbit/analysis/expected-failing-tests.json > /tmp/p04-remediation-marker-placeholder-grep.txt
+cargo test --test github_pr_followup_executor_tests -- registry >/tmp/p04-remediation-registry.txt 2>&1
+cargo test --test github_pr_followup_executor_tests -- pr_checks_default_watch_budget_is_twelve_observations_without_real_sleep >/tmp/p04-remediation-pr-check-budget.txt 2>&1
+cargo test --test e2e_workflow_integration -- test_workflow_config_loads_from_toml >/tmp/p04-remediation-e2e-load.txt 2>&1
+```
+
+## Remediation Results
+
+- JSON manifest validation: PASS.
+- Test listing: PASS (`/tmp/p04-remediation-github-pr-list.txt`, `/tmp/p04-remediation-e2e-list.txt`).
+- Expected-failure verifier: PASS, `verified_entries=29` (`/tmp/p04-remediation-expected-failing-verifier.txt`).
+- `cargo build --all-targets`: PASS (`/tmp/p04-remediation-cargo-build-all-targets.txt`).
+- Marker/placeholder grep: PASS, no matches after excluding legitimate unrelated `is_empty()` behavior assertions (`/tmp/p04-remediation-marker-placeholder-grep.txt`).
+- Representative passing filters: PASS (`/tmp/p04-remediation-registry.txt`, `/tmp/p04-remediation-pr-check-budget.txt`, `/tmp/p04-remediation-e2e-load.txt`).
+
+
+# Phase 04 Completion Evidence
+
+Plan: PLAN-20260429-CODERABBIT-PR-FOLLOWUP
+Phase: P04 Engine Integration TDD
+Completed: 2026-04-30
+
+## Files Created/Updated
+
+- `tests/github_pr_followup_executor_tests.rs`: expanded from P03 registry checks to compile-time behavioral TDD covering artifact store, PR identity/check watch, CI collection, CodeRabbit readiness/feedback, evaluator behavior, remediation planning/validation/wrapper/test/push, marker/idempotency/carry-forward, shell safety, and terminal behavior.
+- `tests/e2e_workflow_integration.rs`: added minimal post-PR workflow graph tests for no direct `create_pr -> log_completion`, no post-PR `abandon_and_log`, allowed route outcome values, terminal fatal route expectations, duplicate branch rejection, routing/reachability, and `artifact_root` params.
+- `project-plans/coderabbit/analysis/expected-failing-tests.json`: populated exact concrete expected-failing test entries with group, owner phase, requirement, expected failure mode/assertion, and artifacts/fixtures.
+- `project-plans/coderabbit/analysis/verify-expected-failing-tests.py`: added checked-in expected-failure verifier for manifest validation, concrete test existence, exact failure expansion, assertion text matching, and compile-error rejection.
+- `project-plans/coderabbit/execution-tracker.md`: updated P04 to PASS and advanced current phase to P05.
+
+## Manifest Summary
+
+Total expected-failing entries: 29.
+
+By group:
+- `artifact store`: 3 entries, owned by P05/P06.
+- `GitHub API`: 7 entries, owned by P06/P07/P08.
+- `evaluator`: 2 entries, owned by P09.
+- `remediation validator`: 7 entries, owned by P10/P11/P12/P13/P14.
+- `marker/idempotency`: 2 entries, owned by P15.
+- `shell safety`: 5 entries, owned by P06/P09/P12/P13/P14/P15.
+- `graph/fake E2E`: 4 entries, owned by P17.
+
+## Exact Commands Run and Outputs
+
+### Prerequisite check
+
+Command:
+```bash
+test -f project-plans/coderabbit/.completed/P03 && grep -E "^## Verdict: PASS|^VERDICT: PASS" project-plans/coderabbit/.completed/P03A.md
+```
+
+Output:
+```text
+## Verdict: PASS
+VERDICT: PASS
+## Verdict: PASS
+VERDICT: PASS
+## Verdict: PASS
+VERDICT: PASS
+## Verdict: PASS
+VERDICT: PASS
+## Verdict: PASS
+VERDICT: PASS
+## Verdict: PASS
+VERDICT: PASS
+## Verdict: PASS
+VERDICT: PASS
+## Verdict: PASS
+VERDICT: PASS
+## Verdict: PASS
+VERDICT: PASS
+## Verdict: PASS
+VERDICT: PASS
+## Verdict: PASS
+VERDICT: PASS
+## Verdict: PASS
+VERDICT: PASS
+## Verdict: PASS
+VERDICT: PASS
+## Verdict: PASS
+VERDICT: PASS
+## Verdict: PASS
+VERDICT: PASS
+exit=0
+```
+
+### GitHub API contract tests and validator plus existing filtered tests
+
+Command:
+```bash
+cargo test --test github_api_contract_tests -- github_api_contract && cargo run --bin github_api_contract_validator -- project-plans/coderabbit/analysis/github-api-contract.md tests/fixtures/github_api_contract && cargo test --lib && cargo test --test github_pr_followup_executor_tests -- registry && cargo test --test github_pr_followup_executor_tests -- pr_checks_default_watch_budget_is_twelve_observations_without_real_sleep && cargo test --test e2e_workflow_integration -- test_workflow_config_loads_from_toml
+```
+
+Output excerpt:
+```text
+running 2 tests
+test github_api_contract_negative_fixture_rejects_missing_contract ... ok
+test github_api_contract_validator_accepts_phase_02_contract ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.47s
+
+github_api_contract_validator: PASS
+
+running 67 tests
+[67 library tests listed as ok]
+test result: ok. 67 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.12s
+
+running 2 tests
+test registry_registers_all_post_pr_step_types_by_introspection ... ok
+test registry_introspection_lists_all_post_pr_step_types ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 31 filtered out; finished in 0.00s
+
+running 1 test
+test pr_checks_default_watch_budget_is_twelve_observations_without_real_sleep ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 32 filtered out; finished in 0.00s
+
+running 1 test
+test test_workflow_config_loads_from_toml ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 21 filtered out; finished in 0.00s
+
+exit=0
+```
+
+### Phase 04 list commands
+
+Command:
+```bash
+cargo test --test github_pr_followup_executor_tests -- --list && cargo test --test e2e_workflow_integration -- post_pr --list
+```
+
+Output:
+```text
+artifact_schema_validation_rejects_missing_common_binding_and_history_metadata: test
+artifact_store_allocates_global_artifact_and_failure_sequences_with_per_family_write_sequences_for_interleaved_families: test
+artifact_store_recovers_sequence_allocation_from_history_when_canonical_current_is_missing: test
+ci_failure_failed_pending_collects_logs_preserves_pending_and_routes_terminal: test
+ci_failure_page2_jobs_and_logs_affect_failure_artifacts: test
+ci_failure_passed_checks_writes_empty_artifact: test
+coderabbit_feedback_page2_threads_comments_and_rest_fallback_are_normalized: test
+coderabbit_readiness_requires_two_identical_ready_observations_and_filters_bot_noise: test
+executor_error_policy_writes_best_effort_failure_artifact_before_fatal_outcome: test
+feedback_evaluation_reuses_unchanged_accepted_state_without_reinvoking_adapter: test
+feedback_evaluation_single_item_request_rejects_batch_wrong_hash_unknown_decision_and_missing_reason: test
+feedback_evaluator_command_shell_safety_writes_raw_llm_text_to_bounded_artifacts: test
+github_pr_command_runner_shell_safety_uses_argv_not_raw_interpolated_text: test
+marker_comment_shell_safety_uses_body_files_or_graphql_variables: test
+marker_idempotency_avoids_duplicate_comments_using_local_and_remote_markers: test
+pending_marker_actions_carry_forward_across_head_change: test
+post_pr_failure_terminal_writes_terminal_artifact_and_returns_fatal_only: test
+post_pr_iteration_guard_preserves_same_head_and_exhausts_fourth_head_change_to_terminal: test
+post_pr_test_and_push_shell_safety_use_configured_argv_without_shell_injection: test
+pr_checks_default_watch_budget_is_twelve_observations_without_real_sleep: test
+pr_checks_non_fail_fast_continues_after_early_failure_while_pending_remains: test
+pr_checks_page2_data_affects_status_and_stale_head_checks_cannot_create_success: test
+pr_identity_capture_writes_pr_json_and_rejects_missing_number_url_or_head_sha: test
+push_remediation_changes_records_safe_staging_remote_heads_and_verified_push_state: test
+registry_introspection_lists_all_post_pr_step_types: test
+registry_registers_all_post_pr_step_types_by_introspection: test
+remediation_plan_routes_only_concrete_ci_failures_and_valid_feedback_to_must_fix: test
+remediation_result_accepts_already_satisfied_and_not_reproduced_only_with_deterministic_evidence: test
+remediation_result_rejects_not_fixed_skipped_failed_before_push_success: test
+remediation_result_same_head_no_change_attempt_cap_reaches_terminal_not_abandoned: test
+remediation_wrapper_shell_safety_passes_plan_and_result_paths_as_argv: test
+remediation_wrapper_writes_validator_readable_failure_artifact_for_timeout_or_spawn_failure: test
+run_post_pr_tests_fixable_failures_use_artifact_backed_retry_cap: test
+
+33 tests, 0 benchmarks
+post_pr_failure_terminal_is_terminal_and_fatal_routes_target_it: test
+post_pr_no_direct_create_pr_to_log_completion: test
+post_pr_no_route_reachable_from_create_pr_goes_to_abandon_and_log: test
+post_pr_rejects_duplicate_outcome_branches_in_tail_including_create_pr_success: test
+post_pr_required_routing_contract_and_reachability_are_present: test
+post_pr_routes_use_only_current_step_outcome_values: test
+post_pr_steps_have_artifact_root_parameters: test
+
+7 tests, 0 benchmarks
+exit=0
+```
+
+### Representative expected-failing executor tests
+
+Command:
+```bash
+cargo test --test github_pr_followup_executor_tests
+```
+
+Output excerpt:
+```text
+running 33 tests
+test executor_error_policy_writes_best_effort_failure_artifact_before_fatal_outcome ... ok
+test feedback_evaluation_single_item_request_rejects_batch_wrong_hash_unknown_decision_and_missing_reason ... FAILED
+test github_pr_command_runner_shell_safety_uses_argv_not_raw_interpolated_text ... FAILED
+test ci_failure_passed_checks_writes_empty_artifact ... FAILED
+test coderabbit_feedback_page2_threads_comments_and_rest_fallback_are_normalized ... FAILED
+test feedback_evaluation_reuses_unchanged_accepted_state_without_reinvoking_adapter ... FAILED
+test ci_failure_failed_pending_collects_logs_preserves_pending_and_routes_terminal ... ok
+[additional P04 expected failures omitted here; full output was captured in terminal]
+
+test result: FAILED. 8 passed; 25 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+exit=101
+```
+
+Representative failure assertions included:
+```text
+artifact store must allocate global artifact sequences and per-family write sequences for interleaved families; observed sequences: ArtifactSequenceMetadata { artifact_sequence: 0, write_sequence: 0, producer_step_id: "" }, ...
+PR identity capture must write pr.json after rejecting missing PR number, URL, or head SHA; actual outcome was Fatal
+page-2-only PR check data must affect pr-check-status and stale head checks must not create success; actual outcome was Fatal
+passed checks must write ci-failures.json with failures=[] and pending_or_unknown=[]; actual outcome was Fatal
+CodeRabbit readiness must require two identical ready observations and exclude non-CodeRabbit bot noise; actual outcome was Fatal
+feedback evaluator must invoke exactly one item per request and reject batch, wrong body hash, wrong head SHA, unknown decision, and missing reason responses
+valid structured not_fixed, skipped, or failed remediation results must not route to push success; actual outcome was Fatal
+pending marker actions must carry forward across head change and complete without duplicate retry comments; actual outcome was Fatal
+GitHub command runner shell safety must pass malicious PR text via argv or files, not raw shell interpolation
+```
+
+### Representative expected-failing graph tests
+
+Command:
+```bash
+cargo test --test e2e_workflow_integration -- post_pr
+```
+
+Output:
+```text
+running 7 tests
+test post_pr_rejects_duplicate_outcome_branches_in_tail_including_create_pr_success ... ok
+test post_pr_routes_use_only_current_step_outcome_values ... ok
+test post_pr_no_route_reachable_from_create_pr_goes_to_abandon_and_log ... ok
+test post_pr_no_direct_create_pr_to_log_completion ... FAILED
+test post_pr_steps_have_artifact_root_parameters ... FAILED
+test post_pr_required_routing_contract_and_reachability_are_present ... FAILED
+test post_pr_failure_terminal_is_terminal_and_fatal_routes_target_it ... FAILED
+
+failures:
+
+---- post_pr_no_direct_create_pr_to_log_completion stdout ----
+thread 'post_pr_no_direct_create_pr_to_log_completion' panicked at tests/e2e_workflow_integration.rs:736:5:
+assertion `left == right` failed: create_pr success must route only to capture_pr_identity and never directly to log_completion
+  left: ["log_completion"]
+ right: ["capture_pr_identity"]
+
+---- post_pr_steps_have_artifact_root_parameters stdout ----
+thread 'post_pr_steps_have_artifact_root_parameters' panicked at tests/e2e_workflow_integration.rs:915:32:
+missing post-PR step capture_pr_identity
+
+---- post_pr_required_routing_contract_and_reachability_are_present stdout ----
+thread 'post_pr_required_routing_contract_and_reachability_are_present' panicked at tests/e2e_workflow_integration.rs:722:5:
+assertion `left == right` failed: expected exactly one post-PR transition watch_pr_checks --success--> collect_ci_failures, got []
+  left: []
+ right: ["collect_ci_failures"]
+
+---- post_pr_failure_terminal_is_terminal_and_fatal_routes_target_it stdout ----
+thread 'post_pr_failure_terminal_is_terminal_and_fatal_routes_target_it' panicked at tests/e2e_workflow_integration.rs:722:5:
+assertion `left == right` failed: expected exactly one post-PR transition capture_pr_identity --fatal--> post_pr_failure_terminal, got []
+  left: []
+ right: ["post_pr_failure_terminal"]
+
+test result: FAILED. 3 passed; 4 failed; 0 ignored; 0 measured; 15 filtered out; finished in 0.00s
+exit=101
+```
+
+### Full list and manifest existing-test validation
+
+Command:
+```bash
+cargo test -- --list >/tmp/p04-all-list.txt && python3 -c "import json,subprocess,sys; m=json.load(open('project-plans/coderabbit/analysis/expected-failing-tests.json')); missing=[]; [missing.append((e['test_binary'],e['test_name'])) for e in m['entries'] if e['test_name'] not in {line.split(':',1)[0] for line in subprocess.run(['cargo','test','--test',e['test_binary'],'--','--list'],text=True,stdout=subprocess.PIPE,stderr=subprocess.STDOUT).stdout.splitlines() if line.endswith(': test')}]; print('manifest_existing_tests=PASS entries=%d' % len(m['entries'])) if not missing else (print('missing '+repr(missing)), sys.exit(1))"
+```
+
+Output:
+```text
+manifest_existing_tests=PASS entries=29
+exit=0
+```
+
+### Expected-failure verifier, representative subset
+
+Command:
+```bash
+python3 project-plans/coderabbit/analysis/verify-expected-failing-tests.py --manifest project-plans/coderabbit/analysis/expected-failing-tests.json --test pr_identity_capture_writes_pr_json_and_rejects_missing_number_url_or_head_sha --test pr_checks_page2_data_affects_status_and_stale_head_checks_cannot_create_success --test ci_failure_passed_checks_writes_empty_artifact --test coderabbit_readiness_requires_two_identical_ready_observations_and_filters_bot_noise --test feedback_evaluation_single_item_request_rejects_batch_wrong_hash_unknown_decision_and_missing_reason --test remediation_result_rejects_not_fixed_skipped_failed_before_push_success --test pending_marker_actions_carry_forward_across_head_change --test github_pr_command_runner_shell_safety_uses_argv_not_raw_interpolated_text --test post_pr_no_direct_create_pr_to_log_completion
+```
+
+Output:
+```text
+expected_failing_tests_verifier: PASS
+verified_entries=9
+verified github_pr_followup_executor_tests::pr_identity_capture_writes_pr_json_and_rejects_missing_number_url_or_head_sha
+verified github_pr_followup_executor_tests::pr_checks_page2_data_affects_status_and_stale_head_checks_cannot_create_success
+verified github_pr_followup_executor_tests::ci_failure_passed_checks_writes_empty_artifact
+verified github_pr_followup_executor_tests::coderabbit_readiness_requires_two_identical_ready_observations_and_filters_bot_noise
+verified github_pr_followup_executor_tests::feedback_evaluation_single_item_request_rejects_batch_wrong_hash_unknown_decision_and_missing_reason
+verified github_pr_followup_executor_tests::remediation_result_rejects_not_fixed_skipped_failed_before_push_success
+verified github_pr_followup_executor_tests::pending_marker_actions_carry_forward_across_head_change
+verified github_pr_followup_executor_tests::github_pr_command_runner_shell_safety_uses_argv_not_raw_interpolated_text
+verified e2e_workflow_integration::post_pr_no_direct_create_pr_to_log_completion
+exit=0
+```
+
+### Expected-failure verifier, all manifest entries
+
+Command:
+```bash
+python3 project-plans/coderabbit/analysis/verify-expected-failing-tests.py --manifest project-plans/coderabbit/analysis/expected-failing-tests.json
+```
+
+Output:
+```text
+expected_failing_tests_verifier: PASS
+verified_entries=29
+verified github_pr_followup_executor_tests::artifact_store_allocates_global_artifact_and_failure_sequences_with_per_family_write_sequences_for_interleaved_families
+verified github_pr_followup_executor_tests::artifact_store_recovers_sequence_allocation_from_history_when_canonical_current_is_missing
+verified github_pr_followup_executor_tests::pr_identity_capture_writes_pr_json_and_rejects_missing_number_url_or_head_sha
+verified github_pr_followup_executor_tests::post_pr_iteration_guard_preserves_same_head_and_exhausts_fourth_head_change_to_terminal
+verified github_pr_followup_executor_tests::pr_checks_non_fail_fast_continues_after_early_failure_while_pending_remains
+verified github_pr_followup_executor_tests::pr_checks_page2_data_affects_status_and_stale_head_checks_cannot_create_success
+verified github_pr_followup_executor_tests::ci_failure_passed_checks_writes_empty_artifact
+verified github_pr_followup_executor_tests::ci_failure_page2_jobs_and_logs_affect_failure_artifacts
+verified github_pr_followup_executor_tests::coderabbit_readiness_requires_two_identical_ready_observations_and_filters_bot_noise
+verified github_pr_followup_executor_tests::coderabbit_feedback_page2_threads_comments_and_rest_fallback_are_normalized
+verified github_pr_followup_executor_tests::feedback_evaluation_single_item_request_rejects_batch_wrong_hash_unknown_decision_and_missing_reason
+verified github_pr_followup_executor_tests::feedback_evaluation_reuses_unchanged_accepted_state_without_reinvoking_adapter
+verified github_pr_followup_executor_tests::remediation_plan_routes_only_concrete_ci_failures_and_valid_feedback_to_must_fix
+verified github_pr_followup_executor_tests::remediation_result_rejects_not_fixed_skipped_failed_before_push_success
+verified github_pr_followup_executor_tests::remediation_result_accepts_already_satisfied_and_not_reproduced_only_with_deterministic_evidence
+verified github_pr_followup_executor_tests::remediation_wrapper_writes_validator_readable_failure_artifact_for_timeout_or_spawn_failure
+verified github_pr_followup_executor_tests::run_post_pr_tests_fixable_failures_use_artifact_backed_retry_cap
+verified github_pr_followup_executor_tests::push_remediation_changes_records_safe_staging_remote_heads_and_verified_push_state
+verified github_pr_followup_executor_tests::marker_idempotency_avoids_duplicate_comments_using_local_and_remote_markers
+verified github_pr_followup_executor_tests::pending_marker_actions_carry_forward_across_head_change
+verified github_pr_followup_executor_tests::github_pr_command_runner_shell_safety_uses_argv_not_raw_interpolated_text
+verified github_pr_followup_executor_tests::feedback_evaluator_command_shell_safety_writes_raw_llm_text_to_bounded_artifacts
+verified github_pr_followup_executor_tests::remediation_wrapper_shell_safety_passes_plan_and_result_paths_as_argv
+verified github_pr_followup_executor_tests::marker_comment_shell_safety_uses_body_files_or_graphql_variables
+verified github_pr_followup_executor_tests::post_pr_test_and_push_shell_safety_use_configured_argv_without_shell_injection
+verified e2e_workflow_integration::post_pr_no_direct_create_pr_to_log_completion
+verified e2e_workflow_integration::post_pr_failure_terminal_is_terminal_and_fatal_routes_target_it
+verified e2e_workflow_integration::post_pr_required_routing_contract_and_reachability_are_present
+verified e2e_workflow_integration::post_pr_steps_have_artifact_root_parameters
+exit=0
+```
+
+### All-target build
+
+Command:
+```bash
+cargo build --all-targets
+```
+
+Output excerpt:
+```text
+warning: `luther-workflow` (test "e2e_workflow_integration") generated 1 warning
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.07s
+exit=0
+```
+
+### Marker audit and placeholder negative checks
+
+Command:
+```bash
+grep -RIn "TBD\|TODO\|unimplemented!\|todo!\|placeholder\|not yet implemented" tests/github_pr_followup_executor_tests.rs tests/e2e_workflow_integration.rs project-plans/coderabbit/analysis/verify-expected-failing-tests.py project-plans/coderabbit/analysis/expected-failing-tests.json; test $? -eq 1
+
+grep -RIn "PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P04" tests/github_pr_followup_executor_tests.rs tests/e2e_workflow_integration.rs | wc -l
+```
+
+Output:
+```text
+46
+exit=0
+```
+
+Interpretation: no forbidden placeholder/TBD tokens were present in touched tests/scripts/manifest; 46 P04 plan markers were found in touched test files.
+
+## Semantic Verification Against Phase 04 Success Criteria
+
+- P03 prerequisite marker exists and P03A contains PASS.
+- Added broad integration/behavior tests covering artifact store, PR identity, check watch, CI failure collection, CodeRabbit readiness/feedback, evaluation, remediation validation, marker/idempotency/carry-forward, shell safety, graph routing, pagination/fallback, terminal behavior, and caps.
+- Added minimal graph tests for `llxprt-issue-fix-v1` protecting no direct `create_pr -> log_completion`, no post-PR `abandon_and_log`, current StepOutcome route values, terminal fatal behavior, duplicate outcome rejection, post-PR reachability, no abandon in post-PR routes, artifact_root params, and duplicate transition detection including `create_pr` success.
+- Did not modify workflow TOML or production code to satisfy these tests.
+- Expected failures are concrete assertion/behavior failures against stubs/current TOML, not compile failures. The verifier checked all 29 manifest entries and passed.
+- Existing pre-feature library tests and filtered relevant tests still pass.
+- `cargo build --all-targets` passes.
+- Full suite was not claimed green; expected-failing P04 tests are intentionally tracked in the manifest for later owner phases.
+
+## Blocking Issues
+
+None.

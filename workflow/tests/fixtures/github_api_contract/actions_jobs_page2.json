@@ -1,0 +1,16 @@
+{
+  "total_count": 3,
+  "jobs": [
+    {
+      "id": 4003,
+      "run_id": 3003,
+      "name": "integration",
+      "status": "completed",
+      "conclusion": "failure",
+      "html_url": "https://github.com/example/workflow/actions/runs/3003/job/4003",
+      "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "started_at": "2026-04-29T17:02:00Z",
+      "completed_at": "2026-04-29T17:06:00Z"
+    }
+  ]
+}

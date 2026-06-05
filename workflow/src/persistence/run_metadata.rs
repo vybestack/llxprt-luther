@@ -1,6 +1,5 @@
 /// @plan:PLAN-20260404-INITIAL-RUNTIME.P05
 /// Run metadata persistence - structures for tracking workflow run state and identifiers.
-
 use chrono::{DateTime, Utc};
 
 use crate::workflow::schema::WorkflowRunRef;

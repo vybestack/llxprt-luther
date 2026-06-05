@@ -1,0 +1,27 @@
+{
+  "total_count": 3,
+  "jobs": [
+    {
+      "id": 4001,
+      "run_id": 3001,
+      "name": "build",
+      "status": "completed",
+      "conclusion": "success",
+      "html_url": "https://github.com/example/workflow/actions/runs/3001/job/4001",
+      "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "started_at": "2026-04-29T17:00:00Z",
+      "completed_at": "2026-04-29T17:05:00Z"
+    },
+    {
+      "id": 4002,
+      "run_id": 3002,
+      "name": "lint",
+      "status": "completed",
+      "conclusion": "failure",
+      "html_url": "https://github.com/example/workflow/actions/runs/3002/job/4002",
+      "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "started_at": "2026-04-29T17:01:00Z",
+      "completed_at": "2026-04-29T17:08:00Z"
+    }
+  ]
+}

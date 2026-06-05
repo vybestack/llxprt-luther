@@ -1,0 +1,269 @@
+VERDICT: PASS
+
+# Phase 02 Completion Evidence
+
+Plan: PLAN-20260429-CODERABBIT-PR-FOLLOWUP
+Phase: P02 Pseudocode and API contract
+Completed: 2026-04-30
+
+## Exact commands run and outputs
+
+### Prerequisite check before Phase 02 work
+
+Command:
+```bash
+test -f project-plans/coderabbit/.completed/P01; printf 'p01_exists=%s\n' "$?"; test -f project-plans/coderabbit/.completed/P01A.md; printf 'p01a_exists=%s\n' "$?"; grep -E "^## Verdict: PASS|^VERDICT: PASS" project-plans/coderabbit/.completed/P01A.md; printf 'p01a_pass=%s\n' "$?"
+```
+
+Output:
+```text
+p01_exists=0
+p01a_exists=0
+## Verdict: PASS
+VERDICT: PASS
+## Verdict: PASS
+VERDICT: PASS
+## Verdict: PASS
+VERDICT: PASS
+p01a_pass=0
+```
+
+### Required marker: P01 exists
+
+Command:
+```bash
+test -f project-plans/coderabbit/.completed/P01; printf 'exit=%s\n' "$?"
+```
+
+Output:
+```text
+exit=0
+```
+
+### Required marker: P01A PASS verdict
+
+Command:
+```bash
+grep -E "^## Verdict: PASS|^VERDICT: PASS" project-plans/coderabbit/.completed/P01A.md; printf 'exit=%s\n' "$?"
+```
+
+Output:
+```text
+## Verdict: PASS
+VERDICT: PASS
+## Verdict: PASS
+VERDICT: PASS
+## Verdict: PASS
+VERDICT: PASS
+exit=0
+```
+
+### Artifact schema contract exists
+
+Command:
+```bash
+test -f project-plans/coderabbit/analysis/artifact-schema-contract.md; printf 'exit=%s\n' "$?"
+```
+
+Output:
+```text
+exit=0
+```
+
+### GitHub API contract exists
+
+Command:
+```bash
+test -f project-plans/coderabbit/analysis/github-api-contract.md; printf 'exit=%s\n' "$?"
+```
+
+Output:
+```text
+exit=0
+```
+
+### Numbered pseudocode lines
+
+Command:
+```bash
+grep -R "^[0-9][0-9]*\." project-plans/coderabbit/analysis/pseudocode/*.md | wc -l
+```
+
+Output:
+```text
+159
+```
+
+### Numbered pseudocode grep required by phase
+
+Command:
+```bash
+grep -R "^[0-9][0-9]*\." project-plans/coderabbit/analysis/pseudocode/*.md; printf 'exit=%s\n' "$?"
+```
+
+Output excerpt:
+```text
+project-plans/coderabbit/analysis/pseudocode/ci-failures.md:1. `collect_ci_failures` reads current `pr.json` and current `pr-check-status.json` through the artifact store.
+project-plans/coderabbit/analysis/pseudocode/ci-failures.md:2. Validate repository, PR number, head ref, head SHA, base ref, base SHA, schema version, artifact sequence, and producer metadata.
+project-plans/coderabbit/analysis/pseudocode/coderabbit-feedback.md:1. `collect_coderabbit_feedback` reads current `pr.json`, current feedback state, and optional pending marker actions.
+project-plans/coderabbit/analysis/pseudocode/feedback-evaluation.md:1. `evaluate_coderabbit_feedback` reads current `pr.json`, `coderabbit-feedback.json`, and `coderabbit-feedback-state.json` through the artifact store.
+project-plans/coderabbit/analysis/pseudocode/pr-identity-and-checks.md:1. `capture_pr_identity` receives `artifact_root`, repository owner/name, and the PR URL or PR number produced by `create_pr`.
+project-plans/coderabbit/analysis/pseudocode/remediation-and-marker.md:53. Write `post-pr-failure-terminal.json` with selected source metadata and return fatal as the only terminal outcome.
+exit=0
+```
+
+The full command produced 159 numbered pseudocode lines across five files.
+
+### Negative placeholder check
+
+Command:
+```bash
+if grep -R "TBD\|TODO\|json_path TBD\|@pseudocode" project-plans/coderabbit/analysis/*.md project-plans/coderabbit/analysis/pseudocode/*.md; then printf 'forbidden_exit=1\n'; exit 1; else printf 'forbidden_exit=0\n'; fi
+```
+
+Output:
+```text
+forbidden_exit=0
+```
+
+### API contract validator command
+
+Command:
+```bash
+cargo run --bin github_api_contract_validator -- project-plans/coderabbit/analysis/github-api-contract.md tests/fixtures/github_api_contract
+```
+
+Output:
+```text
+github_api_contract_validator: PASS
+warning: unused doc comment
+   --> src/engine/runner.rs:125:9
+[existing warning output omitted here for brevity; command completed successfully]
+warning: `luther-workflow` (lib) generated 12 warnings
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.45s
+     Running `target/debug/github_api_contract_validator project-plans/coderabbit/analysis/github-api-contract.md tests/fixtures/github_api_contract`
+```
+
+Exit code: 0.
+
+### Contract validator test target
+
+Command:
+```bash
+cargo test --test github_api_contract_tests -- github_api_contract
+```
+
+Output:
+```text
+running 2 tests
+test github_api_contract_validator_accepts_phase_02_contract ... ok
+test github_api_contract_negative_fixture_rejects_missing_contract ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.47s
+
+warning: unused doc comment
+   --> src/engine/runner.rs:125:9
+[existing warning output omitted here for brevity; command completed successfully]
+```
+
+Exit code: 0.
+
+### JSON fixture validation
+
+Command:
+```bash
+for f in tests/fixtures/github_api_contract/*.json; do echo "json_tool $f"; python3 -m json.tool "$f" >/dev/null; printf 'exit=%s\n' "$?"; done
+```
+
+Output:
+```text
+json_tool tests/fixtures/github_api_contract/actions_job_log.json
+exit=0
+json_tool tests/fixtures/github_api_contract/actions_jobs_page1.json
+exit=0
+json_tool tests/fixtures/github_api_contract/actions_jobs_page2.json
+exit=0
+json_tool tests/fixtures/github_api_contract/check_runs_rest_page2.json
+exit=0
+json_tool tests/fixtures/github_api_contract/checks_gh_pr_checks_page1.json
+exit=0
+json_tool tests/fixtures/github_api_contract/coderabbit_readiness_in_progress.json
+exit=0
+json_tool tests/fixtures/github_api_contract/coderabbit_readiness_ready_empty.json
+exit=0
+json_tool tests/fixtures/github_api_contract/coderabbit_readiness_stable_ready.json
+exit=0
+json_tool tests/fixtures/github_api_contract/coderabbit_readiness_timeout.json
+exit=0
+json_tool tests/fixtures/github_api_contract/create_issue_comment_response.json
+exit=0
+json_tool tests/fixtures/github_api_contract/issue_comments_rest_page2.json
+exit=0
+json_tool tests/fixtures/github_api_contract/pending_marker_actions_current.json
+exit=0
+json_tool tests/fixtures/github_api_contract/permission_denied_graphql.json
+exit=0
+json_tool tests/fixtures/github_api_contract/permission_denied_mutation.json
+exit=0
+json_tool tests/fixtures/github_api_contract/permission_denied_rest_actions.json
+exit=0
+json_tool tests/fixtures/github_api_contract/pr_identity_gh_pr_view.json
+exit=0
+json_tool tests/fixtures/github_api_contract/pr_identity_graphql_fallback.json
+exit=0
+json_tool tests/fixtures/github_api_contract/resolve_review_thread_response.json
+exit=0
+json_tool tests/fixtures/github_api_contract/review_comments_rest_fallback.json
+exit=0
+json_tool tests/fixtures/github_api_contract/review_threads_graphql_page1.json
+exit=0
+json_tool tests/fixtures/github_api_contract/review_threads_graphql_page2.json
+exit=0
+json_tool tests/fixtures/github_api_contract/statuses_rest_fallback.json
+exit=0
+```
+
+### Expected failing tests manifest validation
+
+Command:
+```bash
+python3 -m json.tool project-plans/coderabbit/analysis/expected-failing-tests.json >/dev/null; printf 'exit=%s\n' "$?"
+```
+
+Output:
+```text
+exit=0
+```
+
+## Files created or updated with purpose
+
+- `project-plans/coderabbit/analysis/domain-model.md` — Phase 02 deterministic entity/state summary for later implementation references.
+- `project-plans/coderabbit/analysis/pseudocode/pr-identity-and-checks.md` — numbered pseudocode lines 1-33 for PR identity, iteration guard, and check watching.
+- `project-plans/coderabbit/analysis/pseudocode/ci-failures.md` — numbered pseudocode lines 1-21 for CI failure/log collection and fatal bridge behavior.
+- `project-plans/coderabbit/analysis/pseudocode/coderabbit-feedback.md` — numbered pseudocode lines 1-29 for CodeRabbit feedback collection, readiness, truth-table behavior, and state reuse.
+- `project-plans/coderabbit/analysis/pseudocode/feedback-evaluation.md` — numbered pseudocode lines 1-23 for one accepted validated evaluation per item.
+- `project-plans/coderabbit/analysis/pseudocode/remediation-and-marker.md` — numbered pseudocode lines 1-53 for remediation plan, wrapper, validator, post-PR tests, push, marker, and terminal selection.
+- `project-plans/coderabbit/analysis/github-api-contract.md` — exact API, JSON pointer, fixture, fallback, pagination, readiness truth table, mutation, and permission-denied contract.
+- `tests/fixtures/github_api_contract/*.json` — fixture payloads for PR identity, check runs/statuses, Actions jobs/logs, review threads, REST fallbacks, marker comments, mutations, readiness, pending marker actions, and permission denied cases.
+- `tests/fixtures/github_api_contract/actions_job_log.txt` — raw log text fixture referenced by the log contract.
+- `src/bin/github_api_contract_validator.rs` — minimal checked-in validator executable for contract, fixture, pointer, assertion, pagination, permission, and placeholder coverage.
+- `tests/github_api_contract_tests.rs` — checked-in test target `github_api_contract_tests` with positive validator coverage and a negative missing-contract case.
+- `project-plans/coderabbit/execution-tracker.md` — P02 marked PASS and current phase advanced to P03.
+- `project-plans/coderabbit/.completed/P02` — this evidence file.
+
+## Semantic verification against Phase 02 success criteria
+
+- Prerequisites passed before Phase 02 work: P01 exists, P01A exists, and P01A contains PASS verdict lines.
+- Phase type respected: no production PR follow-through executors or workflow TOML were implemented. The only Rust code added is a scoped contract validator binary and a scoped contract validator test target.
+- Pseudocode deliverables passed: five pseudocode files contain 159 numbered lines, exceeding the minimum and allowing later exact line-range references.
+- API contract deliverable passed: `github-api-contract.md` documents exact commands/queries/mutations, JSON pointers, fixtures, assertion names, fallback order, page-2 pagination rows, CodeRabbit readiness truth table rows, marker discovery rows, mutation response paths, and permission-denied cases.
+- CodeRabbit readiness passed: the contract includes rows and fixtures for ready-empty, in-progress override, stable-ready feedback, timeout, API fatal/permission denied, and non-CodeRabbit noise filtering with expected artifact states.
+- Contract validator passed: the required command `cargo run --bin github_api_contract_validator -- project-plans/coderabbit/analysis/github-api-contract.md tests/fixtures/github_api_contract` succeeds and prints `github_api_contract_validator: PASS`.
+- Test target passed: `cargo test --test github_api_contract_tests -- github_api_contract` runs two tests, including a negative missing-contract case.
+- Artifact schema contract did not require field-name changes. The API contract maps external paths to existing Phase 01 artifact field names under its artifact schema refinements section.
+- Expected failing test manifest was not modified and remains valid JSON.
+- Negative placeholder check passed for analysis docs and pseudocode.
+
+## Blocking issues
+
+None.

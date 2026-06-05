@@ -1,6 +1,5 @@
 /// @plan:PLAN-20260404-INITIAL-RUNTIME.P08
 /// Checkpoint persistence - saves and restores workflow execution state.
-
 use std::cell::RefCell;
 use std::collections::HashMap;
 
@@ -43,8 +42,9 @@ fn ensure_default_conn() -> Result<(), PersistenceError> {
     DEFAULT_CONN.with(|c| {
         let mut conn_opt = c.borrow_mut();
         if conn_opt.is_none() {
-            let conn = Connection::open_in_memory()
-                .map_err(|e| PersistenceError::Database(format!("Failed to create in-memory DB: {}", e)))?;
+            let conn = Connection::open_in_memory().map_err(|e| {
+                PersistenceError::Database(format!("Failed to create in-memory DB: {}", e))
+            })?;
             // Initialize schema
             conn.execute(
                 "CREATE TABLE IF NOT EXISTS checkpoints (
@@ -58,7 +58,8 @@ fn ensure_default_conn() -> Result<(), PersistenceError> {
                     PRIMARY KEY (run_id, step_id)
                 )",
                 [],
-            ).map_err(|e| PersistenceError::Database(e.to_string()))?;
+            )
+            .map_err(|e| PersistenceError::Database(e.to_string()))?;
             conn.execute(
                 "CREATE TABLE IF NOT EXISTS events (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -68,7 +69,8 @@ fn ensure_default_conn() -> Result<(), PersistenceError> {
                     timestamp TEXT NOT NULL
                 )",
                 [],
-            ).map_err(|e| PersistenceError::Database(e.to_string()))?;
+            )
+            .map_err(|e| PersistenceError::Database(e.to_string()))?;
             *conn_opt = Some(conn);
         }
         Ok(())
@@ -195,10 +197,7 @@ pub fn save_checkpoint_with_conn(
     context_data.insert(
         "__edge_loop_counts".to_string(),
         serde_json::to_value(&checkpoint.state_snapshot.edge_loop_counts).map_err(|e| {
-            PersistenceError::Serialization(format!(
-                "Failed to serialize edge_loop_counts: {}",
-                e
-            ))
+            PersistenceError::Serialization(format!("Failed to serialize edge_loop_counts: {}", e))
         })?,
     );
 
@@ -235,10 +234,7 @@ pub fn save_checkpoint_with_conn(
 /// Uses a thread-local default connection.
 /// @plan:PLAN-20260404-INITIAL-RUNTIME.P08
 /// @requirement:REQ-EARS-ENG-002,REQ-EARS-PERSIST-002,REQ-EARS-PERSIST-004
-pub fn save_checkpoint(
-    _run_id: &str,
-    checkpoint: &Checkpoint,
-) -> Result<(), PersistenceError> {
+pub fn save_checkpoint(_run_id: &str, checkpoint: &Checkpoint) -> Result<(), PersistenceError> {
     ensure_default_conn()?;
     DEFAULT_CONN.with(|c| {
         let conn_opt = c.borrow();
@@ -265,15 +261,15 @@ pub fn load_checkpoint_with_conn(
          FROM checkpoints
          WHERE run_id = ?1
          ORDER BY timestamp DESC
-         LIMIT 1"
+         LIMIT 1",
     )?;
 
     let mut rows = stmt.query(params![run_id])?;
 
     if let Some(row) = rows.next()? {
         let context_json: String = row.get(4)?;
-        let context: HashMap<String, serde_json::Value> =
-            serde_json::from_str(&context_json).map_err(|e| {
+        let context: HashMap<String, serde_json::Value> = serde_json::from_str(&context_json)
+            .map_err(|e| {
                 PersistenceError::Serialization(format!("Failed to deserialize context: {}", e))
             })?;
 
@@ -284,9 +280,9 @@ pub fn load_checkpoint_with_conn(
             .unwrap_or_default();
 
         let timestamp_str: String = row.get(6)?;
-        let timestamp = timestamp_str.parse().map_err(|_| {
-            PersistenceError::Database("Invalid timestamp format".to_string())
-        })?;
+        let timestamp = timestamp_str
+            .parse()
+            .map_err(|_| PersistenceError::Database("Invalid timestamp format".to_string()))?;
 
         Ok(Some(Checkpoint {
             run_id: row.get(0)?,
@@ -335,13 +331,13 @@ pub fn list_checkpoints(
         "SELECT run_id, step_id, retry_count, loop_count, context, status, timestamp
          FROM checkpoints
          WHERE run_id = ?1
-         ORDER BY timestamp ASC"
+         ORDER BY timestamp ASC",
     )?;
 
     let rows = stmt.query_map(params![run_id], |row| {
         let context_json: String = row.get(4)?;
-        let context: HashMap<String, serde_json::Value> =
-            serde_json::from_str(&context_json).map_err(|e| {
+        let context: HashMap<String, serde_json::Value> = serde_json::from_str(&context_json)
+            .map_err(|e| {
                 rusqlite::Error::FromSqlConversionFailure(
                     4,
                     rusqlite::types::Type::Text,
@@ -450,15 +446,12 @@ pub fn append_event(
 /// Load events for a run.
 /// @plan:PLAN-20260404-INITIAL-RUNTIME.P08
 /// @requirement:REQ-EARS-PERSIST-002
-pub fn load_events(
-    conn: &Connection,
-    run_id: &str,
-) -> Result<Vec<EventRecord>, PersistenceError> {
+pub fn load_events(conn: &Connection, run_id: &str) -> Result<Vec<EventRecord>, PersistenceError> {
     let mut stmt = conn.prepare(
         "SELECT run_id, step_id, outcome, timestamp
          FROM events
          WHERE run_id = ?1
-         ORDER BY timestamp ASC"
+         ORDER BY timestamp ASC",
     )?;
 
     let rows = stmt.query_map(params![run_id], |row| {
@@ -583,7 +576,8 @@ mod tests {
         let checkpoint = Checkpoint::new("run-123", "step-a");
         save_checkpoint_with_conn(&conn, &checkpoint).expect("Failed to save checkpoint");
 
-        let loaded = load_checkpoint_with_conn(&conn, "run-123").expect("Failed to load checkpoint");
+        let loaded =
+            load_checkpoint_with_conn(&conn, "run-123").expect("Failed to load checkpoint");
         assert!(loaded.is_some(), "Checkpoint should be found");
         let loaded_cp = loaded.unwrap();
         assert_eq!(loaded_cp.run_id, "run-123");
@@ -605,7 +599,8 @@ mod tests {
         let checkpoint = Checkpoint::with_snapshot("run-456", "step-b", snapshot);
         save_checkpoint_with_conn(&conn, &checkpoint).expect("Failed to save checkpoint");
 
-        let loaded = load_checkpoint_with_conn(&conn, "run-456").expect("Failed to load checkpoint");
+        let loaded =
+            load_checkpoint_with_conn(&conn, "run-456").expect("Failed to load checkpoint");
         assert!(loaded.is_some());
         let loaded_cp = loaded.unwrap();
         assert_eq!(loaded_cp.state_snapshot.retry_count, 3);

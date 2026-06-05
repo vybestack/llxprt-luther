@@ -1,5 +1,5 @@
 /// @plan:PLAN-20260408-LLXPRT-FIRST.P04
-/// Enhanced ShellExecutor TDD tests for JSON parsing, stdin piping, outcome mapping.
+/// Enhanced `ShellExecutor` TDD tests for JSON parsing, stdin piping, outcome mapping.
 /// These tests expect REAL behavior and will fail until Phase 05 implementation.
 use luther_workflow::engine::executor::{StepContext, StepExecutor};
 use luther_workflow::engine::executors::ShellExecutor;
@@ -125,7 +125,9 @@ fn test_shell_json_missing_dot_path_returns_fatal_with_available_keys() {
 
     assert!(result.is_ok());
     assert_eq!(result.unwrap(), StepOutcome::Fatal);
-    let error_info = ctx.get("json_path_error").expect("error info should be set");
+    let error_info = ctx
+        .get("json_path_error")
+        .expect("error info should be set");
     assert!(error_info.contains("nonexistent"));
     assert!(error_info.contains("title") || error_info.contains("body"));
 }

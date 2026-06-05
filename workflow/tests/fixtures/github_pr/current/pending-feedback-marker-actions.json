@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "run_id": "run-20260430-p01-fixture",
+  "repository_owner": "luther",
+  "repository_name": "workflow",
+  "pr_number": 1910,
+  "head_ref": "luther/issue-1234",
+  "head_sha": "1111111111111111111111111111111111111111",
+  "base_ref": "main",
+  "base_sha": "0000000000000000000000000000000000000000",
+  "artifact_sequence": 9,
+  "write_sequence": 1,
+  "history_metadata": {
+    "canonical_path": "tests/fixtures/github_pr/current/pending-feedback-marker-actions.json",
+    "history_path": "tests/fixtures/github_pr/history/pending-feedback-marker-actions/9-1-build_remediation_plan.json",
+    "artifact_family": "pending-feedback-marker-actions",
+    "is_canonical": true,
+    "history_written_at": "2026-04-30T00:21:00Z"
+  },
+  "step_order_index": 7,
+  "producer_step_id": "build_remediation_plan",
+  "carry_forward_from_artifact_sequence": null,
+  "marker_policy": {
+    "comment_invalid": true,
+    "comment_fixed": true,
+    "resolve_fixed_threads": true
+  },
+  "pending_actions": [
+    {
+      "action_id": "marker-action-1",
+      "action_kind": "comment_fixed",
+      "item_id": "cr-thread-1",
+      "stable_marker_key": "thread:PRRT_example:sha256:body",
+      "source_head_sha": "1111111111111111111111111111111111111111",
+      "remediation_output_head_sha": "2222222222222222222222222222222222222222",
+      "body_hash": "sha256:body",
+      "idempotency_key": "marker:thread:PRRT_example:sha256:body:1111111111111111111111111111111111111111:comment_fixed",
+      "comment_body_template_id": "fixed-valid-feedback-v1",
+      "comment_body_artifact_path": "tests/fixtures/github_pr/comment-bodies/marker-action-1.md",
+      "resolution_required": true,
+      "status": "pending",
+      "reason": "Valid feedback fixed by remediation result."
+    }
+  ]
+}

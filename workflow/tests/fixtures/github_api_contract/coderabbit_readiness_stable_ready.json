@@ -1,0 +1,18 @@
+{
+  "observations": [
+    {
+      "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "ready_signal": true,
+      "in_progress_signal": false,
+      "feedback_item_set_hash": "sha256:stable-items",
+      "items_count": 2
+    },
+    {
+      "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "ready_signal": true,
+      "in_progress_signal": false,
+      "feedback_item_set_hash": "sha256:stable-items",
+      "items_count": 2
+    }
+  ]
+}

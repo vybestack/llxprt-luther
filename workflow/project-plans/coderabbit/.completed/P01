@@ -1,0 +1,150 @@
+VERDICT: PASS
+
+# Phase 01 Completion Evidence
+
+Plan: PLAN-20260429-CODERABBIT-PR-FOLLOWUP
+Phase: P01 Domain Model and Artifact Schemas
+Completed: 2026-04-30
+
+## Exact commands run and outputs
+
+### Prerequisite check
+
+Command:
+```bash
+test -f project-plans/coderabbit/.completed/P0.5; printf 'p05_exit=%s\\n' "$?"; test -f project-plans/coderabbit/.completed/P0.5A.md; printf 'p05a_exit=%s\\n' "$?"; grep -E "^## Verdict: PASS|^VERDICT: PASS" project-plans/coderabbit/.completed/P0.5A.md; printf 'p05a_pass_exit=%s\\n' "$?"
+```
+
+Output:
+```text
+p05_exit=0
+p05a_exit=0
+## Verdict: PASS
+VERDICT: PASS
+p05a_pass_exit=0
+```
+
+### Required Phase 01 verification
+
+Command:
+```bash
+echo '--- prerequisite P0.5'; test -f project-plans/coderabbit/.completed/P0.5; printf 'exit=%s\\n' "$?"; echo '--- prerequisite P0.5A pass'; grep -E "^## Verdict: PASS|^VERDICT: PASS" project-plans/coderabbit/.completed/P0.5A.md; printf 'exit=%s\\n' "$?"; echo '--- required analysis files'; test -f project-plans/coderabbit/analysis/preflight-verification.md; printf 'preflight_exit=%s\\n' "$?"; test -f project-plans/coderabbit/analysis/artifact-schema-contract.md; printf 'schema_exit=%s\\n' "$?"; echo '--- schema terms'; grep -n -E "schema_version|run_id|repository_owner|repository_name|pr_number|head_sha|artifact_sequence|write_sequence|failure_sequence|pending-feedback-marker-actions|pr-remediation-result|coderabbit-feedback-state" project-plans/coderabbit/analysis/artifact-schema-contract.md; printf 'schema_terms_exit=%s\\n' "$?"; echo '--- json fixtures'; for f in tests/fixtures/github_pr/pr.json tests/fixtures/github_pr/current/*.json tests/fixtures/github_pr/history/pr-check-status/*.json tests/fixtures/github_pr/history/pending-feedback-marker-actions/*.json; do echo "json_tool $f"; python3 -m json.tool "$f" >/dev/null; printf 'exit=%s\\n' "$?"; done
+```
+
+Output:
+```text
+--- prerequisite P0.5
+exit=0
+--- prerequisite P0.5A pass
+## Verdict: PASS
+VERDICT: PASS
+exit=0
+--- required analysis files
+preflight_exit=0
+schema_exit=0
+p01_exit=0
+--- schema terms
+16:| `repo` string as primary binding | Split `repository_owner` and `repository_name`; a derived display value may exist but is not a binding substitute. |
+20:| Generic `remediate_pr_feedback` raw `llxprt` step | `PrFollowupRemediationExecutor` wrapper and validator-readable `pr-remediation-result.json`. |
+29:<artifact_root>/pr-followup/current/<run_id>/<repository_owner>/<repository_name>/<pr_number>/<artifact_family>.json
+35:<artifact_root>/pr-followup/history/<run_id>/<repository_owner>/<repository_name>/<pr_number>/<artifact_family>/<artifact_sequence>-<write_sequence>-<producer_step_id>.json
+42:| `schema_version` | integer | yes | Initial value `1`. |
+43:| `run_id` | string | yes | Workflow run correlation ID. |
+44:| `repository_owner` | string | yes | GitHub owner/organization. |
+45:| `repository_name` | string | yes | GitHub repository name. |
+46:| `pr_number` | integer | yes | Pull request number. |
+48:| `head_sha` | string | yes | Current PR head SHA for artifacts that observe the current head. |
+52:Consumers reject absent or mismatched `run_id`, `repository_owner`, `repository_name`, `pr_number`, `head_ref`, `head_sha`, `base_ref`, and non-null `base_sha`. Rejected stale artifacts may be recorded in audit arrays such as `ignored_stale_artifacts`, `stale_checks`, or `source_artifacts`, but must not be consumed as current evidence.
+60:| `artifact_sequence` | integer | yes | Monotonic global sequence allocated across all PR follow-through artifact writes for the same `run_id` and PR binding. |
+61:| `write_sequence` | integer | yes | Monotonic sequence within the artifact family for every atomic write. Rewrites of aggregate artifacts increment it. |
+71:`artifact_sequence` is global, not per family. `write_sequence` is per family. Terminal source ordering uses `failure_sequence` first, then `artifact_sequence`, then `write_sequence`, then `step_order_index`; it must not use filesystem mtimes.
+81:| `failure_sequence` | integer | yes | Monotonic global sequence across failure-producing PR follow-through artifacts for the same `run_id`. |
+105:| Common binding/common fields | mixed | yes | Includes `schema_version`, `run_id`, repository fields, PR fields, sequence fields. |
+111:| `source_head_repository_owner` | string or null | yes | Fork owner if available. |
+112:| `source_head_repository_name` | string or null | yes | Fork repo if available. |
+121:| `previous_head_sha` | string or null | yes | Null for initial entry. |
+122:| `reason` | enum | yes | `initial_entry`, `same_head_reentry`, `head_sha_changed_after_remediation_push`, `max_iterations_exceeded`, or `unreadable_or_unbindable_guard_state`. |
+143:Each `poll_observations[]` entry contains `attempt_number`, `observed_at`, `head_sha`, `current_head_checks`, `stale_checks`, `classification`, `terminal_counts`, and `write_sequence`. Each check contains `check_id`, `name`, `status`, `conclusion`, `state`, `bucket`, `url`, `workflow_name`, `run_id`, `job_id`, `started_at`, `completed_at`, `head_sha`, `app_slug`, and `source`.
+156:| `source_check_status_artifact_sequence` | integer | yes | `artifact_sequence` of consumed `pr-check-status.json`. |
+158:`failures[]` records include `failure_id`, `check_id`, `check_name`, `state`, `conclusion`, `url`, `run_id`, `job_id`, `log_status`, `log_excerpt`, `log_excerpt_path`, `raw_log_path`, and `collection_error`. `log_status` is `available`, `unavailable`, `not_applicable`, or `fetch_failed`. `pending_or_unknown` records always route to terminal non-success/needs-user-judgment; they are never placed in `pr-remediation-plan.must_fix`.
+177:### `coderabbit-feedback-state.json` — feedback state/reuse/idempotency source
+182:| `state_entries` | array | yes | Entries keyed by `stable_marker_key`, `body_hash`, and `head_sha`. |
+186:State entries include `item_id`, `stable_marker_key`, `body_hash`, `head_sha`, `first_seen_at`, `last_seen_at`, `evaluation_status` (`accepted`, `rejected`, `unevaluated`, `budget_exhausted`, or `reused`), `accepted_evaluation`, `remediation_status`, `marker_status`, `resolution_status`, `superseded`, `stale`, and `reuse_eligible`.
+202:Accepted results include `item_id`, `stable_marker_key`, `body_hash`, `head_sha`, `decision`, `reason`, `recommended_action`, `accepted_at`, `attempt_count`, `source`, and `reuse_state`. `decision` is exactly `valid`, `invalid`, `out_of_scope`, or `needs_user_judgment`; budget exhaustion is never an accepted decision. `source` is `new` or `reused`. `reuse_state` is `not_reused`, `reused_from_state`, or `not_reuse_eligible`. Rejected attempts include `attempt_number`, `item_id`, `raw_response_artifact_path`, `reject_reason`, `parsed_decision`, and `observed_head_sha`.
+216:Each plan item includes `source_type` (`ci_failure` or `coderabbit_feedback`), `source_id`, `stable_marker_key` when applicable, `reason`, `recommended_action`, `input_head_sha`, and `source_artifact_sequence`. Pending/unknown check evidence is never in `must_fix`.
+235:### `pr-remediation-result.json` — remediation result/status enum
+239:| Common binding/common fields | mixed | yes | Uses `input_head_sha` for plan binding and `output_head_sha` for post-remediation state. |
+240:| `input_head_sha` | string | yes | Must match plan `head_sha`. |
+241:| `output_head_sha` | string | yes | Git head after remediation attempt. |
+251:| `retry_scope` | object | yes | `run_id` + PR binding + input head + plan artifact sequence. |
+252:| `plan_artifact_sequence` | integer | yes | Consumed plan sequence. |
+256:Canonical `results[].status` enum is exactly `fixed`, `changed`, `already_satisfied`, `not_reproduced`, `not_fixed`, `skipped`, or `failed`. Each result includes `source_type` (`ci_failure` or `coderabbit_feedback`), `source_id`, `status`, `action`, `evidence`, and `evidence_paths`. `already_satisfied` and `not_reproduced` require deterministic `evidence.kind`, `evidence.current_head_sha`, and at least one of `evidence.paths`, `evidence.commands`, `evidence.api_lookups`, or `evidence.check_runs`; explanation-only evidence is invalid.
+268:| `plan_artifact_sequence` | integer | yes | Consumed plan. |
+269:| `remediation_result_artifact_sequence` | integer | yes | Consumed remediation result. |
+282:| `pre_push_local_head_sha` | string | yes | Local head before staging/commit/push. |
+283:| `pre_push_remote_head_sha` | string | yes | Remote PR branch head before push. |
+284:| `pre_push_pr_head_sha` | string | yes | `pr.json.head_sha`. |
+285:| `committed_head_sha` | string or null | yes | Commit created by executor when changes exist. |
+286:| `post_push_local_head_sha` | string | yes | Local head after push attempt. |
+287:| `post_push_remote_head_sha` | string or null | yes | Remote head after push attempt when known. |
+288:| `expected_head_sha` | string | yes | Expected remote head. |
+296:### `pending-feedback-marker-actions.json` — pending marker action queue
+302:| `carry_forward_from_artifact_sequence` | integer or null | yes | Prior pending action source when resumed/carried forward. |
+305:Each pending action includes `action_id`, `action_kind` (`comment_fixed`, `comment_invalid`, `comment_out_of_scope`, `comment_needs_user_judgment`, `resolve_thread`, or `skip`), `item_id`, `stable_marker_key`, `source_head_sha`, `remediation_output_head_sha`, `body_hash`, `idempotency_key`, `comment_body_template_id`, `comment_body_artifact_path`, `resolution_required`, `status` (`pending`, `completed`, `skipped`, or `failed`), and `reason`.
+318:| `pending_feedback_marker_actions_artifact_sequence` | integer or null | yes | Queue consumed by marker. |
+320:Marker actions include `action_id`, `action_kind`, `item_id`, `stable_marker_key`, `idempotency_key`, `hidden_marker`, `body_hash`, `source_head_sha`, `remediation_output_head_sha`, `comment_posted`, `comment_id`, `comment_url`, `resolution_attempted`, `resolved`, `skipped_reason`, `api_operation`, `api_error_class`, `completed_at`, and `idempotency_state` (`new_action`, `already_completed_local`, `already_completed_remote`, or `ambiguous`). Ambiguous idempotency is fatal.
+331:| `source_failure_sequence` | integer | yes | Selected source failure sequence. |
+332:| `source_artifact_sequence` | integer | yes | Selected source artifact sequence. |
+333:| `source_write_sequence` | integer | yes | Selected source write sequence. |
+343:Phase 01 JSON examples live under `tests/fixtures/github_pr/`. They are intentionally contract fixtures, not GitHub API fixtures. They must parse with `python3 -m json.tool` and expose the required terms used by P04 tests: `schema_version`, `run_id`, `repository_owner`, `repository_name`, `pr_number`, `head_sha`, `artifact_sequence`, `write_sequence`, `failure_sequence`, `pending-feedback-marker-actions`, `pr-remediation-result`, and `coderabbit-feedback-state`.
+schema_terms_exit=0
+--- json fixtures
+json_tool tests/fixtures/github_pr/pr.json
+exit=0
+json_tool tests/fixtures/github_pr/current/ci-failures.json
+exit=0
+json_tool tests/fixtures/github_pr/current/coderabbit-feedback-state.json
+exit=0
+json_tool tests/fixtures/github_pr/current/coderabbit-feedback.json
+exit=0
+json_tool tests/fixtures/github_pr/current/feedback-evaluations.json
+exit=0
+json_tool tests/fixtures/github_pr/current/pending-feedback-marker-actions.json
+exit=0
+json_tool tests/fixtures/github_pr/current/post-pr-failure-terminal.json
+exit=0
+json_tool tests/fixtures/github_pr/current/pr-check-status.json
+exit=0
+json_tool tests/fixtures/github_pr/current/pr-feedback-marker-report.json
+exit=0
+json_tool tests/fixtures/github_pr/current/pr-remediation-plan.json
+exit=0
+json_tool tests/fixtures/github_pr/current/pr-remediation-result.json
+exit=0
+json_tool tests/fixtures/github_pr/history/pr-check-status/2-2-watch_pr_checks.json
+exit=0
+json_tool tests/fixtures/github_pr/history/pending-feedback-marker-actions/9-1-build_remediation_plan.json
+exit=0
+```
+
+## Files created/updated with purpose
+
+- project-plans/coderabbit/analysis/artifact-schema-contract.md — Phase 01 artifact/domain schema contract, common fields, failure contract, sequence semantics, field tables, and superseded source-spec clauses.
+- tests/fixtures/github_pr/pr.json — PR identity/current-head binding fixture.
+- tests/fixtures/github_pr/current/*.json — Current canonical contract fixtures for check status, CI failures, CodeRabbit feedback/state, evaluations, remediation plan/result, marker queue/report, and terminal failure.
+- tests/fixtures/github_pr/history/pr-check-status/2-2-watch_pr_checks.json — Representative immutable history snapshot with sequence fields.
+- tests/fixtures/github_pr/history/pending-feedback-marker-actions/9-1-build_remediation_plan.json — Representative marker queue history snapshot.
+- project-plans/coderabbit/execution-tracker.md — P01 marked PASS and status summary advanced to P02.
+- project-plans/coderabbit/.completed/P01 — This completion evidence.
+
+## Semantic verification against Phase 01 success criteria
+
+- Prerequisites passed: P0.5 and P0.5A exist, and P0.5A contains PASS.
+- Analysis/schema only: no production Rust source or workflow TOML was modified by Phase 01.
+- Domain model covers PR identity/current-head binding, check watch status and precedence, CI failure collection including pending_or_unknown/fatal_source behavior, CodeRabbit feedback/readiness/state, evaluation accepted/rejected/unevaluated/reuse state, remediation plan/result/status enum/retry scopes, pending marker actions, marker idempotency, artifact root/current/history paths, sequence semantics, and terminal failure artifacts.
+- JSON contract fixtures parse with python3 -m json.tool.
+- Artifact schema contract contains required grep terms for downstream P04 tests.
+
+## Blocking issues
+
+None.

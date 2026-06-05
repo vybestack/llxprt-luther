@@ -1,0 +1,18 @@
+{
+  "argv": [
+    "cargo",
+    "run",
+    "--bin",
+    "luther-workflow",
+    "--",
+    "run",
+    "--workflow-type",
+    "llxprt-issue-fix-v1",
+    "--config",
+    "llxprt-code",
+    "--dry-run"
+  ],
+  "working_directory": "/Users/acoliver/projects/luther/workflow",
+  "non_live": true,
+  "notes": "Dry-run path loads production config/workflows and config/workflow-configs, prints step list, and exits before EngineRunner execution."
+}

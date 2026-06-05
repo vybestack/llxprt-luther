@@ -17,13 +17,12 @@ impl StepExecutor for WriteFileExecutor {
         params: &serde_json::Value,
     ) -> Result<StepOutcome, EngineError> {
         // Extract "path" and "content" from params JSON
-        let path_template = params
-            .get("path")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| EngineError::StepExecutionError {
+        let path_template = params.get("path").and_then(|v| v.as_str()).ok_or_else(|| {
+            EngineError::StepExecutionError {
                 step_id: "write_file".to_string(),
                 message: "Missing 'path' parameter for write_file executor".to_string(),
-            })?;
+            }
+        })?;
 
         let content_template = params
             .get("content")

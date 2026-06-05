@@ -1,0 +1,51 @@
+{
+  "schema_version": 1,
+  "run_id": "run-20260430-p01-fixture",
+  "repository_owner": "luther",
+  "repository_name": "workflow",
+  "pr_number": 1910,
+  "head_ref": "luther/issue-1234",
+  "head_sha": "1111111111111111111111111111111111111111",
+  "base_ref": "main",
+  "base_sha": "0000000000000000000000000000000000000000",
+  "artifact_sequence": 11,
+  "write_sequence": 1,
+  "history_metadata": {
+    "canonical_path": "tests/fixtures/github_pr/current/post-pr-failure-terminal.json",
+    "history_path": "tests/fixtures/github_pr/history/post-pr-failure-terminal/11-1-post_pr_failure_terminal.json",
+    "artifact_family": "post-pr-failure-terminal",
+    "is_canonical": true,
+    "history_written_at": "2026-04-30T00:30:00Z"
+  },
+  "step_order_index": 15,
+  "producer_step_id": "post_pr_failure_terminal",
+  "semantic_state": "fatal",
+  "failure_reason": "selected_source_failure",
+  "failure_sequence": 4,
+  "produced_at": "2026-04-30T00:30:00Z",
+  "failure_details": {
+    "selected_source_reason": "highest_failure_sequence"
+  },
+  "terminal_state": "fatal",
+  "failed_step": "collect_ci_failures",
+  "source_artifacts": [
+    {
+      "artifact_family": "ci-failures",
+      "artifact_sequence": 3,
+      "write_sequence": 1,
+      "failure_sequence": 2,
+      "producer_step_id": "collect_ci_failures",
+      "path": "tests/fixtures/github_pr/current/ci-failures.json",
+      "history_path": "tests/fixtures/github_pr/history/ci-failures/3-1-collect_ci_failures.json"
+    }
+  ],
+  "source_failure_sequence": 2,
+  "source_artifact_sequence": 3,
+  "source_write_sequence": 1,
+  "source_producer_step_id": "collect_ci_failures",
+  "source_step_order_index": 4,
+  "source_artifact_path": "tests/fixtures/github_pr/current/ci-failures.json",
+  "source_history_path": "tests/fixtures/github_pr/history/ci-failures/3-1-collect_ci_failures.json",
+  "selected_source_reason": "highest_failure_sequence",
+  "logged_at": "2026-04-30T00:30:00Z"
+}

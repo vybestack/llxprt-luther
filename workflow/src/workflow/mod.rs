@@ -1,6 +1,5 @@
 /// @plan:PLAN-20260404-INITIAL-RUNTIME.P03
 /// Workflow module - schema definitions and config loading.
-
 pub mod config_loader;
 pub mod schema;
 

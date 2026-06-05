@@ -1,0 +1,30 @@
+### grep todo/unimplemented macros
+tests/cli_e2e_integration.rs:18:/// THEN: command is recognized (may fail with stub/todo! but exists)
+tests/cli_e2e_integration.rs:31:    // In RED phase, it may fail with todo!() but should not be "unknown command"
+tests/cli_e2e_integration.rs:48:/// THEN: command is recognized (may fail with stub/todo! but exists)
+tests/cli_e2e_integration.rs:61:    // In RED phase, it may fail with todo!() but should not be "unknown command"
+exit=1
+### grep deferred markers
+src/engine/executors/shell.rs:268:    let placeholder = Command::new("sh")
+src/engine/executors/shell.rs:275:    Ok(std::mem::replace(child, placeholder))
+src/engine/executor.rs:156:/// Interpolate `{key}` and `{step_id.key}` placeholders in a template string.
+src/engine/executor.rs:159:/// Handles both namespaced (`{step_id.variable}`) and bare (`{variable}`) placeholders.
+src/engine/executor.rs:212:        let placeholder = format!("{{{key}}}");
+src/engine/executor.rs:214:            result = result.replace(&placeholder, value);
+tests/engine_execution_integration.rs:226:            // Expected for TDD RED phase - will be implemented later
+tests/engine_execution_integration.rs:322:    // This will be verified when the run() method is fully implemented
+tests/e2e_workflow_integration.rs:1292:fn post_pr_params_have_no_unresolved_placeholders() {
+tests/config_binding_integration.rs:223:    // The actual validation logic will be implemented in Phase 05
+tests/namespaced_context_tests.rs:68:/// Test 4: interpolate_string with namespaced placeholder
+tests/namespaced_context_tests.rs:70:fn test_interpolate_namespaced_placeholder() {
+tests/namespaced_context_tests.rs:77:    // Interpolate using namespaced placeholder
+tests/namespaced_context_tests.rs:86:/// Test 5: interpolate with unnamespaced placeholder still works
+tests/namespaced_context_tests.rs:88:fn test_interpolate_unnamespaced_placeholder_still_works() {
+tests/namespaced_context_tests.rs:95:    // Interpolate using unnamespaced placeholder
+tests/namespaced_context_tests.rs:104:/// Test 6: interpolate mixed namespaced and unnamespaced placeholders
+tests/namespaced_context_tests.rs:208:/// Test 12: undefined placeholder left as-is (backward compat)
+tests/namespaced_context_tests.rs:210:fn test_interpolate_undefined_placeholder_left_as_is() {
+tests/per_edge_loop_tests.rs:6:/// is not yet in the EngineRunner::run() method.
+project-plans/coderabbit/analysis/artifact-schema-contract.md:301:| `pending_actions` | array | yes | Actions not yet completed by marker. |
+project-plans/coderabbit/analysis/preflight-verification.md:372:- No-network default for PR follow-through is not yet implemented; P04/P16/P18 must use fixtures and fake command runners/fake `gh` and must not depend on live GitHub.
+exit=1

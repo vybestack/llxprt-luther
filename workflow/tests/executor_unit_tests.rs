@@ -1,7 +1,6 @@
 /// @plan:PLAN-20260408-STEP-EXEC.P04
-/// Unit tests for executor module - StepContext, Registry, and Executor implementations.
+/// Unit tests for executor module - `StepContext`, Registry, and Executor implementations.
 /// These tests expect REAL behavior and will fail until Phase 05 implementation.
-
 use luther_workflow::engine::executor::{
     interpolate_string, ExecutorRegistry, StepContext, StepExecutor,
 };
@@ -58,7 +57,7 @@ fn step_context_work_dir_and_run_id_return_correct_values() {
     let work_dir = PathBuf::from("/custom/work/dir");
     let run_id = "custom-run-id";
 
-    let ctx = StepContext::new(work_dir.clone(), run_id.to_string());
+    let ctx = StepContext::new(work_dir, run_id.to_string());
 
     assert_eq!(ctx.work_dir(), &PathBuf::from("/custom/work/dir"));
     assert_eq!(ctx.run_id(), "custom-run-id");
@@ -351,7 +350,10 @@ fn context_carries_values_across_executions() {
     let params = json!({"command": "echo {step1_output}"});
 
     // Context should still have the value
-    assert_eq!(ctx.get("step1_output"), Some(&"data_from_step1".to_string()));
+    assert_eq!(
+        ctx.get("step1_output"),
+        Some(&"data_from_step1".to_string())
+    );
 
     // Execute and verify the interpolated command works
     let result = shell.execute(&mut ctx, &params);

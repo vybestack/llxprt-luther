@@ -1,0 +1,62 @@
+{
+  "schema_version": 1,
+  "run_id": "run-20260430-p01-fixture",
+  "repository_owner": "luther",
+  "repository_name": "workflow",
+  "pr_number": 1910,
+  "head_ref": "luther/issue-1234",
+  "head_sha": "2222222222222222222222222222222222222222",
+  "base_ref": "main",
+  "base_sha": "0000000000000000000000000000000000000000",
+  "artifact_sequence": 10,
+  "write_sequence": 1,
+  "history_metadata": {
+    "canonical_path": "tests/fixtures/github_pr/current/pr-feedback-marker-report.json",
+    "history_path": "tests/fixtures/github_pr/history/pr-feedback-marker-report/10-1-mark_coderabbit_feedback.json",
+    "artifact_family": "pr-feedback-marker-report",
+    "is_canonical": true,
+    "history_written_at": "2026-04-30T00:25:00Z"
+  },
+  "step_order_index": 14,
+  "producer_step_id": "mark_coderabbit_feedback",
+  "marker_state": "complete",
+  "pending_feedback_marker_actions_artifact_sequence": 9,
+  "marker_actions": [
+    {
+      "action_id": "marker-action-1",
+      "action_kind": "comment_fixed",
+      "item_id": "cr-thread-1",
+      "stable_marker_key": "thread:PRRT_example:sha256:body",
+      "idempotency_key": "marker:thread:PRRT_example:sha256:body:1111111111111111111111111111111111111111:comment_fixed",
+      "hidden_marker": "<!-- luther-pr-followup marker_key=thread:PRRT_example:sha256:body source_head=1111111111111111111111111111111111111111 remediation_output_head=2222222222222222222222222222222222222222 body=sha256:body action=comment_fixed run_id=run-20260430-p01-fixture -->",
+      "body_hash": "sha256:body",
+      "source_head_sha": "1111111111111111111111111111111111111111",
+      "remediation_output_head_sha": "2222222222222222222222222222222222222222",
+      "comment_posted": true,
+      "comment_id": "IC_1",
+      "comment_url": "https://github.com/luther/workflow/pull/1910#issuecomment-1",
+      "resolution_attempted": true,
+      "resolved": true,
+      "skipped_reason": null,
+      "api_operation": "graphql.resolveReviewThread",
+      "api_error_class": null,
+      "completed_at": "2026-04-30T00:25:00Z",
+      "idempotency_state": "new_action"
+    }
+  ],
+  "skipped_actions": [],
+  "remote_marker_comments_seen": [],
+  "resolved_threads": [
+    {
+      "thread_id": "PRRT_example",
+      "resolved_at": "2026-04-30T00:25:00Z"
+    }
+  ],
+  "posted_comments": [
+    {
+      "comment_id": "IC_1",
+      "comment_url": "https://github.com/luther/workflow/pull/1910#issuecomment-1",
+      "body_hash": "sha256:marker-comment"
+    }
+  ]
+}

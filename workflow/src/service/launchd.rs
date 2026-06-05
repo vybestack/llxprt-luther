@@ -1,12 +1,11 @@
 //! Launchd service installation for macOS.
 //!
 /// @plan:PLAN-20260404-INITIAL-RUNTIME.P10
-
 use std::path::PathBuf;
 use std::process::Command;
 use thiserror::Error;
 
-use crate::service::spec::{ServiceSpec, generate_launchd_plist};
+use crate::service::spec::{generate_launchd_plist, ServiceSpec};
 
 /// Error type for launchd service operations.
 #[derive(Debug, Error)]
@@ -67,10 +66,10 @@ pub fn install_launchd_service(spec: &ServiceSpec) -> Result<PathBuf, LaunchdErr
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let exit_code = output.status.code().unwrap_or(-1);
-        
+
         // Cleanup on failure
         let _ = std::fs::remove_file(&plist_path);
-        
+
         return Err(LaunchdError::LaunchctlError {
             message: format!("Failed to load service: {}", stderr),
             exit_code,
@@ -102,7 +101,7 @@ pub fn uninstall_launchd_service(spec: &ServiceSpec) -> Result<(), LaunchdError>
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let exit_code = output.status.code().unwrap_or(-1);
-        
+
         return Err(LaunchdError::LaunchctlError {
             message: format!("Failed to unload service: {}", stderr),
             exit_code,
@@ -130,7 +129,7 @@ pub fn start_launchd_service(spec: &ServiceSpec) -> Result<(), LaunchdError> {
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let exit_code = output.status.code().unwrap_or(-1);
-        
+
         return Err(LaunchdError::LaunchctlError {
             message: format!("Failed to start service: {}", stderr),
             exit_code,
@@ -155,7 +154,7 @@ pub fn stop_launchd_service(spec: &ServiceSpec) -> Result<(), LaunchdError> {
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let exit_code = output.status.code().unwrap_or(-1);
-        
+
         return Err(LaunchdError::LaunchctlError {
             message: format!("Failed to stop service: {}", stderr),
             exit_code,
@@ -218,7 +217,7 @@ pub fn enable_launchd_service(spec: &ServiceSpec, domain: &str) -> Result<(), La
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let exit_code = output.status.code().unwrap_or(-1);
-        
+
         return Err(LaunchdError::LaunchctlError {
             message: format!("Failed to enable service: {}", stderr),
             exit_code,
@@ -244,7 +243,7 @@ pub fn disable_launchd_service(spec: &ServiceSpec, domain: &str) -> Result<(), L
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let exit_code = output.status.code().unwrap_or(-1);
-        
+
         return Err(LaunchdError::LaunchctlError {
             message: format!("Failed to disable service: {}", stderr),
             exit_code,
@@ -268,12 +267,11 @@ mod tests {
 
     #[test]
     fn test_get_plist_path() {
-        let spec = ServiceSpec::new("test", "/bin/test")
-            .with_label("com.luther.test");
-        
+        let spec = ServiceSpec::new("test", "/bin/test").with_label("com.luther.test");
+
         let path = get_plist_path(&spec);
         let path_str = path.to_string_lossy();
-        
+
         assert!(path_str.contains("com.luther.test.plist"));
         assert!(path_str.contains("LaunchAgents"));
     }
@@ -284,7 +282,7 @@ mod tests {
         // For now, just verify the function returns false for non-existent paths
         let spec = ServiceSpec::new("nonexistent-test-service-xyz", "/bin/nonexistent")
             .with_label("com.luther.nonexistent-test-service-xyz");
-        
+
         // Should be false since it doesn't exist
         assert!(!is_service_installed(&spec));
     }

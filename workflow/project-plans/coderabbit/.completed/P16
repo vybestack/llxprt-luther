@@ -1,0 +1,42 @@
+VERDICT: PASS
+
+# Phase 16 Evidence — Workflow Integration TDD Remediation Attempt 2
+
+## Fixes
+
+- Retained the substantive fake PR follow-up workflow scenario tests from remediation attempt 1; `tests/pr_followup_workflow_integration.rs` has no current-TOML/P17-owned expected failures and passes as an empty-expected binary.
+- Updated `project-plans/coderabbit/analysis/verify-expected-failing-tests.py` so an explicitly requested `--test-binary` with zero selected manifest entries is valid only after proving the binary exists and `cargo test --test <binary>` passes.
+- Preserved `project-plans/coderabbit/analysis/expected-failing-tests.json` with exactly seven current-TOML/P17-owned `e2e_workflow_integration` graph failures.
+- Added remediation attempt 2 command transcript at `project-plans/coderabbit/.completed/P16-remediation-attempt-2.command-output.md`.
+
+## Manifest and Verifier Summary
+
+- Manifest entries: 7.
+- Expected failing entries are all current-TOML/P17-owned failures in `tests/e2e_workflow_integration.rs`.
+- `pr_followup_workflow_integration` is now verified as an empty-expected requested binary by running the full binary and requiring success.
+- P16 remains TDD-only; no P17 workflow TOML/config wiring was implemented.
+
+## Verification Evidence
+
+Full command transcript: `project-plans/coderabbit/.completed/P16-remediation-attempt-2.command-output.md`.
+
+Key results from transcript:
+
+- `cargo test --test github_api_contract_tests -- github_api_contract` — exit 0.
+- `cargo run --bin github_api_contract_validator -- project-plans/coderabbit/analysis/github-api-contract.md tests/fixtures/github_api_contract` — exit 0.
+- `cargo test --test pr_followup_marker_audit_tests -- p16_markers_cover_all_touched_items` — exit 0.
+- `cargo test --test pr_followup_workflow_integration` — exit 0; 13 substantive fake scenario tests passed.
+- `cargo test --test e2e_workflow_integration -- post_pr --list` — exit 0; 11 tests discovered.
+- `cargo test --test e2e_workflow_integration -- llxprt_dry_run_step_list --list` — exit 0; 2 tests discovered.
+- `cargo test --test e2e_workflow_integration -- llxprt_dry_run_step_list_current_toml_lists_existing_steps --exact` — exit 0.
+- `cargo test --test e2e_workflow_integration -- llxprt_dry_run_step_list_includes_full_post_pr_contract --exact` — exit 101 expected current-TOML/P17-owned failure: `dry-run step list missing capture_pr_identity`.
+- `cargo test --test e2e_workflow_integration -- llxprt_dry_run_step_list` — exit 101 expected current-TOML/P17-owned failure because the full post-PR contract test fails while the current-TOML list gate passes.
+- `python3 project-plans/coderabbit/analysis/validate-expected-failing-tests.py project-plans/coderabbit/analysis/expected-failing-tests.json` — exit 0; `entries=7`.
+- `python3 project-plans/coderabbit/analysis/verify-expected-failing-tests.py --manifest project-plans/coderabbit/analysis/expected-failing-tests.json --test-binary e2e_workflow_integration --test-binary pr_followup_workflow_integration` — exit 0; `verified_entries=7`, `verified_empty_expected_binaries=1`, and `verified empty-expected binary pr_followup_workflow_integration`.
+- `cargo build --all-targets` — exit 0.
+- `cargo test --lib` — exit 0; 67 passed.
+- Negative placeholder/unimplemented grep — expected exit 1, proving no forbidden exact placeholder/TBD/todo/unimplemented patterns were found in the relevant touched files.
+
+## Blocking Issues
+
+None.

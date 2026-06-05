@@ -1,16 +1,72 @@
 /// @plan:PLAN-20260408-STEP-EXEC.P03
 /// @plan:PLAN-20260408-LLXPRT-FIRST.P06
 /// @plan:PLAN-20260408-LLXPRT-FIRST.P15
+/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P03
+/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P06
+/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P08
+/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P09
+/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P12
+/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P13
+/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P14
+/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P15
+/// @requirement:REQ-PRFU-011,REQ-PRFU-012,REQ-PRFU-013,REQ-PRFU-014,REQ-PRFU-015,REQ-PRFU-016,REQ-PRFU-017,REQ-PRFU-026
+/// @pseudocode lines 12-17,29-49
+
+/// @requirement:REQ-PRFU-020
+/// @pseudocode lines 1-53
 /// Executors module - concrete step executor implementations.
+pub mod feedback_eval;
+pub mod github_feedback;
+pub mod github_pr;
 pub mod llxprt;
 pub mod noop;
+pub mod pr_followup_artifacts;
+pub mod pr_followup_types;
+pub mod pr_remediation;
 pub mod shell;
 pub mod verify;
 pub mod write_file;
 
 // Re-export executor implementations for tests
+pub use feedback_eval::{
+    CommandFeedbackEvaluationAdapter, FeedbackEvaluationAdapter, FeedbackEvaluationRequest,
+    FeedbackEvaluationResponse, FeedbackEvaluatorCommandRunner, FeedbackEvaluatorExecutor,
+    FixtureFeedbackEvaluationAdapter, ProcessFeedbackEvaluatorCommandRunner,
+};
+
+pub use github_feedback::{
+    FeedbackMarkerParser, GithubCodeRabbitFeedbackExecutor,
+    GithubCodeRabbitFeedbackExecutorWithRunner, GithubFeedbackMarkerExecutor,
+    GithubFeedbackMarkerExecutorWithRunner, RemoteFeedbackMarker,
+};
+pub use github_pr::{
+    FixtureGithubPrCommandRunner, GithubCheckFailuresExecutor,
+    GithubCheckFailuresExecutorWithRunner, GithubPrChecksExecutor,
+    GithubPrChecksExecutorWithRunner, GithubPrCommandRunner, GithubPrIdentityExecutor,
+    GithubPrIdentityExecutorWithRunner,
+};
 pub use llxprt::LlxprtExecutor;
 pub use noop::NoOpExecutor;
+pub use pr_followup_artifacts::{
+    ArtifactWriter, ClockSleeper, PrFollowupArtifactStore, PrFollowupFilesystem,
+    SystemClockSleeper, SystemPrFollowupFilesystem,
+};
+pub use pr_followup_types::{
+    ArtifactSequenceMetadata, CiFailures, CodeRabbitFeedback, FeedbackEvaluations,
+    FeedbackMarkerReport, FeedbackState, PostPrFailureTerminal, PostPrIterationGuard,
+    PostPrTestResult, PrCheckStatus, PrFollowupBinding, PrIdentity, PrRemediationPlan,
+    PrRemediationResult, PushRemediationResult, PR_FOLLOWUP_SCHEMA_VERSION,
+};
+pub use pr_remediation::{
+    LlxprtInvocationRequest, LlxprtInvocationResult, PostPrFailureTerminalExecutor,
+    PostPrIterationGuardExecutor, PostPrTestCommandRequest, PostPrTestCommandResult,
+    PostPrTestCommandRunner, PrFollowupLlxprtCommandRunner, PrFollowupRemediationExecutor,
+    PrFollowupRemediationExecutorWithRunner, PrRemediationPlanExecutor,
+    PrRemediationResultExecutor, PushRemediationChangesExecutor,
+    PushRemediationChangesExecutorWithRunner, PushRemediationCommandRequest,
+    PushRemediationCommandResult, PushRemediationCommandRunner, RunPostPrTestsExecutor,
+    RunPostPrTestsExecutorWithRunner,
+};
 pub use shell::ShellExecutor;
 pub use verify::VerifyExecutor;
 pub use write_file::WriteFileExecutor;

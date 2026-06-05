@@ -1,0 +1,94 @@
+{
+  "schema_version": 1,
+  "run_id": "run-20260430-p01-fixture",
+  "repository_owner": "luther",
+  "repository_name": "workflow",
+  "pr_number": 1910,
+  "head_ref": "luther/issue-1234",
+  "head_sha": "1111111111111111111111111111111111111111",
+  "base_ref": "main",
+  "base_sha": "0000000000000000000000000000000000000000",
+  "artifact_sequence": 4,
+  "write_sequence": 2,
+  "history_metadata": {
+    "canonical_path": "tests/fixtures/github_pr/current/coderabbit-feedback.json",
+    "history_path": "tests/fixtures/github_pr/history/coderabbit-feedback/4-2-collect_coderabbit_feedback.json",
+    "artifact_family": "coderabbit-feedback",
+    "is_canonical": true,
+    "history_written_at": "2026-04-30T00:12:00Z"
+  },
+  "step_order_index": 5,
+  "producer_step_id": "collect_coderabbit_feedback",
+  "readiness_state": "ready",
+  "stable_observation_count": 2,
+  "required_stable_observations": 2,
+  "max_observations": 6,
+  "observation_interval_seconds": 300,
+  "included_bot_identities": [
+    "coderabbitai[bot]",
+    "coderabbitai"
+  ],
+  "feedback_item_set_hash": "sha256:itemset",
+  "observations": [
+    {
+      "observed_at": "2026-04-30T00:07:00Z",
+      "signals_seen": [
+        "review_thread"
+      ],
+      "bot_identities_matched": [
+        "coderabbitai[bot]"
+      ],
+      "observation_hash": "sha256:itemset",
+      "budget_used": 1,
+      "budget_remaining": 5,
+      "items_count": 1,
+      "outcome_reason": "first_ready_observation",
+      "current_head_ready_signal_seen": true,
+      "in_progress_signal_seen": false,
+      "stale_signals": []
+    },
+    {
+      "observed_at": "2026-04-30T00:12:00Z",
+      "signals_seen": [
+        "review_thread"
+      ],
+      "bot_identities_matched": [
+        "coderabbitai[bot]"
+      ],
+      "observation_hash": "sha256:itemset",
+      "budget_used": 2,
+      "budget_remaining": 4,
+      "items_count": 1,
+      "outcome_reason": "stable_ready_observation",
+      "current_head_ready_signal_seen": true,
+      "in_progress_signal_seen": false,
+      "stale_signals": []
+    }
+  ],
+  "items": [
+    {
+      "item_id": "cr-thread-1",
+      "stable_marker_key": "thread:PRRT_example:sha256:body",
+      "thread_id": "PRRT_example",
+      "comment_id": "PRRC_example",
+      "review_id": "PRR_example",
+      "author_login": "coderabbitai[bot]",
+      "author_association": "NONE",
+      "bot_identity": "coderabbitai[bot]",
+      "path": "src/lib.rs",
+      "line": 42,
+      "side": "RIGHT",
+      "body": "Please add a regression test for this edge case.",
+      "body_hash": "sha256:body",
+      "url": "https://github.com/luther/workflow/pull/1910#discussion_r1",
+      "created_at": "2026-04-30T00:01:00Z",
+      "updated_at": "2026-04-30T00:01:00Z",
+      "resolved": false,
+      "outdated": false,
+      "resolution_state_available": true,
+      "source": "review_thread",
+      "raw_node_id": "PRRT_example",
+      "commit_sha": "1111111111111111111111111111111111111111"
+    }
+  ]
+}

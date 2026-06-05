@@ -4,7 +4,6 @@
 //! branch preparation, and push operations using git commands.
 ///
 /// @plan:PLAN-20260404-INITIAL-RUNTIME.P10
-
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -61,7 +60,10 @@ impl RepositoryConfig {
 #[derive(Debug, Error)]
 pub enum RepoPrepError {
     #[error("Git operation failed: {message}")]
-    GitError { message: String, exit_code: Option<i32> },
+    GitError {
+        message: String,
+        exit_code: Option<i32>,
+    },
     #[error("Invalid repository path: {path}")]
     InvalidPath { path: String },
     #[error("Branch operation failed: {message}")]
@@ -107,7 +109,7 @@ impl RepoPrepError {
 pub fn resolve_workspace_path(config: &RepositoryConfig, run_id: &str) -> PathBuf {
     let base = Path::new(&config.workspace);
 
-    // If workspace contains the run_id placeholder, substitute it
+    // If workspace contains the run_id template token, substitute it
     let workspace_str = config.workspace.replace("{run_id}", run_id);
     let path = Path::new(&workspace_str);
 
@@ -238,11 +240,7 @@ pub fn prepare_branch(
 ///
 /// # Returns
 /// Result indicating success or failure
-pub fn push_branch(
-    workspace: &Path,
-    remote: &str,
-    branch: &str,
-) -> Result<(), RepoPrepError> {
+pub fn push_branch(workspace: &Path, remote: &str, branch: &str) -> Result<(), RepoPrepError> {
     // Validate workspace exists
     if !workspace.exists() {
         return Err(RepoPrepError::InvalidPath {

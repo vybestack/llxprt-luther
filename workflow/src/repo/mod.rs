@@ -1,11 +1,10 @@
 //! Repository module - workspace and branch management for workflow runs.
 //!
+use serde::Deserialize;
 /// @plan:PLAN-20260404-INITIAL-RUNTIME.P09
-
 use std::collections::HashMap;
 use std::path::PathBuf;
 use thiserror::Error;
-use serde::Deserialize;
 
 /// Repository configuration for workspace and branch management.
 #[derive(Debug, Clone, Deserialize)]
@@ -62,7 +61,7 @@ impl Workspace {
         repo_path: &str,
     ) -> Result<Self, RepositoryError> {
         let base_path = PathBuf::from(repo_path);
-        
+
         // For shared strategy, validate that the path exists
         // For temp_clone, the path doesn't need to exist initially
         match config.workspace_strategy.as_str() {
@@ -226,7 +225,7 @@ cleanup_on_failure = false
         };
 
         let mut manager = BranchManager::new(&config);
-        
+
         // First call creates the branch
         let params = BranchParams {
             issue_number: 123,

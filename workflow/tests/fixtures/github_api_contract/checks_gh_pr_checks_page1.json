@@ -1,0 +1,20 @@
+[
+  {
+    "name": "build",
+    "state": "SUCCESS",
+    "bucket": "pass",
+    "link": "https://github.com/example/workflow/actions/runs/3001/job/4001",
+    "workflow": "CI",
+    "startedAt": "2026-04-29T17:00:00Z",
+    "completedAt": "2026-04-29T17:05:00Z"
+  },
+  {
+    "name": "lint",
+    "state": "PENDING",
+    "bucket": "pending",
+    "link": "https://github.com/example/workflow/actions/runs/3002/job/4002",
+    "workflow": "CI",
+    "startedAt": "2026-04-29T17:01:00Z",
+    "completedAt": null
+  }
+]

@@ -1,13 +1,10 @@
 /// @plan:PLAN-20260408-LLXPRT-FIRST.P20
 /// Integration tests for CLI config resolution with production and test fixture layouts
-
 use std::fs;
 use std::path::PathBuf;
 use tempfile::TempDir;
 
-use luther_workflow::workflow::config_loader::{
-    resolve_workflow_config, resolve_workflow_type,
-};
+use luther_workflow::workflow::config_loader::{resolve_workflow_config, resolve_workflow_type};
 
 const TEST_WORKFLOW_TOML: &str = r#"
 workflow_type_id = "test"

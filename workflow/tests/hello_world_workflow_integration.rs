@@ -1,17 +1,8 @@
-/// @plan:PLAN-20260408-STEP-EXEC.P07
-/// Integration tests for the hello-world workflow end-to-end.
-///
-/// These tests verify that the engine can load a workflow, dispatch to real
-/// executors (shell, write_file), and produce correct outcomes.
-
-use std::path::PathBuf;
-
-use luther_workflow::engine::executor::{ExecutorRegistry, NoOpExecutor, StepContext};
+use luther_workflow::engine::executor::ExecutorRegistry;
 use luther_workflow::engine::executors::shell::ShellExecutor;
 use luther_workflow::engine::executors::write_file::WriteFileExecutor;
 use luther_workflow::engine::instance::WorkflowInstance;
 use luther_workflow::engine::runner::{EngineRunner, RunOutcome};
-use luther_workflow::engine::transition::StepOutcome;
 use luther_workflow::workflow::schema::{
     GuardConfig, GuardLimits, RepoConfig, RuntimeConfig, StepDef, TransitionDef, WorkflowConfig,
     WorkflowType,
@@ -139,8 +130,8 @@ fn hello_world_config() -> WorkflowConfig {
 /// @plan:PLAN-20260408-STEP-EXEC.P07
 /// @requirement:REQ-EXEC-007
 /// GIVEN: hello-world workflow type and config
-/// WHEN: engine runs with real shell+write_file executors
-/// THEN: workflow completes with RunOutcome::Success
+/// WHEN: engine runs with real `shell+write_file` executors
+/// THEN: workflow completes with `RunOutcome::Success`
 #[test]
 fn test_hello_world_workflow_end_to_end() {
     let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
@@ -179,7 +170,7 @@ fn test_hello_world_workflow_end_to_end() {
 /// @requirement:REQ-EXEC-001
 /// GIVEN: a 2-step workflow with shell steps
 /// WHEN: engine runs
-/// THEN: both steps execute via ShellExecutor
+/// THEN: both steps execute via `ShellExecutor`
 #[test]
 fn test_engine_dispatches_to_shell_executor() {
     let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
@@ -222,7 +213,7 @@ fn test_engine_dispatches_to_shell_executor() {
 
 /// @plan:PLAN-20260408-STEP-EXEC.P07
 /// @requirement:REQ-EXEC-001
-/// GIVEN: a workflow with write_file steps
+/// GIVEN: a workflow with `write_file` steps
 /// WHEN: engine runs
 /// THEN: files are created on disk
 #[test]
@@ -305,17 +296,17 @@ fn test_context_passes_between_steps_through_engine() {
     let outcome = runner.run().expect("Should not error");
     assert_eq!(outcome, RunOutcome::Success);
 
-    let content = std::fs::read_to_string(work_dir.join("captured.txt")).expect("File should exist");
+    let content =
+        std::fs::read_to_string(work_dir.join("captured.txt")).expect("File should exist");
     assert!(
         content.contains("context_value_123"),
-        "Captured file should contain stdout from shell step, got: '{}'",
-        content
+        "Captured file should contain stdout from shell step, got: '{content}'"
     );
 }
 
 /// @plan:PLAN-20260408-STEP-EXEC.P07
 /// @requirement:REQ-EXEC-002
-/// GIVEN: a workflow with an unregistered step_type
+/// GIVEN: a workflow with an unregistered `step_type`
 /// WHEN: engine runs
 /// THEN: outcome is Failure (unregistered type is fatal)
 #[test]

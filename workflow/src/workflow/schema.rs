@@ -1,6 +1,5 @@
 /// @plan:PLAN-20260404-INITIAL-RUNTIME.P03
 /// Schema definitions for workflow types, configurations, and runtime references.
-
 use std::collections::HashMap;
 
 /// Declarative topology and transitions for a workflow type.

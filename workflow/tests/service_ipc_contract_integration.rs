@@ -24,13 +24,19 @@ async fn test_service_foreground_mode() {
         .expect("Should start service in foreground mode");
 
     // THEN: service runs in current process (not daemonized)
-    assert!(service.is_foreground(), "Service should be in foreground mode");
+    assert!(
+        service.is_foreground(),
+        "Service should be in foreground mode"
+    );
     assert!(!service.is_daemonized(), "Service should not be daemonized");
     assert!(service.is_running(), "Service should be running");
 
     // Verify service is accessible without PID file
     let status = service.get_status().await.expect("Should get status");
-    assert_eq!(status.state, luther_workflow::service::ServiceState::Running);
+    assert_eq!(
+        status.state,
+        luther_workflow::service::ServiceState::Running
+    );
 
     // Clean up
     service.stop().await.expect("Should stop service");
@@ -63,27 +69,39 @@ async fn test_ipc_status_endpoint() {
         include_active_runs: true,
     };
 
-    let response = timeout(
-        Duration::from_secs(5),
-        client.get_status(status_request)
-    )
-    .await
-    .expect("IPC status request timed out")
-    .expect("IPC status request failed");
+    let response = timeout(Duration::from_secs(5), client.get_status(status_request))
+        .await
+        .expect("IPC status request timed out")
+        .expect("IPC status request failed");
 
     // THEN: response contains health and status information
-    assert!(!response.instance_id.is_empty(), "Status should include instance ID");
+    assert!(
+        !response.instance_id.is_empty(),
+        "Status should include instance ID"
+    );
     assert!(response.uptime_secs >= 0, "Status should include uptime");
     assert!(response.version >= 0, "Status should include version");
-    
+
     // Verify metrics are included
-    assert!(response.metrics.is_some(), "Status should include metrics when requested");
+    assert!(
+        response.metrics.is_some(),
+        "Status should include metrics when requested"
+    );
     let metrics = response.metrics.unwrap();
-    assert!(metrics.memory_usage_mb >= 0, "Metrics should include memory usage");
-    assert!(metrics.cpu_usage_percent >= 0.0, "Metrics should include CPU usage");
-    
+    assert!(
+        metrics.memory_usage_mb >= 0,
+        "Metrics should include memory usage"
+    );
+    assert!(
+        metrics.cpu_usage_percent >= 0.0,
+        "Metrics should include CPU usage"
+    );
+
     // Verify active runs info
-    assert!(response.active_runs.is_some(), "Status should include active runs when requested");
+    assert!(
+        response.active_runs.is_some(),
+        "Status should include active runs when requested"
+    );
 
     // Clean up
     service.stop().await.expect("Should stop service");
@@ -106,27 +124,42 @@ async fn test_service_failure_diagnostics() {
         .expect("Should start service");
 
     // Simulate a failure condition
-    let failure_result = service.simulate_failure(
-        luther_workflow::service::FailureType::InternalError
-    ).await;
+    let failure_result = service
+        .simulate_failure(luther_workflow::service::FailureType::InternalError)
+        .await;
 
     // WHEN: failure occurs
-    assert!(failure_result.is_err(), "Simulated failure should return error");
+    assert!(
+        failure_result.is_err(),
+        "Simulated failure should return error"
+    );
     let err = failure_result.unwrap_err();
 
     // THEN: error contains diagnostic information
     let diag = err.get_diagnostics();
-    assert!(!diag.is_empty(), "Error should provide structured diagnostics");
-    
+    assert!(
+        !diag.is_empty(),
+        "Error should provide structured diagnostics"
+    );
+
     // Verify diagnostics include error code
-    assert!(diag.contains_key("error_code"), "Diagnostics should include error code");
-    
+    assert!(
+        diag.contains_key("error_code"),
+        "Diagnostics should include error code"
+    );
+
     // Verify diagnostics include timestamp
-    assert!(diag.contains_key("timestamp"), "Diagnostics should include timestamp");
-    
+    assert!(
+        diag.contains_key("timestamp"),
+        "Diagnostics should include timestamp"
+    );
+
     // Verify recovery suggestions are provided
     let recovery = err.get_recovery_suggestions();
-    assert!(!recovery.is_empty(), "Error should provide recovery suggestions");
+    assert!(
+        !recovery.is_empty(),
+        "Error should provide recovery suggestions"
+    );
 
     // Clean up
     let _ = service.stop().await;

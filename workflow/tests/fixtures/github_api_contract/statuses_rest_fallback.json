@@ -1,0 +1,14 @@
+[
+  {
+    "id": 9001,
+    "context": "legacy-ci",
+    "state": "success",
+    "target_url": "https://ci.example.test/build/9001",
+    "description": "legacy status passed",
+    "created_at": "2026-04-29T17:00:00Z",
+    "updated_at": "2026-04-29T17:07:00Z",
+    "creator": {
+      "login": "ci-bot"
+    }
+  }
+]

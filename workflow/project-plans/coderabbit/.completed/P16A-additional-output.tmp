@@ -1,0 +1,186 @@
+$ cargo test --test pr_followup_workflow_integration
+warning: unused doc comment
+   --> src/engine/runner.rs:125:9
+    |
+125 | /         /// @plan:PLAN-20260408-LLXPRT-FIRST.P15
+126 | |         /// @requirement:REQ-LF-PROF-003
+    | |________________________________________^
+127 | /         for (key, value) in &instance.config.variables {
+128 | |             context.set(key, value);
+129 | |         }
+    | |_________- rustdoc does not generate documentation for expressions
+    |
+    = help: use `//` for a plain comment
+    = note: `#[warn(unused_doc_comments)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused doc comment
+   --> src/engine/runner.rs:132:9
+    |
+132 | /         /// @plan:PLAN-20260408-LLXPRT-FIRST.P15
+133 | |         /// @requirement:REQ-LF-WS-001
+    | |______________________________________^
+134 | /         if let Some(work_dir_str) = instance.config.variables.get("work_dir") {
+135 | |             let path = std::path::PathBuf::from(work_dir_str);
+136 | |             std::fs::create_dir_all(&path).map_err(|e| {
+137 | |                 EngineError::InvalidState(format!(
+...   |
+141 | |             context.set_work_dir(path);
+142 | |         }
+    | |_________- rustdoc does not generate documentation for expressions
+    |
+    = help: use `//` for a plain comment
+
+warning: unused doc comment
+   --> src/engine/runner.rs:201:9
+    |
+201 | /         /// @plan:PLAN-20260408-LLXPRT-FIRST.P15
+202 | |         /// @requirement:REQ-LF-PROF-003
+    | |________________________________________^
+203 | /         for (key, value) in &instance.config.variables {
+204 | |             context.set(key, value);
+205 | |         }
+    | |_________- rustdoc does not generate documentation for expressions
+    |
+    = help: use `//` for a plain comment
+
+warning: unused doc comment
+   --> src/engine/runner.rs:208:9
+    |
+208 | /         /// @plan:PLAN-20260408-LLXPRT-FIRST.P15
+209 | |         /// @requirement:REQ-LF-WS-001
+    | |______________________________________^
+210 | /         if let Some(work_dir_str) = instance.config.variables.get("work_dir") {
+211 | |             let path = std::path::PathBuf::from(work_dir_str);
+212 | |             std::fs::create_dir_all(&path).map_err(|e| {
+213 | |                 EngineError::InvalidState(format!(
+...   |
+218 | |             context.set_work_dir(path);
+219 | |         }
+    | |_________- rustdoc does not generate documentation for expressions
+    |
+    = help: use `//` for a plain comment
+
+warning: unused doc comment
+   --> src/engine/runner.rs:302:13
+    |
+302 | /             /// @plan:PLAN-20260408-LLXPRT-FIRST.P15
+303 | |             /// @requirement:REQ-LF-FAIL-001
+    | |____________________________________________^
+304 | /             if outcome == StepOutcome::Abandon {
+305 | |                 let run_outcome = RunOutcome::Abandoned {
+306 | |                     step_id: current_step_id.clone(),
+307 | |                     reason: "Loop limit exceeded".to_string(),
+...   |
+310 | |                 return Ok(run_outcome);
+311 | |             }
+    | |_____________- rustdoc does not generate documentation for expressions
+    |
+    = help: use `//` for a plain comment
+
+warning: unused doc comment
+   --> src/engine/runner.rs:314:13
+    |
+314 | /             /// @plan:PLAN-20260408-LLXPRT-FIRST.P15
+315 | |             /// @requirement:REQ-LF-FAIL-001
+    | |____________________________________________^
+316 |               let next_step = self.resolve_next_step(&current_step_id, &outcome)?;
+    |               -------------------------------------------------------------------- rustdoc does not generate documentation for statements
+    |
+    = help: use `//` for a plain comment
+
+warning: unused doc comment
+   --> src/engine/runner.rs:350:21
+    |
+350 | /                     /// @plan:PLAN-20260408-LLXPRT-FIRST.P15
+351 | |                     /// @requirement:REQ-LF-FAIL-001
+    | |____________________________________________________^
+352 | /                     let run_outcome = match outcome {
+353 | |                         StepOutcome::Success => RunOutcome::Success,
+354 | |                         StepOutcome::Fatal => RunOutcome::Failure {
+355 | |                             step_id: current_step_id.clone(),
+...   |
+365 | |                         },
+366 | |                     };
+    | |______________________- rustdoc does not generate documentation for statements
+    |
+    = help: use `//` for a plain comment
+
+warning: field `max_retries` is never read
+  --> src/engine/runner.rs:83:5
+   |
+75 | pub struct EngineRunner {
+   |            ------------ field in this struct
+...
+83 |     max_retries: u32,
+   |     ^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `config` is never read
+  --> src/monitor/mod.rs:42:5
+   |
+41 | pub struct Monitor {
+   |            ------- field in this struct
+42 |     config: process::MonitorConfig,
+   |     ^^^^^^
+
+warning: field `path` is never read
+   --> src/monitor/mod.rs:158:5
+    |
+157 | pub struct SingletonLock {
+    |            ------------- field in this struct
+158 |     path: String,
+    |     ^^^^
+    |
+    = note: `SingletonLock` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+
+warning: field `created_branches` is never read
+   --> src/repo/mod.rs:138:5
+    |
+136 | pub struct BranchManager<'a> {
+    |            ------------- field in this struct
+137 |     config: &'a RepositoryConfig,
+138 |     created_branches: Vec<String>,
+    |     ^^^^^^^^^^^^^^^^
+
+warning: field `socket_path` is never read
+   --> src/service/mod.rs:207:5
+    |
+206 | pub struct IpcClient {
+    |            --------- field in this struct
+207 |     socket_path: String,
+    |     ^^^^^^^^^^^
+
+warning: `luther-workflow` (lib) generated 12 warnings
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.05s
+     Running tests/pr_followup_workflow_integration.rs (target/debug/deps/pr_followup_workflow_integration-52387906893a32be)
+
+running 13 tests
+test post_pr_fake_clean_success_reaches_marker_and_log_completion ... ok
+test post_pr_fake_empty_not_ready_fatal ... ok
+test post_pr_fake_all_terminal_ci_failed_remediation_rechecks_head ... ok
+test post_pr_fake_coderabbit_valid_remediation ... ok
+test post_pr_fake_local_verification_failure_loops_to_remediation ... ok
+test post_pr_fake_malformed_non_empty_remediation_result_rejected ... ok
+test post_pr_fake_failed_and_unknown_terminal ... ok
+test post_pr_fake_failed_and_pending_terminal ... ok
+test post_pr_fake_marker_retry_idempotency ... ok
+test post_pr_fake_invalid_out_of_scope_only_marks_then_completes ... ok
+test post_pr_fake_marker_partial_failure_terminal ... ok
+test post_pr_fake_pending_marker_carry_forward_head_a_to_b ... ok
+test post_pr_fake_unknown_timeout_without_concrete_failures_fatal ... ok
+
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+exit=0
+
+$ grep -R -n -E "@pseudocode placeholder|@pseudocode TBD|TODO API|json_path TBD|fixture TBD|assertion TBD|todo!|unimplemented!" tests/e2e_workflow_integration.rs tests/pr_followup_workflow_integration.rs tests/pr_followup_marker_audit_tests.rs tests/smoke_test.rs project-plans/coderabbit/analysis config/workflows/llxprt-issue-fix-v1.toml
+exit=1
+
+$ grep -R -n -E "placeholder|TBD" tests/e2e_workflow_integration.rs tests/pr_followup_workflow_integration.rs tests/pr_followup_marker_audit_tests.rs tests/smoke_test.rs project-plans/coderabbit/analysis config/workflows/llxprt-issue-fix-v1.toml
+tests/pr_followup_marker_audit_tests.rs:151:        format!("{} {}", "@pseudocode", "TBD"),
+tests/pr_followup_marker_audit_tests.rs:154:        format!("{} {}", "json_path", "TBD"),
+tests/pr_followup_marker_audit_tests.rs:155:        format!("{} {}", "fixture", "TBD"),
+tests/pr_followup_marker_audit_tests.rs:156:        format!("{} {}", "assertion", "TBD"),
+project-plans/coderabbit/analysis/validate-expected-failing-tests.py:19:VAGUE = re.compile(r"^(fails?|not implemented|future|TBD|TODO)$", re.IGNORECASE)
+exit=0

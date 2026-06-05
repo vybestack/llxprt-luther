@@ -6,12 +6,13 @@ use crate::engine::executor::{interpolate_string, StepContext, StepExecutor};
 use crate::engine::runner::EngineError;
 use crate::engine::transition::StepOutcome;
 use regex::Regex;
-use std::path::PathBuf;
-use std::process::{Command, Output, Stdio};
-use std::thread;
-use std::time::{Duration, Instant};
+use std::io::{BufReader, Read};
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
+use std::path::PathBuf;
+use std::process::{Command, ExitStatus, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 
 /// Result of a single verification check.
 /// @plan:PLAN-20260408-LLXPRT-FIRST.P06
@@ -99,12 +100,13 @@ impl StepExecutor for VerifyExecutor {
 
         // Process each check
         for check_value in checks_array {
-            let check_type = check_value
-                .as_str()
-                .ok_or_else(|| EngineError::StepExecutionError {
-                    step_id: "verify".to_string(),
-                    message: "Check type must be a string".to_string(),
-                })?;
+            let check_type =
+                check_value
+                    .as_str()
+                    .ok_or_else(|| EngineError::StepExecutionError {
+                        step_id: "verify".to_string(),
+                        message: "Check type must be a string".to_string(),
+                    })?;
 
             // Resolve the command for this check type
             let command = resolve_check_command(check_type, params, context)?;
@@ -112,19 +114,28 @@ impl StepExecutor for VerifyExecutor {
             let output = match run_command_with_timeout(&command, &work_dir, timeout) {
                 Ok(WaitResult::Completed(output)) => output,
                 Ok(WaitResult::TimedOut { timeout }) => {
-                    context.set("verify_error", &format!("{check_type} timed out after {} seconds", timeout.as_secs()));
+                    context.set(
+                        "verify_error",
+                        &format!("{check_type} timed out after {} seconds", timeout.as_secs()),
+                    );
                     all_passed = false;
                     results.push(CheckResult {
                         check_type: check_type.to_string(),
                         passed: false,
                         exit_code: 124,
                         errors: vec![ErrorRecord {
-                            message: format!("{check_type} timed out after {} seconds", timeout.as_secs()),
+                            message: format!(
+                                "{check_type} timed out after {} seconds",
+                                timeout.as_secs()
+                            ),
                             severity: Some("error".to_string()),
                             ..ErrorRecord::default()
                         }],
                         raw_stdout: String::new(),
-                        raw_stderr: format!("{check_type} timed out after {} seconds", timeout.as_secs()),
+                        raw_stderr: format!(
+                            "{check_type} timed out after {} seconds",
+                            timeout.as_secs()
+                        ),
                     });
                     break;
                 }
@@ -133,7 +144,10 @@ impl StepExecutor for VerifyExecutor {
                     return Ok(StepOutcome::Fatal);
                 }
                 Err(WaitError::Wait(e)) => {
-                    context.set("verify_error", &format!("Failed to complete {check_type}: {e}"));
+                    context.set(
+                        "verify_error",
+                        &format!("Failed to complete {check_type}: {e}"),
+                    );
                     return Ok(StepOutcome::Fatal);
                 }
             };
@@ -185,30 +199,24 @@ impl StepExecutor for VerifyExecutor {
         };
 
         // Write report to file (REQ-LF-VERIFY-003)
-        let report_json = serde_json::to_string_pretty(&report).map_err(|e| {
-            EngineError::StepExecutionError {
+        let report_json =
+            serde_json::to_string_pretty(&report).map_err(|e| EngineError::StepExecutionError {
                 step_id: "verify".to_string(),
                 message: format!("Failed to serialize report: {e}"),
-            }
-        })?;
+            })?;
         let luther_dir = artifact_root;
         std::fs::create_dir_all(&luther_dir).map_err(|e| EngineError::StepExecutionError {
             step_id: "verify".to_string(),
             message: format!("Failed to create .luther directory: {e}"),
         })?;
         let report_path = luther_dir.join("verify-report.json");
-        std::fs::write(&report_path, report_json).map_err(|e| {
-            EngineError::StepExecutionError {
-                step_id: "verify".to_string(),
-                message: format!("Failed to write report file: {e}"),
-            }
+        std::fs::write(&report_path, report_json).map_err(|e| EngineError::StepExecutionError {
+            step_id: "verify".to_string(),
+            message: format!("Failed to write report file: {e}"),
         })?;
 
         // Set context variables (REQ-LF-VERIFY-002, REQ-LF-VERIFY-004, REQ-LF-VERIFY-009)
-        context.set(
-            "verify_passed",
-            if all_passed { "true" } else { "false" },
-        );
+        context.set("verify_passed", if all_passed { "true" } else { "false" });
         context.set("verify_summary", &summary);
 
         // Set per-check-type error context vars
@@ -238,8 +246,14 @@ impl StepExecutor for VerifyExecutor {
         }
     }
 }
+struct CapturedOutput {
+    status: ExitStatus,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+}
+
 enum WaitResult {
-    Completed(Output),
+    Completed(CapturedOutput),
     TimedOut { timeout: Duration },
 }
 
@@ -263,29 +277,55 @@ fn run_command_with_timeout(
     cmd.process_group(0);
 
     let mut child = cmd.spawn().map_err(WaitError::Spawn)?;
+    let stdout_reader = child.stdout.take().map(spawn_output_reader);
+    let stderr_reader = child.stderr.take().map(spawn_output_reader);
 
-    let Some(timeout) = timeout else {
-        return child.wait_with_output()
-            .map(WaitResult::Completed)
-            .map_err(WaitError::Wait);
+    let status = if let Some(timeout) = timeout {
+        let start = Instant::now();
+        loop {
+            if let Some(status) = child.try_wait().map_err(WaitError::Wait)? {
+                break Some(status);
+            }
+
+            if start.elapsed() >= timeout {
+                terminate_command(command, child.id());
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = join_output_reader(stdout_reader);
+                let _ = join_output_reader(stderr_reader);
+                return Ok(WaitResult::TimedOut { timeout });
+            }
+
+            thread::sleep(Duration::from_millis(100));
+        }
+    } else {
+        Some(child.wait().map_err(WaitError::Wait)?)
     };
 
-    let start = Instant::now();
-    loop {
-        if child.try_wait().map_err(WaitError::Wait)?.is_some() {
-            return child.wait_with_output()
-                .map(WaitResult::Completed)
-                .map_err(WaitError::Wait);
-        }
+    let stdout = join_output_reader(stdout_reader).unwrap_or_default();
+    let stderr = join_output_reader(stderr_reader).unwrap_or_default();
 
-        if start.elapsed() >= timeout {
-            terminate_command(command, child.id());
-            let _ = child.kill();
-            return Ok(WaitResult::TimedOut { timeout });
-        }
+    Ok(WaitResult::Completed(CapturedOutput {
+        status: status.expect("wait status is set before output capture"),
+        stdout,
+        stderr,
+    }))
+}
 
-        thread::sleep(Duration::from_millis(100));
-    }
+fn spawn_output_reader<R>(reader: R) -> thread::JoinHandle<Vec<u8>>
+where
+    R: Read + Send + 'static,
+{
+    thread::spawn(move || {
+        let mut reader = BufReader::new(reader);
+        let mut output = Vec::new();
+        let _ = reader.read_to_end(&mut output);
+        output
+    })
+}
+
+fn join_output_reader(reader: Option<thread::JoinHandle<Vec<u8>>>) -> Option<Vec<u8>> {
+    reader.and_then(|handle| handle.join().ok())
 }
 
 fn terminate_command(_command: &str, shell_pid: u32) {
@@ -305,12 +345,21 @@ fn terminate_command(_command: &str, shell_pid: u32) {
 
 fn cap_output(output: &str) -> String {
     const MAX_OUTPUT_BYTES: usize = 20_000;
-    if output.len() <= MAX_OUTPUT_BYTES {
+    cap_text(output, MAX_OUTPUT_BYTES, "verifier output")
+}
+
+fn cap_error_message(message: &str) -> String {
+    const MAX_ERROR_MESSAGE_BYTES: usize = 4_000;
+    cap_text(message, MAX_ERROR_MESSAGE_BYTES, "verifier error message")
+}
+
+fn cap_text(output: &str, max_bytes: usize, label: &str) -> String {
+    if output.len() <= max_bytes {
         return output.to_string();
     }
 
-    let head_len = MAX_OUTPUT_BYTES / 2;
-    let tail_len = MAX_OUTPUT_BYTES - head_len;
+    let head_len = max_bytes / 2;
+    let tail_len = max_bytes - head_len;
     let mut head_end = head_len.min(output.len());
     while !output.is_char_boundary(head_end) {
         head_end -= 1;
@@ -321,7 +370,7 @@ fn cap_output(output: &str) -> String {
     }
 
     format!(
-        "{}\n\n[... verifier output truncated: {} bytes omitted ...]\n\n{}",
+        "{}\n\n[... {label} truncated: {} bytes omitted ...]\n\n{}",
         &output[..head_end],
         tail_start.saturating_sub(head_end),
         &output[tail_start..],
@@ -347,8 +396,6 @@ fn resolve_artifact_root(
     })
 }
 
-
-
 /// Resolve the command for a specific check type.
 /// @plan:PLAN-20260408-LLXPRT-FIRST.P06
 /// @plan:PLAN-20260408-LLXPRT-FIRST.P08
@@ -356,12 +403,12 @@ fn resolve_artifact_root(
 fn resolve_check_command(
     check_type: &str,
     params: &serde_json::Value,
-    _context: &StepContext,
+    context: &StepContext,
 ) -> Result<String, EngineError> {
     // Check custom commands first
     if let Some(custom_commands) = params.get("check_commands") {
         if let Some(custom_cmd) = custom_commands.get(check_type).and_then(|v| v.as_str()) {
-            return Ok(custom_cmd.to_string());
+            return Ok(interpolate_string(custom_cmd, context));
         }
     }
 
@@ -400,6 +447,7 @@ fn parse_check_output(
         "lint" => parse_lint_errors(stdout, stderr),
         "format" => parse_format_errors(stdout, stderr),
         "build" => parse_build_errors(stdout, stderr),
+        "diff" => parse_diff_errors(stdout, stderr),
         _ => {
             // Unknown check type - wrap raw output in ErrorRecord
             let combined = format!("{stdout}{stderr}").trim().to_string();
@@ -436,15 +484,21 @@ fn parse_typescript_errors(stdout: &str, stderr: &str) -> Vec<ErrorRecord> {
 
     for line in combined.lines() {
         if let Some(caps) = ts_regex.captures(line) {
-            let file = caps.get(1).map(|m: regex::Match<'_>| m.as_str().to_string());
+            let file = caps
+                .get(1)
+                .map(|m: regex::Match<'_>| m.as_str().to_string());
             let line_num = caps
                 .get(2)
                 .and_then(|m: regex::Match<'_>| m.as_str().parse::<u32>().ok());
             let col_num = caps
                 .get(3)
                 .and_then(|m: regex::Match<'_>| m.as_str().parse::<u32>().ok());
-            let error_code = caps.get(4).map(|m: regex::Match<'_>| m.as_str().to_string());
-            let message = caps.get(5).map(|m: regex::Match<'_>| m.as_str().to_string());
+            let error_code = caps
+                .get(4)
+                .map(|m: regex::Match<'_>| m.as_str().to_string());
+            let message = caps
+                .get(5)
+                .map(|m: regex::Match<'_>| m.as_str().to_string());
 
             let full_message = if let Some(code) = error_code {
                 format!("{}: {}", code, message.unwrap_or_default())
@@ -506,7 +560,10 @@ fn parse_test_results(stdout: &str, stderr: &str) -> Vec<ErrorRecord> {
     if let Ok(json) = json_result {
         if let Some(test_results) = json.get("testResults").and_then(|v| v.as_array()) {
             for test_file in test_results {
-                let file_path = test_file.get("name").and_then(|v| v.as_str()).map(String::from);
+                let file_path = test_file
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
 
                 if let Some(assertion_results) =
                     test_file.get("assertionResults").and_then(|v| v.as_array())
@@ -595,8 +652,7 @@ fn parse_lint_errors(stdout: &str, stderr: &str) -> Vec<ErrorRecord> {
                 if let Some(messages) = file_result.get("messages").and_then(|v| v.as_array()) {
                     for msg in messages {
                         let line = msg.get("line").and_then(|v| v.as_u64()).map(|v| v as u32);
-                        let column =
-                            msg.get("column").and_then(|v| v.as_u64()).map(|v| v as u32);
+                        let column = msg.get("column").and_then(|v| v.as_u64()).map(|v| v as u32);
                         let message = msg
                             .get("message")
                             .and_then(|v| v.as_str())
@@ -631,15 +687,63 @@ fn parse_lint_errors(stdout: &str, stderr: &str) -> Vec<ErrorRecord> {
         }
     }
 
-    // Fallback: just return raw output as a single error
-    let combined = format!("{stdout}{stderr}").trim().to_string();
+    let combined = format!("{stdout}{stderr}");
+    let stylish_errors = parse_eslint_stylish_errors(&combined);
+    if !stylish_errors.is_empty() {
+        return stylish_errors;
+    }
+
+    let combined = combined.trim().to_string();
     if !combined.is_empty() {
         errors.push(ErrorRecord {
             file: None,
             line: None,
             column: None,
-            message: combined,
+            message: cap_error_message(&combined),
             severity: Some("error".to_string()),
+            test_name: None,
+            assertion_kind: None,
+            expected: None,
+            actual: None,
+        });
+    }
+
+    errors
+}
+
+fn parse_eslint_stylish_errors(output: &str) -> Vec<ErrorRecord> {
+    let diagnostic_regex =
+        Regex::new(r"^\s*(\d+):(\d+)\s+(error|warning)\s+(.+?)(?:\s{2,}([^\s].*?))?\s*$").unwrap();
+    let mut current_file: Option<String> = None;
+    let mut errors = Vec::new();
+
+    for line in output.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('/') || trimmed.starts_with("./") || trimmed.starts_with("../") {
+            current_file = Some(trimmed.to_string());
+            continue;
+        }
+
+        let Some(caps) = diagnostic_regex.captures(line) else {
+            continue;
+        };
+        let severity = caps
+            .get(3)
+            .map(|m| m.as_str().to_string())
+            .unwrap_or_else(|| "error".to_string());
+        if severity != "error" {
+            continue;
+        }
+
+        errors.push(ErrorRecord {
+            file: current_file.clone(),
+            line: caps.get(1).and_then(|m| m.as_str().parse::<u32>().ok()),
+            column: caps.get(2).and_then(|m| m.as_str().parse::<u32>().ok()),
+            message: caps
+                .get(4)
+                .map(|m| m.as_str().trim().to_string())
+                .unwrap_or_default(),
+            severity: Some(severity),
             test_name: None,
             assertion_kind: None,
             expected: None,
@@ -722,6 +826,24 @@ fn parse_format_errors(stdout: &str, stderr: &str) -> Vec<ErrorRecord> {
     }
 
     errors
+}
+fn parse_diff_errors(stdout: &str, stderr: &str) -> Vec<ErrorRecord> {
+    let combined = format!("{stdout}{stderr}").trim().to_string();
+    vec![ErrorRecord {
+        file: None,
+        line: None,
+        column: None,
+        message: if combined.is_empty() {
+            "No repository changes were produced".to_string()
+        } else {
+            combined
+        },
+        severity: Some("error".to_string()),
+        test_name: None,
+        assertion_kind: None,
+        expected: None,
+        actual: None,
+    }]
 }
 
 /// Parse build errors from build output.

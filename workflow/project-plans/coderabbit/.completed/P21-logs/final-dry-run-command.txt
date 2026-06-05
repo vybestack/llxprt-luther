@@ -1,0 +1,4 @@
+error: `cargo run` could not determine which binary to run. Use the `--bin` option to specify a binary, or the `default-run` manifest key.
+available binaries: github_api_contract_validator, luther-workflow
+argv=["cargo", "run", "--", "run", "--workflow-type", "llxprt-issue-fix-v1", "--config", "llxprt-code", "--dry-run"]
+exit=101

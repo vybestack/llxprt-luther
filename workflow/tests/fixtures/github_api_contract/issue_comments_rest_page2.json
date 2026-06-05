@@ -1,0 +1,14 @@
+[
+  {
+    "id": 8302,
+    "node_id": "IC_page2_marker",
+    "body": "<!-- luther:coderabbit-marker action=comment_fixed key=thread:PRRT_thread_1 -->\nFixed in commit evidence.",
+    "html_url": "https://github.com/example/workflow/pull/1910#issuecomment-8302",
+    "created_at": "2026-04-29T18:12:00Z",
+    "updated_at": "2026-04-29T18:12:00Z",
+    "user": {
+      "login": "luther-bot",
+      "type": "Bot"
+    }
+  }
+]

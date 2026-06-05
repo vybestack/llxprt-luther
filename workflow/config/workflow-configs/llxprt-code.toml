@@ -15,17 +15,19 @@ branch_template = "issue{issue_number}"
 base_branch = "main"
 
 [guards]
-max_iterations = 10
+max_iterations = 4
 max_file_changes = 200
 max_tokens = 500000
 max_cost = 50.0
 
 [variables]
 target_repo = "vybestack/llxprt-code"
+repository_owner = "vybestack"
+repository_name = "llxprt-code"
 assignee = "acoliver"
 work_dir = "/tmp/luther-workspaces/llxprt-code"
 artifact_dir = "/tmp/luther-artifacts/llxprt-code"
-primary_issue_number = "1808"
+primary_issue_number = "1803"
 
 base_branch = "main"
 profile_planning = "gpt53codexXHigh"

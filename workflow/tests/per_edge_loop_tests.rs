@@ -2,12 +2,10 @@
 /// Per-edge Loop Limits TDD Tests
 ///
 /// These tests verify the behavioral requirements for per-edge loop limits.
-/// They will FAIL during the TDD Red phase (Phase 13) because the implementation
-/// is not yet in the EngineRunner::run() method.
+/// They cover the completed `EngineRunner::run()` loop-limit contract.
 ///
-/// Tests use a configurable SequenceExecutor that returns different outcomes
+/// Tests use a configurable `SequenceExecutor` that returns different outcomes
 /// on successive calls, allowing precise control over workflow execution.
-
 use std::collections::HashMap;
 use std::sync::Mutex;
 
@@ -20,9 +18,9 @@ use luther_workflow::workflow::schema::{
     GuardLimits, RepoConfig, RuntimeConfig, StepDef, TransitionDef, WorkflowConfig, WorkflowType,
 };
 
-/// SequenceExecutor returns outcomes from a configured sequence.
+/// `SequenceExecutor` returns outcomes from a configured sequence.
 /// Used for tests that need to return different outcomes on successive calls.
-/// Uses Mutex for thread-safe access (required by StepExecutor: Send + Sync).
+/// Uses Mutex for thread-safe access (required by `StepExecutor`: Send + Sync).
 /// @plan:PLAN-20260408-LLXPRT-FIRST.P13
 struct SequenceExecutor {
     outcomes: Mutex<Vec<StepOutcome>>,
@@ -30,8 +28,8 @@ struct SequenceExecutor {
 }
 
 impl SequenceExecutor {
-    /// Create a new SequenceExecutor with the given outcomes.
-    fn new(outcomes: Vec<StepOutcome>) -> Self {
+    /// Create a new `SequenceExecutor` with the given outcomes.
+    const fn new(outcomes: Vec<StepOutcome>) -> Self {
         Self {
             outcomes: Mutex::new(outcomes),
             call_count: Mutex::new(0),
@@ -46,7 +44,7 @@ impl StepExecutor for SequenceExecutor {
         _params: &serde_json::Value,
     ) -> Result<StepOutcome, luther_workflow::engine::runner::EngineError> {
         let mut count = self.call_count.lock().unwrap();
-        let mut outcomes = self.outcomes.lock().unwrap();
+        let outcomes = self.outcomes.lock().unwrap();
 
         if *count < outcomes.len() {
             let outcome = outcomes[*count];
@@ -59,7 +57,7 @@ impl StepExecutor for SequenceExecutor {
     }
 }
 
-/// Helper: Create a registry with SequenceExecutor registered as "sequence".
+/// Helper: Create a registry with `SequenceExecutor` registered as "sequence".
 fn sequence_registry(outcomes: Vec<StepOutcome>) -> ExecutorRegistry {
     let mut registry = ExecutorRegistry::new();
     registry.register("sequence", Box::new(SequenceExecutor::new(outcomes)));
@@ -104,7 +102,7 @@ fn make_config(max_iterations: Option<u32>) -> WorkflowConfig {
 }
 
 /// Test 1: Per-edge limit abandons when exceeded.
-/// GIVEN: Workflow A → B → A (on fixable) with max_iterations: 2 on B→A transition
+/// GIVEN: Workflow A → B → A (on fixable) with `max_iterations`: 2 on B→A transition
 /// WHEN: Executor B always returns Fixable
 /// THEN: On the 4th attempt, engine returns Abandoned
 /// @plan:PLAN-20260408-LLXPRT-FIRST.P13
@@ -152,9 +150,12 @@ fn test_per_edge_limit_abandons_when_exceeded() {
     // With limit 2 on B→A, need 3 loop iterations to exceed:
     // A(S)→B(F)→A(S)→B(F)→A(S)→B(F)→Abandoned
     let registry = sequence_registry(vec![
-        StepOutcome::Success, StepOutcome::Fixable,
-        StepOutcome::Success, StepOutcome::Fixable,
-        StepOutcome::Success, StepOutcome::Fixable,
+        StepOutcome::Success,
+        StepOutcome::Fixable,
+        StepOutcome::Success,
+        StepOutcome::Fixable,
+        StepOutcome::Success,
+        StepOutcome::Fixable,
     ]);
     let mut runner = EngineRunner::new(instance, registry).expect("Failed to create EngineRunner");
 
@@ -175,21 +176,20 @@ fn test_per_edge_limit_abandons_when_exceeded() {
                     || reason.contains("limit")
                     || reason.contains("step_b")
                     || reason.contains("step_a"),
-                "Abandon reason should mention loop limit or edge: got {}",
-                reason
+                "Abandon reason should mention loop limit or edge: got {reason}"
             );
         }
         Ok(other) => {
-            panic!("Expected Abandoned, got {:?}", other);
+            panic!("Expected Abandoned, got {other:?}");
         }
         Err(e) => {
-            panic!("Expected Abandoned outcome, got error: {:?}", e);
+            panic!("Expected Abandoned outcome, got error: {e:?}");
         }
     }
 }
 
 /// Test 2: Per-edge limit allows iterations within limit.
-/// GIVEN: Workflow A → B → A (on fixable, max_iterations: 3) → C (on success)
+/// GIVEN: Workflow A → B → A (on fixable, `max_iterations`: 3) → C (on success)
 /// WHEN: Executor B returns Fixable twice, then Success
 /// THEN: Run outcome is Success (2 loops within limit of 3)
 /// @plan:PLAN-20260408-LLXPRT-FIRST.P13
@@ -266,10 +266,10 @@ fn test_per_edge_limit_allows_iterations_within_limit() {
             // Test passes
         }
         Ok(other) => {
-            panic!("Expected Success, got {:?}", other);
+            panic!("Expected Success, got {other:?}");
         }
         Err(e) => {
-            panic!("Expected Success, got error: {:?}", e);
+            panic!("Expected Success, got error: {e:?}");
         }
     }
 }
@@ -387,22 +387,19 @@ fn test_independent_loops_tracked_separately() {
             // Test passes
         }
         Ok(RunOutcome::Abandoned { reason, .. }) => {
-            panic!(
-                "Should have succeeded with per-edge tracking. Abandoned: {}",
-                reason
-            );
+            panic!("Should have succeeded with per-edge tracking. Abandoned: {reason}");
         }
         Ok(other) => {
-            panic!("Expected Success, got {:?}", other);
+            panic!("Expected Success, got {other:?}");
         }
         Err(e) => {
-            panic!("Expected Success, got error: {:?}", e);
+            panic!("Expected Success, got error: {e:?}");
         }
     }
 }
 
 /// Test 4: Global fallback used when no per-edge limit.
-/// GIVEN: Workflow A → B → A (fixable, NO per-edge limit) with global max_iterations: 2
+/// GIVEN: Workflow A → B → A (fixable, NO per-edge limit) with global `max_iterations`: 2
 /// WHEN: Executor B always returns Fixable
 /// THEN: Engine returns Abandoned after 2 iterations (using global fallback)
 /// @plan:PLAN-20260408-LLXPRT-FIRST.P13
@@ -449,9 +446,12 @@ fn test_global_fallback_used_when_no_per_edge_limit() {
     // Executor: A returns Success, B returns Fixable, repeat enough to exceed global limit 2
     // A(S)→B(F)→A(S)→B(F)→A(S)→B(F)→Abandoned
     let registry = sequence_registry(vec![
-        StepOutcome::Success, StepOutcome::Fixable,
-        StepOutcome::Success, StepOutcome::Fixable,
-        StepOutcome::Success, StepOutcome::Fixable,
+        StepOutcome::Success,
+        StepOutcome::Fixable,
+        StepOutcome::Success,
+        StepOutcome::Fixable,
+        StepOutcome::Success,
+        StepOutcome::Fixable,
     ]);
     let mut runner = EngineRunner::new(instance, registry).expect("Failed to create EngineRunner");
 
@@ -464,16 +464,16 @@ fn test_global_fallback_used_when_no_per_edge_limit() {
             // Test passes
         }
         Ok(other) => {
-            panic!("Expected Abandoned (global fallback), got {:?}", other);
+            panic!("Expected Abandoned (global fallback), got {other:?}");
         }
         Err(e) => {
-            panic!("Expected Abandoned, got error: {:?}", e);
+            panic!("Expected Abandoned, got error: {e:?}");
         }
     }
 }
 
 /// Test 5: Per-edge limit overrides global.
-/// GIVEN: Workflow with per-edge limit 5 and global max_iterations: 2
+/// GIVEN: Workflow with per-edge limit 5 and global `max_iterations`: 2
 /// WHEN: Executor B returns Fixable 3 times then Success
 /// THEN: Run outcome is Success (per-edge limit 5 > global 2)
 /// @plan:PLAN-20260408-LLXPRT-FIRST.P13
@@ -538,31 +538,26 @@ fn test_per_edge_limit_overrides_global() {
             // Test passes
         }
         Ok(RunOutcome::Abandoned { reason, .. }) => {
-            panic!(
-                "Per-edge limit 5 should allow 3 iterations. Abandoned: {}",
-                reason
-            );
+            panic!("Per-edge limit 5 should allow 3 iterations. Abandoned: {reason}");
         }
         Ok(other) => {
-            panic!("Expected Success, got {:?}", other);
+            panic!("Expected Success, got {other:?}");
         }
         Err(e) => {
-            panic!("Expected Success, got error: {:?}", e);
+            panic!("Expected Success, got error: {e:?}");
         }
     }
 }
 
 /// Test 6: Edge counts survive checkpoint roundtrip.
-/// GIVEN: StateSnapshot with edge_loop_counts: {"A:B": 2, "C:D": 1}
+/// GIVEN: `StateSnapshot` with `edge_loop_counts`: {"A:B": 2, "C:D": 1}
 /// WHEN: Checkpoint is saved and loaded
-/// THEN: Loaded snapshot has same edge_loop_counts
+/// THEN: Loaded snapshot has same `edge_loop_counts`
 /// @plan:PLAN-20260408-LLXPRT-FIRST.P13
 /// @requirement:REQ-LF-LOOP-005
 #[test]
 fn test_edge_counts_survive_checkpoint_roundtrip() {
-    use luther_workflow::persistence::{
-        save_checkpoint_with_conn, load_checkpoint_with_conn,
-    };
+    use luther_workflow::persistence::{load_checkpoint_with_conn, save_checkpoint_with_conn};
     use rusqlite::Connection;
 
     // GIVEN: StateSnapshot with edge_loop_counts
@@ -647,9 +642,12 @@ fn test_abandoned_reason_identifies_edge() {
     // Executor: Always returns Fixable to trigger abandonment
     // A(S)→B(F)→A(S)→B(F)→A(S)→B(F)→Abandoned
     let registry = sequence_registry(vec![
-        StepOutcome::Success, StepOutcome::Fixable,
-        StepOutcome::Success, StepOutcome::Fixable,
-        StepOutcome::Success, StepOutcome::Fixable,
+        StepOutcome::Success,
+        StepOutcome::Fixable,
+        StepOutcome::Success,
+        StepOutcome::Fixable,
+        StepOutcome::Success,
+        StepOutcome::Fixable,
     ]);
     let mut runner = EngineRunner::new(instance, registry).expect("Failed to create EngineRunner");
 
@@ -666,22 +664,21 @@ fn test_abandoned_reason_identifies_edge() {
                 || reason.contains("limit");
             assert!(
                 has_edge_info,
-                "Abandon reason should identify the edge: got {}",
-                reason
+                "Abandon reason should identify the edge: got {reason}"
             );
         }
         Ok(other) => {
-            panic!("Expected Abandoned, got {:?}", other);
+            panic!("Expected Abandoned, got {other:?}");
         }
         Err(e) => {
-            panic!("Expected Abandoned, got error: {:?}", e);
+            panic!("Expected Abandoned, got error: {e:?}");
         }
     }
 }
 
 /// Test 8: Forward transitions not counted.
 /// GIVEN: Workflow A → B → C → D (all forward, all success)
-/// WHEN: All transitions have max_iterations: 1
+/// WHEN: All transitions have `max_iterations`: 1
 /// THEN: Run outcome is Success (forward transitions don't increment counters)
 /// @plan:PLAN-20260408-LLXPRT-FIRST.P13
 /// @requirement:REQ-LF-LOOP-002
@@ -758,17 +755,17 @@ fn test_forward_transitions_not_counted() {
             // Test passes
         }
         Ok(other) => {
-            panic!("Expected Success, got {:?}", other);
+            panic!("Expected Success, got {other:?}");
         }
         Err(e) => {
-            panic!("Expected Success, got error: {:?}", e);
+            panic!("Expected Success, got error: {e:?}");
         }
     }
 }
 
 /// Test 9: Loop count accessor returns sum of edge counts.
 /// GIVEN: Engine with 2 iterations of loop A → B → A
-/// WHEN: runner.loop_count() is called
+/// WHEN: `runner.loop_count()` is called
 /// THEN: Returns 2 (sum of all edge counts)
 /// @plan:PLAN-20260408-LLXPRT-FIRST.P13
 /// @requirement:REQ-LF-LOOP-002
@@ -936,15 +933,14 @@ fn test_mixed_per_edge_and_global_limits() {
             // Reason should NOT mention step_d/loop 2
             assert!(
                 !reason.contains("step_d"),
-                "Abandon reason should not mention loop 2 (step_d): got {}",
-                reason
+                "Abandon reason should not mention loop 2 (step_d): got {reason}"
             );
         }
         Ok(other) => {
-            panic!("Expected Abandoned at loop 1, got {:?}", other);
+            panic!("Expected Abandoned at loop 1, got {other:?}");
         }
         Err(e) => {
-            panic!("Expected Abandoned, got error: {:?}", e);
+            panic!("Expected Abandoned, got error: {e:?}");
         }
     }
 }

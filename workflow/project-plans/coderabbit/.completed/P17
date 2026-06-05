@@ -1,0 +1,173 @@
+VERDICT: PASS
+
+# Phase 17 Evidence — Workflow TOML and Fixture Implementation
+
+## Commands Run and Outputs
+
+Prerequisite checks:
+
+```text
+$ test -f project-plans/coderabbit/.completed/P16
+exit=0
+
+$ grep -E "^## Verdict: PASS|^VERDICT: PASS" project-plans/coderabbit/.completed/P16A.md
+## Verdict: PASS
+VERDICT: PASS
+exit=0
+
+$ grep -n "P16.*PASS" project-plans/coderabbit/execution-tracker.md
+33:| P16 | PASS | 3 | 2026-04-30 | 2026-04-30 PASS after remediation attempt 2 | ... |
+exit=0
+```
+
+Contract and marker checks:
+
+```text
+$ cargo test --test github_api_contract_tests -- github_api_contract
+running 2 tests
+test github_api_contract_negative_fixture_rejects_missing_contract ... ok
+test github_api_contract_validator_accepts_phase_02_contract ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.31s
+
+$ cargo run --bin github_api_contract_validator -- project-plans/coderabbit/analysis/github-api-contract.md tests/fixtures/github_api_contract
+github_api_contract_validator: PASS
+
+$ cargo test --test pr_followup_marker_audit_tests -- p17_markers_cover_all_touched_items
+running 1 test
+test p17_markers_cover_all_touched_items ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 14 filtered out; finished in 0.00s
+
+$ grep -RInE "@pseudocode lines X-Y|@pseudocode TBD|@pseudocode placeholder|TODO API|json_path TBD|fixture TBD|assertion TBD" src/engine tests project-plans/coderabbit/analysis || true
+(no output)
+```
+
+Fixture regeneration:
+
+```text
+$ cp config/workflows/llxprt-issue-fix-v1.toml tests/fixtures/workflows/valid/llxprt-issue-fix-v1.toml
+exit=0
+
+$ python3 junk/regen_fixtures.py
+regen tests/fixtures/workflows/valid/llxprt-issue-fix-v1.json
+regen tests/fixtures/workflow-configs/valid/llxprt-code.json
+exit=0
+```
+
+Workflow verification:
+
+```text
+$ cargo test --test e2e_workflow_integration -- post_pr
+running 15 tests
+...
+test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 17 filtered out; finished in 0.01s
+
+$ cargo test --test e2e_workflow_integration -- post_pr_reachable_transitions_are_unique_by_from_and_effective_condition
+running 1 test
+test post_pr_reachable_transitions_are_unique_by_from_and_effective_condition ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 31 filtered out; finished in 0.00s
+
+$ cargo test --test e2e_workflow_integration -- post_pr_reachable_graph_does_not_use_abandon_condition
+running 1 test
+test post_pr_reachable_graph_does_not_use_abandon_condition ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 31 filtered out; finished in 0.00s
+
+$ cargo test --test e2e_workflow_integration -- llxprt_dry_run_step_list
+running 2 tests
+test llxprt_dry_run_step_list_current_toml_lists_existing_steps ... ok
+test llxprt_dry_run_step_list_includes_full_post_pr_contract ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 30 filtered out; finished in 0.00s
+
+$ cargo test --test e2e_workflow_integration -- post_pr_params_have_no_unresolved_placeholders
+running 1 test
+test post_pr_params_have_no_unresolved_placeholders ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 31 filtered out; finished in 0.00s
+
+$ cargo test --test e2e_workflow_integration -- post_pr_steps_require_artifact_root
+running 1 test
+test post_pr_steps_require_artifact_root ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 31 filtered out; finished in 0.00s
+
+$ cargo test --test e2e_workflow_integration -- post_pr_steps_forbid_artifact_dir_alias
+running 1 test
+test post_pr_steps_forbid_artifact_dir_alias ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 31 filtered out; finished in 0.00s
+
+$ cargo test --test e2e_workflow_integration -- production_and_fixture_llxprt_issue_fix_v1_are_equivalent
+running 1 test
+test production_and_fixture_llxprt_issue_fix_v1_are_equivalent ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 31 filtered out; finished in 0.01s
+
+$ cargo test --test pr_followup_workflow_integration
+running 13 tests
+...
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+```
+
+Expected-failing manifest verification:
+
+```text
+$ python3 project-plans/coderabbit/analysis/validate-expected-failing-tests.py project-plans/coderabbit/analysis/expected-failing-tests.json
+expected_failing_tests_manifest: PASS
+entries=0
+
+$ python3 project-plans/coderabbit/analysis/verify-expected-failing-tests.py --manifest project-plans/coderabbit/analysis/expected-failing-tests.json --test-binary e2e_workflow_integration --test-binary pr_followup_workflow_integration
+expected_failing_tests_verifier: PASS
+verified_entries=0
+verified_empty_expected_binaries=2
+verified empty-expected binary e2e_workflow_integration
+verified empty-expected binary pr_followup_workflow_integration
+```
+
+Build/library and placeholder verification:
+
+```text
+$ cargo build --all-targets
+Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.05s
+
+$ cargo test --lib
+running 67 tests
+...
+test result: ok. 67 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.11s
+
+$ grep -RInE "todo!|unimplemented!" config/workflows/llxprt-issue-fix-v1.toml tests/e2e_workflow_integration.rs tests/pr_followup_marker_audit_tests.rs tests/pr_followup_workflow_integration.rs project-plans/coderabbit/analysis/expected-failing-tests.json || true
+(no output)
+```
+
+Cargo emitted existing warnings about unused doc comments/imports/dead code during build/test runs. The final relevant commands passed.
+
+## Files Created/Updated With Purpose
+
+- `config/workflows/llxprt-issue-fix-v1.toml`: added complete post-PR follow-through tail after PR creation, removed direct `create_pr -> log_completion`, and configured P17 routing/params.
+- `tests/fixtures/workflows/valid/llxprt-issue-fix-v1.toml`: copied from production TOML.
+- `tests/fixtures/workflows/valid/llxprt-issue-fix-v1.json`: regenerated from TOML using the recorded fixture command.
+- `tests/e2e_workflow_integration.rs`: added/updated P17 graph, parameter, fixture-equivalence, abandon-condition, and mock executor coverage.
+- `tests/pr_followup_marker_audit_tests.rs`: added P17 touched-item marker audit coverage.
+- `project-plans/coderabbit/analysis/expected-failing-tests.json`: removed all P17-owned expected failures; manifest now has zero entries.
+- `project-plans/coderabbit/analysis/verify-expected-failing-tests.py`: accepts an empty manifest only when explicitly requested binaries pass.
+- `project-plans/coderabbit/.completed/P17`: this evidence file.
+
+## Manifest Diff/Summary
+
+Before P17, the expected-failing manifest contained seven `owner_phase=P17` workflow graph/dry-run failures. After P17, the manifest contains zero entries. The validator reported `entries=0`; the verifier proved both `e2e_workflow_integration` and `pr_followup_workflow_integration` pass as empty-expected binaries.
+
+## Semantic Verification Against Phase 17 Success Criteria
+
+- `create_pr` success routes to `capture_pr_identity`; no direct `create_pr -> log_completion` transition remains.
+- Complete post-PR step chain is present, including `post_pr_iteration_guard` and terminal `post_pr_failure_terminal`.
+- Routing matches the P17 contract: watcher success/fixable/fatal all route to `collect_ci_failures`; `collect_ci_failures` fatal routes terminal; remediation uses `pr_followup_remediation`; validation and post-PR test fixable routes loop to remediation with explicit high defensive `max_iterations=50`; push success loops to `capture_pr_identity`; marker success routes to `log_completion` and marker fatal routes terminal.
+- No post-PR transition routes to `generate_pr_description`, `create_pr`, `abandon_and_log`, or condition `abandon`.
+- Every post-PR step has `artifact_root`, no `artifact_dir`, unique monotonic `step_order_index`, and artifact/result paths under `{artifact_root}/`.
+- Production and valid fixture TOML are equivalent, and JSON fixture is regenerated.
+
+## Blocking Issues
+
+None.

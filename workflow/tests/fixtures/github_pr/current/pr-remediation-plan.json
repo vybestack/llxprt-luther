@@ -1,0 +1,63 @@
+{
+  "schema_version": 1,
+  "run_id": "run-20260430-p01-fixture",
+  "repository_owner": "luther",
+  "repository_name": "workflow",
+  "pr_number": 1910,
+  "head_ref": "luther/issue-1234",
+  "head_sha": "1111111111111111111111111111111111111111",
+  "base_ref": "main",
+  "base_sha": "0000000000000000000000000000000000000000",
+  "artifact_sequence": 7,
+  "write_sequence": 1,
+  "history_metadata": {
+    "canonical_path": "tests/fixtures/github_pr/current/pr-remediation-plan.json",
+    "history_path": "tests/fixtures/github_pr/history/pr-remediation-plan/7-1-build_remediation_plan.json",
+    "artifact_family": "pr-remediation-plan",
+    "is_canonical": true,
+    "history_written_at": "2026-04-30T00:15:00Z"
+  },
+  "step_order_index": 7,
+  "producer_step_id": "build_remediation_plan",
+  "semantic_state": "needs_remediation",
+  "failure_reason": "must_fix_items_present",
+  "failure_sequence": 3,
+  "produced_at": "2026-04-30T00:15:00Z",
+  "failure_details": {
+    "must_fix_count": 2
+  },
+  "plan_state": "needs_remediation",
+  "must_fix": [
+    {
+      "source_type": "ci_failure",
+      "source_id": "ci:check-1",
+      "stable_marker_key": null,
+      "reason": "Current-head CI check failed.",
+      "recommended_action": "Fix the failing integration test.",
+      "input_head_sha": "1111111111111111111111111111111111111111",
+      "source_artifact_sequence": 3
+    },
+    {
+      "source_type": "coderabbit_feedback",
+      "source_id": "cr-thread-1",
+      "stable_marker_key": "thread:PRRT_example:sha256:body",
+      "reason": "The requested regression covers behavior changed by this PR.",
+      "recommended_action": "Add the regression test requested by CodeRabbit.",
+      "input_head_sha": "1111111111111111111111111111111111111111",
+      "source_artifact_sequence": 6
+    }
+  ],
+  "mark_invalid": [],
+  "needs_user_judgment": [],
+  "pending_or_unknown": [],
+  "source_artifacts": [
+    {
+      "artifact_family": "ci-failures",
+      "artifact_sequence": 3
+    },
+    {
+      "artifact_family": "feedback-evaluations",
+      "artifact_sequence": 6
+    }
+  ]
+}

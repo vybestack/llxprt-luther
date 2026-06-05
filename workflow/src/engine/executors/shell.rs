@@ -66,11 +66,12 @@ impl StepExecutor for ShellExecutor {
 
         // --- Spawn command (pseudocode lines 020-035) ---
         // Ensure work_dir exists before running command
-        std::fs::create_dir_all(context.work_dir())
-            .map_err(|e| EngineError::StepExecutionError {
+        std::fs::create_dir_all(context.work_dir()).map_err(|e| {
+            EngineError::StepExecutionError {
                 step_id: "shell".to_string(),
                 message: format!("Failed to create work_dir: {e}"),
-            })?;
+            }
+        })?;
 
         let mut cmd = Command::new("sh");
         cmd.arg("-c").arg(&interpolated_command);
@@ -118,7 +119,10 @@ impl StepExecutor for ShellExecutor {
                 context.set("exit_code", "124");
                 context.set(
                     "diagnostic",
-                    &format!("shell command timed out after {} seconds", timeout.as_secs()),
+                    &format!(
+                        "shell command timed out after {} seconds",
+                        timeout.as_secs()
+                    ),
                 );
                 return Ok(StepOutcome::Fatal);
             }
@@ -129,8 +133,6 @@ impl StepExecutor for ShellExecutor {
                 });
             }
         };
-
-
 
         // Capture stdout and stderr into context (lines 037-046)
         let stdout_str = String::from_utf8_lossy(&output.stdout).to_string();
@@ -232,7 +234,6 @@ impl StepExecutor for ShellExecutor {
     }
 }
 
-
 enum WaitResult {
     Completed(Output),
     TimedOut { timeout: Duration },
@@ -246,7 +247,6 @@ fn wait_with_optional_timeout(
         let owned_child = take_child(child)?;
         return owned_child.wait_with_output().map(WaitResult::Completed);
     };
-
 
     let start = Instant::now();
     loop {
@@ -265,23 +265,21 @@ fn wait_with_optional_timeout(
 }
 
 fn take_child(child: &mut std::process::Child) -> std::io::Result<std::process::Child> {
-    let placeholder = Command::new("sh")
+    let replacement_child = Command::new("sh")
         .arg("-c")
         .arg("exit 0")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()?;
-    Ok(std::mem::replace(child, placeholder))
+    Ok(std::mem::replace(child, replacement_child))
 }
 
 fn terminate_process_tree(child: &mut std::process::Child) {
     #[cfg(unix)]
     {
         let pid = child.id().to_string();
-        let _ = Command::new("pkill")
-            .args(["-TERM", "-P", &pid])
-            .status();
+        let _ = Command::new("pkill").args(["-TERM", "-P", &pid]).status();
     }
 
     let _ = child.kill();
@@ -290,15 +288,12 @@ fn terminate_process_tree(child: &mut std::process::Child) {
     #[cfg(unix)]
     {
         let pid = child.id().to_string();
-        let _ = Command::new("pkill")
-            .args(["-KILL", "-P", &pid])
-            .status();
+        let _ = Command::new("pkill").args(["-KILL", "-P", &pid]).status();
     }
 
     let _ = child.kill();
     let _ = child.wait();
 }
-
 
 /// Extract a value from a JSON object using dot-path notation.
 /// Pseudocode lines 088-097

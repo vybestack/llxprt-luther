@@ -1,12 +1,11 @@
 //! Systemd service installation for Linux.
 //!
 /// @plan:PLAN-20260404-INITIAL-RUNTIME.P10
-
 use std::path::PathBuf;
 use std::process::Command;
 use thiserror::Error;
 
-use crate::service::spec::{ServiceSpec, generate_systemd_unit};
+use crate::service::spec::{generate_systemd_unit, ServiceSpec};
 
 /// Error type for systemd service operations.
 #[derive(Debug, Error)]
@@ -67,10 +66,10 @@ pub fn install_systemd_service(spec: &ServiceSpec) -> Result<PathBuf, SystemdErr
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let exit_code = output.status.code().unwrap_or(-1);
-        
+
         // Cleanup on failure
         let _ = std::fs::remove_file(&unit_path);
-        
+
         return Err(SystemdError::SystemctlError {
             message: format!("Failed to reload systemd: {}", stderr),
             exit_code,
@@ -86,7 +85,7 @@ pub fn install_systemd_service(spec: &ServiceSpec) -> Result<PathBuf, SystemdErr
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             let exit_code = output.status.code().unwrap_or(-1);
-            
+
             // Cleanup on failure - but leave the unit file for debugging
             return Err(SystemdError::SystemctlError {
                 message: format!("Failed to enable service: {}", stderr),
@@ -139,7 +138,7 @@ pub fn uninstall_systemd_service(spec: &ServiceSpec) -> Result<(), SystemdError>
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let exit_code = output.status.code().unwrap_or(-1);
-        
+
         return Err(SystemdError::SystemctlError {
             message: format!("Failed to reload systemd: {}", stderr),
             exit_code,
@@ -164,7 +163,7 @@ pub fn start_systemd_service(spec: &ServiceSpec) -> Result<(), SystemdError> {
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let exit_code = output.status.code().unwrap_or(-1);
-        
+
         return Err(SystemdError::SystemctlError {
             message: format!("Failed to start service: {}", stderr),
             exit_code,
@@ -189,7 +188,7 @@ pub fn stop_systemd_service(spec: &ServiceSpec) -> Result<(), SystemdError> {
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let exit_code = output.status.code().unwrap_or(-1);
-        
+
         return Err(SystemdError::SystemctlError {
             message: format!("Failed to stop service: {}", stderr),
             exit_code,
@@ -214,7 +213,7 @@ pub fn restart_systemd_service(spec: &ServiceSpec) -> Result<(), SystemdError> {
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let exit_code = output.status.code().unwrap_or(-1);
-        
+
         return Err(SystemdError::SystemctlError {
             message: format!("Failed to restart service: {}", stderr),
             exit_code,
@@ -276,7 +275,7 @@ pub fn enable_systemd_service(spec: &ServiceSpec) -> Result<(), SystemdError> {
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let exit_code = output.status.code().unwrap_or(-1);
-        
+
         return Err(SystemdError::SystemctlError {
             message: format!("Failed to enable service: {}", stderr),
             exit_code,
@@ -301,7 +300,7 @@ pub fn disable_systemd_service(spec: &ServiceSpec) -> Result<(), SystemdError> {
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let exit_code = output.status.code().unwrap_or(-1);
-        
+
         return Err(SystemdError::SystemctlError {
             message: format!("Failed to disable service: {}", stderr),
             exit_code,
@@ -336,10 +335,10 @@ mod tests {
     #[test]
     fn test_get_unit_path() {
         let spec = ServiceSpec::new("test", "/bin/test");
-        
+
         let path = get_unit_path(&spec);
         let path_str = path.to_string_lossy();
-        
+
         assert!(path_str.contains("test.service"));
         assert!(path_str.contains("systemd") || path_str.contains("~"));
     }
@@ -349,7 +348,7 @@ mod tests {
         // This test would need a temp directory to fully test
         // For now, just verify the function returns false for non-existent paths
         let spec = ServiceSpec::new("nonexistent-test-service-xyz", "/bin/nonexistent");
-        
+
         // Should be false since it doesn't exist
         assert!(!is_service_installed(&spec));
     }
@@ -360,7 +359,7 @@ mod tests {
         // On Linux with systemd, it should return true
         // On macOS, it should return false
         let available = is_systemd_available();
-        
+
         // Just verify it doesn't panic
         println!("Systemd available: {}", available);
     }

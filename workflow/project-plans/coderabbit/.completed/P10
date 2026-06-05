@@ -1,0 +1,175 @@
+VERDICT: PASS
+
+# Phase 10 Remediation Plan Aggregation Implementation Evidence
+
+Plan: PLAN-20260429-CODERABBIT-PR-FOLLOWUP
+Phase: P10
+Date: 2026-04-30
+
+## Files Created/Updated With Purpose
+
+- `src/engine/executors/pr_remediation.rs` — implemented `PrRemediationPlanExecutor` aggregation using binding-valid `pr`, `ci-failures`, `coderabbit-feedback`, and `feedback-evaluations` artifacts through `PrFollowupArtifactStore`; writes `pr-remediation-plan` and clean-plan invalid/out-of-scope `pending-feedback-marker-actions` artifacts.
+- `tests/github_pr_followup_executor_tests.rs` — added P10 artifact-backed remediation-plan tests for must-fix filtering, invalid/out-of-scope clean marker actions, retry idempotency, user-judgment fatal routing, and remediation-result status vocabulary guard.
+- `tests/pr_followup_marker_audit_tests.rs` — added P10 touched-file marker audit.
+- `project-plans/coderabbit/analysis/expected-failing-tests.json` — removed the P10-owned remediation-plan expected failing entry; remaining entries are later-phase failures.
+- `project-plans/coderabbit/.completed/P10` — this evidence file.
+- `project-plans/coderabbit/execution-tracker.md` — P10 row updated to PASS.
+
+## Manifest Diff/Summary
+
+- Removed owner_phase `P10` entry: `github_pr_followup_executor_tests::remediation_plan_routes_only_concrete_failures_and_valid_feedback_to_must_fix`.
+- Expected-failing manifest verifier now reports `verified_entries=14`.
+- Remaining owner phases: `P11,P12,P13,P14,P15,P17`; P10 owner entries: `0`.
+
+## Command Evidence
+
+Full combined verification output was captured at `/tmp/p10-verification.log`; targeted negative grep output was captured at `/tmp/p10-negative-greps.log`.
+
+```text
+$ test -f project-plans/coderabbit/.completed/P09
+exit=0
+
+$ grep -E "^## Verdict: PASS|^VERDICT: PASS" project-plans/coderabbit/.completed/P09A.md
+## Verdict: PASS
+VERDICT: PASS
+exit=0
+
+$ grep P09 project-plans/coderabbit/execution-tracker.md | grep PASS
+| P09 | PASS | 3 | 2026-04-30 | 2026-04-30 PASS after remediation attempt 3 | project-plans/coderabbit/.completed/P09, project-plans/coderabbit/.completed/P09A.md, src/engine/executors/feedback_eval.rs, src/engine/executors/pr_followup_artifacts.rs, tests/github_pr_followup_executor_tests.rs, tests/pr_followup_marker_audit_tests.rs |
+- Result: PASS after remediation attempt 3; updated evidence recorded in `project-plans/coderabbit/.completed/P09`.
+exit=0
+
+$ cargo test --test github_api_contract_tests -- github_api_contract
+running 2 tests
+test github_api_contract_negative_fixture_rejects_missing_contract ... ok
+test github_api_contract_validator_accepts_phase_02_contract ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.40s
+exit=0
+
+$ cargo run --bin github_api_contract_validator -- project-plans/coderabbit/analysis/github-api-contract.md tests/fixtures/github_api_contract
+github_api_contract_validator: PASS
+exit=0
+
+$ cargo test --test github_pr_followup_executor_tests -- remediation_plan
+running 3 tests
+test remediation_plan_routes_only_concrete_failures_and_valid_feedback_to_must_fix ... ok
+test remediation_plan_needs_user_judgment_returns_fatal ... ok
+test remediation_plan_invalid_out_of_scope_only_writes_pending_marker_actions_and_returns_success ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 49 filtered out; finished in 0.02s
+exit=0
+
+$ cargo test --test github_pr_followup_executor_tests -- remediation_plan_invalid_out_of_scope_only_writes_pending_marker_actions_and_returns_success
+running 1 test
+test remediation_plan_invalid_out_of_scope_only_writes_pending_marker_actions_and_returns_success ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 51 filtered out; finished in 0.01s
+exit=0
+
+$ cargo test --test github_pr_followup_executor_tests -- pending_marker_actions_invalid_out_of_scope_have_no_remediation_output_head_and_do_not_duplicate_on_retry
+running 1 test
+test pending_marker_actions_invalid_out_of_scope_have_no_remediation_output_head_and_do_not_duplicate_on_retry ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 51 filtered out; finished in 0.02s
+exit=0
+
+$ cargo test --test github_pr_followup_executor_tests -- remediation_plan_needs_user_judgment_returns_fatal
+running 1 test
+test remediation_plan_needs_user_judgment_returns_fatal ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 51 filtered out; finished in 0.01s
+exit=0
+
+$ cargo test --test github_pr_followup_executor_tests -- remediation_result_status_enum_rejects_needs_user_judgment
+running 1 test
+test remediation_result_status_enum_rejects_needs_user_judgment ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 51 filtered out; finished in 0.00s
+exit=0
+
+$ cargo test --test pr_followup_marker_audit_tests -- p10_markers_cover_all_touched_items
+running 1 test
+test p10_markers_cover_all_touched_items ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.00s
+exit=0
+
+$ python3 -m json.tool project-plans/coderabbit/analysis/expected-failing-tests.json >/tmp/p10-expected-failing.json
+exit=0
+
+$ python3 project-plans/coderabbit/analysis/verify-expected-failing-tests.py --manifest project-plans/coderabbit/analysis/expected-failing-tests.json
+expected_failing_tests_verifier: PASS
+verified_entries=14
+verified github_pr_followup_executor_tests::remediation_result_rejects_not_fixed_skipped_failed_before_push_success
+verified github_pr_followup_executor_tests::remediation_result_accepts_already_satisfied_and_not_reproduced_only_with_deterministic_evidence
+verified github_pr_followup_executor_tests::remediation_wrapper_writes_validator_readable_failure_artifact_for_timeout_or_spawn_failure
+verified github_pr_followup_executor_tests::run_post_pr_tests_fixable_failures_use_artifact_backed_retry_cap
+verified github_pr_followup_executor_tests::push_remediation_changes_records_safe_staging_remote_heads_and_verified_push_state
+verified github_pr_followup_executor_tests::marker_idempotency_avoids_duplicate_comments_using_local_and_remote_markers
+verified github_pr_followup_executor_tests::pending_marker_actions_carry_forward_across_head_change
+verified github_pr_followup_executor_tests::remediation_wrapper_shell_safety_passes_plan_and_result_paths_as_argv
+verified github_pr_followup_executor_tests::marker_comment_shell_safety_uses_body_files_or_graphql_variables
+verified github_pr_followup_executor_tests::post_pr_test_and_push_shell_safety_use_configured_argv_without_shell_injection
+verified e2e_workflow_integration::post_pr_no_direct_create_pr_to_log_completion
+verified e2e_workflow_integration::post_pr_failure_terminal_is_terminal_and_fatal_routes_target_it
+verified e2e_workflow_integration::post_pr_required_routing_contract_and_reachability_are_present
+verified e2e_workflow_integration::post_pr_steps_have_artifact_root_parameters
+exit=0
+
+$ python3 -c manifest owner summary
+owner_phases=P11,P12,P13,P14,P15,P17
+p10_owner_entries=0
+P11 github_pr_followup_executor_tests::remediation_result_rejects_not_fixed_skipped_failed_before_push_success -> assertion failure because remediation result validator stub returns fatal instead of fixable valid_but_unsuccessful
+P11 github_pr_followup_executor_tests::remediation_result_accepts_already_satisfied_and_not_reproduced_only_with_deterministic_evidence -> assertion failure because remediation result validator stub does not accept deterministic evidence success cases
+P12 github_pr_followup_executor_tests::remediation_wrapper_writes_validator_readable_failure_artifact_for_timeout_or_spawn_failure -> assertion failure because remediation wrapper stub returns fatal instead of validator-readable success route
+P13 github_pr_followup_executor_tests::run_post_pr_tests_fixable_failures_use_artifact_backed_retry_cap -> assertion failure because post-PR test executor stub returns fatal instead of fixable retry artifact state
+P14 github_pr_followup_executor_tests::push_remediation_changes_records_safe_staging_remote_heads_and_verified_push_state -> assertion failure because push remediation executor stub returns fatal instead of verified push success
+P15 github_pr_followup_executor_tests::marker_idempotency_avoids_duplicate_comments_using_local_and_remote_markers -> assertion failure because marker executor stub returns fatal instead of idempotent success
+P15 github_pr_followup_executor_tests::pending_marker_actions_carry_forward_across_head_change -> assertion failure because marker executor stub does not carry forward pending actions
+P12 github_pr_followup_executor_tests::remediation_wrapper_shell_safety_passes_plan_and_result_paths_as_argv -> assertion failure because remediation wrapper stub returns fatal instead of safe argv success route
+P15 github_pr_followup_executor_tests::marker_comment_shell_safety_uses_body_files_or_graphql_variables -> assertion failure because marker executor stub returns fatal instead of body-file or GraphQL-variable comment creation
+P13 github_pr_followup_executor_tests::post_pr_test_and_push_shell_safety_use_configured_argv_without_shell_injection -> assertion failure because post-PR test/push executor stubs return fatal instead of safe configured argv success
+P17 e2e_workflow_integration::post_pr_no_direct_create_pr_to_log_completion -> assertion failure against current TOML because create_pr still routes directly to log_completion
+P17 e2e_workflow_integration::post_pr_failure_terminal_is_terminal_and_fatal_routes_target_it -> assertion failure against current TOML because post-PR fatal transitions are not present
+P17 e2e_workflow_integration::post_pr_required_routing_contract_and_reachability_are_present -> assertion failure against current TOML because post-PR routing contract is absent
+P17 e2e_workflow_integration::post_pr_steps_have_artifact_root_parameters -> assertion failure against current TOML because post-PR steps and artifact_root parameters are absent
+exit=0
+
+$ cargo build --all-targets
+Finished `dev` profile [unoptimized + debuginfo] target(s) in 7.19s
+exit=0
+
+$ cargo test --lib
+running 67 tests
+...
+test result: ok. 67 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.12s
+exit=0
+
+$ grep -R -n -E "@pseudocode lines X-Y|@pseudocode TBD|@pseudocode placeholder|TODO API|json_path TBD|fixture TBD|assertion TBD|todo!|unimplemented!" src/engine/executors/pr_remediation.rs tests/github_pr_followup_executor_tests.rs tests/pr_followup_marker_audit_tests.rs project-plans/coderabbit/analysis/expected-failing-tests.json; test $? -eq 1
+exit=0
+
+$ grep -R -n -E "PLACEHOLDER|not yet implemented|todo!|unimplemented!" src/engine/executors/pr_remediation.rs tests/github_pr_followup_executor_tests.rs tests/pr_followup_marker_audit_tests.rs; test $? -eq 1
+exit=0
+
+$ grep -n -E "TBD|placeholder|todo!|unimplemented!" src/engine/executors/pr_remediation.rs; test $? -eq 1
+exit=0
+```
+
+Cargo emitted existing warnings from unrelated files during build/test commands; all required commands exited 0.
+
+## Semantic Verification Against Phase 10 Success Criteria
+
+- `PrRemediationPlanExecutor` reads only binding-valid `pr`, `ci-failures`, `coderabbit-feedback`, and `feedback-evaluations` artifacts through `PrFollowupArtifactStore` before aggregating the plan.
+- Concrete CI failures and accepted `decision=valid` feedback become `must_fix`; accepted `invalid` and `out_of_scope` feedback become `mark_invalid`.
+- Accepted `needs_user_judgment`, CI `pending_or_unknown`, non-ready feedback state, incomplete evaluation state, unevaluated items, and budget-exhausted items become `needs_user_judgment`/`pending_or_unknown` evidence and route `StepOutcome::Fatal` with `plan_state=blocked_needs_user_judgment`.
+- `pending_or_unknown` evidence is never placed in `must_fix`.
+- Semantic `clean` returns `StepOutcome::Success`, `needs_remediation` returns `StepOutcome::Fixable`, and `blocked_needs_user_judgment`/`fatal` return `StepOutcome::Fatal`; no custom outcomes or `Abandon` are introduced.
+- Clean invalid/out-of-scope-only plans write durable `pending-feedback-marker-actions` through `PrFollowupArtifactStore` with canonical/history metadata, deterministic idempotency keys, action kinds, reason/evidence, and `remediation_output_head=none`/null output head; retry/resume does not duplicate actions.
+- Schema/vocabulary guard test prevents `needs_user_judgment` from becoming a remediation result status while preserving it as an evaluation decision and remediation-plan state.
+- P10-owned expected-failing manifest entry was removed and the manifest verifier confirms only later-phase concrete failures remain.
+- P10 marker audit passes for all touched P10 production/test files.
+
+## Blocking Issues
+
+None.

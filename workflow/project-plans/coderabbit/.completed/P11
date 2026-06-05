@@ -1,0 +1,90 @@
+VERDICT: PASS
+
+# Phase 11 Remediation Attempt 2 Evidence
+
+Plan: PLAN-20260429-CODERABBIT-PR-FOLLOWUP
+Phase: P11
+
+## Fixes Implemented
+
+- Added `changed` to the canonical remediation result status enum and successful status set in `src/engine/executors/pr_remediation.rs`.
+- Strengthened remediation result validation so success requires exact complete coverage of current `pr-remediation-plan.json` `must_fix` items: every plan item must have exactly one result bound to the same current head, source identity, marker key, and body hash; missing, duplicate, stale, and extra result items are rejected before success.
+- Added durable pending marker action creation/update for fixed/changed valid CodeRabbit feedback after validator success and before push. Pending actions include original feedback identity, stable marker key, body hash, source head, remediation input/output head fields, action/evidence fields, and idempotency keys; no remote comment/resolution behavior was implemented.
+- Added meaningful exact-filter tests for `remediation_validator_status_enum` and `remediation_validator_same_head_no_change_attempt_cap_reaches_post_pr_failure_terminal_failure_not_abandoned`, plus coverage for exact plan coverage and fixed-feedback pending marker action artifacts.
+- Ran `cargo fmt` and confirmed `cargo fmt --check` passes.
+
+## Verification Commands
+
+```text
+$ cargo test --test github_pr_followup_executor_tests -- remediation_result --nocapture
+running 3 tests
+test remediation_result_status_enum_rejects_needs_user_judgment ... ok
+test remediation_result_rejects_not_fixed_skipped_failed_before_push_success ... ok
+test remediation_result_accepts_already_satisfied_and_not_reproduced_only_with_deterministic_evidence ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 53 filtered out
+```
+
+```text
+$ cargo test --test github_pr_followup_executor_tests -- remediation_validator --nocapture
+running 5 tests
+test remediation_validator_same_head_no_change_attempt_cap_reaches_post_pr_failure_terminal_failure_not_abandoned ... ok
+test remediation_validator_writes_pending_marker_action_for_fixed_valid_feedback_before_push ... ok
+test remediation_validator_status_enum ... ok
+test remediation_validator_requires_complete_exact_plan_coverage_before_success ... ok
+test remediation_validator_rejects_unknown_status_outside_canonical_enum ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 51 filtered out
+```
+
+```text
+$ cargo test --test github_pr_followup_executor_tests -- remediation_validator_status_enum
+running 1 test
+test remediation_validator_status_enum ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 55 filtered out
+```
+
+```text
+$ cargo test --test github_pr_followup_executor_tests -- remediation_validator_rejects_unknown_status_outside_canonical_enum
+running 1 test
+test remediation_validator_rejects_unknown_status_outside_canonical_enum ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 55 filtered out
+```
+
+```text
+$ cargo test --test github_pr_followup_executor_tests -- remediation_validator_same_head_no_change_attempt_cap_reaches_post_pr_failure_terminal_failure_not_abandoned
+running 1 test
+test remediation_validator_same_head_no_change_attempt_cap_reaches_post_pr_failure_terminal_failure_not_abandoned ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 55 filtered out
+```
+
+```text
+$ cargo test --test pr_followup_marker_audit_tests -- p11_markers_cover_all_touched_items
+running 1 test
+test p11_markers_cover_all_touched_items ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out
+```
+
+```text
+$ bash -c '! grep -R "@pseudocode lines X-Y\|@pseudocode TBD\|@pseudocode placeholder\|TODO API\|json_path TBD\|fixture TBD\|assertion TBD" src/engine tests project-plans/coderabbit/analysis'
+exit=0 (no forbidden placeholders found)
+```
+
+```text
+$ python3 project-plans/coderabbit/analysis/verify-expected-failing-tests.py --manifest project-plans/coderabbit/analysis/expected-failing-tests.json
+expected_failing_tests_verifier: PASS
+verified_entries=12
+```
+
+```text
+$ cargo fmt --check
+exit=0
+```
+
+## Verdict
+
+PASS

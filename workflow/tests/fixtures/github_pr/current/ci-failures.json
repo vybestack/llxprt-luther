@@ -1,0 +1,60 @@
+{
+  "schema_version": 1,
+  "run_id": "run-20260430-p01-fixture",
+  "repository_owner": "luther",
+  "repository_name": "workflow",
+  "pr_number": 1910,
+  "head_ref": "luther/issue-1234",
+  "head_sha": "1111111111111111111111111111111111111111",
+  "base_ref": "main",
+  "base_sha": "0000000000000000000000000000000000000000",
+  "artifact_sequence": 3,
+  "write_sequence": 1,
+  "history_metadata": {
+    "canonical_path": "tests/fixtures/github_pr/current/ci-failures.json",
+    "history_path": "tests/fixtures/github_pr/history/ci-failures/3-1-collect_ci_failures.json",
+    "artifact_family": "ci-failures",
+    "is_canonical": true,
+    "history_written_at": "2026-04-30T00:06:00Z"
+  },
+  "step_order_index": 4,
+  "producer_step_id": "collect_ci_failures",
+  "semantic_state": "collected",
+  "failure_reason": "current_head_failures_collected",
+  "failure_sequence": 2,
+  "produced_at": "2026-04-30T00:06:00Z",
+  "failure_details": {
+    "failures_count": 1,
+    "pending_or_unknown_count": 0
+  },
+  "collection_state": "collected",
+  "watcher_fatal_source": null,
+  "fatal_source": null,
+  "source_check_status_artifact_sequence": 2,
+  "failures": [
+    {
+      "failure_id": "ci:check-1",
+      "check_id": "check-1",
+      "check_name": "ci/test",
+      "state": "failed",
+      "conclusion": "failure",
+      "url": "https://github.com/luther/workflow/actions/runs/10",
+      "run_id": "10",
+      "job_id": "100",
+      "log_status": "available",
+      "log_excerpt": "assertion failed in integration test",
+      "log_excerpt_path": "tests/fixtures/github_pr/logs/ci-test-excerpt.txt",
+      "raw_log_path": "tests/fixtures/github_pr/logs/ci-test.log",
+      "collection_error": null
+    }
+  ],
+  "pending_or_unknown": [],
+  "log_artifacts": [
+    {
+      "path": "tests/fixtures/github_pr/logs/ci-test.log",
+      "excerpt_path": "tests/fixtures/github_pr/logs/ci-test-excerpt.txt",
+      "bytes_captured": 35,
+      "truncated": false
+    }
+  ]
+}

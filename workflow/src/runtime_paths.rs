@@ -4,7 +4,6 @@
 //! using the `directories` crate for cross-platform support.
 ///
 /// @plan:PLAN-20260404-INITIAL-RUNTIME.P10
-
 use directories::ProjectDirs;
 use std::path::PathBuf;
 
@@ -46,7 +45,11 @@ pub fn get_config_dir() -> PathBuf {
 /// PathBuf to the run-specific directory
 pub fn get_run_dir(run_id: &str) -> PathBuf {
     let mut path = project_dirs()
-        .map(|d| d.runtime_dir().map(|r| r.to_path_buf()).unwrap_or_else(|| d.data_dir().join("run")))
+        .map(|d| {
+            d.runtime_dir()
+                .map(|r| r.to_path_buf())
+                .unwrap_or_else(|| d.data_dir().join("run"))
+        })
         .unwrap_or_else(|| PathBuf::from(".luther-workflow/run"));
     path.push(run_id);
     path
@@ -71,14 +74,18 @@ mod tests {
     fn get_data_dir_returns_valid_path() {
         let path = get_data_dir();
         assert!(!path.as_os_str().is_empty());
-        assert!(path.to_string_lossy().contains("luther") || path.to_string_lossy().contains(".luther"));
+        assert!(
+            path.to_string_lossy().contains("luther") || path.to_string_lossy().contains(".luther")
+        );
     }
 
     #[test]
     fn get_config_dir_returns_valid_path() {
         let path = get_config_dir();
         assert!(!path.as_os_str().is_empty());
-        assert!(path.to_string_lossy().contains("luther") || path.to_string_lossy().contains(".luther"));
+        assert!(
+            path.to_string_lossy().contains("luther") || path.to_string_lossy().contains(".luther")
+        );
     }
 
     #[test]
@@ -92,6 +99,9 @@ mod tests {
     fn get_artifacts_root_returns_valid_path() {
         let path = get_artifacts_root();
         assert!(!path.as_os_str().is_empty());
-        assert!(path.to_string_lossy().contains("artifacts") || path.to_string_lossy().contains(".luther"));
+        assert!(
+            path.to_string_lossy().contains("artifacts")
+                || path.to_string_lossy().contains(".luther")
+        );
     }
 }

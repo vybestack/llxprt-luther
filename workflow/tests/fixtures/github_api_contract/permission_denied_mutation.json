@@ -1,0 +1,17 @@
+{
+  "errors": [
+    {
+      "type": "FORBIDDEN",
+      "message": "Could not resolve to a node with the global id of PRRT_thread_1",
+      "path": [
+        "resolveReviewThread"
+      ]
+    }
+  ],
+  "metadata": {
+    "operation": "resolveReviewThread",
+    "required_scope_or_permission": "Pull requests write or repository maintain",
+    "account_login": "acoliver",
+    "token_type": "classic_oauth"
+  }
+}

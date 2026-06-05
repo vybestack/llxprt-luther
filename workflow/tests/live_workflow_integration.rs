@@ -5,11 +5,10 @@
 /// and require:
 /// - gh CLI authenticated
 /// - Network access to GitHub
-/// - Run with: cargo test --test live_workflow_integration -- --ignored
+/// - Run with: cargo test --test `live_workflow_integration` -- --ignored
 ///
 /// CRITICAL: All repo-specific values are loaded from the TOML config fixture.
 /// NO hardcoded repo names, org names, or profile names in this file.
-
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -28,7 +27,7 @@ fn load_config() -> luther_workflow::workflow::schema::WorkflowConfig {
         .expect("Failed to load workflow config from TOML fixture")
 }
 
-/// Get target_repo from config.
+/// Get `target_repo` from config.
 fn get_target_repo() -> String {
     let config = load_config();
     config
@@ -38,7 +37,7 @@ fn get_target_repo() -> String {
         .expect("target_repo not found in config")
 }
 
-/// Get base_branch from config (e.g., "main").
+/// Get `base_branch` from config (e.g., "main").
 fn get_base_branch() -> String {
     let config = load_config();
     config
@@ -60,11 +59,13 @@ fn get_assignee() -> String {
 
 /// Run a shell command and return stdout.
 fn run_command(cmd: &mut Command) -> Result<String, String> {
-    let output = cmd.output().map_err(|e| format!("Failed to execute: {}", e))?;
+    let output = cmd
+        .output()
+        .map_err(|e| format!("Failed to execute: {e}"))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("Command failed: {}", stderr));
+        return Err(format!("Command failed: {stderr}"));
     }
 
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
@@ -72,19 +73,21 @@ fn run_command(cmd: &mut Command) -> Result<String, String> {
 
 /// Get any valid issue number from the repo.
 fn get_any_issue_number(target_repo: &str) -> Result<String, String> {
-    let output = run_command(
-        Command::new("gh")
-            .args([
-                "issue", "list",
-                "--repo", target_repo,
-                "--state", "open",
-                "--json", "number",
-                "--limit", "1",
-            ])
-    )?;
+    let output = run_command(Command::new("gh").args([
+        "issue",
+        "list",
+        "--repo",
+        target_repo,
+        "--state",
+        "open",
+        "--json",
+        "number",
+        "--limit",
+        "1",
+    ]))?;
 
-    let parsed: Vec<Value> = serde_json::from_str(&output)
-        .map_err(|e| format!("Failed to parse JSON: {}", e))?;
+    let parsed: Vec<Value> =
+        serde_json::from_str(&output).map_err(|e| format!("Failed to parse JSON: {e}"))?;
 
     if parsed.is_empty() {
         return Err("No open issues found".to_string());
@@ -101,7 +104,7 @@ fn get_any_issue_number(target_repo: &str) -> Result<String, String> {
 // ============================================================================
 
 /// Test 1: Can list issues from repo
-/// GIVEN: The target_repo loaded from TOML config
+/// GIVEN: The `target_repo` loaded from TOML config
 /// WHEN: We run the gh issue list command
 /// THEN: We get valid JSON with at least one issue
 /// @plan:PLAN-20260408-LLXPRT-FIRST.P18
@@ -111,28 +114,27 @@ fn get_any_issue_number(target_repo: &str) -> Result<String, String> {
 fn test_can_list_issues_from_repo() {
     let target_repo = get_target_repo();
 
-    let output = run_command(
-        Command::new("gh")
-            .args([
-                "issue", "list",
-                "--repo", &target_repo,
-                "--state", "open",
-                "--json", "number,title",
-                "--limit", "5",
-            ])
-    ).expect("Failed to list issues");
+    let output = run_command(Command::new("gh").args([
+        "issue",
+        "list",
+        "--repo",
+        &target_repo,
+        "--state",
+        "open",
+        "--json",
+        "number,title",
+        "--limit",
+        "5",
+    ]))
+    .expect("Failed to list issues");
 
-    let parsed: Vec<Value> = serde_json::from_str(&output)
-        .expect("Output should be valid JSON");
+    let parsed: Vec<Value> = serde_json::from_str(&output).expect("Output should be valid JSON");
 
     assert!(!parsed.is_empty(), "Expected at least one issue");
 
     // Verify structure: each entry has number and title
     for issue in &parsed {
-        assert!(
-            issue["number"].is_number(),
-            "Issue should have a number"
-        );
+        assert!(issue["number"].is_number(), "Issue should have a number");
         let title = issue["title"].as_str();
         assert!(
             title.is_some() && !title.unwrap().is_empty(),
@@ -146,8 +148,8 @@ fn test_can_list_issues_from_repo() {
 // ============================================================================
 
 /// Test 2: Can list milestones from repo
-/// GIVEN: The target_repo loaded from TOML config
-/// WHEN: We run the gh api repos/{target_repo}/milestones command
+/// GIVEN: The `target_repo` loaded from TOML config
+/// WHEN: We run the gh api `repos/{target_repo}/milestones` command
 /// THEN: We get at least 1 milestone
 /// @plan:PLAN-20260408-LLXPRT-FIRST.P18
 /// @requirement:REQ-LF-ISSUE-001
@@ -156,20 +158,18 @@ fn test_can_list_issues_from_repo() {
 fn test_can_list_milestones_from_repo() {
     let target_repo = get_target_repo();
 
-    let output = run_command(
-        Command::new("gh")
-            .args([
-                "api",
-                &format!("repos/{}/milestones", target_repo),
-                "--jq", ".[].title",
-            ])
-    ).expect("Failed to list milestones");
+    let output = run_command(Command::new("gh").args([
+        "api",
+        &format!("repos/{target_repo}/milestones"),
+        "--jq",
+        ".[].title",
+    ]))
+    .expect("Failed to list milestones");
 
     let lines: Vec<&str> = output.lines().collect();
     assert!(
         !lines.is_empty(),
-        "Expected at least one milestone, got: {}",
-        output
+        "Expected at least one milestone, got: {output}"
     );
 }
 
@@ -178,7 +178,7 @@ fn test_can_list_milestones_from_repo() {
 // ============================================================================
 
 /// Test 3: Can fetch issue details
-/// GIVEN: The target_repo and a valid issue number
+/// GIVEN: The `target_repo` and a valid issue number
 /// WHEN: We run gh issue view
 /// THEN: JSON has title, body, comments array, url
 /// @plan:PLAN-20260408-LLXPRT-FIRST.P18
@@ -187,20 +187,20 @@ fn test_can_list_milestones_from_repo() {
 #[test]
 fn test_can_fetch_issue_details() {
     let target_repo = get_target_repo();
-    let issue_number = get_any_issue_number(&target_repo)
-        .expect("Failed to get any issue number");
+    let issue_number = get_any_issue_number(&target_repo).expect("Failed to get any issue number");
 
-    let output = run_command(
-        Command::new("gh")
-            .args([
-                "issue", "view", &issue_number,
-                "--repo", &target_repo,
-                "--json", "title,body,comments,url",
-            ])
-    ).expect("Failed to fetch issue details");
+    let output = run_command(Command::new("gh").args([
+        "issue",
+        "view",
+        &issue_number,
+        "--repo",
+        &target_repo,
+        "--json",
+        "title,body,comments,url",
+    ]))
+    .expect("Failed to fetch issue details");
 
-    let parsed: Value = serde_json::from_str(&output)
-        .expect("Output should be valid JSON");
+    let parsed: Value = serde_json::from_str(&output).expect("Output should be valid JSON");
 
     // Verify title is non-empty string
     let title = parsed["title"].as_str();
@@ -216,17 +216,11 @@ fn test_can_fetch_issue_details() {
     );
 
     // Verify comments is an array
-    assert!(
-        parsed["comments"].is_array(),
-        "Comments should be an array"
-    );
+    assert!(parsed["comments"].is_array(), "Comments should be an array");
 
     // Verify url contains "github.com"
     let url = parsed["url"].as_str().expect("URL should be a string");
-    assert!(
-        url.contains("github.com"),
-        "URL should contain github.com"
-    );
+    assert!(url.contains("github.com"), "URL should contain github.com");
 }
 
 // ============================================================================
@@ -234,8 +228,8 @@ fn test_can_fetch_issue_details() {
 // ============================================================================
 
 /// Test 4: Fetch writes issue files
-/// GIVEN: A temp directory as work_dir with .luther/ created
-/// WHEN: We run the fetch_issue commands from TOML
+/// GIVEN: A temp directory as `work_dir` with .luther/ created
+/// WHEN: We run the `fetch_issue` commands from TOML
 /// THEN: .luther/issue.md and .luther/issue-raw.json exist and are non-empty
 /// @plan:PLAN-20260408-LLXPRT-FIRST.P18
 /// @requirement:REQ-LF-FETCH-002,REQ-LF-DATA-002
@@ -243,8 +237,7 @@ fn test_can_fetch_issue_details() {
 #[test]
 fn test_fetch_writes_issue_files() {
     let target_repo = get_target_repo();
-    let issue_number = get_any_issue_number(&target_repo)
-        .expect("Failed to get any issue number");
+    let issue_number = get_any_issue_number(&target_repo).expect("Failed to get any issue number");
 
     // Create temp directory
     let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
@@ -261,8 +254,7 @@ fn test_fetch_writes_issue_files() {
         target_repo,
         raw_json_path.display()
     );
-    run_command(Command::new("sh").args(["-c", &cmd]))
-        .expect("Failed to fetch issue raw JSON");
+    run_command(Command::new("sh").args(["-c", &cmd])).expect("Failed to fetch issue raw JSON");
 
     // 2. Write issue body to file
     let issue_md_path = luther_dir.join("issue.md");
@@ -271,8 +263,7 @@ fn test_fetch_writes_issue_files() {
         raw_json_path.display(),
         issue_md_path.display()
     );
-    run_command(Command::new("sh").args(["-c", &cmd]))
-        .expect("Failed to write issue.md");
+    run_command(Command::new("sh").args(["-c", &cmd])).expect("Failed to write issue.md");
 
     // 3. Write comments
     let comments_md_path = luther_dir.join("comments.md");
@@ -281,32 +272,24 @@ fn test_fetch_writes_issue_files() {
         raw_json_path.display(),
         comments_md_path.display()
     );
-    run_command(Command::new("sh").args(["-c", &cmd]))
-        .expect("Failed to write comments.md");
+    run_command(Command::new("sh").args(["-c", &cmd])).expect("Failed to write comments.md");
 
     // Assert files exist and are non-empty
+    assert!(raw_json_path.exists(), "issue-raw.json should exist");
+    let raw_content =
+        std::fs::read_to_string(&raw_json_path).expect("Failed to read issue-raw.json");
     assert!(
-        raw_json_path.exists(),
-        "issue-raw.json should exist"
+        !raw_content.is_empty(),
+        "issue-raw.json should be non-empty"
     );
-    let raw_content = std::fs::read_to_string(&raw_json_path)
-        .expect("Failed to read issue-raw.json");
-    assert!(!raw_content.is_empty(), "issue-raw.json should be non-empty");
 
     // Verify it's valid JSON
-    let _: Value = serde_json::from_str(&raw_content)
-        .expect("issue-raw.json should be valid JSON");
+    let _: Value = serde_json::from_str(&raw_content).expect("issue-raw.json should be valid JSON");
 
-    assert!(
-        issue_md_path.exists(),
-        "issue.md should exist"
-    );
+    assert!(issue_md_path.exists(), "issue.md should exist");
     // issue.md can be empty if issue body is empty
 
-    assert!(
-        comments_md_path.exists(),
-        "comments.md should exist"
-    );
+    assert!(comments_md_path.exists(), "comments.md should exist");
     // comments.md can be empty if no comments
 
     // Cleanup temp dir
@@ -317,9 +300,9 @@ fn test_fetch_writes_issue_files() {
 // ============================================================================
 
 /// Test 5: Workspace setup creates clone
-/// GIVEN: A temp directory, work_dir as subpath that doesn't exist
-/// WHEN: We run the setup_workspace shell commands
-/// THEN: work_dir/.git/ exists, work_dir/.luther/ exists, correct branch
+/// GIVEN: A temp directory, `work_dir` as subpath that doesn't exist
+/// WHEN: We run the `setup_workspace` shell commands
+/// THEN: `work_dir/.git`/ exists, `work_dir/.luther`/ exists, correct branch
 /// @plan:PLAN-20260408-LLXPRT-FIRST.P18
 /// @requirement:REQ-LF-WS-001,REQ-LF-WS-002,REQ-LF-WS-004
 #[ignore]
@@ -341,8 +324,7 @@ fn test_workspace_setup_creates_clone() {
         target_repo,
         work_dir.display()
     );
-    run_command(Command::new("sh").args(["-c", &cmd]))
-        .expect("Failed to clone repo");
+    run_command(Command::new("sh").args(["-c", &cmd])).expect("Failed to clone repo");
 
     // 2. Fetch, checkout base branch, reset, create issue branch
     let cmd = format!(
@@ -352,8 +334,7 @@ fn test_workspace_setup_creates_clone() {
         base_branch,
         issue_number
     );
-    run_command(Command::new("sh").args(["-c", &cmd]))
-        .expect("Failed to setup workspace");
+    run_command(Command::new("sh").args(["-c", &cmd])).expect("Failed to setup workspace");
 
     // 3. Create .luther directory
     let luther_dir = work_dir.join(".luther");
@@ -373,15 +354,15 @@ fn test_workspace_setup_creates_clone() {
     );
 
     // Assert current branch is issue{issue_number}
-    let branch_output = run_command(
-        Command::new("git")
-            .args([
-                "-C", &work_dir.display().to_string(),
-                "branch", "--show-current",
-            ])
-    ).expect("Failed to get current branch");
+    let branch_output = run_command(Command::new("git").args([
+        "-C",
+        &work_dir.display().to_string(),
+        "branch",
+        "--show-current",
+    ]))
+    .expect("Failed to get current branch");
 
-    let expected_branch = format!("issue{}", issue_number);
+    let expected_branch = format!("issue{issue_number}");
     assert_eq!(
         branch_output.trim(),
         expected_branch,
@@ -421,8 +402,7 @@ fn test_workspace_setup_reuses_existing_clone() {
         target_repo,
         work_dir.display()
     );
-    run_command(Command::new("sh").args(["-c", &cmd]))
-        .expect("Failed on first clone");
+    run_command(Command::new("sh").args(["-c", &cmd])).expect("Failed on first clone");
 
     let cmd = format!(
         "cd {} && git fetch origin && git checkout {} && git reset --hard origin/{} && git checkout -b issue{} || git checkout issue{}",
@@ -432,8 +412,7 @@ fn test_workspace_setup_reuses_existing_clone() {
         issue_number,
         issue_number
     );
-    run_command(Command::new("sh").args(["-c", &cmd]))
-        .expect("Failed on first setup");
+    run_command(Command::new("sh").args(["-c", &cmd])).expect("Failed on first setup");
 
     let luther_dir = work_dir.join(".luther");
     std::fs::create_dir_all(&luther_dir).expect("Failed to create .luther dir");
@@ -448,7 +427,11 @@ fn test_workspace_setup_reuses_existing_clone() {
         issue_number
     );
     let result = run_command(Command::new("sh").args(["-c", &cmd]));
-    assert!(result.is_ok(), "Second run should succeed: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "Second run should succeed: {:?}",
+        result.err()
+    );
 
     // Assert .git/ still exists
     let git_dir = work_dir.join(".git");
@@ -458,19 +441,18 @@ fn test_workspace_setup_reuses_existing_clone() {
     );
 
     // Assert branch exists (could be issue12346 or issue12346-retry)
-    let branches_output = run_command(
-        Command::new("git")
-            .args([
-                "-C", &work_dir.display().to_string(),
-                "branch", "--list",
-            ])
-    ).expect("Failed to list branches");
+    let branches_output = run_command(Command::new("git").args([
+        "-C",
+        &work_dir.display().to_string(),
+        "branch",
+        "--list",
+    ]))
+    .expect("Failed to list branches");
 
     let branches = branches_output;
     assert!(
-        branches.contains(&format!("issue{}", issue_number)),
-        "Expected branch to contain issue{}",
-        issue_number
+        branches.contains(&format!("issue{issue_number}")),
+        "Expected branch to contain issue{issue_number}"
     );
 
     // Cleanup: temp_dir dropped automatically

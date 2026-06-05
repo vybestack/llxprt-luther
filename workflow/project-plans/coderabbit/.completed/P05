@@ -1,0 +1,320 @@
+VERDICT: PASS
+
+# Phase 05 Dedicated Artifact Store Implementation Evidence
+
+Plan: PLAN-20260429-CODERABBIT-PR-FOLLOWUP
+Phase: P05
+Completed: 2026-04-30
+
+## Files Created/Updated
+
+- `src/engine/executors/pr_followup_artifacts.rs`: replaced P03 shell behavior with the dedicated PR follow-through artifact store implementation. The store owns canonical/current paths, immutable history paths, same-directory temp files, atomic writes, JSON serialization validation, binding validation, recovery by scanning accepted same-run history/current artifacts, global `artifact_sequence`, per-family `write_sequence`, and global `failure_sequence` allocation.
+- `tests/github_pr_followup_executor_tests.rs`: upgraded artifact-store TDD tests to P05 passing behavior, including exact interleaved-family test `artifact_store_allocates_global_artifact_and_failure_sequences_with_per_family_write_sequences_for_interleaved_families`, canonical/history writes, failure sequence allocation, canonical-only recovery, history-only recovery, and binding/history metadata validation.
+- `tests/pr_followup_marker_audit_tests.rs`: added `p05_markers_cover_all_touched_items` marker audit for P05-touched Rust files.
+- `project-plans/coderabbit/analysis/expected-failing-tests.json`: removed P05 artifact-store expected-failing entries. Remaining 27 entries are later-phase P06-P17 expected failures.
+- `project-plans/coderabbit/execution-tracker.md`: recorded P05 PASS and advanced current phase to P06.
+- `project-plans/coderabbit/.completed/P05`: this evidence file.
+
+## Manifest Diff/Summary
+
+- Removed artifact store expected-failing entries owned by P05:
+  - `artifact_store_allocates_global_artifact_and_failure_sequences_with_per_family_write_sequences_for_interleaved_families`
+  - `artifact_store_recovers_sequence_allocation_from_history_when_canonical_current_is_missing`
+- Remaining manifest entries: 27.
+- Remaining owner phases: P06 and later only.
+- Artifact-store group remaining entry is P06-owned `post_pr_iteration_guard_preserves_same_head_and_exhausts_fourth_head_change_to_terminal`, which is a later executor behavior, not dedicated artifact-store behavior.
+
+Command:
+```bash
+python3 -m json.tool project-plans/coderabbit/analysis/expected-failing-tests.json >/tmp/p05-json.txt && python3 project-plans/coderabbit/analysis/verify-expected-failing-tests.py --manifest project-plans/coderabbit/analysis/expected-failing-tests.json
+```
+Output:
+```text
+expected_failing_tests_verifier: PASS
+verified_entries=27
+verified github_pr_followup_executor_tests::pr_identity_capture_writes_pr_json_and_rejects_missing_number_url_or_head_sha
+verified github_pr_followup_executor_tests::post_pr_iteration_guard_preserves_same_head_and_exhausts_fourth_head_change_to_terminal
+verified github_pr_followup_executor_tests::pr_checks_non_fail_fast_continues_after_early_failure_while_pending_remains
+verified github_pr_followup_executor_tests::pr_checks_page2_data_affects_status_and_stale_head_checks_cannot_create_success
+verified github_pr_followup_executor_tests::ci_failure_passed_checks_writes_empty_artifact
+verified github_pr_followup_executor_tests::ci_failure_page2_jobs_and_logs_affect_failure_artifacts
+verified github_pr_followup_executor_tests::coderabbit_readiness_requires_two_identical_ready_observations_and_filters_bot_noise
+verified github_pr_followup_executor_tests::coderabbit_feedback_page2_threads_comments_and_rest_fallback_are_normalized
+verified github_pr_followup_executor_tests::feedback_evaluation_single_item_request_rejects_batch_wrong_hash_unknown_decision_and_missing_reason
+verified github_pr_followup_executor_tests::feedback_evaluation_reuses_unchanged_accepted_state_without_reinvoking_adapter
+verified github_pr_followup_executor_tests::remediation_plan_routes_only_concrete_ci_failures_and_valid_feedback_to_must_fix
+verified github_pr_followup_executor_tests::remediation_result_rejects_not_fixed_skipped_failed_before_push_success
+verified github_pr_followup_executor_tests::remediation_result_accepts_already_satisfied_and_not_reproduced_only_with_deterministic_evidence
+verified github_pr_followup_executor_tests::remediation_wrapper_writes_validator_readable_failure_artifact_for_timeout_or_spawn_failure
+verified github_pr_followup_executor_tests::run_post_pr_tests_fixable_failures_use_artifact_backed_retry_cap
+verified github_pr_followup_executor_tests::push_remediation_changes_records_safe_staging_remote_heads_and_verified_push_state
+verified github_pr_followup_executor_tests::marker_idempotency_avoids_duplicate_comments_using_local_and_remote_markers
+verified github_pr_followup_executor_tests::pending_marker_actions_carry_forward_across_head_change
+verified github_pr_followup_executor_tests::github_pr_command_runner_shell_safety_uses_argv_not_raw_interpolated_text
+verified github_pr_followup_executor_tests::feedback_evaluator_command_shell_safety_writes_raw_llm_text_to_bounded_artifacts
+verified github_pr_followup_executor_tests::remediation_wrapper_shell_safety_passes_plan_and_result_paths_as_argv
+verified github_pr_followup_executor_tests::marker_comment_shell_safety_uses_body_files_or_graphql_variables
+verified github_pr_followup_executor_tests::post_pr_test_and_push_shell_safety_use_configured_argv_without_shell_injection
+verified e2e_workflow_integration::post_pr_no_direct_create_pr_to_log_completion
+verified e2e_workflow_integration::post_pr_failure_terminal_is_terminal_and_fatal_routes_target_it
+verified e2e_workflow_integration::post_pr_required_routing_contract_and_reachability_are_present
+verified e2e_workflow_integration::post_pr_steps_have_artifact_root_parameters
+```
+
+Command:
+```bash
+grep -c '"test_name"' project-plans/coderabbit/analysis/expected-failing-tests.json; grep -n 'owner_phase.*P05\|artifact_store_allocates\|artifact_store_recovers' project-plans/coderabbit/analysis/expected-failing-tests.json; echo artifact_manifest_grep_exit=$?
+```
+Output:
+```text
+27
+artifact_manifest_grep_exit=1
+```
+
+## Semantic Verification Against Phase 05 Success Criteria
+
+- Dedicated store ownership: `PrFollowupArtifactStore`/`ArtifactWriter` now provide the only PR follow-through artifact writing and sequence APIs. Later executor phases can call `write_json_artifact`, `next_sequence_for_step`, `next_failure_sequence`, `read_current_json`, and validation helpers rather than duplicating writer behavior.
+- Canonical/current and immutable history paths: implemented under `<artifact_root>/pr-followup/current/.../<family>.json` and `<artifact_root>/pr-followup/history/.../<family>/<artifact_sequence>-<write_sequence>-<producer_step_id>.json`.
+- Atomic writes and temp placement: `atomic_write` creates the parent directory, writes `.filename.uuid.tmp` in the destination directory, then renames into place for both history and current files.
+- JSON serialization validation: payloads must serialize to JSON objects; common binding, sequence, producer, step order, and `history_metadata` fields are injected and validated.
+- Recovery: allocation scans accepted same-run history snapshots and uses canonical current only for families with no history snapshots, covering canonical-only and history-only loss while avoiding double-counting the canonical/history pair for the same write.
+- Sequence semantics: tests prove global artifact sequences across interleaved families, per-family write sequences, and global failure sequence allocation.
+- Binding validation: helper rejects missing/mismatched required binding fields and artifacts missing required `history_metadata`.
+- Scope guard: no PR identity/check watching, CI collection, CodeRabbit collection/evaluation, remediation, marker, workflow TOML, or later executor behavior was implemented in this phase.
+
+## Exact Commands Run and Outputs
+
+### Prerequisite checks
+
+Command:
+```bash
+test -f project-plans/coderabbit/.completed/P04; echo exit=$?; grep -E "^## Verdict: PASS|^VERDICT: PASS" project-plans/coderabbit/.completed/P04A.md; echo exit=$?; grep -E "^\| P04 \| PASS \|" project-plans/coderabbit/execution-tracker.md; echo exit=$?
+```
+Output:
+```text
+exit=0
+## Verdict: PASS
+VERDICT: PASS
+## Verdict: PASS
+VERDICT: PASS
+## Verdict: PASS
+VERDICT: PASS
+## Verdict: PASS
+VERDICT: PASS
+## Verdict: PASS
+VERDICT: PASS
+## Verdict: PASS
+VERDICT: PASS
+## Verdict: PASS
+VERDICT: PASS
+## Verdict: PASS
+VERDICT: PASS
+## Verdict: PASS
+VERDICT: PASS
+## Verdict: PASS
+VERDICT: PASS
+## Verdict: PASS
+VERDICT: PASS
+## Verdict: PASS
+VERDICT: PASS
+## Verdict: PASS
+VERDICT: PASS
+## Verdict: PASS
+VERDICT: PASS
+## Verdict: PASS
+VERDICT: PASS
+## Verdict: PASS
+VERDICT: PASS
+exit=0
+| P04 | PASS | 2 | 2026-04-30 | 2026-04-30 P04A PASS | project-plans/coderabbit/.completed/P04, project-plans/coderabbit/.completed/P04A.md, tests/github_pr_followup_executor_tests.rs, tests/e2e_workflow_integration.rs, project-plans/coderabbit/analysis/expected-failing-tests.json |
+exit=0
+```
+
+Additional prerequisite guard:
+```bash
+test -f project-plans/coderabbit/.completed/P04; echo P04_exists_exit=$?; test -f project-plans/coderabbit/.completed/P04A.md; echo P04A_exists_exit=$?; grep -E "^## Verdict: PASS|^VERDICT: PASS" project-plans/coderabbit/.completed/P04A.md; echo P04A_pass_grep_exit=$?; if grep -Ei "equivocation-word-pattern" project-plans/coderabbit/.completed/P04A.md; then echo P04A_equivocation_language=FOUND; exit 1; else echo P04A_equivocation_language=NONE; fi; grep -E "^\| P04 \| PASS \|" project-plans/coderabbit/execution-tracker.md; echo tracker_grep_exit=$?
+```
+Output:
+```text
+P04_exists_exit=0
+P04A_exists_exit=0
+## Verdict: PASS
+VERDICT: PASS
+## Verdict: PASS
+VERDICT: PASS
+## Verdict: PASS
+VERDICT: PASS
+## Verdict: PASS
+VERDICT: PASS
+## Verdict: PASS
+VERDICT: PASS
+## Verdict: PASS
+VERDICT: PASS
+## Verdict: PASS
+VERDICT: PASS
+## Verdict: PASS
+VERDICT: PASS
+## Verdict: PASS
+VERDICT: PASS
+## Verdict: PASS
+VERDICT: PASS
+## Verdict: PASS
+VERDICT: PASS
+## Verdict: PASS
+VERDICT: PASS
+## Verdict: PASS
+VERDICT: PASS
+## Verdict: PASS
+VERDICT: PASS
+## Verdict: PASS
+VERDICT: PASS
+## Verdict: PASS
+VERDICT: PASS
+P04A_pass_grep_exit=0
+P04A_equivocation_language=NONE
+| P04 | PASS | 2 | 2026-04-30 | 2026-04-30 P04A PASS | project-plans/coderabbit/.completed/P04, project-plans/coderabbit/.completed/P04A.md, tests/github_pr_followup_executor_tests.rs, tests/e2e_workflow_integration.rs, project-plans/coderabbit/analysis/expected-failing-tests.json |
+tracker_grep_exit=0
+```
+
+### GitHub API contract tests and validator
+
+Command:
+```bash
+cargo test --test github_api_contract_tests -- github_api_contract && cargo run --bin github_api_contract_validator -- project-plans/coderabbit/analysis/github-api-contract.md tests/fixtures/github_api_contract
+```
+Output excerpt from combined required command:
+```text
+running 2 tests
+test github_api_contract_negative_fixture_rejects_missing_contract ... ok
+test github_api_contract_validator_accepts_phase_02_contract ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.28s
+
+github_api_contract_validator: PASS
+```
+
+### Artifact store tests
+
+Command:
+```bash
+cargo test --test github_pr_followup_executor_tests -- artifact_store
+```
+Output:
+```text
+running 3 tests
+test artifact_store_recovers_sequence_allocation_from_history_when_canonical_current_is_missing ... ok
+test artifact_store_recovers_sequence_allocation_from_current_when_history_is_missing ... ok
+test artifact_store_allocates_global_artifact_and_failure_sequences_with_per_family_write_sequences_for_interleaved_families ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 31 filtered out; finished in 0.01s
+```
+
+Command:
+```bash
+cargo test --test github_pr_followup_executor_tests -- artifact_store_allocates_global_artifact_and_failure_sequences_with_per_family_write_sequences_for_interleaved_families
+```
+Output:
+```text
+running 1 test
+test artifact_store_allocates_global_artifact_and_failure_sequences_with_per_family_write_sequences_for_interleaved_families ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 33 filtered out; finished in 0.01s
+```
+
+### Marker audit
+
+Command:
+```bash
+cargo test --test pr_followup_marker_audit_tests -- p05_markers_cover_all_touched_items
+```
+Output:
+```text
+running 1 test
+test p05_markers_cover_all_touched_items ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+```
+
+### Build and library tests
+
+Command:
+```bash
+cargo build --all-targets && cargo test --lib
+```
+Output excerpt:
+```text
+Finished `dev` profile [unoptimized + debuginfo] target(s) in 5.61s
+
+running 67 tests
+[67 tests listed ok]
+test result: ok. 67 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.12s
+```
+
+### Negative greps
+
+Command:
+```bash
+grep -R "@pseudocode lines X-Y\|@pseudocode TBD\|@pseudocode placeholder\|TODO API\|json_path TBD\|fixture TBD\|assertion TBD" src/engine/executors/pr_followup_artifacts.rs tests project-plans/coderabbit/analysis; echo placeholder_grep_exit=$?; grep -R "todo!\|unimplemented!" src/engine/executors/pr_followup_artifacts.rs; echo todo_grep_exit=$?
+```
+Output:
+```text
+placeholder_grep_exit=1
+todo_grep_exit=1
+```
+
+## Blocking Issues
+
+None.
+
+## Remediation Attempt 1 Evidence (2026-04-30)
+
+Remediation target: P05 verification blocker that artifact recovery accepted decreasing/non-monotonic sequence data affecting consumed artifact families.
+
+### Fix Summary
+
+- `src/engine/executors/pr_followup_artifacts.rs`: recovery now validates contiguous monotonic recovered sequences before allocating the next value. It rejects missing/lower-gap data for global `artifact_sequence`, per-family `write_sequence`, and global `failure_sequence`, while preserving canonical-only/history-only loss recovery for valid monotonic data.
+- `tests/github_pr_followup_executor_tests.rs`: strengthened artifact-store behavior coverage for rejected malformed sequence recovery:
+  - `artifact_store_rejects_non_monotonic_global_artifact_sequence_for_consumed_family`
+  - `artifact_store_rejects_duplicate_global_artifact_sequence_for_consumed_family`
+  - `artifact_store_rejects_non_monotonic_per_family_write_sequence_for_consumed_family`
+  - `artifact_store_rejects_unbound_current_run_sequence_data_for_consumed_family`
+  - `artifact_store_rejects_non_monotonic_failure_sequence_when_allocating_failure_sequence`
+
+### Remediation Verification Commands
+
+Command:
+```bash
+cargo test --test github_pr_followup_executor_tests -- artifact_store && cargo test --test github_pr_followup_executor_tests -- artifact_store_allocates_global_artifact_and_failure_sequences_with_per_family_write_sequences_for_interleaved_families && cargo test --test pr_followup_marker_audit_tests -- p05_markers_cover_all_touched_items && python3 -m json.tool project-plans/coderabbit/analysis/expected-failing-tests.json >/tmp/p05-remediation-json.txt && python3 project-plans/coderabbit/analysis/verify-expected-failing-tests.py --manifest project-plans/coderabbit/analysis/expected-failing-tests.json && cargo build --all-targets && cargo test --lib && grep -n '"owner_phase": "P05"\|artifact_store_allocates_global_artifact_and_failure_sequences_with_per_family_write_sequences_for_interleaved_families\|artifact_store_recovers_sequence_allocation_from_history_when_canonical_current_is_missing\|artifact_store_recovers_sequence_allocation_from_current_when_history_is_missing' project-plans/coderabbit/analysis/expected-failing-tests.json; test $? -eq 1
+```
+
+Result: PASS (exit 0).
+
+Key output:
+```text
+running 8 tests
+test artifact_store_rejects_unbound_current_run_sequence_data_for_consumed_family ... ok
+test artifact_store_recovers_sequence_allocation_from_current_when_history_is_missing ... ok
+test artifact_store_recovers_sequence_allocation_from_history_when_canonical_current_is_missing ... ok
+test artifact_store_rejects_non_monotonic_per_family_write_sequence_for_consumed_family ... ok
+test artifact_store_rejects_duplicate_global_artifact_sequence_for_consumed_family ... ok
+test artifact_store_rejects_non_monotonic_global_artifact_sequence_for_consumed_family ... ok
+test artifact_store_rejects_non_monotonic_failure_sequence_when_allocating_failure_sequence ... ok
+test artifact_store_allocates_global_artifact_and_failure_sequences_with_per_family_write_sequences_for_interleaved_families ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 31 filtered out
+
+running 1 test
+test artifact_store_allocates_global_artifact_and_failure_sequences_with_per_family_write_sequences_for_interleaved_families ... ok
+
+running 1 test
+test p05_markers_cover_all_touched_items ... ok
+
+expected_failing_tests_verifier: PASS
+verified_entries=27
+
+cargo build --all-targets: PASS
+cargo test --lib: PASS, 67 passed
+negative P05 artifact-store manifest grep: PASS (no P05 artifact-store expected-failing entries)
+```
+
+## Verdict: PASS

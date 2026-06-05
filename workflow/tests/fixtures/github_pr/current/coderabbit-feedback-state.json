@@ -1,0 +1,42 @@
+{
+  "schema_version": 1,
+  "run_id": "run-20260430-p01-fixture",
+  "repository_owner": "luther",
+  "repository_name": "workflow",
+  "pr_number": 1910,
+  "head_ref": "luther/issue-1234",
+  "head_sha": "1111111111111111111111111111111111111111",
+  "base_ref": "main",
+  "base_sha": "0000000000000000000000000000000000000000",
+  "artifact_sequence": 5,
+  "write_sequence": 1,
+  "history_metadata": {
+    "canonical_path": "tests/fixtures/github_pr/current/coderabbit-feedback-state.json",
+    "history_path": "tests/fixtures/github_pr/history/coderabbit-feedback-state/5-1-collect_coderabbit_feedback.json",
+    "artifact_family": "coderabbit-feedback-state",
+    "is_canonical": true,
+    "history_written_at": "2026-04-30T00:12:01Z"
+  },
+  "step_order_index": 5,
+  "producer_step_id": "collect_coderabbit_feedback",
+  "state_index_hash": "sha256:state-index",
+  "state_entries": [
+    {
+      "item_id": "cr-thread-1",
+      "stable_marker_key": "thread:PRRT_example:sha256:body",
+      "body_hash": "sha256:body",
+      "head_sha": "1111111111111111111111111111111111111111",
+      "first_seen_at": "2026-04-30T00:07:00Z",
+      "last_seen_at": "2026-04-30T00:12:00Z",
+      "evaluation_status": "unevaluated",
+      "accepted_evaluation": null,
+      "remediation_status": "not_started",
+      "marker_status": "not_marked",
+      "resolution_status": "unresolved",
+      "superseded": false,
+      "stale": false,
+      "reuse_eligible": false
+    }
+  ],
+  "superseded_entries": []
+}

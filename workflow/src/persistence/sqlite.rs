@@ -1,6 +1,5 @@
 /// @plan:PLAN-20260404-INITIAL-RUNTIME.P05
 /// SQLite persistence layer for run metadata.
-
 use std::path::Path;
 
 use rusqlite::{params, Connection, Result as SqliteResult};
@@ -87,9 +86,9 @@ impl SqliteStore {
             "SELECT run_id, workflow_type_id, config_id, status, created_at, updated_at, current_step
              FROM runs WHERE run_id = ?1"
         )?;
-        
+
         let mut rows = stmt.query(params![run_id])?;
-        
+
         if let Some(row) = rows.next()? {
             let status_str: String = row.get(3)?;
             let status = status_str.parse().map_err(|e: String| {
@@ -99,7 +98,7 @@ impl SqliteStore {
                     Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, e)),
                 )
             })?;
-            
+
             Ok(Some(RunMetadata {
                 run_id: row.get(0)?,
                 workflow_type_id: row.get(1)?,
@@ -109,10 +108,16 @@ impl SqliteStore {
                     rusqlite::Error::FromSqlConversionFailure(
                         4,
                         rusqlite::types::Type::Text,
-                        Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, "Invalid datetime")),
+                        Box::new(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            "Invalid datetime",
+                        )),
                     )
                 })?,
-                updated_at: row.get::<_, Option<String>>(5)?.map(|s| s.parse().ok()).flatten(),
+                updated_at: row
+                    .get::<_, Option<String>>(5)?
+                    .map(|s| s.parse().ok())
+                    .flatten(),
                 current_step: row.get(6)?,
             }))
         } else {
@@ -127,7 +132,7 @@ impl SqliteStore {
             "SELECT run_id, workflow_type_id, config_id, status, created_at, updated_at, current_step
              FROM runs ORDER BY created_at DESC"
         )?;
-        
+
         let rows = stmt.query_map([], |row| {
             let status_str: String = row.get(3)?;
             let status = status_str.parse().map_err(|e: String| {
@@ -137,7 +142,7 @@ impl SqliteStore {
                     Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, e)),
                 )
             })?;
-            
+
             Ok(RunMetadata {
                 run_id: row.get(0)?,
                 workflow_type_id: row.get(1)?,
@@ -147,14 +152,20 @@ impl SqliteStore {
                     rusqlite::Error::FromSqlConversionFailure(
                         4,
                         rusqlite::types::Type::Text,
-                        Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, "Invalid datetime")),
+                        Box::new(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            "Invalid datetime",
+                        )),
                     )
                 })?,
-                updated_at: row.get::<_, Option<String>>(5)?.map(|s| s.parse().ok()).flatten(),
+                updated_at: row
+                    .get::<_, Option<String>>(5)?
+                    .map(|s| s.parse().ok())
+                    .flatten(),
                 current_step: row.get(6)?,
             })
         })?;
-        
+
         rows.collect()
     }
 

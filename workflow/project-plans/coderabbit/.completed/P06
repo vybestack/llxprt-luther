@@ -1,0 +1,126 @@
+VERDICT: PASS
+
+# Phase 06 PR Identity and Check Watch Implementation Evidence
+
+Plan: PLAN-20260429-CODERABBIT-PR-FOLLOWUP
+Phase: P06
+Completed: 2026-04-30
+Remediation attempt: 1 of 3
+
+## Remediation Summary
+
+Fixed all P06A blockers:
+
+- `pending_timeout` and `unknown` current-head check evidence now route to `StepOutcome::Fatal` even when concrete failed checks are also present.
+- Concrete failed checks remain in `pr-check-status.json` (`checks` and `terminal_counts.failed`) for later CI failure collection; they no longer make pending/unknown watcher states fixable.
+- Registered/default `GithubPrChecksExecutor` no longer injects `max_attempts = 1`; default behavior uses `max_attempts = 12`, `poll_interval_seconds = 300`, first poll immediate, 11 sleeps, and no t=60 request/final sleep.
+- Added meaningful `check_classification_*` tests selected by `cargo test --test github_pr_followup_executor_tests -- check_classification`.
+- Strengthened PR-check watch tests to assert observation count, sleep count/duration, timestamp cadence/no t=60 argv, and artifact write sequence after every poll.
+- Strengthened GitHub PR command-runner shell-safety coverage to exercise the `GithubPrCommandRunner` seam directly and prove malicious API text is not interpolated into argv/shell strings.
+
+## Files Updated With Purpose
+
+- `src/engine/executors/github_pr.rs`: removed default executor one-attempt override and fixed outcome precedence so only passed succeeds, concrete failed-only is fixable, and pending/unknown/fatal states are fatal.
+- `tests/github_pr_followup_executor_tests.rs`: added recording clock and scripted GitHub runner seams; strengthened PR-check, classification, and shell-safety tests.
+- `project-plans/coderabbit/.completed/P06`: updated remediation evidence.
+- `project-plans/coderabbit/execution-tracker.md`: updated P06 remediation status.
+
+## Manifest Status
+
+No P06-owned expected-failing tests remain. Manifest verification still reports 22 later-phase expected failures.
+
+## Exact Verification Evidence
+
+Full verification output captured at `/tmp/p06-remediation-verification-output.txt`.
+
+Required command results:
+
+```text
+$ test -f project-plans/coderabbit/.completed/P05
+exit=0
+
+$ grep -E "^## Verdict: PASS|^VERDICT: PASS" project-plans/coderabbit/.completed/P05A.md
+## Verdict: PASS
+VERDICT: PASS
+...
+exit=0
+
+$ grep "P05" project-plans/coderabbit/execution-tracker.md
+| P05 | PASS | 2 | 2026-04-30 | 2026-04-30 remediation attempt 1 PASS after P05A FAIL | ... |
+exit=0
+
+$ cargo test --test github_api_contract_tests -- github_api_contract
+running 2 tests
+test github_api_contract_negative_fixture_rejects_missing_contract ... ok
+test github_api_contract_validator_accepts_phase_02_contract ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.39s
+exit=0
+
+$ cargo run --bin github_api_contract_validator -- project-plans/coderabbit/analysis/github-api-contract.md tests/fixtures/github_api_contract
+github_api_contract_validator: PASS
+exit=0
+
+$ cargo test --test github_pr_followup_executor_tests -- pr_identity
+running 1 test
+test pr_identity_capture_writes_pr_json_and_rejects_missing_number_url_or_head_sha ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 40 filtered out; finished in 0.01s
+exit=0
+
+$ cargo test --test github_pr_followup_executor_tests -- pr_checks
+running 3 tests
+test pr_checks_page2_data_affects_status_and_stale_head_checks_cannot_create_success ... ok
+test pr_checks_non_fail_fast_continues_after_early_failure_while_pending_remains ... ok
+test pr_checks_default_watch_budget_is_twelve_observations_without_real_sleep ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 38 filtered out; finished in 0.19s
+exit=0
+
+$ cargo test --test github_pr_followup_executor_tests -- check_classification
+running 2 tests
+test check_classification_pending_timeout_with_failed_checks_is_fatal_and_preserves_failures ... ok
+test check_classification_unknown_current_head_evidence_is_fatal ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 39 filtered out; finished in 0.11s
+exit=0
+
+$ cargo test --test github_pr_followup_executor_tests -- github_pr_command_runner_shell_safety
+running 1 test
+test github_pr_command_runner_shell_safety_uses_argv_not_raw_interpolated_text ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 40 filtered out; finished in 0.01s
+exit=0
+
+$ cargo test --test pr_followup_marker_audit_tests -- p06_markers_cover_all_touched_items
+running 1 test
+test p06_markers_cover_all_touched_items ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
+exit=0
+
+$ python3 -m json.tool project-plans/coderabbit/analysis/expected-failing-tests.json >/tmp/p06-json.txt && python3 project-plans/coderabbit/analysis/verify-expected-failing-tests.py --manifest project-plans/coderabbit/analysis/expected-failing-tests.json && grep -n "owner_phase.*P06" project-plans/coderabbit/analysis/expected-failing-tests.json; test $? -eq 1
+expected_failing_tests_verifier: PASS
+verified_entries=22
+exit=0
+
+$ cargo build --all-targets
+Finished `dev` profile [unoptimized + debuginfo] target(s) in 13.93s
+exit=0
+
+$ cargo test --lib
+running 67 tests
+...
+test result: ok. 67 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.20s
+exit=0
+
+$ grep -R "@pseudocode lines X-Y\|@pseudocode TBD\|@pseudocode placeholder\|TODO API\|json_path TBD\|fixture TBD\|assertion TBD" src/engine/executors/github_pr.rs tests project-plans/coderabbit/analysis; echo exit=$?
+exit=1
+
+$ grep -R "todo!\|unimplemented!" src/engine/executors/github_pr.rs src/engine/executors/mod.rs tests/github_pr_followup_executor_tests.rs tests/pr_followup_marker_audit_tests.rs; echo exit=$?
+exit=1
+```
+
+## Blocking Issues
+
+None.

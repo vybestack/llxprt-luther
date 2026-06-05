@@ -1,0 +1,23 @@
+{
+  "data": {
+    "repository": {
+      "pullRequest": {
+        "number": 1910,
+        "url": "https://github.com/example/workflow/pull/1910",
+        "id": "PR_kwDOExample",
+        "headRefName": "luther/issue-1234",
+        "headRefOid": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "baseRefName": "main",
+        "baseRefOid": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "state": "OPEN",
+        "isDraft": false,
+        "headRepository": {
+          "owner": {
+            "login": "example"
+          },
+          "name": "workflow"
+        }
+      }
+    }
+  }
+}

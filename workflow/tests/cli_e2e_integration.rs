@@ -3,20 +3,18 @@
 ///
 /// These tests verify the behavioral requirements for CLI commands,
 /// including run, status, help, and error handling.
-
 use std::process::Command;
 
 /// Helper to get the path to the luther-workflow binary.
 /// @plan:PLAN-20260404-INITIAL-RUNTIME.P11
 fn luther_workflow_bin() -> Command {
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_luther-workflow"));
-    cmd
+    Command::new(env!("CARGO_BIN_EXE_luther-workflow"))
 }
 
 /// Test: CLI run command exists and is recognized.
 /// GIVEN: the luther-workflow binary
 /// WHEN: running with "run" subcommand
-/// THEN: command is recognized (may fail with stub/todo! but exists)
+/// THEN: command is recognized (may fail with incomplete implementation but exists)
 /// @plan:PLAN-20260404-INITIAL-RUNTIME.P11
 /// @requirement:REQ-EARS-QUAL-001
 #[test]
@@ -29,24 +27,23 @@ fn test_cli_run_command_exists() {
     let output = cmd.output().expect("Failed to execute run command");
 
     // THEN: command should exist (exit code 0 or have "run" in output/error)
-    // In RED phase, it may fail with todo!() but should not be "unknown command"
+    // In RED phase, it may fail with an incomplete implementation but should not be "unknown command"
     let stderr = String::from_utf8_lossy(&output.stderr);
     let stdout = String::from_utf8_lossy(&output.stdout);
-    
+
     // The command should be recognized - either succeed or fail in a known way
     // (not "Unknown command" which indicates the command doesn't exist)
     let is_recognized = !stderr.contains("Unknown command") && !stdout.contains("Unknown command");
     assert!(
         is_recognized,
-        "run command should exist and be recognized. stdout: {}, stderr: {}",
-        stdout, stderr
+        "run command should exist and be recognized. stdout: {stdout}, stderr: {stderr}"
     );
 }
 
 /// Test: CLI status command exists and is recognized.
 /// GIVEN: the luther-workflow binary
 /// WHEN: running with "status" subcommand
-/// THEN: command is recognized (may fail with stub/todo! but exists)
+/// THEN: command is recognized (may fail with incomplete implementation but exists)
 /// @plan:PLAN-20260404-INITIAL-RUNTIME.P11
 /// @requirement:REQ-EARS-QUAL-001
 #[test]
@@ -59,17 +56,16 @@ fn test_cli_status_command_exists() {
     let output = cmd.output().expect("Failed to execute status command");
 
     // THEN: command should exist (exit code 0 or have "status" in output/error)
-    // In RED phase, it may fail with todo!() but should not be "unknown command"
+    // In RED phase, it may fail with an incomplete implementation but should not be "unknown command"
     let stderr = String::from_utf8_lossy(&output.stderr);
     let stdout = String::from_utf8_lossy(&output.stdout);
-    
+
     // The command should be recognized - either succeed or fail in a known way
     // (not "Unknown command" which indicates the command doesn't exist)
     let is_recognized = !stderr.contains("Unknown command") && !stdout.contains("Unknown command");
     assert!(
         is_recognized,
-        "status command should exist and be recognized. stdout: {}, stderr: {}",
-        stdout, stderr
+        "status command should exist and be recognized. stdout: {stdout}, stderr: {stderr}"
     );
 }
 
@@ -91,24 +87,61 @@ fn test_cli_help_flag() {
     // THEN: should display usage information
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
-    
+
     // Check that help output contains expected elements
-    let has_usage = stdout.contains("Usage:") || stdout.contains("usage:") || 
-                    stderr.contains("Usage:") || stderr.contains("usage:");
-    let has_commands = stdout.contains("Commands:") || stdout.contains("commands:") ||
-                       stderr.contains("Commands:") || stderr.contains("commands:");
-    
+    let has_usage = stdout.contains("Usage:")
+        || stdout.contains("usage:")
+        || stderr.contains("Usage:")
+        || stderr.contains("usage:");
+    let has_commands = stdout.contains("Commands:")
+        || stdout.contains("commands:")
+        || stderr.contains("Commands:")
+        || stderr.contains("commands:");
+
     assert!(
         output.status.success() || has_usage,
-        "Help should display usage information. stdout: {}, stderr: {}",
-        stdout, stderr
+        "Help should display usage information. stdout: {stdout}, stderr: {stderr}"
     );
-    
+
     // Should list available commands
     assert!(
-        has_commands || stdout.contains("luther-workflow") || stdout.contains("run") || stdout.contains("status"),
-        "Help should list available commands. stdout: {}",
-        stdout
+        has_commands
+            || stdout.contains("luther-workflow")
+            || stdout.contains("run")
+            || stdout.contains("status"),
+        "Help should list available commands. stdout: {stdout}"
+    );
+}
+
+/// Test: CLI run supports explicit run id for durable resume.
+/// @requirement:REQ-EARS-ENG-004
+#[test]
+fn test_cli_run_accepts_explicit_run_id() {
+    let mut cmd = luther_workflow_bin();
+    cmd.args([
+        "run",
+        "--workflow-type",
+        "hello-world-v1",
+        "--config",
+        "hello-world-config",
+        "--config-dir",
+        "tests/fixtures",
+        "--run-id",
+        "cli-explicit-run-id",
+        "--dry-run",
+    ]);
+
+    let output = cmd.output().expect("Failed to execute run command");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        output.status.success(),
+        "dry-run with explicit run id should succeed. stdout: {stdout}, stderr: {stderr}"
+    );
+    assert!(
+        stdout.contains("Starting workflow run: cli-explicit-run-id"),
+        "CLI should use the provided run id for resumable runs. stdout: {stdout}"
     );
 }
 
@@ -130,20 +163,21 @@ fn test_cli_invalid_command_error() {
     // THEN: should return non-zero exit code
     let stderr = String::from_utf8_lossy(&output.stderr);
     let stdout = String::from_utf8_lossy(&output.stdout);
-    
+
     assert!(
         !output.status.success(),
-        "Invalid command should return non-zero exit code. stdout: {}, stderr: {}",
-        stdout, stderr
+        "Invalid command should return non-zero exit code. stdout: {stdout}, stderr: {stderr}"
     );
-    
+
     // AND: should show error or unknown command message
-    let has_error = stderr.contains("Unknown command") || stderr.contains("error") ||
-                    stderr.contains("Error") || stderr.contains("invalid") ||
-                    stderr.contains("unrecognized") || stdout.contains("Unknown command");
+    let has_error = stderr.contains("Unknown command")
+        || stderr.contains("error")
+        || stderr.contains("Error")
+        || stderr.contains("invalid")
+        || stderr.contains("unrecognized")
+        || stdout.contains("Unknown command");
     assert!(
         has_error,
-        "Invalid command should show error message. stdout: {}, stderr: {}",
-        stdout, stderr
+        "Invalid command should show error message. stdout: {stdout}, stderr: {stderr}"
     );
 }

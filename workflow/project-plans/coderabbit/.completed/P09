@@ -1,0 +1,124 @@
+VERDICT: PASS
+
+# Phase 09 Feedback Evaluation Runner Implementation Evidence
+
+Plan: PLAN-20260429-CODERABBIT-PR-FOLLOWUP
+Phase: P09
+Remediation attempt: 3
+
+## Remediation Fixes
+
+- Made the evaluator retry budget strictly internal to `feedback_eval.rs`: `MAX_ATTEMPTS_PER_ITEM` is fixed at 3 and `evaluate_coderabbit_feedback` no longer reads `max_attempts_per_item` from step params/config.
+- Removed the default P09 test helper's `max_attempts_per_item` parameter so normal coverage does not rely on configurable retry caps.
+- Added `feedback_evaluation_ignores_max_attempts_param_override`, which injects `max_attempts_per_item = 4`, returns three mismatched responses followed by a valid fourth response, and proves the fourth response is never requested.
+- The new test also proves malformed/mismatched output produces exactly 3 rejected attempts before fatal budget exhaustion and that the audit artifact records `max_attempts_per_item: 3` plus exhausted `attempts: 3`.
+
+## Files Updated With Purpose
+
+- `src/engine/executors/feedback_eval.rs` — changed retry budget selection from params/config lookup to fixed internal `MAX_ATTEMPTS_PER_ITEM`.
+- `tests/github_pr_followup_executor_tests.rs` — removed default retry param from P09 helper and added explicit override-ignored/budget-exhaustion test.
+- `project-plans/coderabbit/.completed/P09` — updated remediation attempt 3 evidence.
+- `project-plans/coderabbit/execution-tracker.md` — updated P09 status/remediation log.
+
+## Command Evidence
+
+### cargo test --test github_pr_followup_executor_tests -- feedback_evaluation
+
+```text
+$ cargo test --test github_pr_followup_executor_tests -- feedback_evaluation
+running 5 tests
+test feedback_evaluation_rejects_unbound_reusable_state_as_fatal ... ok
+test feedback_evaluation_reuses_unchanged_accepted_state_without_reinvoking_adapter ... ok
+test feedback_evaluation_rejects_extra_identity_fields ... ok
+test feedback_evaluation_ignores_max_attempts_param_override ... ok
+test feedback_evaluation_single_item_request_rejects_batch_wrong_hash_unknown_decision_and_missing_reason ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 43 filtered out; finished in 0.02s
+exit=0
+```
+
+### cargo test --test github_pr_followup_executor_tests -- feedback_evaluator_command_shell_safety
+
+```text
+$ cargo test --test github_pr_followup_executor_tests -- feedback_evaluator_command_shell_safety
+running 1 test
+test feedback_evaluator_command_shell_safety_writes_raw_llm_text_to_bounded_artifacts ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 47 filtered out; finished in 0.01s
+exit=0
+```
+
+### cargo test --test pr_followup_marker_audit_tests -- p09_markers_cover_all_touched_items
+
+```text
+$ cargo test --test pr_followup_marker_audit_tests -- p09_markers_cover_all_touched_items
+running 1 test
+test p09_markers_cover_all_touched_items ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.00s
+exit=0
+```
+
+### cargo build --all-targets
+
+```text
+$ cargo build --all-targets
+Finished `dev` profile [unoptimized + debuginfo] target(s) in 7.25s
+exit=0
+```
+
+### cargo test --lib
+
+```text
+$ cargo test --lib
+running 67 tests
+...
+test result: ok. 67 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.12s
+exit=0
+```
+
+### Expected-failing manifest validator/verifier
+
+```text
+$ python3 -m json.tool project-plans/coderabbit/analysis/expected-failing-tests.json >/tmp/p09-json-tool.txt
+exit=0
+```
+
+```text
+$ python3 project-plans/coderabbit/analysis/verify-expected-failing-tests.py --manifest project-plans/coderabbit/analysis/expected-failing-tests.json
+expected_failing_tests_verifier: PASS
+verified_entries=15
+exit=0
+```
+
+### Negative placeholder/TBD grep
+
+```text
+$ grep -R -n -E 'PLACEHOLDER_PATTERN|todo!|unimplemented!|@pseudocode lines X-Y|@pseudocode TBD|@pseudocode placeholder|TODO API|json_path TBD|fixture TBD|assertion TBD' src/engine/executors/feedback_eval.rs src/engine/executors/pr_followup_artifacts.rs src/engine/executors/mod.rs tests/github_pr_followup_executor_tests.rs tests/pr_followup_marker_audit_tests.rs project-plans/coderabbit/analysis/expected-failing-tests.json; test $? -eq 1
+exit=0
+```
+
+### Negative direct std::fs write grep in feedback_eval.rs
+
+```text
+$ grep -n -E 'std::fs::(write|create_dir_all|remove|rename|copy|File::create|OpenOptions)|std::fs::create_dir_all|std::fs::write' src/engine/executors/feedback_eval.rs; test $? -eq 1
+exit=0
+```
+
+### Parameter override search
+
+```text
+$ grep -n 'u64_param(params, "max_attempts_per_item"' src/engine/executors/feedback_eval.rs; test $? -eq 1
+exit=0
+```
+
+## Semantic Verification Against Remediation Criteria
+
+- Retry cap is strictly internal/fixed at 3 attempts per item: `evaluate_coderabbit_feedback` sets `let max_attempts = MAX_ATTEMPTS_PER_ITEM;` and no longer accepts `max_attempts_per_item` from step params/config.
+- Attempted override is ignored: the new test sets `max_attempts_per_item` to 4 and provides a fourth valid response, but only 3 evaluator requests are issued and the outcome remains fatal.
+- Malformed/mismatched output handling is proven: P09 tests verify exactly 3 rejected attempts, zero accepted results, one budget-exhausted item, fatal routing, and fixed-cap audit fields before budget exhaustion.
+- Previously remediated P09 criteria remain covered: strict reusable binding validation, extra identity rejection, command adapter shell-safety coverage, raw LLM output store routing, marker audit coverage, and direct-write negative grep all pass.
+
+## Blocking Issues
+
+None.

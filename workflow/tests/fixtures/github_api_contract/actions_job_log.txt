@@ -1,0 +1,3 @@
+running integration tests
+thread 'integration_case' panicked at src/lib.rs:42
+error: test failed

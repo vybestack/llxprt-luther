@@ -1,6 +1,5 @@
 /// @plan:PLAN-20260404-INITIAL-RUNTIME.P06
 /// Artifact persistence - writes and manages per-run output files.
-
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
@@ -56,10 +55,7 @@ impl ArtifactRecord {
 /// Returns a deterministic path based on the run_id.
 /// @plan:PLAN-20260404-INITIAL-RUNTIME.P06
 /// @requirement:REQ-EARS-PERSIST-003
-pub fn get_artifacts_dir(
-    artifacts_root: impl AsRef<Path>,
-    run_id: &str,
-) -> PathBuf {
+pub fn get_artifacts_dir(artifacts_root: impl AsRef<Path>, run_id: &str) -> PathBuf {
     // Deterministic path: <artifacts_root>/<run_id>/
     artifacts_root.as_ref().join(run_id)
 }
@@ -122,10 +118,7 @@ pub fn write_artifact_with_kind(
 
 /// Read an artifact file for a run.
 /// @plan:PLAN-20260404-INITIAL-RUNTIME.P06
-pub fn read_artifact(
-    run_id: &str,
-    name: &str,
-) -> Result<Vec<u8>, PersistenceError> {
+pub fn read_artifact(run_id: &str, name: &str) -> Result<Vec<u8>, PersistenceError> {
     let artifacts_root = default_artifacts_root();
     let artifact_path = get_artifacts_dir(&artifacts_root, run_id).join(name);
 

@@ -1,6 +1,5 @@
 /// @plan:PLAN-20260404-INITIAL-RUNTIME.P06
 /// Workflow transition logic - routes between steps based on outcomes.
-
 use serde::{Deserialize, Serialize};
 
 /// Outcome of executing a single workflow step.

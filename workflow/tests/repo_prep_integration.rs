@@ -53,8 +53,11 @@ async fn test_shared_workspace_strategy() {
     let run_id_2 = "run-002";
     let path_1 = workspace.path_for_run(run_id_1);
     let path_2 = workspace.path_for_run(run_id_2);
-    
-    assert_eq!(path_1, path_2, "Shared workspace should return same path for all runs");
+
+    assert_eq!(
+        path_1, path_2,
+        "Shared workspace should return same path for all runs"
+    );
     assert!(workspace.is_shared());
     assert!(!workspace.is_temp());
 }
@@ -83,8 +86,11 @@ async fn test_per_run_workspace_strategy() {
     let run_id_2 = "run-002";
     let path_1 = workspace.path_for_run(run_id_1);
     let path_2 = workspace.path_for_run(run_id_2);
-    
-    assert_ne!(path_1, path_2, "Per-run workspace should return different paths");
+
+    assert_ne!(
+        path_1, path_2,
+        "Per-run workspace should return different paths"
+    );
     assert!(!workspace.is_shared());
     assert!(workspace.is_temp());
 }
@@ -104,7 +110,7 @@ async fn test_branch_preparation() {
     };
 
     let mut branch_manager = luther_workflow::repo::BranchManager::new(&config);
-    
+
     let params = luther_workflow::repo::BranchParams {
         issue_number: 123,
         run_id: "run-001".to_string(),
@@ -116,7 +122,11 @@ async fn test_branch_preparation() {
         .await;
 
     // THEN: existing branch is checked out
-    assert!(result.is_ok(), "Branch preparation should succeed: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "Branch preparation should succeed: {:?}",
+        result.err()
+    );
     let branch_result = result.unwrap();
     assert_eq!(branch_result.branch_name, "luther-fix-123");
     assert!(!branch_result.created);
@@ -137,7 +147,7 @@ async fn test_branch_create_if_missing() {
     };
 
     let mut branch_manager = luther_workflow::repo::BranchManager::new(&config);
-    
+
     let params = luther_workflow::repo::BranchParams {
         issue_number: 999, // Non-existent issue
         run_id: "run-002".to_string(),
@@ -149,7 +159,11 @@ async fn test_branch_create_if_missing() {
         .await;
 
     // THEN: new branch is created from base_branch
-    assert!(result.is_ok(), "Branch creation should succeed: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "Branch creation should succeed: {:?}",
+        result.err()
+    );
     let branch_result = result.unwrap();
     assert_eq!(branch_result.branch_name, "luther-fix-999");
     assert!(branch_result.created);
@@ -171,20 +185,24 @@ async fn test_repo_prep_failure_diagnostics() {
     };
 
     // WHEN: attempting to prepare invalid repository
-    let result = luther_workflow::repo::Workspace::prepare(&config, "/nonexistent/path")
-        .await;
+    let result = luther_workflow::repo::Workspace::prepare(&config, "/nonexistent/path").await;
 
     // THEN: returns descriptive error with diagnostics
     assert!(result.is_err(), "Should fail for invalid repository path");
     match result {
         Err(e) => {
             // Verify error contains diagnostic information
-            assert!(e.to_string().contains("repository") || e.to_string().contains("path"),
-                "Error should mention repository or path: {}", e);
-            
+            assert!(
+                e.to_string().contains("repository") || e.to_string().contains("path"),
+                "Error should mention repository or path: {e}"
+            );
+
             // Verify error type supports structured diagnostics
             let diag = e.get_diagnostics();
-            assert!(!diag.is_empty(), "Error should provide structured diagnostics");
+            assert!(
+                !diag.is_empty(),
+                "Error should provide structured diagnostics"
+            );
         }
         Ok(_) => panic!("Expected workspace preparation to fail"),
     }

@@ -1,11 +1,10 @@
 /// @plan:PLAN-20260408-LLXPRT-FIRST.P16
-/// Engine Integration Tests for LLxprt First Phase
+/// Engine Integration Tests for `LLxprt` First Phase
 ///
-/// These tests verify the four new components (ShellExecutor, VerifyExecutor,
-/// ExecutorRegistry, StepContext) working together through the EngineRunner.
-
+/// These tests verify the four new components (`ShellExecutor`, `VerifyExecutor`,
+/// `ExecutorRegistry`, `StepContext`) working together through the `EngineRunner`.
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 
 use luther_workflow::engine::executor::{ExecutorRegistry, StepContext, StepExecutor};
 use luther_workflow::engine::executors::noop::NoOpExecutor;
@@ -17,11 +16,17 @@ use luther_workflow::workflow::schema::{
     GuardLimits, RepoConfig, RuntimeConfig, StepDef, TransitionDef, WorkflowConfig, WorkflowType,
 };
 
+fn env_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
+
 // ============================================================================
 // Helper Executors
 // ============================================================================
 
-/// SequenceExecutor returns outcomes from a configured sequence.
+/// `SequenceExecutor` returns outcomes from a configured sequence.
 /// Used for tests that need to return different outcomes on successive calls.
 /// @plan:PLAN-20260408-LLXPRT-FIRST.P16
 struct SequenceExecutor {
@@ -30,7 +35,7 @@ struct SequenceExecutor {
 }
 
 impl SequenceExecutor {
-    fn new(outcomes: Vec<StepOutcome>) -> Self {
+    const fn new(outcomes: Vec<StepOutcome>) -> Self {
         Self {
             outcomes: Mutex::new(outcomes),
             call_count: Mutex::new(0),
@@ -57,7 +62,7 @@ impl StepExecutor for SequenceExecutor {
     }
 }
 
-/// FatalExecutor always returns Fatal outcome.
+/// `FatalExecutor` always returns Fatal outcome.
 /// @plan:PLAN-20260408-LLXPRT-FIRST.P16
 struct FatalExecutor;
 
@@ -117,13 +122,201 @@ fn make_config(max_iterations: Option<u32>) -> WorkflowConfig {
     make_config_with_vars(max_iterations, HashMap::new())
 }
 
+#[test]
+fn test_llxprt_executor_emits_progress_while_waiting() {
+    use luther_workflow::engine::executors::LlxprtExecutor;
+
+    let mut context = StepContext::new(std::env::temp_dir(), uuid::Uuid::new_v4().to_string());
+    let params = serde_json::json!({
+        "static_stdout": "IMPLEMENTATION_COMPLETE",
+        "outcome_on_stdout": {
+            "IMPLEMENTATION_COMPLETE": "success"
+        }
+    });
+
+    let outcome = LlxprtExecutor
+        .execute(&mut context, &params)
+        .expect("llxprt static stdout should execute");
+
+    assert_eq!(outcome, StepOutcome::Success);
+}
+
+#[test]
+fn test_llxprt_executor_requires_diff_when_success_on_diff_enabled() {
+    use luther_workflow::engine::executors::LlxprtExecutor;
+
+    let temp_dir = tempfile::tempdir().expect("temp dir should be created");
+    std::process::Command::new("git")
+        .arg("init")
+        .current_dir(temp_dir.path())
+        .status()
+        .expect("git init should run");
+
+    let mut context = StepContext::new(
+        temp_dir.path().to_path_buf(),
+        uuid::Uuid::new_v4().to_string(),
+    );
+    let params = serde_json::json!({
+        "static_stdout": "IMPLEMENTATION_COMPLETE",
+        "success_on_diff": true,
+        "outcome_on_stdout": {
+            "IMPLEMENTATION_SYSTEM_ERROR": "fatal"
+        }
+    });
+
+    let outcome = LlxprtExecutor
+        .execute(&mut context, &params)
+        .expect("llxprt static stdout should execute");
+
+    assert_eq!(outcome, StepOutcome::Fixable);
+}
+
+#[test]
+fn test_llxprt_executor_requires_new_diff_when_success_on_diff_enabled() {
+    use luther_workflow::engine::executors::LlxprtExecutor;
+
+    let temp_dir = tempfile::tempdir().expect("temp dir should be created");
+    std::process::Command::new("git")
+        .arg("init")
+        .current_dir(temp_dir.path())
+        .status()
+        .expect("git init should run");
+    std::process::Command::new("git")
+        .args(["config", "user.email", "luther@example.invalid"])
+        .current_dir(temp_dir.path())
+        .status()
+        .expect("git config email should run");
+    std::process::Command::new("git")
+        .args(["config", "user.name", "Luther Test"])
+        .current_dir(temp_dir.path())
+        .status()
+        .expect("git config name should run");
+    std::fs::write(temp_dir.path().join("existing.txt"), "base").expect("write base file");
+    std::process::Command::new("git")
+        .args(["add", "existing.txt"])
+        .current_dir(temp_dir.path())
+        .status()
+        .expect("git add should run");
+    std::process::Command::new("git")
+        .args(["commit", "-m", "base"])
+        .current_dir(temp_dir.path())
+        .status()
+        .expect("git commit should run");
+    std::fs::write(temp_dir.path().join("existing.txt"), "existing change")
+        .expect("write existing diff");
+
+    let mut context = StepContext::new(
+        temp_dir.path().to_path_buf(),
+        uuid::Uuid::new_v4().to_string(),
+    );
+    let params = serde_json::json!({
+        "static_stdout": "REMEDIATION_COMPLETE",
+        "success_on_diff": true,
+        "outcome_on_stdout": {
+            "REMEDIATION_COMPLETE": "success"
+        }
+    });
+
+    let outcome = LlxprtExecutor
+        .execute(&mut context, &params)
+        .expect("llxprt static stdout should execute");
+
+    assert_eq!(outcome, StepOutcome::Fixable);
+    let _env_guard = env_lock().lock().expect("env lock should not be poisoned");
+
+}
+
+#[test]
+fn test_llxprt_executor_can_stop_after_required_diff_before_marker() {
+    use luther_workflow::engine::executors::LlxprtExecutor;
+
+    let temp_dir = tempfile::tempdir().expect("temp dir should be created");
+    std::process::Command::new("git")
+        .arg("init")
+        .current_dir(temp_dir.path())
+        .status()
+        .expect("git init should run");
+    std::process::Command::new("git")
+        .args(["config", "user.email", "luther@example.invalid"])
+        .current_dir(temp_dir.path())
+        .status()
+        .expect("git config email should run");
+    std::process::Command::new("git")
+        .args(["config", "user.name", "Luther Test"])
+        .current_dir(temp_dir.path())
+        .status()
+        .expect("git config name should run");
+    std::fs::write(temp_dir.path().join("tracked.txt"), "base").expect("write base file");
+    std::process::Command::new("git")
+        .args(["add", "tracked.txt"])
+        .current_dir(temp_dir.path())
+        .status()
+        .expect("git add should run");
+    std::process::Command::new("git")
+        .args(["commit", "-m", "base"])
+        .current_dir(temp_dir.path())
+        .status()
+        .expect("git commit should run");
+
+    let bin_dir = temp_dir.path().join("bin");
+    std::fs::create_dir(&bin_dir).expect("create bin dir");
+    let llxprt_script = bin_dir.join("llxprt");
+    std::fs::write(
+        &llxprt_script,
+        "#!/bin/sh\nprintf 'working\\n'\nprintf changed > \"$PWD/tracked.txt\"\nsleep 30\n",
+    )
+    .expect("write llxprt script");
+    std::fs::write(temp_dir.path().join(".gitignore"), "bin/\n").expect("write gitignore");
+    std::process::Command::new("git")
+        .args(["add", ".gitignore"])
+        .current_dir(temp_dir.path())
+        .status()
+        .expect("git add gitignore should run");
+    std::process::Command::new("git")
+        .args(["commit", "-m", "ignore-bin"])
+        .current_dir(temp_dir.path())
+        .status()
+        .expect("git commit gitignore should run");
+
+
+    std::process::Command::new("chmod")
+        .arg("+x")
+        .arg(&llxprt_script)
+        .status()
+        .expect("chmod llxprt script");
+
+    let original_path = std::env::var_os("PATH").unwrap_or_default();
+    let path_value = format!("{}:{}", bin_dir.display(), original_path.to_string_lossy());
+    unsafe { std::env::set_var("PATH", path_value) };
+
+    let mut context = StepContext::new(
+        temp_dir.path().to_path_buf(),
+        uuid::Uuid::new_v4().to_string(),
+    );
+    let params = serde_json::json!({
+        "success_on_diff": true,
+        "min_runtime_before_success_seconds": 120,
+        "max_runtime_after_required_diff_seconds": 0,
+        "timeout_seconds": 60
+    });
+
+    let outcome = LlxprtExecutor
+        .execute(&mut context, &params)
+        .expect("llxprt should execute");
+    eprintln!("status after llxprt: {}", String::from_utf8_lossy(&std::process::Command::new("git").args(["status", "--porcelain", "--untracked-files=all"]).current_dir(temp_dir.path()).output().expect("git status").stdout));
+
+    unsafe { std::env::set_var("PATH", original_path) };
+    assert_eq!(outcome, StepOutcome::Success);
+}
+
+
 // ============================================================================
 // Test 1: Config variables available in shell steps
 // ============================================================================
 
 /// Test 1: Config variables available in shell steps
-/// GIVEN: WorkflowConfig with variables: {"my_var": "hello"}
-/// WHEN: A shell step runs command "echo {my_var}"
+/// GIVEN: `WorkflowConfig` with variables: {"`my_var"`: "hello"}
+/// WHEN: A shell step runs command "echo {`my_var`}"
 /// THEN: The command interpolates correctly and stdout contains "hello"
 /// @plan:PLAN-20260408-LLXPRT-FIRST.P16
 /// @requirement:REQ-LF-PROF-003
@@ -153,8 +346,7 @@ fn test_config_variables_available_in_shell_steps() {
 
     assert!(
         matches!(result, Ok(RunOutcome::Success)),
-        "Expected Success, got {:?}",
-        result
+        "Expected Success, got {result:?}"
     );
 }
 
@@ -163,8 +355,8 @@ fn test_config_variables_available_in_shell_steps() {
 // ============================================================================
 
 /// Test 2: Different configs resolve different profiles
-/// GIVEN: Same WorkflowType with step using {profile_planning}
-/// WHEN: Two different configs with different profile_planning values
+/// GIVEN: Same `WorkflowType` with step using {`profile_planning`}
+/// WHEN: Two different configs with different `profile_planning` values
 /// THEN: The interpolated commands differ
 /// @plan:PLAN-20260408-LLXPRT-FIRST.P16
 /// @requirement:REQ-LF-PROF-004
@@ -209,9 +401,9 @@ fn test_different_configs_resolve_different_profiles() {
 // ============================================================================
 
 /// Test 3: Namespaced context across real steps
-/// GIVEN: Workflow: step_a (echo alpha) → step_b (echo beta) → step_c (echo {step_a.stdout})
+/// GIVEN: Workflow: `step_a` (echo alpha) → `step_b` (echo beta) → `step_c` (echo {`step_a.stdout`})
 /// WHEN: Engine runs
-/// THEN: step_c's stdout contains "alpha" (from step_a namespace)
+/// THEN: `step_c`'s stdout contains "alpha" (from `step_a` namespace)
 /// @plan:PLAN-20260408-LLXPRT-FIRST.P16
 /// @requirement:REQ-LF-CTX-001,REQ-LF-CTX-003
 #[test]
@@ -268,8 +460,7 @@ fn test_namespaced_context_across_real_steps() {
 
     assert!(
         matches!(result, Ok(RunOutcome::Success)),
-        "Expected Success, got {:?}",
-        result
+        "Expected Success, got {result:?}"
     );
 }
 
@@ -278,9 +469,9 @@ fn test_namespaced_context_across_real_steps() {
 // ============================================================================
 
 /// Test 4: Unnamespaced variable gets most recent
-/// GIVEN: Workflow: step_a (echo first) → step_b (echo second) → step_c (echo {stdout})
+/// GIVEN: Workflow: `step_a` (echo first) → `step_b` (echo second) → `step_c` (echo {stdout})
 /// WHEN: Engine runs
-/// THEN: step_c's echo outputs "second" (most-recent bare stdout from step_b)
+/// THEN: `step_c`'s echo outputs "second" (most-recent bare stdout from `step_b`)
 /// @plan:PLAN-20260408-LLXPRT-FIRST.P16
 /// @requirement:REQ-LF-CTX-002
 #[test]
@@ -337,8 +528,7 @@ fn test_unnamespaced_variable_gets_most_recent() {
 
     assert!(
         matches!(result, Ok(RunOutcome::Success)),
-        "Expected Success, got {:?}",
-        result
+        "Expected Success, got {result:?}"
     );
 }
 
@@ -347,7 +537,7 @@ fn test_unnamespaced_variable_gets_most_recent() {
 // ============================================================================
 
 /// Test 5: Per-edge loop with real executor dispatch
-/// GIVEN: Workflow with loop: step_a → step_b → step_a (on fixable, max_iterations: 2)
+/// GIVEN: Workflow with loop: `step_a` → `step_b` → `step_a` (on fixable, `max_iterations`: 2)
 /// WHEN: Executor returns Fixable repeatedly
 /// THEN: Engine abandons after 3 iterations with reason identifying the edge
 /// @plan:PLAN-20260408-LLXPRT-FIRST.P16
@@ -416,12 +606,11 @@ fn test_per_edge_loop_with_real_executor_dispatch() {
                     || reason.contains("limit")
                     || reason.contains("step_b")
                     || reason.contains("step_a"),
-                "Abandon reason should mention loop limit or edge: got {}",
-                reason
+                "Abandon reason should mention loop limit or edge: got {reason}"
             );
         }
-        Ok(other) => panic!("Expected Abandoned, got {:?}", other),
-        Err(e) => panic!("Expected Abandoned, got error: {:?}", e),
+        Ok(other) => panic!("Expected Abandoned, got {other:?}"),
+        Err(e) => panic!("Expected Abandoned, got error: {e:?}"),
     }
 }
 
@@ -537,8 +726,7 @@ fn test_independent_loops_through_engine() {
 
     assert!(
         matches!(result, Ok(RunOutcome::Success)),
-        "Expected Success, got {:?}",
-        result
+        "Expected Success, got {result:?}"
     );
 }
 
@@ -547,9 +735,9 @@ fn test_independent_loops_through_engine() {
 // ============================================================================
 
 /// Test 7: Verify executor dispatches through registry
-/// GIVEN: A step with step_type = "verify" and valid params
+/// GIVEN: A step with `step_type` = "verify" and valid params
 /// WHEN: Engine runs
-/// THEN: VerifyExecutor dispatches without StepExecutionError
+/// THEN: `VerifyExecutor` dispatches without `StepExecutionError`
 /// @plan:PLAN-20260408-LLXPRT-FIRST.P16
 /// @requirement:REQ-LF-VERIFY-001
 #[test]
@@ -579,11 +767,11 @@ fn test_verify_executor_dispatches_through_registry() {
             // Either Success or Fixable is fine - we just need dispatch to work
         }
         Err(EngineError::StepExecutionError { message, .. }) => {
-            panic!("StepExecutionError indicates dispatch failed: {}", message);
+            panic!("StepExecutionError indicates dispatch failed: {message}");
         }
         Err(e) => {
             // Other errors are fine - verify step might fail for other reasons
-            println!("Got error (ok for verify): {:?}", e);
+            println!("Got error (ok for verify): {e:?}");
         }
     }
 }
@@ -593,10 +781,10 @@ fn test_verify_executor_dispatches_through_registry() {
 // ============================================================================
 
 /// Test 8: Config variables and namespaced context combined
-/// GIVEN: WorkflowConfig with variables: {"repo": "my-repo"}
-///        step_a (echo {repo}) → step_b (echo {step_a.stdout})
+/// GIVEN: `WorkflowConfig` with variables: {"repo": "my-repo"}
+///        `step_a` (echo {repo}) → `step_b` (echo {`step_a.stdout`})
 /// WHEN: Engine runs
-/// THEN: step_b echoes "my-repo" (config var → step_a → namespaced ref in step_b)
+/// THEN: `step_b` echoes "my-repo" (config var → `step_a` → namespaced ref in `step_b`)
 /// @plan:PLAN-20260408-LLXPRT-FIRST.P16
 /// @requirement:REQ-LF-PROF-003,REQ-LF-CTX-001
 #[test]
@@ -641,8 +829,7 @@ fn test_config_variables_and_namespaced_context_combined() {
 
     assert!(
         matches!(result, Ok(RunOutcome::Success)),
-        "Expected Success, got {:?}",
-        result
+        "Expected Success, got {result:?}"
     );
 }
 
@@ -651,9 +838,9 @@ fn test_config_variables_and_namespaced_context_combined() {
 // ============================================================================
 
 /// Test 9: Builtin variables still resolve
-/// GIVEN: A shell step with command "echo {run_id}"
+/// GIVEN: A shell step with command "echo {`run_id`}"
 /// WHEN: Engine runs
-/// THEN: stdout is non-empty (contains the UUID run_id)
+/// THEN: stdout is non-empty (contains the UUID `run_id`)
 /// @plan:PLAN-20260408-LLXPRT-FIRST.P16
 /// @requirement:REQ-LF-CTX-004
 #[test]
@@ -677,8 +864,7 @@ fn test_builtin_variables_still_resolve() {
 
     assert!(
         matches!(result, Ok(RunOutcome::Success)),
-        "Expected Success, got {:?}",
-        result
+        "Expected Success, got {result:?}"
     );
 }
 
@@ -687,9 +873,9 @@ fn test_builtin_variables_still_resolve() {
 // ============================================================================
 
 /// Test 10: Fatal with transition routes to target step
-/// GIVEN: Workflow: step_a → step_b → step_c, with step_b → abandon_step on fatal
-/// WHEN: step_b returns Fatal
-/// THEN: abandon_step is executed and RunOutcome::Success
+/// GIVEN: Workflow: `step_a` → `step_b` → `step_c`, with `step_b` → `abandon_step` on fatal
+/// WHEN: `step_b` returns Fatal
+/// THEN: `abandon_step` is executed and `RunOutcome::Success`
 /// @plan:PLAN-20260408-LLXPRT-FIRST.P16
 /// @requirement:REQ-LF-FAIL-001
 #[test]
@@ -744,8 +930,7 @@ fn test_fatal_with_transition_routes_to_target_step() {
     // Should follow fatal transition to abandon_step and succeed
     assert!(
         matches!(result, Ok(RunOutcome::Success)),
-        "Expected Success (fatal routed to abandon_step), got {:?}",
-        result
+        "Expected Success (fatal routed to abandon_step), got {result:?}"
     );
 }
 
@@ -754,9 +939,9 @@ fn test_fatal_with_transition_routes_to_target_step() {
 // ============================================================================
 
 /// Test 11: Fatal without transition returns failure
-/// GIVEN: Workflow: step_a → step_b → step_c, with NO fatal transition from step_b
-/// WHEN: step_b returns Fatal
-/// THEN: RunOutcome::Failure at step_b (fallback behavior)
+/// GIVEN: Workflow: `step_a` → `step_b` → `step_c`, with NO fatal transition from `step_b`
+/// WHEN: `step_b` returns Fatal
+/// THEN: `RunOutcome::Failure` at `step_b` (fallback behavior)
 /// @plan:PLAN-20260408-LLXPRT-FIRST.P16
 /// @requirement:REQ-LF-FAIL-001
 #[test]
@@ -813,8 +998,8 @@ fn test_fatal_without_transition_returns_failure() {
         Ok(RunOutcome::Failure { step_id, .. }) => {
             assert_eq!(step_id, "step_b", "Failure should be at step_b");
         }
-        Ok(other) => panic!("Expected Failure, got {:?}", other),
-        Err(e) => panic!("Expected Failure outcome, got error: {:?}", e),
+        Ok(other) => panic!("Expected Failure, got {other:?}"),
+        Err(e) => panic!("Expected Failure outcome, got error: {e:?}"),
     }
 }
 
@@ -823,9 +1008,9 @@ fn test_fatal_without_transition_returns_failure() {
 // ============================================================================
 
 /// Test 12: Run completion records metadata (Success)
-/// GIVEN: Workflow with DB path (use with_db_path()) and issue_number = "42"
+/// GIVEN: Workflow with DB path (use `with_db_path()`) and `issue_number` = "42"
 /// WHEN: Engine runs to success
-/// THEN: Metadata record contains outcome = "completed", issue_number = "42"
+/// THEN: Metadata record contains outcome = "completed", `issue_number` = "42"
 /// @plan:PLAN-20260408-LLXPRT-FIRST.P16
 /// @requirement:REQ-LF-FAIL-005
 #[test]
@@ -852,8 +1037,8 @@ fn test_run_completion_records_metadata() {
     let temp_dir = std::env::temp_dir();
     let db_path = temp_dir.join(format!("test_metadata_{}.db", uuid::Uuid::new_v4()));
 
-    let mut runner =
-        EngineRunner::with_db_path(instance, registry, &db_path).expect("Failed to create EngineRunner");
+    let mut runner = EngineRunner::with_db_path(instance, registry, &db_path)
+        .expect("Failed to create EngineRunner");
     let run_id = runner.run_id().to_string();
 
     let result = runner.run();
@@ -884,7 +1069,7 @@ fn test_run_completion_records_metadata() {
 /// Test 13: Run abandonment records metadata
 /// GIVEN: Workflow that exceeds a loop limit
 /// WHEN: Engine returns Abandoned
-/// THEN: Metadata record contains outcome = "abandoned", step_id of abandonment
+/// THEN: Metadata record contains outcome = "abandoned", `step_id` of abandonment
 /// @plan:PLAN-20260408-LLXPRT-FIRST.P16
 /// @requirement:REQ-LF-FAIL-005
 #[test]
@@ -940,15 +1125,14 @@ fn test_run_abandonment_records_metadata() {
         ])),
     );
 
-    let mut runner =
-        EngineRunner::with_db_path(instance, registry, &db_path).expect("Failed to create EngineRunner");
+    let mut runner = EngineRunner::with_db_path(instance, registry, &db_path)
+        .expect("Failed to create EngineRunner");
     let run_id = runner.run_id().to_string();
 
     let result = runner.run();
     assert!(
         matches!(result, Ok(RunOutcome::Abandoned { .. })),
-        "Expected Abandoned, got {:?}",
-        result
+        "Expected Abandoned, got {result:?}"
     );
 
     // Query the database for run metadata
@@ -973,8 +1157,8 @@ fn test_run_abandonment_records_metadata() {
 // ============================================================================
 
 /// Test 14: Set work dir preserves seeded variables
-/// GIVEN: EngineRunner with config variables {"my_var": "preserved"}
-/// WHEN: Call runner.set_work_dir(new_path), then run shell step echoing {my_var}
+/// GIVEN: `EngineRunner` with config variables {"`my_var"`: "preserved"}
+/// WHEN: Call `runner.set_work_dir(new_path)`, then run shell step echoing {`my_var`}
 /// THEN: stdout contains "preserved" - the config variable survived the change
 /// @plan:PLAN-20260408-LLXPRT-FIRST.P16
 /// @requirement:REQ-LF-PROF-003
@@ -1008,8 +1192,7 @@ fn test_set_work_dir_preserves_seeded_variables() {
 
     assert!(
         matches!(result, Ok(RunOutcome::Success)),
-        "Expected Success, got {:?}",
-        result
+        "Expected Success, got {result:?}"
     );
 
     // Clean up

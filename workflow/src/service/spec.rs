@@ -1,7 +1,6 @@
 //! Service specification - plist and systemd unit generation.
 //!
 /// @plan:PLAN-20260404-INITIAL-RUNTIME.P10
-
 use std::path::PathBuf;
 
 /// Service specification for daemon/service installation.
@@ -370,7 +369,10 @@ mod tests {
         assert_eq!(spec.label, "com.test.service");
         assert_eq!(spec.args, vec!["arg1", "arg2"]);
         assert_eq!(spec.working_dir, PathBuf::from("/tmp"));
-        assert_eq!(spec.environment, vec![("KEY".to_string(), "value".to_string())]);
+        assert_eq!(
+            spec.environment,
+            vec![("KEY".to_string(), "value".to_string())]
+        );
         assert!(!spec.keep_alive);
         assert!(!spec.run_at_load);
         assert_eq!(spec.user, Some("user1".to_string()));
@@ -379,8 +381,7 @@ mod tests {
 
     #[test]
     fn test_plist_file_name() {
-        let spec = ServiceSpec::new("test", "/bin/test")
-            .with_label("com.luther.test");
+        let spec = ServiceSpec::new("test", "/bin/test").with_label("com.luther.test");
         assert_eq!(spec.plist_file_name(), "com.luther.test.plist");
     }
 

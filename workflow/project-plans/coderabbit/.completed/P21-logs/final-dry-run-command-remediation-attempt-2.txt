@@ -1,0 +1,57 @@
+### recorded final dry-run command remediation attempt 2
+{
+  "argv": [
+    "cargo",
+    "run",
+    "--bin",
+    "luther-workflow",
+    "--",
+    "run",
+    "--workflow-type",
+    "llxprt-issue-fix-v1",
+    "--config",
+    "llxprt-code",
+    "--dry-run"
+  ],
+  "working_directory": "/Users/acoliver/projects/luther/workflow",
+  "non_live": true,
+  "notes": "Dry-run path loads production config/workflows and config/workflow-configs, prints step list, and exits before EngineRunner execution."
+}
+### executing argv
+['cargo', 'run', '--bin', 'luther-workflow', '--', 'run', '--workflow-type', 'llxprt-issue-fix-v1', '--config', 'llxprt-code', '--dry-run']
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.04s
+     Running `target/debug/luther-workflow run --workflow-type llxprt-issue-fix-v1 --config llxprt-code --dry-run`
+Starting workflow run: aadf7b5a-1484-40ea-a5c8-1ae51a6e4251
+  Workflow type: llxprt-issue-fix-v1
+  Config: llxprt-code
+Dry run mode - workflow would execute the following steps:
+  - select_issue (shell): "Select lowest-numbered unassigned issue in lowest-versioned milestone"
+  - setup_workspace (shell): "Ensure repo is checked out, create issue branch, create artifact dir"
+  - fetch_issue (shell): "Fetch issue body and comments, write to artifact files, extract metadata to context"
+  - create_plan (llxprt): "Invoke llxprt to create a plan for the issue"
+  - evaluate_plan (llxprt): "Invoke llxprt to evaluate the plan"
+  - implement (llxprt): "Invoke llxprt to implement the plan"
+  - evaluate_impl (llxprt): "Subjective review: does the implementation actually solve the issue per plan? (runs AFTER lint/typecheck/test/build pass)"
+  - run_tests (verify): "Run lint, typecheck, test, format, build checks"
+  - remediate (llxprt): "Invoke llxprt to fix test/lint/build failures"
+  - push_changes (shell): "Stage, commit, and push changes"
+  - generate_pr_description (llxprt): "Invoke llxprt to write a PR description"
+  - create_pr (shell): "Create a GitHub pull request"
+  - capture_pr_identity (github_pr_identity): "Capture pull request identity and current head metadata"
+  - post_pr_iteration_guard (post_pr_iteration_guard): "Enforce artifact-backed PR follow-up remediation iteration cap"
+  - watch_pr_checks (github_pr_checks): "Watch GitHub PR checks and classify current-head status"
+  - collect_ci_failures (github_check_failures): "Collect concrete CI failures or route untrusted check states to terminal failure"
+  - collect_coderabbit_feedback (github_coderabbit_feedback): "Collect ready CodeRabbit feedback for deterministic evaluation"
+  - evaluate_coderabbit_feedback (feedback_evaluator): "Evaluate CodeRabbit feedback with bounded validated LLM decisions"
+  - build_remediation_plan (pr_remediation_plan): "Build deterministic remediation plan from CI failures and evaluated feedback"
+  - remediate_pr_followup (pr_followup_remediation): "Invoke dedicated PR follow-up remediation wrapper"
+  - validate_remediation_result (pr_remediation_result): "Validate structured remediation result and artifact-backed retry caps"
+  - run_post_pr_tests (run_post_pr_tests): "Run deterministic post-PR local verification after remediation"
+  - push_remediation_changes (push_remediation_changes): "Stage, commit, and push deterministic remediation changes"
+  - mark_coderabbit_feedback (github_feedback_marker): "Comment on and resolve CodeRabbit feedback according to deterministic marker plan"
+  - post_pr_failure_terminal (post_pr_failure_terminal): "Write terminal PR follow-up failure artifact and fail the run"
+  - abandon_and_log (shell): "Comment on issue, remove label, unassign on failure"
+  - log_completion (shell): "Log successful workflow completion"
+
+Dry run complete. No changes made.
+exit=0

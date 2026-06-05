@@ -1,0 +1,206 @@
+VERDICT: PASS
+
+# Phase 13 Evidence
+
+Plan: PLAN-20260429-CODERABBIT-PR-FOLLOWUP
+Phase: P13 — Post-PR Local Verification Executor Implementation
+
+## Files Created/Updated
+
+- `src/engine/executors/pr_remediation.rs`: implemented `RunPostPrTestsExecutor`, `PostPrTestCommandRunner`, owned request/result types, argv/command-ID command parsing, safe working-directory validation, bounded output/full log paths, timeout handling, `post-pr-test-result.json`, fatal/config artifacts, and artifact-backed verification retry caps.
+- `src/engine/executors/mod.rs`: re-exported P13 command runner/request/result/testable executor types and added adjacent P13 traceability markers.
+- `tests/github_pr_followup_executor_tests.rs`: added injected P13 runner coverage for failed-test fixable/fatal cap behavior and post-PR test argv shell safety without requiring P14 push implementation.
+- `tests/pr_followup_marker_audit_tests.rs`: added `p13_markers_cover_all_touched_items`.
+- `project-plans/coderabbit/analysis/expected-failing-tests.json`: removed P13-owned expected-failing entries; remaining entries are P14/P15/P17 later-phase failures.
+- `project-plans/coderabbit/execution-tracker.md`: updated P13 status to PASS and added completion note.
+- `project-plans/coderabbit/.completed/P13`: this evidence file.
+
+## Manifest Diff/Summary
+
+- Removed `github_pr_followup_executor_tests::run_post_pr_tests_fixable_failures_use_artifact_backed_retry_cap` (`owner_phase: P13`).
+- Removed P13 shell-safety expected-failing entry; the active test filter `post_pr_tests_and_push_shell_safety` now selects `post_pr_tests_and_push_shell_safety_use_configured_argv_without_shell_injection` and passes for P13-owned post-PR test execution safety without depending on P14 push implementation.
+- Expected-failing verifier passed with 8 remaining entries, all concrete later-phase failures owned by P14, P15, and P17.
+
+## Exact Commands and Outputs
+
+### Prerequisite checks
+
+```text
+$ test -f project-plans/coderabbit/.completed/P12; printf 'exit=%s\n' "$?"
+exit=0
+```
+
+```text
+$ grep -E "^## Verdict: PASS|^VERDICT: PASS" project-plans/coderabbit/.completed/P12A.md; printf 'exit=%s\n' "$?"
+## Verdict: PASS
+VERDICT: PASS
+## Verdict: PASS
+VERDICT: PASS
+## Verdict: PASS
+VERDICT: PASS
+exit=0
+```
+
+```text
+$ grep -n "P12.*PASS\|Phase 12.*PASS" project-plans/coderabbit/execution-tracker.md; printf 'exit=%s\n' "$?"
+28:| P12 | PASS | 1 | 2026-04-30 | 2026-04-30 P12A PASS | project-plans/coderabbit/.completed/P12, project-plans/coderabbit/.completed/P12A.md, src/engine/executors/pr_remediation.rs, src/engine/executors/mod.rs, tests/github_pr_followup_executor_tests.rs, tests/pr_followup_marker_audit_tests.rs, project-plans/coderabbit/analysis/expected-failing-tests.json |
+exit=0
+```
+
+### GitHub API contract tests
+
+```text
+$ cargo test --test github_api_contract_tests -- github_api_contract
+running 2 tests
+test github_api_contract_negative_fixture_rejects_missing_contract ... ok
+test github_api_contract_validator_accepts_phase_02_contract ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.41s
+exit=0
+```
+
+### GitHub API contract validator
+
+```text
+$ cargo run --bin github_api_contract_validator -- project-plans/coderabbit/analysis/github-api-contract.md tests/fixtures/github_api_contract
+github_api_contract_validator: PASS
+exit=0
+```
+
+### P13 marker audit
+
+```text
+$ cargo test --test pr_followup_marker_audit_tests -- p13_markers_cover_all_touched_items
+running 1 test
+test p13_markers_cover_all_touched_items ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 0.01s
+exit=0
+```
+
+### P13 executor tests
+
+```text
+$ cargo test --test github_pr_followup_executor_tests -- run_post_pr_tests
+running 1 test
+test run_post_pr_tests_fixable_failures_use_artifact_backed_retry_cap ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 57 filtered out; finished in 0.01s
+exit=0
+```
+
+```text
+$ cargo test --test github_pr_followup_executor_tests -- post_pr_tests_and_push_shell_safety
+running 1 test
+test post_pr_tests_and_push_shell_safety_use_configured_argv_without_shell_injection ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 57 filtered out; finished in 0.01s
+exit=0
+```
+
+### Expected-failing manifest validator/verifier
+
+```text
+$ python3 -m json.tool project-plans/coderabbit/analysis/expected-failing-tests.json >/tmp/p13-json.out && cat /tmp/p13-json.out | head -20 && python3 project-plans/coderabbit/analysis/verify-expected-failing-tests.py --manifest project-plans/coderabbit/analysis/expected-failing-tests.json && ! grep -n '"owner_phase": "P13"' project-plans/coderabbit/analysis/expected-failing-tests.json; printf 'exit=%s\n' "$?"
+{
+    "schema_version": 1,
+    "allowed_groups": [
+        "graph/fake E2E",
+        "artifact store",
+        "GitHub API",
+        "evaluator",
+        "remediation validator",
+        "marker/idempotency",
+        "shell safety"
+    ],
+    "entries": [
+        {
+            "test_binary": "github_pr_followup_executor_tests",
+            "test_name": "push_remediation_changes_records_safe_staging_remote_heads_and_verified_push_state",
+            "test_filter": "push_remediation_changes_records_safe_staging_remote_heads_and_verified_push_state",
+            "group": "remediation validator",
+            "owner_phase": "P14",
+            "requirement_id": "REQ-PRFU-015",
+            "introduced_in_phase": "P04",
+expected_failing_tests_verifier: PASS
+verified_entries=8
+verified github_pr_followup_executor_tests::push_remediation_changes_records_safe_staging_remote_heads_and_verified_push_state
+verified github_pr_followup_executor_tests::marker_idempotency_avoids_duplicate_comments_using_local_and_remote_markers
+verified github_pr_followup_executor_tests::pending_marker_actions_carry_forward_across_head_change
+verified github_pr_followup_executor_tests::marker_comment_shell_safety_uses_body_files_or_graphql_variables
+verified e2e_workflow_integration::post_pr_no_direct_create_pr_to_log_completion
+verified e2e_workflow_integration::post_pr_failure_terminal_is_terminal_and_fatal_routes_target_it
+verified e2e_workflow_integration::post_pr_required_routing_contract_and_reachability_are_present
+verified e2e_workflow_integration::post_pr_steps_have_artifact_root_parameters
+exit=0
+```
+
+### Build all targets
+
+```text
+$ cargo build --all-targets
+Finished `dev` profile [unoptimized + debuginfo] target(s) in 5.07s
+exit=0
+```
+
+The command emitted existing warnings only; no errors.
+
+### Library tests
+
+```text
+$ cargo test --lib
+running 67 tests
+...
+test result: ok. 67 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.29s
+exit=0
+```
+
+### Negative greps
+
+```text
+$ ! grep -R "@pseudocode lines X-Y\|@pseudocode TBD\|@pseudocode placeholder\|TODO API\|json_path TBD\|fixture TBD\|assertion TBD" src/engine tests project-plans/coderabbit/analysis; printf 'exit=%s\n' "$?"
+exit=0
+```
+
+```text
+$ ! grep -rn -E "todo!|unimplemented!" src/engine/executors/pr_remediation.rs src/engine/executors/mod.rs tests/github_pr_followup_executor_tests.rs tests/pr_followup_marker_audit_tests.rs; printf 'exit=%s\n' "$?"
+exit=0
+```
+
+### Formatting and focused rerun after timeout enforcement
+
+```text
+$ cargo fmt && cargo test --test github_pr_followup_executor_tests -- run_post_pr_tests && cargo test --test github_pr_followup_executor_tests -- post_pr_tests_and_push_shell_safety && cargo test --test pr_followup_marker_audit_tests -- p13_markers_cover_all_touched_items
+running 1 test
+test run_post_pr_tests_fixable_failures_use_artifact_backed_retry_cap ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 57 filtered out; finished in 0.02s
+
+running 1 test
+test post_pr_tests_and_push_shell_safety_use_configured_argv_without_shell_injection ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 57 filtered out; finished in 0.01s
+
+running 1 test
+test p13_markers_cover_all_touched_items ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 0.01s
+exit=0
+```
+
+## Semantic Verification Against Phase 13 Criteria
+
+- `RunPostPrTestsExecutor` is the dedicated `run_post_pr_tests` executor and remains registered in the default registry.
+- Command configuration is deterministic and argv-only. It accepts explicit `argv` or a `command_id` resolved through a configured command registry; shell-string-only `command`/`shell`, missing command arrays, empty argv, unrecognized command IDs, unsafe working directories, and malformed retry caps route to fatal/config artifacts where the binding is available.
+- The production runner uses `std::process::Command` without a shell, passes args as argv, sets `stdin` null, captures stdout/stderr, enforces positive `timeout_seconds`, writes full stdout/stderr log artifacts, and stores bounded excerpts in `post-pr-test-result.json`.
+- Binding validation is performed by reading `pr.json`, `pr-remediation-plan.json`, and `pr-remediation-result.json` through `PrFollowupArtifactStore`, which validates common binding/history metadata before consumption.
+- `post-pr-test-result.json` records `test_state`, command status/argv/exit/log metadata, `verification_retry_index`, `max_verification_retries`, `retry_scope`, `plan_artifact_sequence`, `remediation_result_artifact_sequence`, and `verification_retry_exhausted`.
+- Local verification success returns `StepOutcome::Success`; failed test commands return `Fixable` while artifact-backed retries remain; retry exhaustion and infrastructure/configuration failures return `Fatal`.
+- The retry cap is artifact-backed from the prior bound `post-pr-test-result.json` for the same plan artifact sequence. The P13 test verifies retry indexes 0 and 1 are fixable, then index 2 with max 2 is fatal/exhausted.
+- P13 shell-safety coverage verifies malicious remediation text is not interpolated into post-PR test argv and does not require P14 push executor behavior.
+- P13 expected-failing manifest entries were removed and verifier passed with only later-phase P14/P15/P17 entries.
+- Adjacent P13 markers with `@requirement` and exact `@pseudocode lines 29-33` are present for touched production/test items; marker audit passed.
+
+## Blocking Issues
+
+None.

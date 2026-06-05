@@ -1,7 +1,6 @@
 //! Monitor IPC management - Unix socket communication for status queries.
 //!
 /// @plan:PLAN-20260404-INITIAL-RUNTIME.P10
-
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -32,9 +31,7 @@ pub enum IpcError {
 #[serde(tag = "type")]
 pub enum IpcRequest {
     #[serde(rename = "status")]
-    Status {
-        include_heartbeats: bool,
-    },
+    Status { include_heartbeats: bool },
     #[serde(rename = "heartbeat")]
     Heartbeat { run_id: String },
     #[serde(rename = "shutdown")]
@@ -74,19 +71,19 @@ pub enum IpcResponse {
 pub fn create_ipc_endpoint() -> Result<PathBuf, IpcError> {
     let mut path = get_data_dir();
     path.push("ipc");
-    
+
     // Create the IPC directory if it doesn't exist
     std::fs::create_dir_all(&path)?;
-    
+
     // Use the instance ID in the socket name for uniqueness
     let instance_id = format!("luther-monitor-{}", std::process::id());
     path.push(format!("{}.sock", instance_id));
-    
+
     // Remove old socket file if it exists
     if path.exists() {
         std::fs::remove_file(&path)?;
     }
-    
+
     Ok(path)
 }
 
@@ -111,15 +108,15 @@ pub fn serve_status(
     state: Arc<Mutex<SharedState>>,
 ) -> JoinHandle<Result<(), IpcError>> {
     let endpoint = endpoint.to_path_buf();
-    
+
     tokio::spawn(async move {
         // Remove old socket file if it exists
         if endpoint.exists() {
             std::fs::remove_file(&endpoint)?;
         }
-        
+
         let listener = UnixListener::bind(&endpoint)?;
-        
+
         loop {
             match listener.accept().await {
                 Ok((stream, _)) => {
@@ -159,7 +156,7 @@ impl SharedState {
             heartbeats: HashMap::new(),
         }
     }
-    
+
     /// Create new shared state with a specific state.
     #[must_use]
     pub fn with_state(mut self, state: MonitorState) -> Self {
@@ -176,13 +173,13 @@ async fn handle_connection(
     // Read the request (up to 4KB)
     let mut buf = vec![0u8; 4096];
     let n = stream.read(&mut buf).await?;
-    
+
     if n == 0 {
         return Ok(());
     }
-    
+
     buf.truncate(n);
-    
+
     // Parse the request
     let request: IpcRequest = match serde_json::from_slice(&buf) {
         Ok(req) => req,
@@ -195,10 +192,12 @@ async fn handle_connection(
             return Ok(());
         }
     };
-    
+
     // Handle the request
     let response = match request {
-        IpcRequest::Status { include_heartbeats: _ } => {
+        IpcRequest::Status {
+            include_heartbeats: _,
+        } => {
             let state = state.lock().await;
             IpcResponse::Status {
                 instance_id: state.instance_id.clone(),
@@ -221,21 +220,18 @@ async fn handle_connection(
             // In a real implementation, this would trigger shutdown
             IpcResponse::Ok
         }
-        IpcRequest::Ping => {
-            IpcResponse::Pong {
-                timestamp: chrono::Utc::now().timestamp(),
-            }
-        }
+        IpcRequest::Ping => IpcResponse::Pong {
+            timestamp: chrono::Utc::now().timestamp(),
+        },
     };
-    
+
     send_response(&mut stream, &response).await?;
     Ok(())
 }
 
 /// Send a response to the client.
 async fn send_response(stream: &mut UnixStream, response: &IpcResponse) -> Result<(), IpcError> {
-    let json = serde_json::to_vec(response)
-        .map_err(|e| IpcError::Serialization(e.to_string()))?;
+    let json = serde_json::to_vec(response).map_err(|e| IpcError::Serialization(e.to_string()))?;
     stream.write_all(&json).await?;
     stream.shutdown().await?;
     Ok(())
@@ -266,19 +262,18 @@ pub async fn send_request(
     request: &IpcRequest,
 ) -> Result<IpcResponse, IpcError> {
     // Send request
-    let json = serde_json::to_vec(request)
-        .map_err(|e| IpcError::Serialization(e.to_string()))?;
+    let json = serde_json::to_vec(request).map_err(|e| IpcError::Serialization(e.to_string()))?;
     stream.write_all(&json).await?;
     stream.shutdown().await?;
-    
+
     // Read response
     let mut buf = vec![0u8; 4096];
     let n = stream.read(&mut buf).await?;
     buf.truncate(n);
-    
-    let response = serde_json::from_slice(&buf)
-        .map_err(|e| IpcError::Serialization(e.to_string()))?;
-    
+
+    let response =
+        serde_json::from_slice(&buf).map_err(|e| IpcError::Serialization(e.to_string()))?;
+
     Ok(response)
 }
 
@@ -286,7 +281,7 @@ pub async fn send_request(
 mod tests {
     use super::*;
     use tempfile::TempDir;
-    
+
     #[test]
     fn test_ipc_endpoint_creation() {
         let path = create_ipc_endpoint().expect("Should create endpoint");
@@ -295,14 +290,16 @@ mod tests {
         assert!(path_str.contains("luther-monitor"));
         assert!(path_str.contains(".sock"));
     }
-    
+
     #[test]
     fn test_ipc_request_serialization() {
-        let req = IpcRequest::Status { include_heartbeats: true };
+        let req = IpcRequest::Status {
+            include_heartbeats: true,
+        };
         let json = serde_json::to_string(&req).unwrap();
         assert!(json.contains("status"));
         assert!(json.contains("include_heartbeats"));
-        
+
         let deserialized: IpcRequest = serde_json::from_str(&json).unwrap();
         match deserialized {
             IpcRequest::Status { include_heartbeats } => {
@@ -311,14 +308,14 @@ mod tests {
             _ => panic!("Wrong request type"),
         }
     }
-    
+
     #[test]
     fn test_ipc_response_serialization() {
         let resp = IpcResponse::Pong { timestamp: 12345 };
         let json = serde_json::to_string(&resp).unwrap();
         assert!(json.contains("pong"));
         assert!(json.contains("12345"));
-        
+
         let deserialized: IpcResponse = serde_json::from_str(&json).unwrap();
         match deserialized {
             IpcResponse::Pong { timestamp } => {
@@ -327,12 +324,11 @@ mod tests {
             _ => panic!("Wrong response type"),
         }
     }
-    
+
     #[test]
     fn test_shared_state() {
-        let state = SharedState::new("test-instance")
-            .with_state(MonitorState::Running);
-        
+        let state = SharedState::new("test-instance").with_state(MonitorState::Running);
+
         assert_eq!(state.instance_id, "test-instance");
         assert_eq!(state.state, MonitorState::Running);
     }

@@ -1,0 +1,15 @@
+{
+  "argv": [
+    "python3",
+    "junk/regen_fixtures.py"
+  ],
+  "working_directory": "/Users/acoliver/projects/luther/workflow",
+  "source_of_truth": {
+    "production_workflow_toml": "config/workflows/llxprt-issue-fix-v1.toml",
+    "fixture_workflow_toml": "tests/fixtures/workflows/valid/llxprt-issue-fix-v1.toml",
+    "fixture_workflow_json": "tests/fixtures/workflows/valid/llxprt-issue-fix-v1.json",
+    "fixture_config_toml": "tests/fixtures/workflow-configs/valid/llxprt-code.toml",
+    "fixture_config_json": "tests/fixtures/workflow-configs/valid/llxprt-code.json"
+  },
+  "notes": "Existing script serializes fixture TOML files to JSON. P17 must copy production TOML to fixture TOML before running this command if workflow TOML changes."
+}

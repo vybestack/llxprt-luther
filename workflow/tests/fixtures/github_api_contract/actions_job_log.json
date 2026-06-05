@@ -1,0 +1,5 @@
+{
+  "log_excerpt": "running integration tests\nthread 'integration_case' panicked at src/lib.rs:42\nerror: test failed\n",
+  "log_status": "available",
+  "raw_log_path": "ci-logs/4003.txt"
+}

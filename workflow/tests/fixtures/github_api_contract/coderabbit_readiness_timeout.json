@@ -1,0 +1,46 @@
+{
+  "observations": [
+    {
+      "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "ready_signal": false,
+      "in_progress_signal": false,
+      "feedback_item_set_hash": null,
+      "items_count": 0
+    },
+    {
+      "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "ready_signal": false,
+      "in_progress_signal": false,
+      "feedback_item_set_hash": null,
+      "items_count": 0
+    },
+    {
+      "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "ready_signal": false,
+      "in_progress_signal": false,
+      "feedback_item_set_hash": null,
+      "items_count": 0
+    },
+    {
+      "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "ready_signal": false,
+      "in_progress_signal": false,
+      "feedback_item_set_hash": null,
+      "items_count": 0
+    },
+    {
+      "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "ready_signal": false,
+      "in_progress_signal": false,
+      "feedback_item_set_hash": null,
+      "items_count": 0
+    },
+    {
+      "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "ready_signal": false,
+      "in_progress_signal": false,
+      "feedback_item_set_hash": null,
+      "items_count": 0
+    }
+  ]
+}

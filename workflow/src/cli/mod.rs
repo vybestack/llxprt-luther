@@ -2,8 +2,7 @@
 /// CLI module - command line interface for the workflow runtime.
 ///
 /// This module provides the CLI commands using clap derive macros.
-
-use clap::{Parser, Subcommand, Args};
+use clap::{Args, Parser, Subcommand};
 use std::path::PathBuf;
 
 /// CLI arguments for the luther-workflow application.
@@ -49,6 +48,9 @@ pub struct RunArgs {
     /// Directory containing workflows/ and workflow-configs/ subdirectories
     #[arg(long, value_name = "DIR")]
     pub config_dir: Option<PathBuf>,
+    /// Stable run id to use for durable checkpoints/resume
+    #[arg(long, value_name = "ID")]
+    pub run_id: Option<String>,
 }
 
 /// Arguments for the status command.
@@ -102,11 +104,13 @@ mod tests {
             dry_run: true,
             workflow_type: Some("test-type".to_string()),
             config_dir: None,
+            run_id: Some("run-123".to_string()),
         };
         assert!(args.dry_run);
         assert_eq!(args.config, Some(PathBuf::from("/test/config.toml")));
         assert_eq!(args.workflow_type, Some("test-type".to_string()));
         assert!(args.config_dir.is_none());
+        assert_eq!(args.run_id, Some("run-123".to_string()));
     }
 
     #[test]

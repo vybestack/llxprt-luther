@@ -8,7 +8,7 @@ use luther_workflow::engine::executor::{interpolate_string, StepContext};
 
 /// @plan:PLAN-20260408-LLXPRT-FIRST.P10
 /// @requirement:REQ-LF-CTX-003
-/// Test 1: set with step_id stores variable under that step's namespace
+/// Test 1: set with `step_id` stores variable under that step's namespace
 #[test]
 fn test_set_with_step_id_stores_namespaced_variable() {
     let mut ctx = StepContext::new(PathBuf::from("/tmp/test"), "run-abc".to_string());
@@ -65,16 +65,16 @@ fn test_unnamespaced_get_returns_most_recent_value() {
 
 /// @plan:PLAN-20260408-LLXPRT-FIRST.P10
 /// @requirement:REQ-LF-CTX-001
-/// Test 4: interpolate_string with namespaced placeholder
+/// Test 4: `interpolate_string` with namespaced template token
 #[test]
-fn test_interpolate_namespaced_placeholder() {
+fn test_interpolate_namespaced_template_token() {
     let mut ctx = StepContext::new(PathBuf::from("/tmp/test"), "run-abc".to_string());
 
     // Simulate: fetch_issue step set issue_number = "42"
     ctx.set_current_step_id("fetch_issue");
     ctx.set("issue_number", "42");
 
-    // Interpolate using namespaced placeholder
+    // Interpolate using namespaced template token
     let template = "Fixes #{fetch_issue.issue_number}";
     let result = interpolate_string(template, &ctx);
 
@@ -83,16 +83,16 @@ fn test_interpolate_namespaced_placeholder() {
 
 /// @plan:PLAN-20260408-LLXPRT-FIRST.P10
 /// @requirement:REQ-LF-CTX-002
-/// Test 5: interpolate with unnamespaced placeholder still works
+/// Test 5: interpolate with unnamespaced template token still works
 #[test]
-fn test_interpolate_unnamespaced_placeholder_still_works() {
+fn test_interpolate_unnamespaced_template_token_still_works() {
     let mut ctx = StepContext::new(PathBuf::from("/tmp/test"), "run-abc".to_string());
 
     // Step A sets greeting
     ctx.set_current_step_id("step_a");
     ctx.set("greeting", "hello");
 
-    // Interpolate using unnamespaced placeholder
+    // Interpolate using unnamespaced template token
     let template = "{greeting} world";
     let result = interpolate_string(template, &ctx);
 
@@ -101,7 +101,7 @@ fn test_interpolate_unnamespaced_placeholder_still_works() {
 
 /// @plan:PLAN-20260408-LLXPRT-FIRST.P10
 /// @requirement:REQ-LF-CTX-001,REQ-LF-CTX-002
-/// Test 6: interpolate mixed namespaced and unnamespaced placeholders
+/// Test 6: interpolate mixed namespaced and unnamespaced template tokens
 #[test]
 fn test_interpolate_mixed_namespaced_and_unnamespaced() {
     let mut ctx = StepContext::new(PathBuf::from("/tmp/test"), "run-abc".to_string());
@@ -123,7 +123,7 @@ fn test_interpolate_mixed_namespaced_and_unnamespaced() {
 
 /// @plan:PLAN-20260408-LLXPRT-FIRST.P10
 /// @requirement:REQ-LF-CTX-004
-/// Test 7: built-in work_dir resolves without namespace
+/// Test 7: built-in `work_dir` resolves without namespace
 #[test]
 fn test_builtin_work_dir_resolves_without_namespace() {
     let ctx = StepContext::new(PathBuf::from("/tmp/test"), "run-abc".to_string());
@@ -137,7 +137,7 @@ fn test_builtin_work_dir_resolves_without_namespace() {
 
 /// @plan:PLAN-20260408-LLXPRT-FIRST.P10
 /// @requirement:REQ-LF-CTX-004
-/// Test 8: built-in run_id resolves without namespace
+/// Test 8: built-in `run_id` resolves without namespace
 #[test]
 fn test_builtin_run_id_resolves_without_namespace() {
     let ctx = StepContext::new(PathBuf::from("/tmp/test"), "run-abc".to_string());
@@ -151,7 +151,7 @@ fn test_builtin_run_id_resolves_without_namespace() {
 
 /// @plan:PLAN-20260408-LLXPRT-FIRST.P10
 /// @requirement:REQ-LF-CTX-003
-/// Test 9: set without step_id stores bare key only (backward compat)
+/// Test 9: set without `step_id` stores bare key only (backward compat)
 #[test]
 fn test_set_without_step_id_stores_bare_key_only() {
     let mut ctx = StepContext::new(PathBuf::from("/tmp/test"), "run-abc".to_string());
@@ -205,9 +205,9 @@ fn test_unknown_namespaced_key_returns_none() {
 
 /// @plan:PLAN-20260408-LLXPRT-FIRST.P10
 /// @requirement:REQ-LF-CTX-002
-/// Test 12: undefined placeholder left as-is (backward compat)
+/// Test 12: undefined template token left as-is (backward compat)
 #[test]
-fn test_interpolate_undefined_placeholder_left_as_is() {
+fn test_interpolate_undefined_template_token_left_as_is() {
     let ctx = StepContext::new(PathBuf::from("/tmp/test"), "run-abc".to_string());
 
     // Undefined variable should be left unchanged
@@ -263,12 +263,15 @@ fn test_step_output_overrides_config_seeded_variable() {
     assert_eq!(ctx.get("target_repo"), Some(&"other/repo".to_string()));
 
     // Explicit namespaced access should return step's value
-    assert_eq!(ctx.get("setup.target_repo"), Some(&"other/repo".to_string()));
+    assert_eq!(
+        ctx.get("setup.target_repo"),
+        Some(&"other/repo".to_string())
+    );
 }
 
 /// @plan:PLAN-20260408-LLXPRT-FIRST.P10
 /// @requirement:REQ-LF-CTX-001,REQ-LF-CTX-004
-/// Test 15: qualified config variable access {config.variable_name}
+/// Test 15: qualified config variable access {`config.variable_name`}
 #[test]
 fn test_config_variable_qualified_access() {
     let mut ctx = StepContext::new(PathBuf::from("/tmp/test"), "run-abc".to_string());

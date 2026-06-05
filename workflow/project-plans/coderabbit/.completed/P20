@@ -1,0 +1,1139 @@
+VERDICT: PASS
+
+# Phase 20 Evidence - Documentation and Traceability Audit
+
+## Documentation/Traceability Audit Notes
+
+- Created docs/architecture/pr-follow-through.md with P20 plan marker and REQ-PRFU markers.
+- Documented deterministic boundaries and LLM boundaries.
+- Documented artifact_root path model and explicitly documented no artifact_dir alias for PR follow-through executors.
+- Documented artifact schemas/paths for pr.json, post-pr-iteration-guard.json, pr-check-status.json, ci-failures.json, coderabbit-feedback.json, coderabbit-feedback-state.json, feedback-evaluations.json, pr-remediation-plan.json, pr-remediation-llxprt-run.json, pr-remediation-result.json, post-pr-test-result.json, push-remediation-result.json, pending-feedback-marker-actions.json, pr-feedback-marker-report.json, and post-pr-failure-terminal.json.
+- Documented trace identifiers and correlation fields: schema_version, run/workflow identity, PR identity, head SHA/ref, source/output head fields, artifact_sequence, write_sequence, failure_sequence, producer step/order, item IDs, stable keys, body hashes, current binding, and stale artifact handling.
+- Documented workflow routing overview with no custom semantic route outcomes, no post-PR abandon, watcher routes through CI collector, remediation validation/local-test/push loop, marker success to log_completion, and fatal paths to post_pr_failure_terminal.
+- Documented operational behavior: 12 observations at t=0,5,...,55, CodeRabbit readiness/stabilization, exactly one accepted validated feedback evaluation, structured remediation result requirements, and idempotent marker comments/resolution.
+- Updated project-plans/coderabbit/execution-tracker.md P20 row and status summary.
+- During verification, the first lowercase grep for deterministic boundaries failed because the section heading was capitalized. The document was updated with an exact lowercase phrase and the grep plus placeholder check were rerun successfully.
+
+## Files Created/Updated With Purpose
+
+- docs/architecture/pr-follow-through.md: architecture, artifact, routing, operation, and traceability documentation for PR follow-through.
+- project-plans/coderabbit/execution-tracker.md: recorded P20 PASS and moved current phase to P21 pending.
+- project-plans/coderabbit/.completed/P20: this evidence file.
+
+## Blocking Issues
+
+None.
+
+## Commands Run and Exact Outputs
+
+```text
+### test -f project-plans/coderabbit/.completed/P19
+exit=0
+### grep -E "^## Verdict: PASS|^VERDICT: PASS" project-plans/coderabbit/.completed/P19A.md
+## Verdict: PASS
+VERDICT: PASS
+## Verdict: PASS
+VERDICT: PASS
+exit=0
+### grep P19 tracker row showing PASS
+37:| P19 | PASS | 2 | 2026-04-30 | 2026-04-30 P19A PASS after remediation attempt 1 | project-plans/coderabbit/.completed/P19, project-plans/coderabbit/.completed/P19A.md, project-plans/coderabbit/.completed/P19-remediation-attempt-1.command-output.md, tests/workflow_shell_safety_tests.rs |
+194:- Result: PASS after remediation attempt 1; evidence recorded in `project-plans/coderabbit/.completed/P19` and `project-plans/coderabbit/.completed/P19-remediation-attempt-1.command-output.md`.
+exit=0
+### grep -R "@plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP" src tests config docs project-plans/coderabbit | wc -l
+     676
+exit=0
+### grep -R "@requirement:REQ-PRFU" src tests | wc -l
+     561
+exit=0
+### grep required document sections/terms in docs/architecture/pr-follow-through.md
+--- deterministic boundaries
+exit=1
+--- LLM boundaries
+24:## LLM boundaries
+exit=0
+--- artifact schemas
+58:## Common artifact schemas and correlation fields
+exit=0
+--- pr.json
+80:### `pr.json` — PR identity
+exit=0
+--- post-pr-iteration-guard.json
+84:### `post-pr-iteration-guard.json` — remediation iteration cap
+exit=0
+--- pr-check-status.json
+88:### `pr-check-status.json` — check status
+exit=0
+--- ci-failures.json
+92:### `ci-failures.json` — CI failures
+exit=0
+--- coderabbit-feedback.json
+96:### `coderabbit-feedback.json` — CodeRabbit feedback
+exit=0
+--- coderabbit-feedback-state.json
+100:### `coderabbit-feedback-state.json` — feedback state
+exit=0
+--- feedback-evaluations.json
+104:### `feedback-evaluations.json` — feedback evaluations
+exit=0
+--- pr-remediation-plan.json
+108:### `pr-remediation-plan.json` — remediation plan
+exit=0
+--- pr-remediation-llxprt-run.json
+112:### `pr-remediation-llxprt-run.json` — remediation invocation
+exit=0
+--- pr-remediation-result.json
+34:- The remediation LLM may edit code and describe actions taken, but its result is not trusted until `pr-remediation-result.json` passes deterministic validation.
+116:### `pr-remediation-result.json` — remediation results
+exit=0
+--- post-pr-test-result.json
+120:### `post-pr-test-result.json` — post-PR tests
+exit=0
+--- push-remediation-result.json
+124:### `push-remediation-result.json` — push results
+exit=0
+--- pending-feedback-marker-actions.json
+128:### `pending-feedback-marker-actions.json` — marker action queue
+exit=0
+--- pr-feedback-marker-report.json
+132:### `pr-feedback-marker-report.json` — marker actions
+exit=0
+--- post-pr-failure-terminal.json
+136:### `post-pr-failure-terminal.json` — terminal failure artifact
+exit=0
+--- 12 observations
+90:Records `poll_attempts`, `max_attempts`, `poll_interval_seconds`, `max_duration_seconds`, `overall_state`, `poll_observations`, final trusted current-head `checks`, `stale_checks`, `observed_at`, and `fatal_source`. Observations are written at t=0,5,...,55 minutes for the default 12 observations; there is no t=60 observation.
+171:- Check watching performs 12 observations at t=0,5,...,55 minutes by default with `poll_interval_seconds=300` and `max_duration_seconds=3600`. The watcher writes a status artifact after every polling cycle and never fails fast while current-head checks remain pending and budget remains.
+exit=0
+--- CodeRabbit readiness
+172:- CodeRabbit readiness requires deterministic readiness/stabilization evidence. Empty feedback is clean only after readiness and stabilization have been established for the current PR head. The v1 readiness collector uses bounded internal observations, a default maximum of 6, and stable-ready requirement of two identical ready observations.
+exit=0
+--- exactly one accepted validated feedback evaluation
+19:- Strict validation that each current CodeRabbit feedback item has exactly one accepted validated feedback evaluation for the current item key/body hash/head SHA.
+106:Records `items_seen`, `accepted_results`, `rejected_attempts`, `unevaluated_items`, `budget_exhausted_items`, `max_attempts_per_item`, `evaluation_state`, and `reused_results_count`. When complete, `accepted_results` contains exactly one accepted validated feedback evaluation per current item/body/head, with decision, reason, recommended action, accepted timestamp, attempt count, source, and reuse state.
+173:- Feedback evaluation requires exactly one accepted validated feedback evaluation per current item/body/head. Malformed LLM output is captured in rejected attempts and retried only within the per-item cap; budget exhaustion is terminal non-success rather than fabricated evaluation.
+exit=0
+--- post_pr_failure_terminal
+150:2. `capture_pr_identity success -> post_pr_iteration_guard`; fatal routes to `post_pr_failure_terminal`.
+151:3. `post_pr_iteration_guard success -> watch_pr_checks`; cap exhaustion/fatal routes to `post_pr_failure_terminal`.
+153:5. `collect_ci_failures success -> collect_coderabbit_feedback`; fatal routes to `post_pr_failure_terminal`.
+154:6. `collect_coderabbit_feedback success -> evaluate_coderabbit_feedback`; fatal routes to `post_pr_failure_terminal`.
+155:7. `evaluate_coderabbit_feedback success -> build_remediation_plan`; fatal routes to `post_pr_failure_terminal`.
+156:8. `build_remediation_plan success -> mark_coderabbit_feedback`; `fixable -> remediate_pr_followup`; fatal routes to `post_pr_failure_terminal`.
+157:9. `remediate_pr_followup success -> validate_remediation_result`; fatal routes to `post_pr_failure_terminal`.
+158:10. `validate_remediation_result success -> run_post_pr_tests`; `fixable -> remediate_pr_followup`; fatal routes to `post_pr_failure_terminal`.
+159:11. `run_post_pr_tests success -> push_remediation_changes`; `fixable -> remediate_pr_followup`; fatal routes to `post_pr_failure_terminal`.
+160:12. `push_remediation_changes success -> capture_pr_identity`; retryable/fatal routes to `post_pr_failure_terminal` unless a dedicated artifact-backed push retry loop is configured.
+161:13. `mark_coderabbit_feedback success -> log_completion`; fatal routes to `post_pr_failure_terminal`.
+162:14. `post_pr_failure_terminal` returns only `fatal`, producing overall non-success instead of cleanup success.
+175:- Marker comments and review-thread resolution are idempotent. Local marker reports and remote hidden marker comments are checked before posting or resolving. Idempotency keys bind stable marker key, source head SHA, remediation output head, body hash, action kind, and run identity. Ambiguous idempotency, partial marker action where policy requires completion, API failure, or unavailable required resolution routes to `post_pr_failure_terminal`.
+exit=0
+--- artifact_root
+42:PR follow-through executors use `artifact_root` as the configured storage root. The path contract is no artifact_dir: the legacy `{artifact_dir}` name is not a PR follow-through executor contract and must not be used as an alias.
+47:<artifact_root>/pr-followup/current/<run_id>/<repository_owner>/<repository_name>/<pr_number>/<artifact_family>.json
+53:<artifact_root>/pr-followup/history/<run_id>/<repository_owner>/<repository_name>/<pr_number>/<artifact_family>/<artifact_sequence>-<write_sequence>-<producer_step_id>.json
+exit=0
+--- no artifact_dir
+42:PR follow-through executors use `artifact_root` as the configured storage root. The path contract is no artifact_dir: the legacy `{artifact_dir}` name is not a PR follow-through executor contract and must not be used as an alias.
+exit=0
+### cargo test --test github_api_contract_tests -- github_api_contract
+warning: unused doc comment
+   --> src/engine/runner.rs:125:9
+    |
+125 | /         /// @plan:PLAN-20260408-LLXPRT-FIRST.P15
+126 | |         /// @requirement:REQ-LF-PROF-003
+    | |________________________________________^
+127 | /         for (key, value) in &instance.config.variables {
+128 | |             context.set(key, value);
+129 | |         }
+    | |_________- rustdoc does not generate documentation for expressions
+    |
+    = help: use `//` for a plain comment
+    = note: `#[warn(unused_doc_comments)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused doc comment
+   --> src/engine/runner.rs:132:9
+    |
+132 | /         /// @plan:PLAN-20260408-LLXPRT-FIRST.P15
+133 | |         /// @requirement:REQ-LF-WS-001
+    | |______________________________________^
+134 | /         if let Some(work_dir_str) = instance.config.variables.get("work_dir") {
+135 | |             let path = std::path::PathBuf::from(work_dir_str);
+136 | |             std::fs::create_dir_all(&path).map_err(|e| {
+137 | |                 EngineError::InvalidState(format!(
+...   |
+141 | |             context.set_work_dir(path);
+142 | |         }
+    | |_________- rustdoc does not generate documentation for expressions
+    |
+    = help: use `//` for a plain comment
+
+warning: unused doc comment
+   --> src/engine/runner.rs:201:9
+    |
+201 | /         /// @plan:PLAN-20260408-LLXPRT-FIRST.P15
+202 | |         /// @requirement:REQ-LF-PROF-003
+    | |________________________________________^
+203 | /         for (key, value) in &instance.config.variables {
+204 | |             context.set(key, value);
+205 | |         }
+    | |_________- rustdoc does not generate documentation for expressions
+    |
+    = help: use `//` for a plain comment
+
+warning: unused doc comment
+   --> src/engine/runner.rs:208:9
+    |
+208 | /         /// @plan:PLAN-20260408-LLXPRT-FIRST.P15
+209 | |         /// @requirement:REQ-LF-WS-001
+    | |______________________________________^
+210 | /         if let Some(work_dir_str) = instance.config.variables.get("work_dir") {
+211 | |             let path = std::path::PathBuf::from(work_dir_str);
+212 | |             std::fs::create_dir_all(&path).map_err(|e| {
+213 | |                 EngineError::InvalidState(format!(
+...   |
+218 | |             context.set_work_dir(path);
+219 | |         }
+    | |_________- rustdoc does not generate documentation for expressions
+    |
+    = help: use `//` for a plain comment
+
+warning: unused doc comment
+   --> src/engine/runner.rs:302:13
+    |
+302 | /             /// @plan:PLAN-20260408-LLXPRT-FIRST.P15
+303 | |             /// @requirement:REQ-LF-FAIL-001
+    | |____________________________________________^
+304 | /             if outcome == StepOutcome::Abandon {
+305 | |                 let run_outcome = RunOutcome::Abandoned {
+306 | |                     step_id: current_step_id.clone(),
+307 | |                     reason: "Loop limit exceeded".to_string(),
+...   |
+310 | |                 return Ok(run_outcome);
+311 | |             }
+    | |_____________- rustdoc does not generate documentation for expressions
+    |
+    = help: use `//` for a plain comment
+
+warning: unused doc comment
+   --> src/engine/runner.rs:314:13
+    |
+314 | /             /// @plan:PLAN-20260408-LLXPRT-FIRST.P15
+315 | |             /// @requirement:REQ-LF-FAIL-001
+    | |____________________________________________^
+316 |               let next_step = self.resolve_next_step(&current_step_id, &outcome)?;
+    |               -------------------------------------------------------------------- rustdoc does not generate documentation for statements
+    |
+    = help: use `//` for a plain comment
+
+warning: unused doc comment
+   --> src/engine/runner.rs:350:21
+    |
+350 | /                     /// @plan:PLAN-20260408-LLXPRT-FIRST.P15
+351 | |                     /// @requirement:REQ-LF-FAIL-001
+    | |____________________________________________________^
+352 | /                     let run_outcome = match outcome {
+353 | |                         StepOutcome::Success => RunOutcome::Success,
+354 | |                         StepOutcome::Fatal => RunOutcome::Failure {
+355 | |                             step_id: current_step_id.clone(),
+...   |
+365 | |                         },
+366 | |                     };
+    | |______________________- rustdoc does not generate documentation for statements
+    |
+    = help: use `//` for a plain comment
+
+warning: field `max_retries` is never read
+  --> src/engine/runner.rs:83:5
+   |
+75 | pub struct EngineRunner {
+   |            ------------ field in this struct
+...
+83 |     max_retries: u32,
+   |     ^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `config` is never read
+  --> src/monitor/mod.rs:42:5
+   |
+41 | pub struct Monitor {
+   |            ------- field in this struct
+42 |     config: process::MonitorConfig,
+   |     ^^^^^^
+
+warning: field `path` is never read
+   --> src/monitor/mod.rs:158:5
+    |
+157 | pub struct SingletonLock {
+    |            ------------- field in this struct
+158 |     path: String,
+    |     ^^^^
+    |
+    = note: `SingletonLock` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+
+warning: field `created_branches` is never read
+   --> src/repo/mod.rs:138:5
+    |
+136 | pub struct BranchManager<'a> {
+    |            ------------- field in this struct
+137 |     config: &'a RepositoryConfig,
+138 |     created_branches: Vec<String>,
+    |     ^^^^^^^^^^^^^^^^
+
+warning: field `socket_path` is never read
+   --> src/service/mod.rs:207:5
+    |
+206 | pub struct IpcClient {
+    |            --------- field in this struct
+207 |     socket_path: String,
+    |     ^^^^^^^^^^^
+
+warning: `luther-workflow` (lib) generated 12 warnings
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.05s
+     Running tests/github_api_contract_tests.rs (target/debug/deps/github_api_contract_tests-2db7dc2f1c547aec)
+
+running 2 tests
+test github_api_contract_negative_fixture_rejects_missing_contract ... ok
+test github_api_contract_validator_accepts_phase_02_contract ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.47s
+
+exit=0
+### cargo run --bin github_api_contract_validator -- project-plans/coderabbit/analysis/github-api-contract.md tests/fixtures/github_api_contract
+warning: unused doc comment
+   --> src/engine/runner.rs:125:9
+    |
+125 | /         /// @plan:PLAN-20260408-LLXPRT-FIRST.P15
+126 | |         /// @requirement:REQ-LF-PROF-003
+    | |________________________________________^
+127 | /         for (key, value) in &instance.config.variables {
+128 | |             context.set(key, value);
+129 | |         }
+    | |_________- rustdoc does not generate documentation for expressions
+    |
+    = help: use `//` for a plain comment
+    = note: `#[warn(unused_doc_comments)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused doc comment
+   --> src/engine/runner.rs:132:9
+    |
+132 | /         /// @plan:PLAN-20260408-LLXPRT-FIRST.P15
+133 | |         /// @requirement:REQ-LF-WS-001
+    | |______________________________________^
+134 | /         if let Some(work_dir_str) = instance.config.variables.get("work_dir") {
+135 | |             let path = std::path::PathBuf::from(work_dir_str);
+136 | |             std::fs::create_dir_all(&path).map_err(|e| {
+137 | |                 EngineError::InvalidState(format!(
+...   |
+141 | |             context.set_work_dir(path);
+142 | |         }
+    | |_________- rustdoc does not generate documentation for expressions
+    |
+    = help: use `//` for a plain comment
+
+warning: unused doc comment
+   --> src/engine/runner.rs:201:9
+    |
+201 | /         /// @plan:PLAN-20260408-LLXPRT-FIRST.P15
+202 | |         /// @requirement:REQ-LF-PROF-003
+    | |________________________________________^
+203 | /         for (key, value) in &instance.config.variables {
+204 | |             context.set(key, value);
+205 | |         }
+    | |_________- rustdoc does not generate documentation for expressions
+    |
+    = help: use `//` for a plain comment
+
+warning: unused doc comment
+   --> src/engine/runner.rs:208:9
+    |
+208 | /         /// @plan:PLAN-20260408-LLXPRT-FIRST.P15
+209 | |         /// @requirement:REQ-LF-WS-001
+    | |______________________________________^
+210 | /         if let Some(work_dir_str) = instance.config.variables.get("work_dir") {
+211 | |             let path = std::path::PathBuf::from(work_dir_str);
+212 | |             std::fs::create_dir_all(&path).map_err(|e| {
+213 | |                 EngineError::InvalidState(format!(
+...   |
+218 | |             context.set_work_dir(path);
+219 | |         }
+    | |_________- rustdoc does not generate documentation for expressions
+    |
+    = help: use `//` for a plain comment
+
+warning: unused doc comment
+   --> src/engine/runner.rs:302:13
+    |
+302 | /             /// @plan:PLAN-20260408-LLXPRT-FIRST.P15
+303 | |             /// @requirement:REQ-LF-FAIL-001
+    | |____________________________________________^
+304 | /             if outcome == StepOutcome::Abandon {
+305 | |                 let run_outcome = RunOutcome::Abandoned {
+306 | |                     step_id: current_step_id.clone(),
+307 | |                     reason: "Loop limit exceeded".to_string(),
+...   |
+310 | |                 return Ok(run_outcome);
+311 | |             }
+    | |_____________- rustdoc does not generate documentation for expressions
+    |
+    = help: use `//` for a plain comment
+
+warning: unused doc comment
+   --> src/engine/runner.rs:314:13
+    |
+314 | /             /// @plan:PLAN-20260408-LLXPRT-FIRST.P15
+315 | |             /// @requirement:REQ-LF-FAIL-001
+    | |____________________________________________^
+316 |               let next_step = self.resolve_next_step(&current_step_id, &outcome)?;
+    |               -------------------------------------------------------------------- rustdoc does not generate documentation for statements
+    |
+    = help: use `//` for a plain comment
+
+warning: unused doc comment
+   --> src/engine/runner.rs:350:21
+    |
+350 | /                     /// @plan:PLAN-20260408-LLXPRT-FIRST.P15
+351 | |                     /// @requirement:REQ-LF-FAIL-001
+    | |____________________________________________________^
+352 | /                     let run_outcome = match outcome {
+353 | |                         StepOutcome::Success => RunOutcome::Success,
+354 | |                         StepOutcome::Fatal => RunOutcome::Failure {
+355 | |                             step_id: current_step_id.clone(),
+...   |
+365 | |                         },
+366 | |                     };
+    | |______________________- rustdoc does not generate documentation for statements
+    |
+    = help: use `//` for a plain comment
+
+warning: field `max_retries` is never read
+  --> src/engine/runner.rs:83:5
+   |
+75 | pub struct EngineRunner {
+   |            ------------ field in this struct
+...
+83 |     max_retries: u32,
+   |     ^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `config` is never read
+  --> src/monitor/mod.rs:42:5
+   |
+41 | pub struct Monitor {
+   |            ------- field in this struct
+42 |     config: process::MonitorConfig,
+   |     ^^^^^^
+
+warning: field `path` is never read
+   --> src/monitor/mod.rs:158:5
+    |
+157 | pub struct SingletonLock {
+    |            ------------- field in this struct
+158 |     path: String,
+    |     ^^^^
+    |
+    = note: `SingletonLock` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+
+warning: field `created_branches` is never read
+   --> src/repo/mod.rs:138:5
+    |
+136 | pub struct BranchManager<'a> {
+    |            ------------- field in this struct
+137 |     config: &'a RepositoryConfig,
+138 |     created_branches: Vec<String>,
+    |     ^^^^^^^^^^^^^^^^
+
+warning: field `socket_path` is never read
+   --> src/service/mod.rs:207:5
+    |
+206 | pub struct IpcClient {
+    |            --------- field in this struct
+207 |     socket_path: String,
+    |     ^^^^^^^^^^^
+
+warning: `luther-workflow` (lib) generated 12 warnings
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.04s
+     Running `target/debug/github_api_contract_validator project-plans/coderabbit/analysis/github-api-contract.md tests/fixtures/github_api_contract`
+github_api_contract_validator: PASS
+exit=0
+### cargo build --all-targets
+warning: unused doc comment
+   --> src/engine/runner.rs:125:9
+    |
+125 | /         /// @plan:PLAN-20260408-LLXPRT-FIRST.P15
+126 | |         /// @requirement:REQ-LF-PROF-003
+    | |________________________________________^
+127 | /         for (key, value) in &instance.config.variables {
+128 | |             context.set(key, value);
+129 | |         }
+    | |_________- rustdoc does not generate documentation for expressions
+    |
+    = help: use `//` for a plain comment
+    = note: `#[warn(unused_doc_comments)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused doc comment
+   --> src/engine/runner.rs:132:9
+    |
+132 | /         /// @plan:PLAN-20260408-LLXPRT-FIRST.P15
+133 | |         /// @requirement:REQ-LF-WS-001
+    | |______________________________________^
+134 | /         if let Some(work_dir_str) = instance.config.variables.get("work_dir") {
+135 | |             let path = std::path::PathBuf::from(work_dir_str);
+136 | |             std::fs::create_dir_all(&path).map_err(|e| {
+137 | |                 EngineError::InvalidState(format!(
+...   |
+141 | |             context.set_work_dir(path);
+142 | |         }
+    | |_________- rustdoc does not generate documentation for expressions
+    |
+    = help: use `//` for a plain comment
+
+warning: unused doc comment
+   --> src/engine/runner.rs:201:9
+    |
+201 | /         /// @plan:PLAN-20260408-LLXPRT-FIRST.P15
+202 | |         /// @requirement:REQ-LF-PROF-003
+    | |________________________________________^
+203 | /         for (key, value) in &instance.config.variables {
+204 | |             context.set(key, value);
+205 | |         }
+    | |_________- rustdoc does not generate documentation for expressions
+    |
+    = help: use `//` for a plain comment
+
+warning: unused doc comment
+   --> src/engine/runner.rs:208:9
+    |
+208 | /         /// @plan:PLAN-20260408-LLXPRT-FIRST.P15
+209 | |         /// @requirement:REQ-LF-WS-001
+    | |______________________________________^
+210 | /         if let Some(work_dir_str) = instance.config.variables.get("work_dir") {
+211 | |             let path = std::path::PathBuf::from(work_dir_str);
+212 | |             std::fs::create_dir_all(&path).map_err(|e| {
+213 | |                 EngineError::InvalidState(format!(
+...   |
+218 | |             context.set_work_dir(path);
+219 | |         }
+    | |_________- rustdoc does not generate documentation for expressions
+    |
+    = help: use `//` for a plain comment
+
+warning: unused doc comment
+   --> src/engine/runner.rs:302:13
+    |
+302 | /             /// @plan:PLAN-20260408-LLXPRT-FIRST.P15
+303 | |             /// @requirement:REQ-LF-FAIL-001
+    | |____________________________________________^
+304 | /             if outcome == StepOutcome::Abandon {
+305 | |                 let run_outcome = RunOutcome::Abandoned {
+306 | |                     step_id: current_step_id.clone(),
+307 | |                     reason: "Loop limit exceeded".to_string(),
+...   |
+310 | |                 return Ok(run_outcome);
+311 | |             }
+    | |_____________- rustdoc does not generate documentation for expressions
+    |
+    = help: use `//` for a plain comment
+
+warning: unused doc comment
+   --> src/engine/runner.rs:314:13
+    |
+314 | /             /// @plan:PLAN-20260408-LLXPRT-FIRST.P15
+315 | |             /// @requirement:REQ-LF-FAIL-001
+    | |____________________________________________^
+316 |               let next_step = self.resolve_next_step(&current_step_id, &outcome)?;
+    |               -------------------------------------------------------------------- rustdoc does not generate documentation for statements
+    |
+    = help: use `//` for a plain comment
+
+warning: unused doc comment
+   --> src/engine/runner.rs:350:21
+    |
+350 | /                     /// @plan:PLAN-20260408-LLXPRT-FIRST.P15
+351 | |                     /// @requirement:REQ-LF-FAIL-001
+    | |____________________________________________________^
+352 | /                     let run_outcome = match outcome {
+353 | |                         StepOutcome::Success => RunOutcome::Success,
+354 | |                         StepOutcome::Fatal => RunOutcome::Failure {
+355 | |                             step_id: current_step_id.clone(),
+...   |
+365 | |                         },
+366 | |                     };
+    | |______________________- rustdoc does not generate documentation for statements
+    |
+    = help: use `//` for a plain comment
+
+warning: field `max_retries` is never read
+  --> src/engine/runner.rs:83:5
+   |
+75 | pub struct EngineRunner {
+   |            ------------ field in this struct
+...
+83 |     max_retries: u32,
+   |     ^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `config` is never read
+  --> src/monitor/mod.rs:42:5
+   |
+41 | pub struct Monitor {
+   |            ------- field in this struct
+42 |     config: process::MonitorConfig,
+   |     ^^^^^^
+
+warning: field `path` is never read
+   --> src/monitor/mod.rs:158:5
+    |
+157 | pub struct SingletonLock {
+    |            ------------- field in this struct
+158 |     path: String,
+    |     ^^^^
+    |
+    = note: `SingletonLock` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+
+warning: field `created_branches` is never read
+   --> src/repo/mod.rs:138:5
+    |
+136 | pub struct BranchManager<'a> {
+    |            ------------- field in this struct
+137 |     config: &'a RepositoryConfig,
+138 |     created_branches: Vec<String>,
+    |     ^^^^^^^^^^^^^^^^
+
+warning: field `socket_path` is never read
+   --> src/service/mod.rs:207:5
+    |
+206 | pub struct IpcClient {
+    |            --------- field in this struct
+207 |     socket_path: String,
+    |     ^^^^^^^^^^^
+
+warning: `luther-workflow` (lib) generated 12 warnings
+warning: unused import: `std::path::PathBuf`
+ --> tests/hello_world_workflow_integration.rs:6:5
+  |
+6 | use std::path::PathBuf;
+  |     ^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused imports: `NoOpExecutor` and `StepContext`
+ --> tests/hello_world_workflow_integration.rs:8:59
+  |
+8 | use luther_workflow::engine::executor::{ExecutorRegistry, NoOpExecutor, StepContext};
+  |                                                           ^^^^^^^^^^^^  ^^^^^^^^^^^
+
+warning: unused import: `luther_workflow::engine::transition::StepOutcome`
+  --> tests/hello_world_workflow_integration.rs:13:5
+   |
+13 | use luther_workflow::engine::transition::StepOutcome;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused variable: `malformed_toml`
+   --> tests/config_binding_integration.rs:192:9
+    |
+192 |     let malformed_toml = r#"
+    |         ^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_malformed_toml`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `RunMetadata`
+  --> tests/persistence_integration.rs:14:74
+   |
+14 |     load_checkpoint, run_metadata_from_ref, save_checkpoint, Checkpoint, RunMetadata, SqliteStore,
+   |                                                                          ^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `std::fs`
+   --> src/adapters/git.rs:334:9
+    |
+334 |     use std::fs;
+    |         ^^^^^^^
+    |
+    = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `tempfile::TempDir`
+   --> src/adapters/git.rs:335:9
+    |
+335 |     use tempfile::TempDir;
+    |         ^^^^^^^^^^^^^^^^^
+
+warning: unused import: `tempfile::TempDir`
+   --> src/monitor/heartbeat.rs:300:9
+    |
+300 |     use tempfile::TempDir;
+    |         ^^^^^^^^^^^^^^^^^
+
+warning: unused import: `tempfile::TempDir`
+   --> src/monitor/ipc.rs:283:9
+    |
+283 |     use tempfile::TempDir;
+    |         ^^^^^^^^^^^^^^^^^
+
+warning: unused import: `std::path::PathBuf`
+   --> src/service/launchd.rs:259:9
+    |
+259 |     use std::path::PathBuf;
+    |         ^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `std::path::PathBuf`
+   --> src/service/systemd.rs:325:9
+    |
+325 |     use std::path::PathBuf;
+    |         ^^^^^^^^^^^^^^^^^^
+
+warning: unused variable: `workspace`
+   --> src/repo/mod.rs:213:13
+    |
+213 |         let workspace = Workspace::prepare(&config, "/tmp/test-repo").await;
+    |             ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_workspace`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+   --> src/repo/mod.rs:227:13
+    |
+227 |         let mut manager = BranchManager::new(&config);
+    |             ----^^^^^^^
+    |             |
+    |             help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `manager`
+   --> src/repo/mod.rs:227:13
+    |
+227 |         let mut manager = BranchManager::new(&config);
+    |             ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_manager`
+
+warning: unused variable: `params`
+   --> src/repo/mod.rs:230:13
+    |
+230 |         let params = BranchParams {
+    |             ^^^^^^ help: if this is intentional, prefix it with an underscore: `_params`
+
+warning: function `setup_test_dir` is never used
+   --> src/monitor/heartbeat.rs:302:8
+    |
+302 |     fn setup_test_dir() {
+    |        ^^^^^^^^^^^^^^
+
+warning: variable does not need to be mutable
+  --> tests/cli_e2e_integration.rs:11:9
+   |
+11 |     let mut cmd = Command::new(env!("CARGO_BIN_EXE_luther-workflow"));
+   |         ----^^^
+   |         |
+   |         help: remove this `mut`
+   |
+   = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: `luther-workflow` (test "hello_world_workflow_integration") generated 3 warnings (run `cargo fix --test "hello_world_workflow_integration" -p luther-workflow` to apply 3 suggestions)
+warning: `luther-workflow` (test "config_binding_integration") generated 1 warning (run `cargo fix --test "config_binding_integration" -p luther-workflow` to apply 1 suggestion)
+warning: `luther-workflow` (test "persistence_integration") generated 1 warning (run `cargo fix --test "persistence_integration" -p luther-workflow` to apply 1 suggestion)
+warning: `luther-workflow` (lib test) generated 23 warnings (12 duplicates) (run `cargo fix --lib -p luther-workflow --tests` to apply 10 suggestions)
+warning: `luther-workflow` (test "cli_e2e_integration") generated 1 warning (run `cargo fix --test "cli_e2e_integration" -p luther-workflow` to apply 1 suggestion)
+warning: method `call_count` is never used
+  --> tests/e2e_workflow_integration.rs:38:8
+   |
+30 | impl SharedMockExecutor {
+   | ----------------------- method in this implementation
+...
+38 |     fn call_count(&self, step_id: &str) -> usize {
+   |        ^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+  --> tests/per_edge_loop_tests.rs:48:13
+   |
+48 |         let mut outcomes = self.outcomes.lock().unwrap();
+   |             ----^^^^^^^^
+   |             |
+   |             help: remove this `mut`
+   |
+   = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `EngineError`
+  --> tests/engine_resume_integration.rs:11:39
+   |
+11 | use luther_workflow::engine::runner::{EngineError, EngineRunner, RunOutcome};
+   |                                       ^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `luther_workflow::engine::transition::StepOutcome`
+  --> tests/engine_resume_integration.rs:12:5
+   |
+12 | use luther_workflow::engine::transition::StepOutcome;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `luther_workflow::persistence::checkpoint::PersistenceError`
+  --> tests/engine_resume_integration.rs:13:5
+   |
+13 | use luther_workflow::persistence::checkpoint::PersistenceError;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `EngineError`
+ --> tests/engine_execution_integration.rs:9:39
+  |
+9 | use luther_workflow::engine::runner::{EngineError, EngineRunner, RunOutcome};
+  |                                       ^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused imports: `resolve_workflow_config` and `resolve_workflow_type`
+  --> tests/engine_execution_integration.rs:11:48
+   |
+11 | use luther_workflow::workflow::config_loader::{resolve_workflow_config, resolve_workflow_type};
+   |                                                ^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `std::collections::HashMap`
+  --> tests/engine_execution_integration.rs:15:5
+   |
+15 | use std::collections::HashMap;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `std::path::PathBuf`
+  --> tests/engine_execution_integration.rs:16:5
+   |
+16 | use std::path::PathBuf;
+   |     ^^^^^^^^^^^^^^^^^^
+
+warning: unused variable: `initial_loop_count`
+   --> tests/engine_execution_integration.rs:323:9
+    |
+323 |     let initial_loop_count = 0;
+    |         ^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_initial_loop_count`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `get_assignee` is never used
+  --> tests/live_workflow_integration.rs:51:4
+   |
+51 | fn get_assignee() -> String {
+   |    ^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `luther-workflow` (test "e2e_workflow_integration") generated 1 warning
+warning: `luther-workflow` (test "per_edge_loop_tests") generated 1 warning (run `cargo fix --test "per_edge_loop_tests" -p luther-workflow` to apply 1 suggestion)
+warning: `luther-workflow` (test "engine_resume_integration") generated 3 warnings (run `cargo fix --test "engine_resume_integration" -p luther-workflow` to apply 3 suggestions)
+warning: `luther-workflow` (test "engine_execution_integration") generated 5 warnings (run `cargo fix --test "engine_execution_integration" -p luther-workflow` to apply 5 suggestions)
+warning: `luther-workflow` (test "live_workflow_integration") generated 1 warning
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.07s
+exit=0
+### cargo test --lib
+warning: unused import: `std::fs`
+   --> src/adapters/git.rs:334:9
+    |
+334 |     use std::fs;
+    |         ^^^^^^^
+    |
+    = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `tempfile::TempDir`
+   --> src/adapters/git.rs:335:9
+    |
+335 |     use tempfile::TempDir;
+    |         ^^^^^^^^^^^^^^^^^
+
+warning: unused doc comment
+   --> src/engine/runner.rs:125:9
+    |
+125 | /         /// @plan:PLAN-20260408-LLXPRT-FIRST.P15
+126 | |         /// @requirement:REQ-LF-PROF-003
+    | |________________________________________^
+127 | /         for (key, value) in &instance.config.variables {
+128 | |             context.set(key, value);
+129 | |         }
+    | |_________- rustdoc does not generate documentation for expressions
+    |
+    = help: use `//` for a plain comment
+    = note: `#[warn(unused_doc_comments)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused doc comment
+   --> src/engine/runner.rs:132:9
+    |
+132 | /         /// @plan:PLAN-20260408-LLXPRT-FIRST.P15
+133 | |         /// @requirement:REQ-LF-WS-001
+    | |______________________________________^
+134 | /         if let Some(work_dir_str) = instance.config.variables.get("work_dir") {
+135 | |             let path = std::path::PathBuf::from(work_dir_str);
+136 | |             std::fs::create_dir_all(&path).map_err(|e| {
+137 | |                 EngineError::InvalidState(format!(
+...   |
+141 | |             context.set_work_dir(path);
+142 | |         }
+    | |_________- rustdoc does not generate documentation for expressions
+    |
+    = help: use `//` for a plain comment
+
+warning: unused doc comment
+   --> src/engine/runner.rs:201:9
+    |
+201 | /         /// @plan:PLAN-20260408-LLXPRT-FIRST.P15
+202 | |         /// @requirement:REQ-LF-PROF-003
+    | |________________________________________^
+203 | /         for (key, value) in &instance.config.variables {
+204 | |             context.set(key, value);
+205 | |         }
+    | |_________- rustdoc does not generate documentation for expressions
+    |
+    = help: use `//` for a plain comment
+
+warning: unused doc comment
+   --> src/engine/runner.rs:208:9
+    |
+208 | /         /// @plan:PLAN-20260408-LLXPRT-FIRST.P15
+209 | |         /// @requirement:REQ-LF-WS-001
+    | |______________________________________^
+210 | /         if let Some(work_dir_str) = instance.config.variables.get("work_dir") {
+211 | |             let path = std::path::PathBuf::from(work_dir_str);
+212 | |             std::fs::create_dir_all(&path).map_err(|e| {
+213 | |                 EngineError::InvalidState(format!(
+...   |
+218 | |             context.set_work_dir(path);
+219 | |         }
+    | |_________- rustdoc does not generate documentation for expressions
+    |
+    = help: use `//` for a plain comment
+
+warning: unused doc comment
+   --> src/engine/runner.rs:302:13
+    |
+302 | /             /// @plan:PLAN-20260408-LLXPRT-FIRST.P15
+303 | |             /// @requirement:REQ-LF-FAIL-001
+    | |____________________________________________^
+304 | /             if outcome == StepOutcome::Abandon {
+305 | |                 let run_outcome = RunOutcome::Abandoned {
+306 | |                     step_id: current_step_id.clone(),
+307 | |                     reason: "Loop limit exceeded".to_string(),
+...   |
+310 | |                 return Ok(run_outcome);
+311 | |             }
+    | |_____________- rustdoc does not generate documentation for expressions
+    |
+    = help: use `//` for a plain comment
+
+warning: unused doc comment
+   --> src/engine/runner.rs:314:13
+    |
+314 | /             /// @plan:PLAN-20260408-LLXPRT-FIRST.P15
+315 | |             /// @requirement:REQ-LF-FAIL-001
+    | |____________________________________________^
+316 |               let next_step = self.resolve_next_step(&current_step_id, &outcome)?;
+    |               -------------------------------------------------------------------- rustdoc does not generate documentation for statements
+    |
+    = help: use `//` for a plain comment
+
+warning: unused doc comment
+   --> src/engine/runner.rs:350:21
+    |
+350 | /                     /// @plan:PLAN-20260408-LLXPRT-FIRST.P15
+351 | |                     /// @requirement:REQ-LF-FAIL-001
+    | |____________________________________________________^
+352 | /                     let run_outcome = match outcome {
+353 | |                         StepOutcome::Success => RunOutcome::Success,
+354 | |                         StepOutcome::Fatal => RunOutcome::Failure {
+355 | |                             step_id: current_step_id.clone(),
+...   |
+365 | |                         },
+366 | |                     };
+    | |______________________- rustdoc does not generate documentation for statements
+    |
+    = help: use `//` for a plain comment
+
+warning: unused import: `tempfile::TempDir`
+   --> src/monitor/heartbeat.rs:300:9
+    |
+300 |     use tempfile::TempDir;
+    |         ^^^^^^^^^^^^^^^^^
+
+warning: unused import: `tempfile::TempDir`
+   --> src/monitor/ipc.rs:283:9
+    |
+283 |     use tempfile::TempDir;
+    |         ^^^^^^^^^^^^^^^^^
+
+warning: unused import: `std::path::PathBuf`
+   --> src/service/launchd.rs:259:9
+    |
+259 |     use std::path::PathBuf;
+    |         ^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `std::path::PathBuf`
+   --> src/service/systemd.rs:325:9
+    |
+325 |     use std::path::PathBuf;
+    |         ^^^^^^^^^^^^^^^^^^
+
+warning: unused variable: `workspace`
+   --> src/repo/mod.rs:213:13
+    |
+213 |         let workspace = Workspace::prepare(&config, "/tmp/test-repo").await;
+    |             ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_workspace`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+   --> src/repo/mod.rs:227:13
+    |
+227 |         let mut manager = BranchManager::new(&config);
+    |             ----^^^^^^^
+    |             |
+    |             help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `manager`
+   --> src/repo/mod.rs:227:13
+    |
+227 |         let mut manager = BranchManager::new(&config);
+    |             ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_manager`
+
+warning: unused variable: `params`
+   --> src/repo/mod.rs:230:13
+    |
+230 |         let params = BranchParams {
+    |             ^^^^^^ help: if this is intentional, prefix it with an underscore: `_params`
+
+warning: field `max_retries` is never read
+  --> src/engine/runner.rs:83:5
+   |
+75 | pub struct EngineRunner {
+   |            ------------ field in this struct
+...
+83 |     max_retries: u32,
+   |     ^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `config` is never read
+  --> src/monitor/mod.rs:42:5
+   |
+41 | pub struct Monitor {
+   |            ------- field in this struct
+42 |     config: process::MonitorConfig,
+   |     ^^^^^^
+
+warning: field `path` is never read
+   --> src/monitor/mod.rs:158:5
+    |
+157 | pub struct SingletonLock {
+    |            ------------- field in this struct
+158 |     path: String,
+    |     ^^^^
+    |
+    = note: `SingletonLock` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+
+warning: function `setup_test_dir` is never used
+   --> src/monitor/heartbeat.rs:302:8
+    |
+302 |     fn setup_test_dir() {
+    |        ^^^^^^^^^^^^^^
+
+warning: field `created_branches` is never read
+   --> src/repo/mod.rs:138:5
+    |
+136 | pub struct BranchManager<'a> {
+    |            ------------- field in this struct
+137 |     config: &'a RepositoryConfig,
+138 |     created_branches: Vec<String>,
+    |     ^^^^^^^^^^^^^^^^
+
+warning: field `socket_path` is never read
+   --> src/service/mod.rs:207:5
+    |
+206 | pub struct IpcClient {
+    |            --------- field in this struct
+207 |     socket_path: String,
+    |     ^^^^^^^^^^^
+
+warning: `luther-workflow` (lib test) generated 23 warnings (run `cargo fix --lib -p luther-workflow --tests` to apply 10 suggestions)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.05s
+     Running unittests src/lib.rs (target/debug/deps/luther_workflow-cec7d813c7133e38)
+
+running 67 tests
+test adapters::git::tests::resolve_workspace_path_shared_strategy ... ok
+test adapters::git::tests::resolve_workspace_path_per_run_strategy ... ok
+test adapters::git::tests::resolve_workspace_path_with_template ... ok
+test cli::tests::service_args_parsing ... ok
+test cli::tests::run_args_parsing ... ok
+test engine::dagrs_runtime::tests::dagrs_runtime_can_be_created ... ok
+test cli::tests::status_args_parsing ... ok
+test engine::dagrs_runtime::tests::dagrs_runtime_load_workflow_succeeds ... ok
+test engine::dagrs_runtime::tests::dagrs_runtime_execute_step_succeeds ... ok
+test engine::dagrs_runtime::tests::dagrs_runtime_resume_run_succeeds ... ok
+test engine::dagrs_runtime::tests::dagrs_runtime_start_run_returns_id ... ok
+test engine::runner::tests::engine_error_display_formats_correctly ... ok
+test engine::runner::tests::run_outcome_variants_exist ... ok
+test engine::transition::tests::step_outcome_display_formats_correctly ... ok
+test cli::tests::cli_parses_without_error ... ok
+test engine::transition::tests::step_outcome_variants_exist ... ok
+test engine::transition::tests::transition_can_be_created ... ok
+test engine::transition::tests::transition_def_can_be_created ... ok
+test monitor::heartbeat::tests::test_get_heartbeat_path ... ok
+test monitor::heartbeat::tests::test_heartbeat_creation ... ok
+test monitor::ipc::tests::test_ipc_endpoint_creation ... ok
+test monitor::ipc::tests::test_ipc_request_serialization ... ok
+test monitor::heartbeat::tests::test_heartbeat_serialization ... ok
+test monitor::process::tests::test_calculate_backoff_exponential ... ok
+test monitor::ipc::tests::test_shared_state ... ok
+test monitor::ipc::tests::test_ipc_response_serialization ... ok
+test monitor::process::tests::test_calculate_backoff_fixed ... ok
+test monitor::process::tests::test_process_state_restart_tracking ... ok
+test monitor::tests::test_restart_policy_exponential_backoff ... ok
+test monitor::tests::test_restart_tracker ... ok
+test monitor::tests::test_select_profile ... ok
+test persistence::artifacts::tests::artifact_record_can_be_created ... ok
+test persistence::artifacts::tests::artifact_record_with_size ... ok
+test persistence::artifacts::tests::default_artifacts_root_returns_path ... ok
+test persistence::checkpoint::tests::checkpoint_can_be_created ... ok
+test persistence::artifacts::tests::get_artifacts_dir_is_deterministic ... ok
+test persistence::checkpoint::tests::checkpoint_with_snapshot ... ok
+test persistence::checkpoint::tests::persistence_error_variants_exist ... ok
+test persistence::checkpoint::tests::checkpoint_mark_interrupted ... ok
+test repo::tests::test_branch_manager_branch_name_generation ... ok
+test runtime_paths::tests::get_artifacts_root_returns_valid_path ... ok
+test runtime_paths::tests::get_config_dir_returns_valid_path ... ok
+test runtime_paths::tests::get_run_dir_includes_run_id ... ok
+test service::launchd::tests::test_get_launch_agents_dir ... ok
+test repo::tests::test_shared_workspace_returns_same_path ... ok
+test repo::tests::test_repository_config_from_toml ... ok
+test service::launchd::tests::test_get_plist_path ... ok
+test service::launchd::tests::test_is_service_installed_check ... ok
+test runtime_paths::tests::get_data_dir_returns_valid_path ... ok
+test service::spec::tests::test_service_spec_builder ... ok
+test service::spec::tests::test_generate_launchd_plist ... ok
+test service::spec::tests::test_generate_systemd_unit ... ok
+test service::spec::tests::test_plist_file_name ... ok
+test service::systemd::tests::test_get_systemd_user_dir ... ok
+test service::spec::tests::test_unit_file_name ... ok
+test service::systemd::tests::test_is_service_installed_check ... ok
+test service::tests::test_failure_type_variants ... ok
+test service::tests::test_service_config ... ok
+test tests::exposes_project_name ... ok
+test service::tests::test_service_error_diagnostics ... ok
+test service::systemd::tests::test_get_unit_path ... ok
+test engine::runner::tests::engine_runner_can_be_created ... ok
+test persistence::checkpoint::tests::checkpoint_preserves_counters ... ok
+test persistence::checkpoint::tests::save_and_load_events ... ok
+test persistence::checkpoint::tests::save_and_load_checkpoint ... ok
+test service::systemd::tests::test_is_systemd_available ... ok
+test monitor::process::tests::test_singleton_lock_acquire_and_release ... ok
+
+test result: ok. 67 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.11s
+
+exit=0
+### negative grep placeholder/TBD markers in relevant touched files
+exit=0
+### grep required document sections/terms in docs/architecture/pr-follow-through.md rerun for deterministic boundaries
+10:This section documents deterministic boundaries.
+exit=0
+### negative grep placeholder/TBD markers in relevant touched files rerun
+exit=0
+```

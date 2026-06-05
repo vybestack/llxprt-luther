@@ -1,14 +1,22 @@
 //! Monitor module - supervision and lifecycle management for workflow runs.
 //!
 /// @plan:PLAN-20260404-INITIAL-RUNTIME.P09
-
 pub mod heartbeat;
 pub mod ipc;
 pub mod process;
 
-pub use heartbeat::{Heartbeat, HeartbeatError, HeartbeatWriter, MonitorState, delete_heartbeat, read_heartbeat, read_all_heartbeats, write_heartbeat, write_heartbeat_full};
-pub use ipc::{IpcRequest, IpcResponse, IpcError, SharedState, connect_ipc, create_ipc_endpoint, get_default_ipc_path, send_request, serve_status};
-pub use process::{MonitorConfig, ProcessState, SingletonGuard, acquire_singleton_lock, calculate_backoff, is_process_alive, release_singleton_lock};
+pub use heartbeat::{
+    delete_heartbeat, read_all_heartbeats, read_heartbeat, write_heartbeat, write_heartbeat_full,
+    Heartbeat, HeartbeatError, HeartbeatWriter, MonitorState,
+};
+pub use ipc::{
+    connect_ipc, create_ipc_endpoint, get_default_ipc_path, send_request, serve_status, IpcError,
+    IpcRequest, IpcResponse, SharedState,
+};
+pub use process::{
+    acquire_singleton_lock, calculate_backoff, is_process_alive, release_singleton_lock,
+    MonitorConfig, ProcessState, SingletonGuard,
+};
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -46,13 +54,13 @@ impl Monitor {
     pub async fn start(config: process::MonitorConfig) -> Result<Self, process::MonitorError> {
         let instance_id = format!("monitor-{}", std::process::id());
         let state = Arc::new(Mutex::new(ipc::SharedState::new(&instance_id)));
-        
+
         // Set initial state
         {
             let mut s = state.lock().await;
             s.state = heartbeat::MonitorState::Running;
         }
-        
+
         Ok(Self {
             config,
             instance_id,
@@ -66,24 +74,28 @@ impl Monitor {
     }
 
     /// Start monitor in single-instance mode (with lock).
-    pub async fn start_single_instance(config: process::MonitorConfig) -> Result<Self, process::MonitorError> {
+    pub async fn start_single_instance(
+        config: process::MonitorConfig,
+    ) -> Result<Self, process::MonitorError> {
         // Try to acquire singleton lock
-        let guard = SingletonLock::acquire("luther-monitor")
-            .map_err(|e| match e {
-                process::MonitorError::LockHeld { pid } => process::MonitorError::LockHeld { pid },
-                _ => process::MonitorError::LockError { message: e.to_string() },
-            })?;
-        
+        let guard = SingletonLock::acquire("luther-monitor").map_err(|e| match e {
+            process::MonitorError::LockHeld { pid } => process::MonitorError::LockHeld { pid },
+            _ => process::MonitorError::LockError {
+                message: e.to_string(),
+            },
+        })?;
+
         let mut monitor = Self::start(config).await?;
-        
+
         // Store the lock guard to keep it alive
         monitor._lock_guard = Some(guard);
-        
+
         // Start IPC server
-        let endpoint = create_ipc_endpoint()
-            .map_err(|e| process::MonitorError::General { message: e.to_string() })?;
+        let endpoint = create_ipc_endpoint().map_err(|e| process::MonitorError::General {
+            message: e.to_string(),
+        })?;
         monitor.ipc_handle = Some(serve_status(&endpoint, monitor.state.clone()));
-        
+
         Ok(monitor)
     }
 
@@ -91,7 +103,7 @@ impl Monitor {
     pub async fn next_heartbeat(&self) -> Option<heartbeat::Heartbeat> {
         let uptime = self.start_time.elapsed().as_secs() as i64;
         let state = self.state.lock().await;
-        
+
         Some(heartbeat::Heartbeat {
             instance_id: self.instance_id.clone(),
             timestamp: chrono::Utc::now().timestamp(),
@@ -108,11 +120,11 @@ impl Monitor {
     pub async fn spawn_worker(&mut self, task: &str) -> String {
         let id = format!("worker-{}", self.workers.len());
         self.workers.push(id.clone());
-        
+
         // Update shared state
         let mut state = self.state.lock().await;
         state.active_runs.push(task.to_string());
-        
+
         id
     }
 
@@ -120,12 +132,12 @@ impl Monitor {
     pub async fn shutdown(&mut self) -> Result<(), process::MonitorError> {
         self.shutdown = true;
         self.workers.clear();
-        
+
         // Update shared state
         let mut state = self.state.lock().await;
         state.state = heartbeat::MonitorState::Stopping;
         state.active_runs.clear();
-        
+
         Ok(())
     }
 
@@ -212,7 +224,10 @@ pub enum DegradedAction {
 impl DegradedAction {
     /// Check if this action requires an alert.
     pub fn requires_alert(&self) -> bool {
-        matches!(self, DegradedAction::AlertAndWait | DegradedAction::AlertAndContinue)
+        matches!(
+            self,
+            DegradedAction::AlertAndWait | DegradedAction::AlertAndContinue
+        )
     }
 
     /// Check if this action allows new work.
@@ -294,14 +309,14 @@ mod tests {
         };
 
         let mut tracker = RestartTracker::new(policy);
-        
+
         assert!(!tracker.should_enter_degraded());
         tracker.record_restart();
         assert!(!tracker.should_enter_degraded());
         tracker.record_restart();
         tracker.record_restart();
         assert!(tracker.should_enter_degraded());
-        
+
         let action = tracker.get_degraded_action();
         assert!(action.requires_alert());
         assert!(!action.allows_new_work());
@@ -313,12 +328,18 @@ mod tests {
             ConfigProfile {
                 name: "dev".to_string(),
                 max_concurrent_runs: 2,
-                resource_limits: ResourceLimits { max_memory_mb: 512, max_cpu_percent: 50.0 },
+                resource_limits: ResourceLimits {
+                    max_memory_mb: 512,
+                    max_cpu_percent: 50.0,
+                },
             },
             ConfigProfile {
                 name: "prod".to_string(),
                 max_concurrent_runs: 10,
-                resource_limits: ResourceLimits { max_memory_mb: 4096, max_cpu_percent: 80.0 },
+                resource_limits: ResourceLimits {
+                    max_memory_mb: 4096,
+                    max_cpu_percent: 80.0,
+                },
             },
         ];
 

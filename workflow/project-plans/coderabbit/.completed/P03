@@ -1,0 +1,298 @@
+VERDICT: PASS
+
+# Phase 03 Completion Evidence
+
+Plan: PLAN-20260429-CODERABBIT-PR-FOLLOWUP
+Phase: P03 Engine Executor Stubs
+Completed: 2026-04-30
+
+## Exact commands run and outputs
+
+### Prerequisite check and required validator before Phase 03 work
+
+Command:
+```bash
+test -f project-plans/coderabbit/.completed/P02; printf 'p02_exists_exit=%s\n' "$?"; test -f project-plans/coderabbit/.completed/P02A.md; printf 'p02a_exists_exit=%s\n' "$?"; grep -E "^## Verdict: PASS|^VERDICT: PASS" project-plans/coderabbit/.completed/P02A.md; printf 'p02a_pass_exit=%s\n' "$?"; cargo run --bin github_api_contract_validator -- project-plans/coderabbit/analysis/github-api-contract.md tests/fixtures/github_api_contract
+```
+
+Output:
+```text
+p02_exists_exit=0
+p02a_exists_exit=0
+## Verdict: PASS
+VERDICT: PASS
+## Verdict: PASS
+VERDICT: PASS
+## Verdict: PASS
+VERDICT: PASS
+## Verdict: PASS
+VERDICT: PASS
+## Verdict: PASS
+VERDICT: PASS
+## Verdict: PASS
+VERDICT: PASS
+## Verdict: PASS
+VERDICT: PASS
+p02a_pass_exit=0
+github_api_contract_validator: PASS
+warning: unused doc comment
+   --> src/engine/runner.rs:125:9
+[existing warning output omitted here for brevity; command completed successfully]
+warning: `luther-workflow` (lib) generated 12 warnings
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.10s
+     Running `target/debug/github_api_contract_validator project-plans/coderabbit/analysis/github-api-contract.md tests/fixtures/github_api_contract`
+```
+
+Exit code: 0.
+
+### Required P02 marker exists and P02A PASS verdict commands
+
+Command:
+```bash
+test -f project-plans/coderabbit/.completed/P02; printf 'exit=%s\n' "$?"; grep -E "^## Verdict: PASS|^VERDICT: PASS" project-plans/coderabbit/.completed/P02A.md; printf 'exit=%s\n' "$?"
+```
+
+Output:
+```text
+exit=0
+## Verdict: PASS
+VERDICT: PASS
+## Verdict: PASS
+VERDICT: PASS
+## Verdict: PASS
+VERDICT: PASS
+## Verdict: PASS
+VERDICT: PASS
+## Verdict: PASS
+VERDICT: PASS
+## Verdict: PASS
+VERDICT: PASS
+## Verdict: PASS
+VERDICT: PASS
+exit=0
+```
+
+Exit code: 0.
+
+### Formatting
+
+Command:
+```bash
+cargo fmt --all
+```
+
+Output:
+```text
+```
+
+Exit code: 0.
+
+### All-target build
+
+Command:
+```bash
+cargo build --all-targets
+```
+
+Output excerpt:
+```text
+warning: unused doc comment
+   --> src/engine/runner.rs:125:9
+[existing warning output omitted here for brevity; command completed successfully]
+warning: `luther-workflow` (test "persistence_integration") generated 1 warning (run `cargo fix --test "persistence_integration" -p luther-workflow` to apply 1 suggestion)
+warning: `luther-workflow` (lib test) generated 23 warnings (12 duplicates) (run `cargo fix --lib -p luther-workflow --tests` to apply 10 suggestions)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 8.21s
+```
+
+Exit code: 0.
+
+### Library tests
+
+Command:
+```bash
+cargo test --lib
+```
+
+Output excerpt:
+```text
+running 67 tests
+test engine::dagrs_runtime::tests::dagrs_runtime_can_be_created ... ok
+[60 passing test lines omitted for brevity]
+test monitor::process::tests::test_singleton_lock_acquire_and_release ... ok
+
+test result: ok. 67 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.12s
+
+warning: unused import: `std::fs`
+   --> src/adapters/git.rs:334:9
+[existing warning output omitted here for brevity; command completed successfully]
+```
+
+Exit code: 0.
+
+### GitHub API contract tests
+
+Command:
+```bash
+cargo test --test github_api_contract_tests -- github_api_contract
+```
+
+Output:
+```text
+running 2 tests
+test github_api_contract_negative_fixture_rejects_missing_contract ... ok
+test github_api_contract_validator_accepts_phase_02_contract ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.32s
+
+warning: unused doc comment
+   --> src/engine/runner.rs:125:9
+[existing warning output omitted here for brevity; command completed successfully]
+warning: `luther-workflow` (lib) generated 12 warnings
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.06s
+     Running tests/github_api_contract_tests.rs (target/debug/deps/github_api_contract_tests-2db7dc2f1c547aec)
+```
+
+Exit code: 0.
+
+### GitHub API contract validator
+
+Command:
+```bash
+cargo run --bin github_api_contract_validator -- project-plans/coderabbit/analysis/github-api-contract.md tests/fixtures/github_api_contract
+```
+
+Output:
+```text
+github_api_contract_validator: PASS
+   Compiling luther-workflow v0.1.0 (/Users/acoliver/projects/luther/workflow)
+warning: unused doc comment
+   --> src/engine/runner.rs:125:9
+[existing warning output omitted here for brevity; command completed successfully]
+warning: `luther-workflow` (lib) generated 12 warnings
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 2.27s
+     Running `target/debug/github_api_contract_validator project-plans/coderabbit/analysis/github-api-contract.md tests/fixtures/github_api_contract`
+```
+
+Exit code: 0.
+
+### Registry introspection tests
+
+Command:
+```bash
+cargo test --test github_pr_followup_executor_tests -- registry
+```
+
+Output:
+```text
+running 2 tests
+test registry_registers_all_post_pr_step_types_by_introspection ... ok
+test registry_introspection_lists_all_post_pr_step_types ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+warning: unused doc comment
+   --> src/engine/runner.rs:125:9
+[existing warning output omitted here for brevity; command completed successfully]
+warning: `luther-workflow` (lib) generated 12 warnings
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.06s
+     Running tests/github_pr_followup_executor_tests.rs (target/debug/deps/github_pr_followup_executor_tests-c36b92fac72104d2)
+```
+
+Exit code: 0.
+
+### P03 marker grep in src/engine
+
+Command:
+```bash
+grep -R "@plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P03" src/engine | wc -l; grep -R "@plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P03" src/engine
+```
+
+Output excerpt:
+```text
+69
+src/engine/executor.rs:    /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P03
+src/engine/executor.rs:    /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P03
+src/engine/executor.rs:    /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P03
+src/engine/executors/pr_followup_artifacts.rs://! @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P03
+src/engine/executors/pr_followup_artifacts.rs:/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P03
+src/engine/executors/pr_followup_artifacts.rs:/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P03
+[remaining marker lines omitted for brevity; total count above is exact]
+```
+
+Exit code: 0.
+
+### Marker audit test
+
+Command:
+```bash
+cargo test --test pr_followup_marker_audit_tests -- p03_markers_cover_all_touched_items
+```
+
+Output:
+```text
+running 1 test
+test p03_markers_cover_all_touched_items ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+warning: unused doc comment
+   --> src/engine/runner.rs:125:9
+[existing warning output omitted here for brevity; command completed successfully]
+warning: `luther-workflow` (lib) generated 12 warnings
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.05s
+     Running tests/pr_followup_marker_audit_tests.rs (target/debug/deps/pr_followup_marker_audit_tests-541da5180a19145e)
+```
+
+Exit code: 0.
+
+### Negative checks
+
+Command:
+```bash
+printf 'CHECK pseudocode placeholders\n'; grep -RIn "@pseudocode lines X-Y\|@pseudocode TBD\|@pseudocode placeholder\|TODO API\|json_path TBD\|fixture TBD\|assertion TBD" src/engine tests project-plans/coderabbit/analysis 2>/dev/null; printf 'exit=%s\n' "$?"; printf 'CHECK abandon in new post-PR code/tests\n'; grep -RIn "StepOutcome::Abandon" src/engine/executors/pr_followup_artifacts.rs src/engine/executors/pr_followup_types.rs src/engine/executors/github_pr.rs src/engine/executors/github_feedback.rs src/engine/executors/feedback_eval.rs src/engine/executors/pr_remediation.rs tests/github_pr_followup_executor_tests.rs tests/pr_followup_marker_audit_tests.rs; printf 'exit=%s\n' "$?"; printf 'CHECK dispatch in registry tests\n'; grep -RIn "\.dispatch\|dispatch(" tests/github_pr_followup_executor_tests.rs; printf 'exit=%s\n' "$?"; printf 'CHECK TODO FIXME placeholders in touched PR follow-through files\n'; grep -RIn "TODO\|FIXME\|placeholder\|not yet implemented" src/engine/executors/pr_followup_artifacts.rs src/engine/executors/pr_followup_types.rs src/engine/executors/github_pr.rs src/engine/executors/github_feedback.rs src/engine/executors/feedback_eval.rs src/engine/executors/pr_remediation.rs tests/github_pr_followup_executor_tests.rs tests/pr_followup_marker_audit_tests.rs; printf 'exit=%s\n' "$?"
+```
+
+Output:
+```text
+CHECK pseudocode placeholders
+exit=1
+CHECK abandon in new post-PR code/tests
+exit=1
+CHECK dispatch in registry tests
+exit=1
+CHECK TODO FIXME placeholders in touched PR follow-through files
+exit=1
+```
+
+Interpretation: each grep exit 1 means no matches. New post-PR stubs do not return `StepOutcome::Abandon`, registry tests do not dispatch stubs, and touched PR follow-through files do not contain the forbidden marker placeholders or unallowlisted TODO/FIXME/placeholder text.
+
+## Files created or updated with purpose
+
+- `src/engine/executors/pr_followup_artifacts.rs` — Added `PrFollowupArtifactStore`, `ArtifactWriter`, filesystem, and clock/sleeper shell signatures with no behavioral writer implementation.
+- `src/engine/executors/pr_followup_types.rs` — Added minimal production schema stubs for PR identity, check status, CI failures, CodeRabbit feedback/state/evaluations, remediation plan/result, post-PR tests, push result, feedback marker report, iteration guard, and failure terminal artifacts.
+- `src/engine/executors/github_pr.rs` — Added PR identity, PR checks, and CI failure executor stubs plus GitHub command-runner seam.
+- `src/engine/executors/github_feedback.rs` — Added CodeRabbit feedback and feedback marker executor stubs plus marker parser/discovery type shells.
+- `src/engine/executors/feedback_eval.rs` — Added feedback evaluation request/response types, adapter seam, and evaluator executor stub.
+- `src/engine/executors/pr_remediation.rs` — Added remediation plan, remediation wrapper, result validator, run-post-PR-tests, push-remediation, iteration guard, and failure terminal executor stubs.
+- `src/engine/executors/mod.rs` — Exported new PR follow-through modules, executors, shell traits, and shared types.
+- `src/engine/executor.rs` — Added registry introspection helpers and registered all planned P03 post-PR step types in `ExecutorRegistry::with_defaults()`.
+- `tests/github_pr_followup_executor_tests.rs` — Added default registry introspection tests for all planned post-PR step types without dispatching stubs.
+- `tests/pr_followup_marker_audit_tests.rs` — Added minimal P03 marker audit test target covering touched P03 Rust files.
+- `project-plans/coderabbit/execution-tracker.md` — Marked P03 PASS and advanced current phase to P04 pending.
+- `project-plans/coderabbit/.completed/P03` — This evidence file.
+
+## Semantic verification against Phase 03 success criteria
+
+- Prerequisites passed before Phase 03 work: P02 marker exists, P02A exists, P02A contains PASS verdict lines, and the required GitHub API contract validator command passed.
+- Phase type respected: P03 is a stub phase. New executor stubs compile and return `StepOutcome::Fatal` as a non-success placeholder; no stub returns `StepOutcome::Abandon` and no tests treat dispatch behavior as product behavior.
+- Artifact writer behavior deferred: `PrFollowupArtifactStore` and `ArtifactWriter` shell signatures exist, including constructor shape, canonical/history path signatures, sequence allocator signature, binding validator signature, filesystem seam, and clock/sleeper seam. No direct artifact writer behavior tests were added and no post-PR executor dispatch exercises writer behavior.
+- Registry reachability passed: `ExecutorRegistry::with_defaults()` registers `github_pr_identity`, `post_pr_iteration_guard`, `github_pr_checks`, `github_check_failures`, `github_coderabbit_feedback`, `feedback_evaluator`, `pr_remediation_plan`, `pr_followup_remediation`, `pr_remediation_result`, `run_post_pr_tests`, `push_remediation_changes`, `github_feedback_marker`, and `post_pr_failure_terminal`.
+- Registry tests use introspection only: `github_pr_followup_executor_tests` calls `contains_step_type` and `registered_step_types`; negative grep found no dispatch calls in that test file.
+- P03 marker requirements passed: source grep found 69 P03 plan markers in `src/engine`; `pr_followup_marker_audit_tests::p03_markers_cover_all_touched_items` passed and verifies adjacent marker tokens on the touched P03 files.
+- No workflow TOML changes were made by this phase. The working tree already contains workflow TOML changes from earlier/unrelated work; Phase 03 did not modify workflow TOML.
+- Required build and test gates passed: all-target build, lib tests, GitHub API contract tests, registry introspection tests, and marker audit tests all passed.
+- Negative checks passed for forbidden pseudocode placeholders, `StepOutcome::Abandon` in new post-PR code/tests, dispatching stubs in registry tests, and unallowlisted TODO/FIXME/placeholder text in touched PR follow-through files.
+
+## Blocking issues
+
+None.
