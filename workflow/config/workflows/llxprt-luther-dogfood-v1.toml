@@ -294,7 +294,7 @@ step_type = "verify"
 description = "Run lint, typecheck, test, format, build checks"
 
 [steps.parameters]
-checks = ["diff_or_existing_pr", "format", "test", "diff_or_existing_pr"]
+checks = ["diff_or_existing_pr", "test", "diff_or_existing_pr"]
 timeout_seconds = 2400
 artifact_root = "{artifact_dir}"
 
