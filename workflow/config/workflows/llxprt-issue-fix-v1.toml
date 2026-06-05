@@ -202,15 +202,7 @@ description = "Invoke llxprt to create a plan for the issue"
 profile = "{profile_planning}"
 timeout_seconds = 900
 success_file = "{artifact_dir}/plan.md"
-static_content = """
-# Implementation Plan
-
-1. Read {artifact_dir}/issue.md and confirm the requested behavior for issue #{issue_number}: when a stream event has contextCleared=true, any pending Gemini response text must be flushed/reset so later content starts a fresh message.
-2. Inspect packages/cli/src/ui/hooks/geminiStream/useStreamEventHandlers.ts, especially processGeminiStreamEvents, geminiMessageBuffer, handleContentEvent, and the AgentExecutionStopped/AgentExecutionBlocked contextCleared branches.
-3. Implement the smallest source change in useStreamEventHandlers.ts so contextCleared flushes any pending Gemini text, clears pending state, resets geminiMessageBuffer, and then preserves the existing "Conversation context has been cleared." info message.
-4. Add or update focused regression tests for the contextCleared stream event path. Prefer a test near the geminiStream hook tests that proves pre-clear and post-clear content become separate Gemini messages and are not merged.
-5. Run targeted verification for the changed package/files only, then keep the final diff narrowly scoped to issue #{issue_number}; do not modify package lockfiles, generated notice files, .luther files, generated build output, or unrelated files.
-"""
+static_content = "{plan_static_content}"
 
 prompt = """
 Do not use subagents. Do not ask questions. Read {artifact_dir}/issue.md and {artifact_dir}/comments.md. Inspect the repository as needed.
@@ -253,7 +245,7 @@ success_on_diff = true
 success_on_existing_diff = true
 
 continue_on_empty_diff = false
-required_changed_path_patterns = ["packages/cli/src/ui/hooks/"]
+required_changed_path_patterns = ["{required_changed_path_pattern}"]
 
 min_runtime_before_success_seconds = 120
 stdout_file = "{artifact_dir}/implement-stdout.txt"
@@ -322,41 +314,22 @@ artifact_root = "{artifact_dir}"
 
 [steps.parameters.check_commands]
 diff_or_existing_pr = """
-CHANGED=$(git status --porcelain --untracked-files=all | sed 's/^...//' | grep -E '^packages/cli/src/ui/hooks/' || true)
+CHANGED=$(git status --porcelain --untracked-files=all | sed 's/^...//' | grep -E '{diff_required_path_regex}' || true)
 if [ -n "$CHANGED" ]; then
   exit 0
 fi
 if [ "{setup_workspace.existing_pr_number}" != "0" ]; then
   exit 0
 fi
-echo 'No issue #1803 source/test diff found and no reusable open PR exists'
+echo '{diff_failure_message}'
 exit 1
 """
 
-lint = """
-CHANGED=$(git status --porcelain --untracked-files=all | sed 's/^...//' | grep -E '[.](ts|tsx|js|jsx)$' | tr '\n' ' ')
-if [ -z "$CHANGED" ]; then
-  echo 'No changed lint-checked files'
-else
-  npx eslint $CHANGED > "{artifact_dir}/lint-output.log" 2>&1
-  status=$?
-  tail -n 240 "{artifact_dir}/lint-output.log"
-  exit $status
-fi
-"""
-typecheck = "npm run typecheck 2>&1"
-build = "npm run build 2>&1"
-test = "npm run test --workspace @vybestack/llxprt-code -- useStreamEventHandlers 2>&1"
-format = """
-CHANGED=$(git status --porcelain --untracked-files=all | sed 's/^...//' | grep -E '[.](ts|tsx|js|jsx|json|md)$' | tr '\\n' ' ')
-
-if [ -z "$CHANGED" ]; then
-  echo 'No changed format-checked files'
-else
-  npx prettier --write $CHANGED >/tmp/luther-prettier-write.log 2>&1
-  npx prettier --check $CHANGED 2>&1
-fi
-"""
+lint = "{lint_command}"
+typecheck = "{typecheck_command}"
+build = "{build_command}"
+test = "{test_command}"
+format = "{format_command}"
 
 
 [[steps]]
