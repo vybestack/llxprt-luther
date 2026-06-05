@@ -1,0 +1,606 @@
+# LLxprt Issue Fix Workflow Type Definition
+# @plan:PLAN-20260408-LLXPRT-FIRST.P17
+# @requirement:REQ-LF-PROF-001,REQ-LF-DATA-001,REQ-LF-DATA-002,REQ-LF-DATA-003
+
+workflow_type_id = "llxprt-luther-dogfood-v1"
+
+# =============================================================================
+# STEPS (14 total - write_issue_files eliminated, fetch_issue writes directly)
+# =============================================================================
+
+[[steps]]
+step_id = "select_issue"
+step_type = "shell"
+description = "Select configured Luther dogfood issue"
+
+[steps.parameters]
+command = """
+set -euo pipefail
+
+if [ -n "{primary_issue_number}" ] && [ "{primary_issue_number}" != "0" ]; then
+  ISSUE_JSON=$(gh issue view {primary_issue_number} --repo {target_repo} --json number,title,state --jq 'select(.state == "OPEN") | {number, title}')
+  if [ -n "$ISSUE_JSON" ]; then
+    ISSUE_NUMBER=$(echo "$ISSUE_JSON" | jq -r '.number')
+    ISSUE_TITLE=$(echo "$ISSUE_JSON" | jq -r '.title')
+    gh issue edit "$ISSUE_NUMBER" --repo {target_repo} --add-assignee {assignee} --add-label "{luther_label}" > /dev/null
+    jq -n --argjson num "$ISSUE_NUMBER" --arg title "$ISSUE_TITLE" '{number: $num, title: $title}'
+    exit 0
+  fi
+fi
+
+
+# Query milestones sorted by semver (sort -V)
+MILESTONES=$(gh api repos/{target_repo}/milestones --jq '.[].title' | sort -V)
+
+SELECTED_ISSUE=""
+FOUND=0
+for MILESTONE in $MILESTONES; do
+  # List open issues: unassigned, labeled "{ok_label}", not already "{luther_label}"
+  ISSUES=$(gh issue list --repo {target_repo} \
+    --milestone "$MILESTONE" --state open --assignee "" \
+    --label "{ok_label}" \
+    --json number,title,labels --limit 50 \
+    --jq '[.[] | select(all(.labels[].name; . != "{luther_label}")) | {number, title}] | sort_by(.number)')
+
+  COUNT=$(echo "$ISSUES" | jq 'length')
+  if [ "$COUNT" -eq 0 ]; then
+    continue
+  fi
+
+  for i in $(seq 0 $((COUNT - 1))); do
+    NUM=$(echo "$ISSUES" | jq -r ".[$i].number")
+    # Skip issues that already have an open PR (REQ-LF-ISSUE-004)
+    PR_COUNT=$(gh pr list --repo {target_repo} --search "issue:$NUM" --state open --json number --jq 'length')
+    if [ "$PR_COUNT" = "0" ]; then
+      SELECTED_ISSUE=$(echo "$ISSUES" | jq -c ".[$i]")
+      FOUND=1
+      break 2
+    fi
+  done
+done
+
+if [ "$FOUND" = "0" ]; then
+  echo "FATAL: No eligible unassigned issues found in any milestone" >&2
+  exit 1
+fi
+
+ISSUE_NUMBER=$(echo "$SELECTED_ISSUE" | jq -r '.number')
+ISSUE_TITLE=$(echo "$SELECTED_ISSUE" | jq -r '.title')
+
+# Claim the issue: assign and label (redirect stdout to avoid polluting JSON output)
+gh issue edit "$ISSUE_NUMBER" --repo {target_repo} \
+  --add-assignee {assignee} --add-label "{luther_label}" > /dev/null
+
+# Output JSON for context_map extraction (only on success path)
+jq -n --argjson num "$ISSUE_NUMBER" --arg title "$ISSUE_TITLE" \
+  '{number: $num, title: $title}'
+exit 0
+"""
+output_format = "json"
+
+[steps.parameters.exit_code_map]
+1 = "fatal"
+
+[steps.parameters.context_map]
+issue_number = ".number"
+issue_title = ".title"
+
+[[steps]]
+step_id = "setup_workspace"
+step_type = "shell"
+description = "Ensure repo is checked out, create issue branch, create artifact dir"
+
+[steps.parameters]
+output_format = "json"
+context_map = { existing_pr_number = "existing_pr_number", existing_pr_url = "existing_pr_url" }
+command = """
+set -euo pipefail
+
+if [ ! -d "{work_dir}/.git" ]; then
+  git clone https://github.com/{target_repo}.git {work_dir}
+fi
+
+cd {work_dir}
+if ! git fsck --connectivity-only >/dev/null 2>&1; then
+  cd "$(dirname "{work_dir}")"
+  rm -rf "{work_dir}"
+  git clone https://github.com/{target_repo}.git "{work_dir}"
+  cd "{work_dir}"
+fi
+
+git fetch --prune origin
+EXISTING_PR_JSON=$(gh pr view issue{issue_number} --repo {target_repo} --json number,url,state,isDraft 2>/dev/null || true)
+if [ -n "$EXISTING_PR_JSON" ] && [ "$(echo "$EXISTING_PR_JSON" | jq -r '.state')" = "OPEN" ] && [ "$(echo "$EXISTING_PR_JSON" | jq -r '.isDraft')" = "false" ]; then
+  EXISTING_PR_NUMBER=$(echo "$EXISTING_PR_JSON" | jq -r '.number')
+  EXISTING_PR_URL=$(echo "$EXISTING_PR_JSON" | jq -r '.url')
+else
+  EXISTING_PR_NUMBER="0"
+  EXISTING_PR_URL=""
+fi
+git reset --hard 1>&2
+if [ "$EXISTING_PR_NUMBER" != "0" ] && git rev-parse --verify origin/issue{issue_number} >/dev/null 2>&1; then
+  git checkout -B issue{issue_number} origin/issue{issue_number} 1>&2
+else
+  git checkout {base_branch} 1>&2
+  git reset --hard origin/{base_branch} 1>&2
+  git checkout -B issue{issue_number} 1>&2
+fi
+
+mkdir -p {artifact_dir}
+rm -f \
+  {artifact_dir}/plan.md \
+  {artifact_dir}/plan-evaluation.md \
+  {artifact_dir}/implement-stdout.txt \
+  {artifact_dir}/implement-stderr.txt \
+  {artifact_dir}/implementation-evaluation.md \
+  {artifact_dir}/implementation-evaluation-stdout.txt \
+  {artifact_dir}/implementation-evaluation-stderr.txt \
+  {artifact_dir}/remediate-output.txt \
+  {artifact_dir}/remediate-stdout.txt \
+  {artifact_dir}/remediate-stderr.txt \
+  {artifact_dir}/verify-report.json \
+  {artifact_dir}/pr-description.md
+rm -f implementation-evaluation.tmp.md .tmp-implementation-evaluation.md
+jq -n --argjson existing_pr_number "$EXISTING_PR_NUMBER" --arg existing_pr_url "$EXISTING_PR_URL" \
+  '{existing_pr_number: $existing_pr_number, existing_pr_url: $existing_pr_url}'
+"""
+
+[steps.parameters.exit_code_map]
+1 = "fatal"
+128 = "fatal"
+
+[[steps]]
+step_id = "fetch_issue"
+step_type = "shell"
+description = "Fetch issue body and comments, write to artifact files, extract metadata to context"
+
+[steps.parameters]
+command = """
+set -euo pipefail
+
+# Fetch full issue data as JSON
+gh issue view {issue_number} --repo {target_repo} \
+  --json title,body,comments,url > {artifact_dir}/issue-raw.json
+
+# Write issue body to file
+jq -r '.body // ""' {artifact_dir}/issue-raw.json > {artifact_dir}/issue.md
+
+# Write comments with thread structure preserved (REQ-LF-FETCH-003)
+jq -r '.comments[] | "## Comment by \\(.author.login) at \\(.createdAt)\\n\\n\\(.body)\\n\\n---\\n"' \
+  {artifact_dir}/issue-raw.json > {artifact_dir}/comments.md
+
+# Emit short metadata as JSON for context_map
+jq '{title: .title, url: .url}' {artifact_dir}/issue-raw.json
+"""
+output_format = "json"
+
+[steps.parameters.exit_code_map]
+1 = "fatal"
+
+[steps.parameters.context_map]
+issue_title = ".title"
+issue_url = ".url"
+
+[[steps]]
+step_id = "create_plan"
+step_type = "llxprt"
+description = "Invoke llxprt to create a plan for the issue"
+
+[steps.parameters]
+profile = "{profile_planning}"
+timeout_seconds = 900
+success_file = "{artifact_dir}/plan.md"
+prompt = """
+Do not use subagents. Do not ask questions. Read {artifact_dir}/issue.md and {artifact_dir}/comments.md. Inspect the repository as needed.
+Write a concise implementation plan to {artifact_dir}/plan.md. The plan MUST be specific to Luther issue #{issue_number} and the current issue text, must identify the relevant source/config/test files, must describe the architectural problem from the issue, and must list the intended tests.
+You are working on the Luther workflow repository itself in a separate target checkout. Do not implement the fix in this step. Exit after writing {artifact_dir}/plan.md.
+"""
+
+[steps.parameters.exit_code_map]
+1 = "fatal"
+
+[[steps]]
+step_id = "evaluate_plan"
+step_type = "llxprt"
+description = "Invoke llxprt to evaluate the plan"
+
+[steps.parameters]
+profile = "{profile_evaluating}"
+timeout_seconds = 600
+static_stdout = "PLAN_APPROVED"
+prompt = """
+Do not use subagents. Do not ask questions. Read the issue in {artifact_dir}/issue.md and the plan in {artifact_dir}/plan.md. Evaluate whether the plan adequately addresses the issue and is narrowly scoped. If the plan is ready, respond with exactly PLAN_APPROVED on its own line. If it needs revision, respond with exactly PLAN_NEEDS_REVISION on its own line, followed by your feedback. Write any detailed feedback to {artifact_dir}/plan-evaluation.md, then exit.
+"""
+
+[steps.parameters.outcome_on_stdout]
+PLAN_APPROVED = "success"
+PLAN_NEEDS_REVISION = "fixable"
+
+[steps.parameters.exit_code_map]
+1 = "fatal"
+
+[[steps]]
+step_id = "implement"
+step_type = "llxprt"
+description = "Invoke llxprt to implement the plan"
+
+[steps.parameters]
+profile = "{profile_implementing}"
+timeout_seconds = 900
+success_on_diff = true
+success_on_existing_diff = true
+
+continue_on_empty_diff = false
+required_changed_path_patterns = ["config/"]
+
+min_runtime_before_success_seconds = 60
+stdout_file = "{artifact_dir}/implement-stdout.txt"
+stderr_file = "{artifact_dir}/implement-stderr.txt"
+prompt = """
+Do not use subagents. Do not ask questions. Read the current issue in {artifact_dir}/issue.md and the approved plan in {artifact_dir}/plan.md, then implement that plan.
+Make the smallest source/config/test changes needed to fix Luther issue #{issue_number}. You MUST leave a non-empty git diff in {work_dir}; if no files are changed, this step is not complete. Do not modify package lockfiles, generated notice files, .luther files, or unrelated files.
+The required source and test scope is whatever the approved plan identifies for this issue. If the plan and issue disagree, follow the issue text and update only files directly relevant to the current issue.
+Add or update focused tests when practical. If focused tests require broad UI harness work, still implement the source fix and explain the targeted/manual verification you performed. You are not finished unless git diff shows intentional changes related to issue #{issue_number}.
+Do not run full project verification commands such as cargo test, cargo build, or cargo clippy. The workflow runs configured checks after this step. You may run narrowly targeted tests/checks related to the files you changed.
+If {artifact_dir}/implementation-evaluation.md exists, treat it as a required remediation checklist and address every unresolved item before finishing this step. Do not stop after partially addressing the feedback.
+Before responding, inspect git diff --stat and git diff. If the diff does not match the current issue and approved plan, continue working or remove the unrelated changes before finishing. Remove any accidental temporary files in {work_dir} before finishing.
+Finish as soon as source/test edits are present and you have inspected the diff. Do not keep iterating on targeted tests after making a scoped diff; the workflow will run deterministic verification and remediation steps. Finish with exactly IMPLEMENTATION_COMPLETE on its own line, followed by a concise truthful summary of the changes and verification you performed, then exit.
+"""
+
+[steps.parameters.outcome_on_stdout]
+IMPLEMENTATION_COMPLETE = "success"
+
+REMEDIATION_SYSTEM_ERROR = "fatal"
+IMPLEMENTATION_SYSTEM_ERROR = "fatal"
+
+
+[steps.parameters.exit_code_map]
+1 = "fatal"
+
+[[steps]]
+step_id = "evaluate_impl"
+step_type = "llxprt"
+description = "Subjective review: does the implementation actually solve the issue per plan? (runs AFTER lint/typecheck/test/build pass)"
+
+[steps.parameters]
+profile = "{profile_evaluating}"
+timeout_seconds = 420
+stdout_file = "{artifact_dir}/implementation-evaluation-stdout.txt"
+stderr_file = "{artifact_dir}/implementation-evaluation-stderr.txt"
+prompt = """
+Do not use subagents. Do not ask questions. All configured deterministic checks have already passed.
+This workflow step is not a broad audit or design review. It is a narrow issue-acceptance gate for the current branch diff.
+Your job is ONLY subjective correctness: read the issue in {artifact_dir}/issue.md and the plan in {artifact_dir}/plan.md, then inspect git diff against origin/{base_branch}.
+Judge only: does this implementation materially solve the current issue text and approved plan? Verify the diff is scoped to issue #{issue_number}. Do not require the exact approach from the plan if the behavior is correct, tested, and narrowly scoped.
+Do NOT re-flag style, formatting, or test issues - those are handled elsewhere.
+If the implementation correctly addresses the issue and plan, respond with exactly IMPL_APPROVED on its own line.
+If the implementation does not actually solve the issue or materially diverges from the plan, respond with exactly IMPL_NEEDS_WORK on its own line, followed by concise feedback, and also write detailed actionable feedback to {artifact_dir}/implementation-evaluation.md.
+If you cannot perform this narrow acceptance gate because of instruction conflict or tool/runtime limitations, respond with exactly IMPL_EVALUATION_BLOCKED on its own line followed by the blocker; do not write implementation-evaluation.md in that case.
+
+"""
+
+[steps.parameters.outcome_on_stdout]
+IMPL_APPROVED = "success"
+IMPL_NEEDS_WORK = "fixable"
+IMPL_EVALUATION_BLOCKED = "fatal"
+
+
+[steps.parameters.exit_code_map]
+1 = "fatal"
+
+[[steps]]
+step_id = "run_tests"
+step_type = "verify"
+description = "Run lint, typecheck, test, format, build checks"
+
+[steps.parameters]
+checks = ["diff_or_existing_pr", "format", "test", "diff_or_existing_pr"]
+timeout_seconds = 2400
+artifact_root = "{artifact_dir}"
+
+[steps.parameters.check_commands]
+diff_or_existing_pr = """
+CHANGED=$(git status --porcelain --untracked-files=all | sed 's/^...//' | grep -E '^(config/|tests/|src/|docs/)' || true)
+if [ -n "$CHANGED" ]; then
+  exit 0
+fi
+if [ "{setup_workspace.existing_pr_number}" != "0" ]; then
+  exit 0
+fi
+echo 'No Luther source/config/test/doc diff found and no reusable open PR exists'
+exit 1
+"""
+format = "cargo fmt --check 2>&1"
+test = "cargo test --quiet 2>&1"
+
+
+[[steps]]
+step_id = "remediate"
+step_type = "llxprt"
+description = "Invoke llxprt to remediate verification or evaluator feedback"
+
+[steps.parameters]
+profile = "{profile_remediating}"
+timeout_seconds = 900
+stdout_file = "{artifact_dir}/remediate-stdout.txt"
+stderr_file = "{artifact_dir}/remediate-stderr.txt"
+outcome_on_stdout = { REMEDIATION_COMPLETE = "success", REMEDIATION_SYSTEM_ERROR = "fatal" }
+success_on_diff = true
+min_runtime_before_success_seconds = 30
+max_runtime_after_required_diff_seconds = 30
+idle_timeout_seconds = 180
+
+
+prompt = """
+Do not use subagents. Do not ask questions. Read the current issue in {artifact_dir}/issue.md, the approved plan in {artifact_dir}/plan.md, the verification report in {artifact_dir}/verify-report.json if present, and {artifact_dir}/implementation-evaluation.md if present.
+These artifact paths are intentionally outside the target repository. If file-reading tools cannot read an absolute artifact path, inspect it with shell commands such as cat, sed, or python3 instead; do not report an artifact-path access constraint while shell access works. Missing optional artifacts such as implementation-evaluation.md are not blockers.
+
+If implementation-evaluation.md exists, treat it as the primary remediation checklist and address every unresolved evaluator item before finishing. If verify-report.json contains failed checks, also fix only those failures caused by the current branch diff.
+Start by inspecting git diff --stat origin/{base_branch}...HEAD, git diff origin/{base_branch}...HEAD, git status --porcelain --untracked-files=all, and any failing check messages. Focus only on errors or evaluator feedback caused by the current branch diff and issue #{issue_number}; do not try to fix pre-existing repository-wide warnings unrelated to the current diff.
+Fix the current branch so it both materially solves the issue and lets the configured checks pass. Do not modify package lockfiles, generated notice files, .luther files, or unrelated files unless required by the issue. If implementation-evaluation.md reports unrelated committed branch artifacts, remove those artifacts from the branch even if plain git diff is otherwise empty.
+Before responding, inspect git diff --stat origin/{base_branch}...HEAD, git diff origin/{base_branch}...HEAD, and git status --porcelain --untracked-files=all again. You are not complete if the branch diff is empty, if unrelated files remain in the branch diff, or if implementation-evaluation.md still lists unresolved required actions.
+If there is no current branch diff, first make the minimal issue-specific source/test edit from the plan instead of only inspecting files; do not emit REMEDIATION_SYSTEM_ERROR merely because the previous implementation step stopped early without changes.
+
+If the current branch already contains the issue-specific diff and there are no verification/evaluation failure artifacts to address, inspect git diff and respond with exactly REMEDIATION_COMPLETE on its own line as the final output.
+
+If you successfully fix all current verification/evaluation issues, respond with exactly REMEDIATION_COMPLETE on its own line as the final output.
+If you encounter a system/workflow/tooling problem (shell parse failure, malformed command, missing profile/tool, etc.), respond with exactly REMEDIATION_SYSTEM_ERROR on its own line, followed by a brief reason.
+Do not output shell snippets with unmatched quotes.
+"""
+
+[steps.parameters.exit_code_map]
+1 = "fatal"
+
+[[steps]]
+step_id = "push_changes"
+step_type = "shell"
+description = "Stage, commit, and push changes"
+
+[steps.parameters]
+command = """
+set -euo pipefail
+git add -A -- ':!.llxprt' ':!.llxprt/**' ':!.luther' ':!.luther/**'
+if git diff --cached --quiet --exit-code; then
+  if [ "{setup_workspace.existing_pr_number}" != "0" ]; then
+    echo "No new repository changes; existing PR #{setup_workspace.existing_pr_number} already carries issue branch changes."
+    exit 0
+  fi
+  echo "No repository changes to commit" >&2
+  exit 1
+fi
+git commit -m "Fix #{issue_number}: {issue_title}"
+git push --force-with-lease -u origin issue{issue_number}
+"""
+
+[steps.parameters.exit_code_map]
+1 = "fatal"
+128 = "fatal"
+
+[[steps]]
+step_id = "generate_pr_description"
+step_type = "llxprt"
+description = "Invoke llxprt to write a PR description"
+
+[steps.parameters]
+profile = "{profile_evaluating}"
+timeout_seconds = 600
+success_file = "{artifact_dir}/pr-description.md"
+prompt = """
+Do not use subagents. Do not ask questions. Read the issue in {artifact_dir}/issue.md and the plan in {artifact_dir}/plan.md. Review the code changes (use git diff origin/{base_branch}). Write a PR description to {artifact_dir}/pr-description.md. The description MUST include 'Fixes #{issue_number}' to auto-close the issue, then exit.
+"""
+
+[steps.parameters.exit_code_map]
+1 = "fatal"
+
+[[steps]]
+step_id = "create_pr"
+step_type = "shell"
+description = "Create a GitHub pull request"
+
+[steps.parameters]
+command = """
+set -euo pipefail
+EXISTING_PR_JSON=$(gh pr view issue{issue_number} --repo {target_repo} --json number,url,title,state,isDraft 2>/dev/null || true)
+if [ -n "$EXISTING_PR_JSON" ] && [ "$(echo "$EXISTING_PR_JSON" | jq -r '.state')" = "OPEN" ] && [ "$(echo "$EXISTING_PR_JSON" | jq -r '.isDraft')" = "false" ]; then
+  PR_JSON=$(echo "$EXISTING_PR_JSON" | jq '{number,url,title,state}')
+else
+  PR_URL=$(gh pr create --repo {target_repo} --title "Fix #{issue_number}: {issue_title}" --body-file {artifact_dir}/pr-description.md --base {base_branch} --head issue{issue_number})
+  PR_JSON=$(gh pr view "$PR_URL" --repo {target_repo} --json number,url,title,state)
+fi
+printf '%s\n' "$PR_JSON"
+
+"""
+
+output_format = "json"
+context_map = { pr_number = "number", pr_url = "url" }
+
+
+
+# @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P17
+# @requirement:REQ-PRFU-001,REQ-PRFU-018,REQ-PRFU-020,REQ-PRFU-020A
+# @pseudocode lines 1-53
+
+[[steps]]
+step_id = "abandon_and_log"
+step_type = "shell"
+description = "Comment on issue, remove label, unassign on failure"
+
+[steps.parameters]
+command = """
+set -euo pipefail
+ISSUE_NUM="{issue_number}"
+case "$ISSUE_NUM" in
+  "{"*|"")
+    if [ -n "{primary_issue_number}" ] && [ "{primary_issue_number}" != "0" ]; then
+      ISSUE_NUM="{primary_issue_number}"
+    else
+      echo "No issue was selected; skipping cleanup."
+      exit 0
+    fi
+    ;;
+esac
+ABANDON_BODY_FILE="$(mktemp "${TMPDIR:-/tmp}/luther-abandon.XXXXXX")"
+trap 'rm -f "$ABANDON_BODY_FILE"' EXIT
+printf '%s
+' "Luther dogfood abandoning this issue: workflow failed at step {current_step_id}." > "$ABANDON_BODY_FILE"
+gh issue comment "$ISSUE_NUM" --repo {target_repo} --body-file "$ABANDON_BODY_FILE"
+gh issue edit "$ISSUE_NUM" --repo {target_repo} --remove-label "{luther_label}" || true
+gh issue edit "$ISSUE_NUM" --repo {target_repo} --remove-assignee {assignee} || true
+"""
+
+[[steps]]
+step_id = "log_completion"
+step_type = "shell"
+description = "Log successful PR creation"
+
+[steps.parameters]
+command = """
+echo "Luther dogfood PR created successfully for issue #{issue_number}: {pr_url}"
+"""
+
+# =============================================================================
+# TRANSITIONS - dogfood stops after PR creation for human review
+# =============================================================================
+
+[[transitions]]
+from = "select_issue"
+to = "setup_workspace"
+
+[[transitions]]
+from = "setup_workspace"
+to = "fetch_issue"
+
+[[transitions]]
+from = "fetch_issue"
+to = "create_plan"
+
+[[transitions]]
+from = "create_plan"
+to = "evaluate_plan"
+
+[[transitions]]
+from = "evaluate_plan"
+to = "implement"
+condition = "success"
+
+[[transitions]]
+from = "evaluate_plan"
+to = "create_plan"
+condition = "fixable"
+max_iterations = 5
+
+[[transitions]]
+from = "implement"
+to = "run_tests"
+
+[[transitions]]
+from = "implement"
+to = "remediate"
+condition = "fixable"
+max_iterations = 1
+
+[[transitions]]
+from = "run_tests"
+to = "evaluate_impl"
+condition = "success"
+
+[[transitions]]
+from = "run_tests"
+to = "remediate"
+condition = "fixable"
+max_iterations = 3
+
+[[transitions]]
+from = "remediate"
+to = "run_tests"
+condition = "success"
+max_iterations = 2
+
+[[transitions]]
+from = "remediate"
+to = "run_tests"
+condition = "fixable"
+max_iterations = 2
+
+[[transitions]]
+from = "evaluate_impl"
+to = "push_changes"
+condition = "success"
+
+[[transitions]]
+from = "evaluate_impl"
+to = "remediate"
+condition = "fixable"
+max_iterations = 2
+
+[[transitions]]
+from = "push_changes"
+to = "generate_pr_description"
+
+[[transitions]]
+from = "generate_pr_description"
+to = "create_pr"
+
+[[transitions]]
+from = "create_pr"
+to = "log_completion"
+
+[[transitions]]
+from = "select_issue"
+to = "abandon_and_log"
+condition = "fatal"
+
+[[transitions]]
+from = "setup_workspace"
+to = "abandon_and_log"
+condition = "fatal"
+
+[[transitions]]
+from = "fetch_issue"
+to = "abandon_and_log"
+condition = "fatal"
+
+[[transitions]]
+from = "create_plan"
+to = "abandon_and_log"
+condition = "fatal"
+
+[[transitions]]
+from = "evaluate_plan"
+to = "abandon_and_log"
+condition = "fatal"
+
+[[transitions]]
+from = "implement"
+to = "abandon_and_log"
+condition = "fatal"
+
+[[transitions]]
+from = "evaluate_impl"
+to = "remediate"
+condition = "fatal"
+
+[[transitions]]
+from = "run_tests"
+to = "abandon_and_log"
+condition = "fatal"
+
+[[transitions]]
+from = "remediate"
+to = "abandon_and_log"
+condition = "fatal"
+
+[[transitions]]
+from = "push_changes"
+to = "abandon_and_log"
+condition = "fatal"
+
+[[transitions]]
+from = "generate_pr_description"
+to = "abandon_and_log"
+condition = "fatal"
+
+[[transitions]]
+from = "create_pr"
+to = "abandon_and_log"
+condition = "fatal"
