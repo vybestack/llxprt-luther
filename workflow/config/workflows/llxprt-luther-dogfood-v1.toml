@@ -228,7 +228,7 @@ description = "Invoke llxprt to implement the plan"
 profile = "{profile_implementing}"
 timeout_seconds = 900
 success_on_diff = true
-success_on_existing_diff = true
+success_on_existing_diff = false
 
 continue_on_empty_diff = false
 required_changed_path_patterns = ["workflow/config/", "workflow/tests/fixtures/workflows/valid/", "workflow/tests/fixtures/workflow-configs/valid/", "workflow/tests/e2e_workflow_integration.rs"]
