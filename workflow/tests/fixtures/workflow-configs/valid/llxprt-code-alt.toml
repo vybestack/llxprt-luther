@@ -1,0 +1,74 @@
+# Alternate LLxprt-Code Workflow Configuration
+# @plan:PLAN-20260408-LLXPRT-FIRST.P17
+# @requirement:REQ-LF-PROF-001,REQ-LF-PROF-002,REQ-LF-PROF-003
+
+config_id = "llxprt-code-alt"
+workflow_type_id = "llxprt-issue-fix-v1"
+
+[runtime]
+timeout_seconds = 7200
+max_retries = 3
+
+[repository]
+workspace_strategy = "temp_clone"
+branch_template = "issue{issue_number}"
+base_branch = "main"
+
+[guards]
+max_iterations = 4
+max_file_changes = 200
+max_tokens = 500000
+max_cost = 50.0
+
+[variables]
+target_repo = "vybestack/llxprt-code"
+repository_owner = "vybestack"
+repository_name = "llxprt-code"
+assignee = "acoliver"
+work_dir = "/tmp/luther-workspaces/llxprt-code-alt"
+artifact_dir = "/tmp/luther-artifacts/llxprt-code-alt"
+primary_issue_number = "1804"
+
+base_branch = "main"
+profile_planning = "gpt53codexXHigh"
+profile_evaluating = "gpt53codexXHigh"
+profile_implementing = "gpt53codexXHigh"
+profile_remediating = "gpt53codexXHigh"
+luther_label = "Luther working"
+ok_label = "OK for Luther"
+plan_static_content = """
+# Implementation Plan
+
+1. Read {artifact_dir}/issue.md and confirm the requested behavior for issue #{issue_number}: preserve explicit tool call cancellation state when a stream emits a cancellation event.
+2. Inspect packages/core/src/core/StreamProcessor.ts and the adjacent stream processor tests that cover cancellation handling.
+3. Implement the smallest source change so cancellation state is retained until the next tool call begins.
+4. Add or update focused regression tests proving cancelled and subsequent tool calls are reported separately.
+5. Run targeted verification for the changed package/files only, then keep the final diff narrowly scoped to issue #{issue_number}; do not modify package lockfiles, generated notice files, .luther files, generated build output, or unrelated files.
+"""
+required_changed_path_pattern = "packages/core/src/core/"
+diff_required_path_regex = "^packages/core/src/core/"
+diff_failure_message = "No alternate issue source/test diff found and no reusable open PR exists"
+typecheck_command = "npm run typecheck --workspace @vybestack/llxprt-code-core 2>&1"
+build_command = "npm run build 2>&1"
+test_command = "npm run test --workspace @vybestack/llxprt-code-core -- StreamProcessor 2>&1"
+lint_command = """
+CHANGED=$(git status --porcelain --untracked-files=all | sed 's/^...//' | grep -E '[.](ts|tsx|js|jsx)$' | tr '\\n' ' ')
+if [ -z "$CHANGED" ]; then
+  echo 'No changed lint-checked files'
+else
+  npx eslint $CHANGED > "/tmp/luther-artifacts/llxprt-code-alt/lint-output.log" 2>&1
+  status=$?
+  tail -n 240 "/tmp/luther-artifacts/llxprt-code-alt/lint-output.log"
+  exit $status
+fi
+"""
+format_command = """
+CHANGED=$(git status --porcelain --untracked-files=all | sed 's/^...//' | grep -E '[.](ts|tsx|js|jsx|json|md)$' | tr '\n' ' ')
+
+if [ -z "$CHANGED" ]; then
+  echo 'No changed format-checked files'
+else
+  npx prettier --write $CHANGED >/tmp/luther-prettier-write.log 2>&1
+  npx prettier --check $CHANGED 2>&1
+fi
+"""

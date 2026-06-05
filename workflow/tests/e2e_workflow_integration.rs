@@ -7,7 +7,9 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use luther_workflow::engine::executor::{ExecutorRegistry, StepContext, StepExecutor};
+use luther_workflow::engine::executor::{
+    interpolate_string, ExecutorRegistry, StepContext, StepExecutor,
+};
 use luther_workflow::engine::instance::WorkflowInstance;
 use luther_workflow::engine::runner::{EngineError, EngineRunner, RunOutcome};
 use luther_workflow::engine::transition::StepOutcome;
@@ -896,7 +898,7 @@ fn test_run_completion_records_metadata() {
 // ============================================================================
 
 use luther_workflow::workflow::config_loader::parse_workflow_type_toml;
-use luther_workflow::workflow::schema::WorkflowType;
+use luther_workflow::workflow::schema::{WorkflowConfig, WorkflowType};
 
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P16
 /// @requirement:REQ-PRFU-018,REQ-PRFU-020
@@ -943,6 +945,30 @@ fn post_pr_workflow() -> WorkflowType {
     let fixture_root = std::path::PathBuf::from("tests/fixtures");
     resolve_workflow_type("llxprt-issue-fix-v1", &fixture_root)
         .expect("Failed to load workflow type")
+}
+
+fn workflow_config(config_id: &str) -> WorkflowConfig {
+    let fixture_root = std::path::PathBuf::from("tests/fixtures");
+    resolve_workflow_config(config_id, &fixture_root).expect("Failed to load workflow config")
+}
+
+fn context_from_config(config: &WorkflowConfig) -> StepContext {
+    let work_dir = config
+        .variables
+        .get("work_dir")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+    let mut context = StepContext::new(work_dir, "test-run".to_string());
+    for (key, value) in &config.variables {
+        context.set(key, value);
+    }
+    if let Some(issue_number) = config.variables.get("primary_issue_number") {
+        context.set("issue_number", issue_number);
+    }
+    context.set_current_step_id("setup_workspace");
+    context.set("existing_pr_number", "0");
+    context.set_current_step_id("run_tests");
+    context
 }
 
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P16
@@ -1564,6 +1590,8 @@ fn abandon_cleanup_falls_back_to_primary_issue_number() {
 #[test]
 fn run_tests_format_command_formats_changed_files_before_checking() {
     let workflow_type = post_pr_workflow();
+    let config = workflow_config("llxprt-code");
+    let context = context_from_config(&config);
     let run_tests = workflow_type
         .steps
         .iter()
@@ -1576,6 +1604,11 @@ fn run_tests_format_command_formats_changed_files_before_checking() {
         .and_then(|commands| commands.get("format"))
         .and_then(serde_json::Value::as_str)
         .expect("format check command exists");
+    assert_eq!(
+        format_command, "{format_command}",
+        "workflow type should source format command from target profile config"
+    );
+    let format_command = interpolate_string(format_command, &context);
 
     assert!(
         format_command.contains("prettier --write $CHANGED")
@@ -1587,7 +1620,7 @@ fn run_tests_format_command_formats_changed_files_before_checking() {
 /// @plan:PLAN-20260408-LLXPRT-FIRST.P17
 /// @requirement:REQ-LF-IMPL-002
 #[test]
-fn llxprt_issue_1803_implementation_requires_relevant_changed_paths() {
+fn implement_required_changed_paths_are_profile_driven() {
     let workflow_type = post_pr_workflow();
     let implement = workflow_type
         .steps
@@ -1606,18 +1639,39 @@ fn llxprt_issue_1803_implementation_requires_relevant_changed_paths() {
         .collect::<Vec<_>>();
 
     assert!(
-        pattern_values.contains(&"packages/cli/src/ui/hooks/"),
-        "implement success_on_diff should not accept unrelated temp files as the issue #1803 diff: {pattern_values:?}"
+        pattern_values.contains(&"{required_changed_path_pattern}"),
+        "implement success_on_diff should be scoped by target profile config instead of a workflow literal: {pattern_values:?}"
     );
 
+    let llxprt_code = workflow_config("llxprt-code");
+    let llxprt_code_context = context_from_config(&llxprt_code);
+    let llxprt_code_patterns = pattern_values
+        .iter()
+        .map(|pattern| interpolate_string(pattern, &llxprt_code_context))
+        .collect::<Vec<_>>();
+    assert!(
+        llxprt_code_patterns.iter().any(|pattern| pattern == "packages/cli/src/ui/hooks/"),
+        "llxprt-code profile should preserve the issue #1803 changed-path scope: {llxprt_code_patterns:?}"
+    );
+
+    let alt_config = workflow_config("llxprt-code-alt");
+    let alt_context = context_from_config(&alt_config);
+    let alt_patterns = pattern_values
+        .iter()
+        .map(|pattern| interpolate_string(pattern, &alt_context))
+        .collect::<Vec<_>>();
+    assert!(
+        alt_patterns
+            .iter()
+            .any(|pattern| pattern == "packages/core/src/core/"),
+        "alternate profile should drive a distinct changed-path scope: {alt_patterns:?}"
+    );
 }
-
-
 
 /// @plan:PLAN-20260408-LLXPRT-FIRST.P17
 /// @requirement:REQ-LF-PLAN-002
 #[test]
-fn llxprt_issue_1803_static_plan_identifies_context_cleared_buffer_fix() {
+fn create_plan_static_content_is_profile_driven() {
     let workflow_type = post_pr_workflow();
     let create_plan = workflow_type
         .steps
@@ -1631,6 +1685,15 @@ fn llxprt_issue_1803_static_plan_identifies_context_cleared_buffer_fix() {
         .and_then(serde_json::Value::as_str)
         .expect("create_plan static plan exists");
 
+    assert_eq!(
+        static_plan, "{plan_static_content}",
+        "workflow type should not carry issue-specific static plan content"
+    );
+
+    let llxprt_code = workflow_config("llxprt-code");
+    let llxprt_code_context = context_from_config(&llxprt_code);
+    let llxprt_code_static_plan = interpolate_string(static_plan, &llxprt_code_context);
+
     for expected in [
         "contextCleared=true",
         "useStreamEventHandlers.ts",
@@ -1639,18 +1702,32 @@ fn llxprt_issue_1803_static_plan_identifies_context_cleared_buffer_fix() {
         "separate Gemini messages",
     ] {
         assert!(
-            static_plan.contains(expected),
-            "static plan should direct the agent to the issue #1803 stream-buffer fix; missing {expected}: {static_plan}"
+            llxprt_code_static_plan.contains(expected),
+            "llxprt-code profile static plan should direct the agent to the issue #1803 stream-buffer fix; missing {expected}: {llxprt_code_static_plan}"
         );
     }
-}
 
+    let alt_config = workflow_config("llxprt-code-alt");
+    let alt_context = context_from_config(&alt_config);
+    let alt_static_plan = interpolate_string(static_plan, &alt_context);
+    assert!(
+        alt_static_plan.contains("StreamProcessor.ts")
+            && alt_static_plan.contains("cancellation state"),
+        "alternate profile should provide distinct target-specific static plan content: {alt_static_plan}"
+    );
+    assert_ne!(
+        llxprt_code_static_plan, alt_static_plan,
+        "two profiles should load the same workflow type with different target-specific plan content"
+    );
+}
 
 /// @plan:PLAN-20260408-LLXPRT-FIRST.P17
 /// @requirement:REQ-LF-VERIFY-002
 #[test]
 fn run_tests_mirrors_ci_lint_typecheck_and_build_before_push() {
     let workflow_type = post_pr_workflow();
+    let config = workflow_config("llxprt-code");
+    let context = context_from_config(&config);
     let run_tests = workflow_type
         .steps
         .iter()
@@ -1684,6 +1761,11 @@ fn run_tests_mirrors_ci_lint_typecheck_and_build_before_push() {
         .get("lint")
         .and_then(serde_json::Value::as_str)
         .expect("lint command exists");
+    assert_eq!(
+        lint_command, "{lint_command}",
+        "workflow type should source lint command from target profile config"
+    );
+    let lint_command = interpolate_string(lint_command, &context);
     assert!(
         lint_command.contains("git status --porcelain --untracked-files=all"),
         "pre-PR verification should lint changed files only to keep smoke gates bounded: {lint_command}"
@@ -1699,13 +1781,17 @@ fn run_tests_mirrors_ci_lint_typecheck_and_build_before_push() {
     assert_eq!(
         commands
             .get("typecheck")
-            .and_then(serde_json::Value::as_str),
-        Some("npm run typecheck 2>&1"),
+            .and_then(serde_json::Value::as_str)
+            .map(|command| interpolate_string(command, &context)),
+        Some("npm run typecheck 2>&1".to_string()),
         "pre-PR verification should run workspace type checking"
     );
     assert_eq!(
-        commands.get("build").and_then(serde_json::Value::as_str),
-        Some("npm run build 2>&1"),
+        commands
+            .get("build")
+            .and_then(serde_json::Value::as_str)
+            .map(|command| interpolate_string(command, &context)),
+        Some("npm run build 2>&1".to_string()),
         "pre-PR verification should run the full build rather than only core"
     );
     assert!(
@@ -1946,6 +2032,8 @@ fn setup_workspace_exports_existing_pr_context_for_repeat_runs() {
 #[test]
 fn run_tests_accepts_existing_pr_when_repeat_run_has_no_new_diff() {
     let workflow_type = post_pr_workflow();
+    let config = workflow_config("llxprt-code");
+    let context = context_from_config(&config);
     let run_tests = workflow_type
         .steps
         .iter()
@@ -1978,16 +2066,92 @@ fn run_tests_accepts_existing_pr_when_repeat_run_has_no_new_diff() {
         "diff_or_existing_pr command should consult setup_workspace.existing_pr_number"
     );
     assert!(
+        diff_command.contains("{diff_required_path_regex}")
+            && diff_command.contains("{diff_failure_message}"),
+        "diff_or_existing_pr should source target-specific diff scope and failure text from profile config: {diff_command}"
+    );
+    let diff_command = interpolate_string(diff_command, &context);
+    assert!(
         diff_command.contains("git status --porcelain --untracked-files=all")
             && diff_command.contains("packages/cli/src/ui/hooks/")
             && diff_command.contains("No issue #1803 source/test diff found")
-            && diff_command.contains("\"{setup_workspace.existing_pr_number}\" != \"0\""),
+            && diff_command.contains("\"0\" != \"0\""),
 
         "diff_or_existing_pr should fail empty or unrelated branches unless setup_workspace found an open reusable PR: {diff_command}"
     );
+}
 
+/// @plan:PLAN-20260408-LLXPRT-FIRST.P17
+/// @requirement:REQ-LF-PROF-002,REQ-LF-PROF-003
+#[test]
+fn llxprt_issue_fix_workflow_loads_with_two_target_profiles() {
+    let workflow_type = post_pr_workflow();
+    assert_eq!(workflow_type.workflow_type_id, "llxprt-issue-fix-v1");
 
+    let create_plan = workflow_type
+        .steps
+        .iter()
+        .find(|step| step.step_id == "create_plan")
+        .expect("create_plan step exists");
+    let static_plan_template = create_plan
+        .parameters
+        .as_ref()
+        .and_then(|params| params.get("static_content"))
+        .and_then(serde_json::Value::as_str)
+        .expect("create_plan static plan exists");
 
+    let run_tests = workflow_type
+        .steps
+        .iter()
+        .find(|step| step.step_id == "run_tests")
+        .expect("run_tests step exists");
+    let check_commands = run_tests
+        .parameters
+        .as_ref()
+        .and_then(|params| params.get("check_commands"))
+        .and_then(serde_json::Value::as_object)
+        .expect("check_commands exist");
+    let test_command_template = check_commands
+        .get("test")
+        .and_then(serde_json::Value::as_str)
+        .expect("test command exists");
+    let diff_command_template = check_commands
+        .get("diff_or_existing_pr")
+        .and_then(serde_json::Value::as_str)
+        .expect("diff_or_existing_pr command exists");
+
+    let llxprt_code_config = workflow_config("llxprt-code");
+    let alt_config = workflow_config("llxprt-code-alt");
+    assert_eq!(
+        llxprt_code_config.workflow_type_id,
+        workflow_type.workflow_type_id
+    );
+    assert_eq!(alt_config.workflow_type_id, workflow_type.workflow_type_id);
+
+    let llxprt_code_context = context_from_config(&llxprt_code_config);
+    let alt_context = context_from_config(&alt_config);
+    let llxprt_code_plan = interpolate_string(static_plan_template, &llxprt_code_context);
+    let alt_plan = interpolate_string(static_plan_template, &alt_context);
+    let llxprt_code_test_command = interpolate_string(test_command_template, &llxprt_code_context);
+    let alt_test_command = interpolate_string(test_command_template, &alt_context);
+    let llxprt_code_diff_command = interpolate_string(diff_command_template, &llxprt_code_context);
+    let alt_diff_command = interpolate_string(diff_command_template, &alt_context);
+
+    assert!(
+        llxprt_code_plan.contains("useStreamEventHandlers.ts")
+            && llxprt_code_test_command.contains("useStreamEventHandlers")
+            && llxprt_code_diff_command.contains("packages/cli/src/ui/hooks/"),
+        "llxprt-code profile should inject issue #1803 planning, test, and diff scope"
+    );
+    assert!(
+        alt_plan.contains("StreamProcessor.ts")
+            && alt_test_command.contains("StreamProcessor")
+            && alt_diff_command.contains("packages/core/src/core/"),
+        "alternate profile should inject distinct planning, test, and diff scope"
+    );
+    assert_ne!(llxprt_code_plan, alt_plan);
+    assert_ne!(llxprt_code_test_command, alt_test_command);
+    assert_ne!(llxprt_code_diff_command, alt_diff_command);
 }
 
 /// @plan:PLAN-20260408-LLXPRT-FIRST.P17

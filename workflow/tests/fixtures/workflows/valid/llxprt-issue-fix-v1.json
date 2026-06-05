@@ -57,7 +57,7 @@
         },
         "profile": "{profile_planning}",
         "prompt": "Do not use subagents. Do not ask questions. Read {artifact_dir}/issue.md and {artifact_dir}/comments.md. Inspect the repository as needed.\nWrite a concise implementation plan to {artifact_dir}/plan.md. The plan MUST be specific to issue #{issue_number} and the current issue text, must identify the relevant source/test files, must describe the code bug from the issue, and must list the intended tests.\nDo not implement the fix in this step. Exit after writing {artifact_dir}/plan.md.\n",
-        "static_content": "# Implementation Plan\n\n1. Read {artifact_dir}/issue.md and confirm the requested behavior for issue #{issue_number}: when a stream event has contextCleared=true, any pending Gemini response text must be flushed/reset so later content starts a fresh message.\n2. Inspect packages/cli/src/ui/hooks/geminiStream/useStreamEventHandlers.ts, especially processGeminiStreamEvents, geminiMessageBuffer, handleContentEvent, and the AgentExecutionStopped/AgentExecutionBlocked contextCleared branches.\n3. Implement the smallest source change in useStreamEventHandlers.ts so contextCleared flushes any pending Gemini text, clears pending state, resets geminiMessageBuffer, and then preserves the existing \"Conversation context has been cleared.\" info message.\n4. Add or update focused regression tests for the contextCleared stream event path. Prefer a test near the geminiStream hook tests that proves pre-clear and post-clear content become separate Gemini messages and are not merged.\n5. Run targeted verification for the changed package/files only, then keep the final diff narrowly scoped to issue #{issue_number}; do not modify package lockfiles, generated notice files, .luther files, generated build output, or unrelated files.\n",
+        "static_content": "{plan_static_content}",
         "success_file": "{artifact_dir}/plan.md",
         "timeout_seconds": 900
       },
@@ -98,7 +98,7 @@
         "profile": "{profile_implementing}",
         "prompt": "Do not use subagents. Do not ask questions. Read the current issue in {artifact_dir}/issue.md and the approved plan in {artifact_dir}/plan.md, then implement that plan.\nMake the smallest code/test changes needed to fix issue #{issue_number}. You MUST leave a non-empty git diff in {work_dir}; if no files are changed, this step is not complete. Do not modify package lockfiles, generated notice files, .luther files, or unrelated files.\nThe required source and test scope is whatever the approved plan identifies for this issue. If the plan and issue disagree, follow the issue text and update only files directly relevant to the current issue.\nAdd or update focused tests when practical. If focused tests require broad UI harness work, still implement the source fix and explain the targeted/manual verification you performed. You are not finished unless git diff shows intentional changes related to issue #{issue_number}.\nDo not run full project verification commands such as npm run test, npm run build, npm run lint, npm run typecheck, or npm run format:check. The workflow runs configured checks after this step. You may run narrowly targeted tests/checks related to the files you changed.\nIf {artifact_dir}/implementation-evaluation.md exists, treat it as a required remediation checklist and address every unresolved item before finishing this step. Do not stop after partially addressing the feedback.\nBefore responding, inspect git diff --stat and git diff. If the diff does not match the current issue and approved plan, continue working or remove the unrelated changes before finishing. Remove any accidental temporary files in {work_dir} before finishing.\nFinish as soon as source/test edits are present and you have inspected the diff. Do not keep iterating on targeted tests after making a scoped diff; the workflow will run deterministic verification and remediation steps. Finish with exactly IMPLEMENTATION_COMPLETE on its own line, followed by a concise truthful summary of the changes and verification you performed, then exit.\n",
         "required_changed_path_patterns": [
-          "packages/cli/src/ui/hooks/"
+          "{required_changed_path_pattern}"
         ],
         "stderr_file": "{artifact_dir}/implement-stderr.txt",
         "stdout_file": "{artifact_dir}/implement-stdout.txt",
@@ -134,12 +134,12 @@
       "parameters": {
         "artifact_root": "{artifact_dir}",
         "check_commands": {
-          "build": "npm run build 2>&1",
-          "diff_or_existing_pr": "CHANGED=$(git status --porcelain --untracked-files=all | sed 's/^...//' | grep -E '^packages/cli/src/ui/hooks/' || true)\nif [ -n \"$CHANGED\" ]; then\n  exit 0\nfi\nif [ \"{setup_workspace.existing_pr_number}\" != \"0\" ]; then\n  exit 0\nfi\necho 'No issue #1803 source/test diff found and no reusable open PR exists'\nexit 1\n",
-          "format": "CHANGED=$(git status --porcelain --untracked-files=all | sed 's/^...//' | grep -E '[.](ts|tsx|js|jsx|json|md)$' | tr '\\n' ' ')\n\nif [ -z \"$CHANGED\" ]; then\n  echo 'No changed format-checked files'\nelse\n  npx prettier --write $CHANGED >/tmp/luther-prettier-write.log 2>&1\n  npx prettier --check $CHANGED 2>&1\nfi\n",
-          "lint": "CHANGED=$(git status --porcelain --untracked-files=all | sed 's/^...//' | grep -E '[.](ts|tsx|js|jsx)$' | tr '\n' ' ')\nif [ -z \"$CHANGED\" ]; then\n  echo 'No changed lint-checked files'\nelse\n  npx eslint $CHANGED > \"{artifact_dir}/lint-output.log\" 2>&1\n  status=$?\n  tail -n 240 \"{artifact_dir}/lint-output.log\"\n  exit $status\nfi\n",
-          "test": "npm run test --workspace @vybestack/llxprt-code -- useStreamEventHandlers 2>&1",
-          "typecheck": "npm run typecheck 2>&1"
+          "build": "{build_command}",
+          "diff_or_existing_pr": "CHANGED=$(git status --porcelain --untracked-files=all | sed 's/^...//' | grep -E '{diff_required_path_regex}' || true)\nif [ -n \"$CHANGED\" ]; then\n  exit 0\nfi\nif [ \"{setup_workspace.existing_pr_number}\" != \"0\" ]; then\n  exit 0\nfi\necho '{diff_failure_message}'\nexit 1\n",
+          "format": "{format_command}",
+          "lint": "{lint_command}",
+          "test": "{test_command}",
+          "typecheck": "{typecheck_command}"
         },
         "checks": [
           "diff_or_existing_pr",
