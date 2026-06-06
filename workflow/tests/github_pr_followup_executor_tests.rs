@@ -3709,6 +3709,35 @@ fn remediation_result_accepts_already_satisfied_and_not_reproduced_only_with_det
         Some("valid")
     );
 
+
+    let command_only_evidence = tempfile::tempdir().expect("tempdir");
+    write_p11_plan_and_result(
+        &command_only_evidence,
+        serde_json::json!([
+            { "source_type": "ci_failure", "source_id": "ci-build", "status": "already_satisfied", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "verified", "evidence": { "current_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "commands": [{ "id": "cargo-test", "status": "passed", "argv": ["cargo", "test"] }] }, "evidence_paths": [] },
+            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "thread-valid", "body_hash": "hash-valid", "status": "not_reproduced", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "verified", "evidence": { "kind": "api_lookup", "current_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "api_lookups": [{ "endpoint": "/repos/example/workflow/pulls/1910/comments", "normalized_status": "not_found" }] }, "evidence_paths": [] }
+        ]),
+    );
+    let mut command_only_context = p11_context(&command_only_evidence);
+    let command_only_outcome = PrRemediationResultExecutor
+        .execute(
+            &mut command_only_context,
+            &p11_params(&command_only_evidence),
+        )
+        .expect("validate command-only deterministic evidence");
+    let command_only_artifact = read_json(&p11_result_path(&command_only_evidence));
+    assert_expected_outcome(
+        command_only_outcome,
+        StepOutcome::Success,
+        "already_satisfied deterministic evidence should be accepted when passed commands are tied to the current head",
+    );
+    assert_eq!(
+        command_only_artifact
+            .get("validation_state")
+            .and_then(serde_json::Value::as_str),
+        Some("valid")
+    );
+
     let missing_evidence = tempfile::tempdir().expect("tempdir");
     write_p11_plan_and_result(
         &missing_evidence,

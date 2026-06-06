@@ -2240,8 +2240,7 @@ fn validate_deterministic_evidence(
                         .and_then(Value::as_array)
                         .is_some_and(|argv| !argv.is_empty())
             });
-            if evidence.get("kind").and_then(Value::as_str) != Some("current_repository_test")
-                || !has_passed_command
+            if !has_passed_command
             {
                 errors.push(format!(
                     "already_satisfied result {key} lacks deterministic passed command evidence"
