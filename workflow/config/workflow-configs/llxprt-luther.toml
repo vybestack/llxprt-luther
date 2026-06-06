@@ -25,7 +25,7 @@ repository_name = "llxprt-luther"
 assignee = "acoliver"
 work_dir = "/tmp/luther-workspaces/llxprt-luther"
 artifact_dir = "/tmp/luther-artifacts/llxprt-luther"
-primary_issue_number = "2"
+primary_issue_number = "3"
 
 base_branch = "main"
 profile_planning = "gpt55high"
