@@ -315,6 +315,51 @@ impl PrFollowupArtifactStore {
         if !self.validate_binding(expected, &actual) {
             return Err(artifact_error("artifact binding mismatch"));
         }
+        self.validate_artifact_metadata(artifact_family, value)
+    }
+
+    fn validate_sequence_artifact_value(
+        &self,
+        expected: &PrFollowupBinding,
+        artifact_family: &str,
+        value: &Value,
+    ) -> Result<(), EngineError> {
+        let actual = binding_from_value(value)?;
+        if !self.validate_sequence_binding(expected, &actual) {
+            return Err(artifact_error("artifact binding mismatch"));
+        }
+        self.validate_artifact_metadata(artifact_family, value)
+    }
+
+    fn validate_sequence_binding(
+        &self,
+        expected: &PrFollowupBinding,
+        actual: &PrFollowupBinding,
+    ) -> bool {
+        expected.schema_version == actual.schema_version
+            && expected.schema_version != 0
+            && expected.run_id == actual.run_id
+            && !expected.run_id.is_empty()
+            && expected.repository_owner == actual.repository_owner
+            && !expected.repository_owner.is_empty()
+            && expected.repository_name == actual.repository_name
+            && !expected.repository_name.is_empty()
+            && expected.pr_number == actual.pr_number
+            && expected.pr_number != 0
+            && expected.head_ref == actual.head_ref
+            && !expected.head_ref.is_empty()
+            && !expected.head_sha.is_empty()
+            && !actual.head_sha.is_empty()
+            && expected.base_ref == actual.base_ref
+            && !expected.base_ref.is_empty()
+            && expected.base_sha == actual.base_sha
+    }
+
+    fn validate_artifact_metadata(
+        &self,
+        artifact_family: &str,
+        value: &Value,
+    ) -> Result<(), EngineError> {
         let metadata = value
             .get("history_metadata")
             .and_then(Value::as_object)
@@ -423,7 +468,7 @@ impl PrFollowupArtifactStore {
                     path.display()
                 ))
             })?;
-            self.validate_artifact_value(binding, &family, &value)?;
+            self.validate_sequence_artifact_value(binding, &family, &value)?;
             state.accept_snapshot(&family, &value, &path)?;
             last_path = Some(path);
         }

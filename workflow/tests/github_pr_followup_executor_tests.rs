@@ -1074,6 +1074,47 @@ fn artifact_store_rejects_unbound_current_run_sequence_data_for_consumed_family(
 /// @requirement:REQ-PRFU-002
 /// @pseudocode lines 5-7
 #[test]
+fn artifact_sequence_recovery_allows_same_pr_run_history_after_head_change() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let store = PrFollowupArtifactStore::new(temp.path().to_path_buf());
+    let first_binding = sample_binding();
+    let mut second_binding = first_binding.clone();
+    second_binding.head_sha = "head-b".to_string();
+    let clock = FixedClock;
+    store
+        .write_json_artifact(
+            &first_binding,
+            "pr",
+            "capture_pr_identity",
+            1,
+            &TestArtifactPayload {
+                payload_state: "first-head".to_string(),
+            },
+            None,
+            &clock,
+        )
+        .expect("write first head artifact");
+
+    let sequence = store
+        .next_sequence(&second_binding, "pr")
+        .expect("same PR run history from a previous head should seed sequence allocation");
+
+    assert_eq!(sequence.artifact_sequence, 2);
+    assert_eq!(sequence.write_sequence, 2);
+
+    let err = store
+        .read_current_json(&second_binding, "pr")
+        .expect_err("current artifact reads remain bound to the exact head");
+    assert!(
+        format!("{err}").contains("artifact binding mismatch"),
+        "exact current artifact reads must remain strict; err={err:?}"
+    );
+}
+
+/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P05
+/// @requirement:REQ-PRFU-002
+/// @pseudocode lines 5-7
+#[test]
 fn artifact_store_rejects_non_monotonic_failure_sequence_when_allocating_failure_sequence() {
     let temp = tempfile::tempdir().expect("tempdir");
     let store = PrFollowupArtifactStore::new(temp.path().to_path_buf());
