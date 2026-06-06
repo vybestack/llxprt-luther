@@ -701,6 +701,12 @@
       "to": "capture_pr_identity"
     },
     {
+      "condition": "fixable",
+      "from": "push_remediation_changes",
+      "to": "mark_coderabbit_feedback"
+    },
+
+    {
       "condition": "retryable",
       "from": "push_remediation_changes",
       "to": "post_pr_failure_terminal"

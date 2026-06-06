@@ -2240,8 +2240,7 @@ fn validate_deterministic_evidence(
                         .and_then(Value::as_array)
                         .is_some_and(|argv| !argv.is_empty())
             });
-            if !has_passed_command
-            {
+            if !has_passed_command {
                 errors.push(format!(
                     "already_satisfied result {key} lacks deterministic passed command evidence"
                 ));
@@ -3301,7 +3300,7 @@ fn push_remediation_changes(
             &store, &binding, &step_id, step_order, payload, failure, clock,
         )?;
         return Ok(if verified {
-            StepOutcome::Success
+            StepOutcome::Fixable
         } else {
             StepOutcome::Fatal
         });

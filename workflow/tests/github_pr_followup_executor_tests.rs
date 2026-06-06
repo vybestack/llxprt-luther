@@ -4896,6 +4896,49 @@ fn push_remediation_changes_records_safe_staging_remote_heads_and_verified_push_
 }
 
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P14
+/// @requirement:REQ-PRFU-015,REQ-PRFU-016,REQ-PRFU-018
+/// @pseudocode lines 34-49
+#[test]
+fn push_remediation_changes_no_change_routes_fixable_for_marker_handling() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_p11_plan_and_result(
+        &temp,
+        serde_json::json!([
+            { "source_type": "ci_failure", "source_id": "ci-build", "status": "already_satisfied", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "verified", "evidence": { "current_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "commands": [{ "id": "cargo-test", "status": "passed", "argv": ["cargo", "test"] }] }, "evidence_paths": [] },
+            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "thread-valid", "body_hash": "hash-valid", "status": "already_satisfied", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "verified", "evidence": { "current_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "commands": [{ "id": "cargo-test", "status": "passed", "argv": ["cargo", "test"] }] }, "evidence_paths": [] }
+        ]),
+    );
+    write_p14_post_pr_test_result(&temp, "passed");
+    let mut runner = P14RecordingPushRunner::new();
+    runner.status_output = String::new();
+    runner.local_after = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string();
+    runner.remote_after = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string();
+    let mut context = p11_context(&temp);
+    let outcome = PushRemediationChangesExecutorWithRunner::new(runner, FixedClock)
+        .execute(&mut context, &p11_params(&temp))
+        .expect("verify no-change remediation push result");
+    let artifact = read_json(&p11_current_artifact_path(&temp, "push-remediation-result"));
+
+    assert_expected_outcome(
+        outcome,
+        StepOutcome::Fixable,
+        "verified no-change remediation must route to marker handling instead of recapturing unchanged PR feedback",
+    );
+    assert_eq!(
+        artifact
+            .get("push_state")
+            .and_then(serde_json::Value::as_str),
+        Some("no_change")
+    );
+    assert_eq!(
+        artifact
+            .get("verified_remote_matches_expected")
+            .and_then(serde_json::Value::as_bool),
+        Some(true)
+    );
+}
+
+/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P14
 /// @requirement:REQ-PRFU-015,REQ-PRFU-017
 /// @pseudocode lines 34-40
 #[test]

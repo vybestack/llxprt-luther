@@ -955,6 +955,11 @@ max_iterations = 50
 
 [[transitions]]
 from = "push_remediation_changes"
+to = "mark_coderabbit_feedback"
+condition = "fixable"
+
+[[transitions]]
+from = "push_remediation_changes"
 to = "post_pr_failure_terminal"
 condition = "retryable"
 

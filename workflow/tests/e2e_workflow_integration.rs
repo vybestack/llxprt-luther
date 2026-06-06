@@ -1289,6 +1289,13 @@ fn post_pr_exact_p17_routing_contract_is_present() {
         "success",
         "capture_pr_identity",
     );
+    assert_single_target(
+        &workflow_type,
+        "push_remediation_changes",
+        "fixable",
+        "mark_coderabbit_feedback",
+    );
+
     for transition in workflow_type
         .transitions
         .iter()
