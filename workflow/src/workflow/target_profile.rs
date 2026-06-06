@@ -1,5 +1,5 @@
 use std::collections::BTreeSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::workflow::config_loader::{ConfigError, ConfigErrorKind, Result};
 use crate::workflow::schema::WorkflowConfig;
@@ -64,23 +64,21 @@ pub fn apply_target_profile_overrides(
         config
             .variables
             .insert("primary_issue_number".to_string(), issue.to_string());
-        config
-            .variables
-            .insert("issue_number".to_string(), issue.to_string());
+        config.variables.remove("issue_number");
     }
 
     if let Some(work_dir) = &overrides.work_dir {
-        config.variables.insert(
-            "work_dir".to_string(),
-            work_dir.to_string_lossy().to_string(),
-        );
+        let work_dir_str = utf8_path_override("work_dir", work_dir)?;
+        config
+            .variables
+            .insert("work_dir".to_string(), work_dir_str.to_string());
     }
 
     if let Some(artifact_dir) = &overrides.artifact_dir {
-        config.variables.insert(
-            "artifact_dir".to_string(),
-            artifact_dir.to_string_lossy().to_string(),
-        );
+        let artifact_dir_str = utf8_path_override("artifact_dir", artifact_dir)?;
+        config
+            .variables
+            .insert("artifact_dir".to_string(), artifact_dir_str.to_string());
     }
 
     Ok(())
@@ -160,6 +158,14 @@ fn invalid_repo_error(repo: &str) -> ConfigError {
     }
 }
 
+fn utf8_path_override<'a>(key: &str, path: &'a Path) -> Result<&'a str> {
+    path.as_os_str().to_str().ok_or_else(|| ConfigError {
+        message: format!("{key} path is not valid UTF-8: {}", path.display()),
+        source_path: None,
+        kind: ConfigErrorKind::ValidationError,
+    })
+}
+
 fn trimmed_value<'a>(config: &'a WorkflowConfig, key: &str) -> Option<&'a str> {
     config
         .variables
@@ -181,9 +187,15 @@ fn interpolate_variables(
             result = result.replace(&token, value);
         }
     }
+    if !variables.contains_key("issue_number") {
+        if let Some(value) = variables.get("primary_issue_number") {
+            result = result.replace("{issue_number}", value);
+        }
+    }
     result
 }
 
+/// Returns unresolved template tokens whose names match `[A-Za-z_][A-Za-z0-9_]*`.
 fn unresolved_tokens(value: &str) -> BTreeSet<String> {
     let mut tokens = BTreeSet::new();
     let mut remaining = value;
@@ -193,12 +205,21 @@ fn unresolved_tokens(value: &str) -> BTreeSet<String> {
             break;
         };
         let token = after_start[..end].trim();
-        if !token.is_empty() {
+        if valid_template_token(token) {
             tokens.insert(token.to_string());
         }
         remaining = &after_start[end + 1..];
     }
     tokens
+}
+
+fn valid_template_token(token: &str) -> bool {
+    let mut chars = token.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first.is_ascii_alphabetic() || first == '_')
+        && chars.all(|character| character.is_ascii_alphanumeric() || character == '_')
 }
 
 #[cfg(test)]
@@ -267,12 +288,15 @@ mod tests {
             Some("llxprt-luther")
         );
         assert_eq!(
-            config.variables.get("primary_issue_number").map(String::as_str),
+            config
+                .variables
+                .get("primary_issue_number")
+                .map(String::as_str),
             Some("3")
         );
         assert_eq!(
             config.variables.get("issue_number").map(String::as_str),
-            Some("3")
+            None
         );
         assert_eq!(
             config.variables.get("work_dir").map(String::as_str),
@@ -310,5 +334,38 @@ mod tests {
 
         assert!(error.message.contains("work_dir"));
         assert!(error.message.contains("missing_repo"));
+    }
+
+    #[test]
+    fn unresolved_path_templates_ignore_malformed_tokens() {
+        let mut config = test_config();
+        config.variables.insert(
+            "work_dir".to_string(),
+            "/tmp/luther-workspaces/{123}/{variable-with-dashes}/{embedded{nested}tokens}/{missing_repo}".to_string(),
+        );
+
+        let error = validate_target_profile(&config).unwrap_err();
+
+        assert!(error.message.contains("missing_repo"));
+        assert!(!error.message.contains("123"));
+        assert!(!error.message.contains("variable-with-dashes"));
+        assert!(!error.message.contains("nested"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_utf8_path_overrides_fail_explicitly() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        let mut config = test_config();
+        let overrides = TargetProfileOverrides {
+            work_dir: Some(PathBuf::from(OsString::from_vec(vec![b'w', 0x80]))),
+            ..TargetProfileOverrides::default()
+        };
+
+        let error = apply_target_profile_overrides(&mut config, &overrides).unwrap_err();
+
+        assert!(error.message.contains("work_dir path is not valid UTF-8"));
     }
 }
