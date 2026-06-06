@@ -51,6 +51,18 @@ pub struct RunArgs {
     /// Stable run id to use for durable checkpoints/resume
     #[arg(long, value_name = "ID")]
     pub run_id: Option<String>,
+    /// Target repository in OWNER/NAME form
+    #[arg(long, value_name = "OWNER/NAME")]
+    pub repo: Option<String>,
+    /// Target issue number
+    #[arg(long, value_name = "NUMBER")]
+    pub issue: Option<String>,
+    /// Target checkout/workspace directory
+    #[arg(long, value_name = "PATH")]
+    pub work_dir: Option<PathBuf>,
+    /// Target artifact directory
+    #[arg(long, value_name = "PATH")]
+    pub artifact_dir: Option<PathBuf>,
 }
 
 /// Arguments for the status command.
@@ -105,12 +117,26 @@ mod tests {
             workflow_type: Some("test-type".to_string()),
             config_dir: None,
             run_id: Some("run-123".to_string()),
+            repo: Some("vybestack/llxprt-luther".to_string()),
+            issue: Some("3".to_string()),
+            work_dir: Some(PathBuf::from("/tmp/luther-workspaces/llxprt-luther")),
+            artifact_dir: Some(PathBuf::from("/tmp/luther-artifacts/llxprt-luther")),
         };
         assert!(args.dry_run);
         assert_eq!(args.config, Some(PathBuf::from("/test/config.toml")));
         assert_eq!(args.workflow_type, Some("test-type".to_string()));
         assert!(args.config_dir.is_none());
         assert_eq!(args.run_id, Some("run-123".to_string()));
+        assert_eq!(args.repo, Some("vybestack/llxprt-luther".to_string()));
+        assert_eq!(args.issue, Some("3".to_string()));
+        assert_eq!(
+            args.work_dir,
+            Some(PathBuf::from("/tmp/luther-workspaces/llxprt-luther"))
+        );
+        assert_eq!(
+            args.artifact_dir,
+            Some(PathBuf::from("/tmp/luther-artifacts/llxprt-luther"))
+        );
     }
 
     #[test]

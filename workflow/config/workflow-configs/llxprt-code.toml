@@ -28,6 +28,7 @@ assignee = "acoliver"
 work_dir = "/tmp/luther-workspaces/llxprt-code"
 artifact_dir = "/tmp/luther-artifacts/llxprt-code"
 primary_issue_number = "1803"
+issue_number = "1803"
 
 base_branch = "main"
 profile_planning = "gpt53codexXHigh"

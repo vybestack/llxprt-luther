@@ -15,6 +15,9 @@ use luther_workflow::engine::runner::{EngineError, EngineRunner, RunOutcome};
 use luther_workflow::engine::transition::StepOutcome;
 use luther_workflow::persistence::SqliteStore;
 use luther_workflow::workflow::config_loader::{resolve_workflow_config, resolve_workflow_type};
+use luther_workflow::workflow::target_profile::{
+    apply_target_profile_overrides, validate_target_profile, TargetProfileOverrides,
+};
 
 // ============================================================================
 // SharedMockExecutor — Thread-safe mock executor

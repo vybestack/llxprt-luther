@@ -15,6 +15,10 @@ use luther_workflow::service::{Service, ServiceConfig};
 use luther_workflow::workflow::config_loader::{
     resolve_workflow, resolve_workflow_config, resolve_workflow_type,
 };
+use luther_workflow::workflow::target_profile::{
+    apply_target_profile_overrides, target_profile_validation_required, validate_target_profile,
+    TargetProfileOverrides,
+};
 
 #[tokio::main]
 async fn main() {
@@ -46,7 +50,7 @@ async fn handle_run_command(args: &luther_workflow::cli::RunArgs) {
         .clone()
         .unwrap_or_else(|| std::path::PathBuf::from("config"));
 
-    let (workflow_type, config, run_ref) = if let Some(config_path) = &args.config {
+    let (workflow_type, mut config, run_ref) = if let Some(config_path) = &args.config {
         // Load from specified path
         let config_id = config_path.file_stem().map_or_else(
             || "default".to_string(),
@@ -102,6 +106,23 @@ async fn handle_run_command(args: &luther_workflow::cli::RunArgs) {
             }
         }
     };
+
+    let overrides = TargetProfileOverrides {
+        repo: args.repo.clone(),
+        issue: args.issue.clone(),
+        work_dir: args.work_dir.clone(),
+        artifact_dir: args.artifact_dir.clone(),
+    };
+    if let Err(e) = apply_target_profile_overrides(&mut config, &overrides) {
+        eprintln!("Error: {e}");
+        process::exit(1);
+    }
+    if target_profile_validation_required(&workflow_type.workflow_type_id, &config, &overrides) {
+        if let Err(e) = validate_target_profile(&config) {
+            eprintln!("Error: {e}");
+            process::exit(1);
+        }
+    }
 
     // 2. Create run_id (already done in run_ref)
     let run_id = run_ref.run_id;

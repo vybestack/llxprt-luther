@@ -2,6 +2,7 @@
 /// Workflow module - schema definitions and config loading.
 pub mod config_loader;
 pub mod schema;
+pub mod target_profile;
 
 pub use config_loader::{
     parse_workflow_config_json, parse_workflow_config_toml, parse_workflow_type_json,
@@ -12,4 +13,8 @@ pub use config_loader::{
 pub use schema::{
     GuardConfig, GuardLimits, RepoConfig, RuntimeConfig, StepDef, TransitionDef, WorkflowConfig,
     WorkflowRunRef, WorkflowType,
+};
+pub use target_profile::{
+    apply_target_profile_overrides, target_profile_validation_required, validate_target_profile,
+    TargetProfileOverrides,
 };
