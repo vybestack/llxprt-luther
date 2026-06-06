@@ -18,7 +18,7 @@ command = """
 set -euo pipefail
 
 if [ -n "{primary_issue_number}" ] && [ "{primary_issue_number}" != "0" ]; then
-  ISSUE_JSON=$(gh issue view {primary_issue_number} --repo {target_repo} --json number,title,labels,assignees,state --jq 'select(.state == "OPEN") | select(any(.labels[].name; . == "{ok_label}")) | {number, title}')
+  ISSUE_JSON=$(gh issue view {primary_issue_number} --repo {target_repo} --json number,title,state --jq 'select(.state == "OPEN") | {number, title}')
   if [ -n "$ISSUE_JSON" ]; then
     ISSUE_NUMBER=$(echo "$ISSUE_JSON" | jq -r '.number')
     ISSUE_TITLE=$(echo "$ISSUE_JSON" | jq -r '.title')
@@ -27,6 +27,7 @@ if [ -n "{primary_issue_number}" ] && [ "{primary_issue_number}" != "0" ]; then
     exit 0
   fi
 fi
+
 
 
 # Query milestones sorted by semver (sort -V)
