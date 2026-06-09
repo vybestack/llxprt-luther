@@ -336,7 +336,12 @@ impl ExecutorRegistry {
         registry.register("noop", Box::new(crate::engine::executors::NoOpExecutor));
         registry.register(
             "github_pr_identity",
-            Box::new(crate::engine::executors::GithubPrIdentityExecutor),
+            Box::new(
+                crate::engine::executors::GithubPrIdentityExecutorWithRunner::new(
+                    crate::engine::executors::SystemGithubPrCommandRunner,
+                    crate::engine::executors::SystemClockSleeper,
+                ),
+            ),
         );
         registry.register(
             "post_pr_iteration_guard",
@@ -344,19 +349,40 @@ impl ExecutorRegistry {
         );
         registry.register(
             "github_pr_checks",
-            Box::new(crate::engine::executors::GithubPrChecksExecutor),
+            Box::new(
+                crate::engine::executors::GithubPrChecksExecutorWithRunner::new(
+                    crate::engine::executors::SystemGithubPrCommandRunner,
+                    crate::engine::executors::SystemClockSleeper,
+                ),
+            ),
         );
         registry.register(
             "github_check_failures",
-            Box::new(crate::engine::executors::GithubCheckFailuresExecutor),
+            Box::new(
+                crate::engine::executors::GithubCheckFailuresExecutorWithRunner::new(
+                    crate::engine::executors::SystemGithubPrCommandRunner,
+                    crate::engine::executors::SystemClockSleeper,
+                ),
+            ),
         );
         registry.register(
             "github_coderabbit_feedback",
-            Box::new(crate::engine::executors::GithubCodeRabbitFeedbackExecutor),
+            Box::new(
+                crate::engine::executors::GithubCodeRabbitFeedbackExecutorWithRunner::new(
+                    crate::engine::executors::SystemGithubPrCommandRunner,
+                    crate::engine::executors::SystemFeedbackClock,
+                ),
+            ),
         );
         registry.register(
             "feedback_evaluator",
-            Box::new(crate::engine::executors::FeedbackEvaluatorExecutor::default()),
+            Box::new(crate::engine::executors::FeedbackEvaluatorExecutor::new(
+                crate::engine::executors::CommandFeedbackEvaluationAdapter::new(
+                    crate::engine::executors::default_feedback_evaluator_argv(),
+                    crate::engine::executors::ProcessFeedbackEvaluatorCommandRunner,
+                ),
+                crate::engine::executors::SystemClockSleeper,
+            )),
         );
         registry.register(
             "pr_remediation_plan",
@@ -364,7 +390,12 @@ impl ExecutorRegistry {
         );
         registry.register(
             "pr_followup_remediation",
-            Box::new(crate::engine::executors::PrFollowupRemediationExecutor),
+            Box::new(
+                crate::engine::executors::PrFollowupRemediationExecutorWithRunner::new(
+                    crate::engine::executors::SystemPrFollowupLlxprtCommandRunner,
+                    crate::engine::executors::SystemClockSleeper,
+                ),
+            ),
         );
         registry.register(
             "pr_remediation_result",
@@ -380,7 +411,12 @@ impl ExecutorRegistry {
         );
         registry.register(
             "github_feedback_marker",
-            Box::new(crate::engine::executors::GithubFeedbackMarkerExecutor),
+            Box::new(
+                crate::engine::executors::GithubFeedbackMarkerExecutorWithRunner::new(
+                    crate::engine::executors::SystemGithubPrCommandRunner,
+                    crate::engine::executors::SystemFeedbackClock,
+                ),
+            ),
         );
         registry.register(
             "post_pr_failure_terminal",

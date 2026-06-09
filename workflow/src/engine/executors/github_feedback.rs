@@ -12,7 +12,7 @@ use std::time::Duration;
 use serde_json::{json, Value};
 
 use crate::engine::executor::{interpolate_string, StepContext, StepExecutor};
-use crate::engine::executors::github_pr::{GithubPrCommandRunner, SystemGithubPrCommandRunner};
+use crate::engine::executors::github_pr::GithubPrCommandRunner;
 use crate::engine::executors::pr_followup_artifacts::{
     ArtifactWriter, ClockSleeper, PrFollowupArtifactStore,
 };
@@ -99,40 +99,6 @@ impl<R, C> GithubCodeRabbitFeedbackExecutorWithRunner<R, C> {
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P08
 /// @requirement:REQ-PRFU-008,REQ-PRFU-009,REQ-PRFU-017,REQ-PRFU-024,REQ-PRFU-034
 /// @pseudocode lines 1-29
-impl StepExecutor for GithubCodeRabbitFeedbackExecutor {
-    fn execute(
-        &self,
-        context: &mut StepContext,
-        params: &serde_json::Value,
-    ) -> Result<StepOutcome, EngineError> {
-        let mut owned_params = params.clone();
-        if let Some(object) = owned_params.as_object_mut() {
-            if object
-                .get("artifact_root")
-                .and_then(Value::as_str)
-                .is_some_and(|root| root == "/tmp/luther-p04-artifacts")
-            {
-                object.insert(
-                    "artifact_root".to_string(),
-                    Value::from(format!(
-                        "/tmp/luther-p04-artifacts-{}",
-                        uuid::Uuid::new_v4()
-                    )),
-                );
-            }
-        }
-        collect_coderabbit_feedback(
-            context,
-            &owned_params,
-            &SystemGithubPrCommandRunner,
-            &SystemFeedbackClock,
-        )
-    }
-}
-
-/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P08
-/// @requirement:REQ-PRFU-008,REQ-PRFU-009,REQ-PRFU-017,REQ-PRFU-024,REQ-PRFU-034
-/// @pseudocode lines 1-29
 impl<R, C> StepExecutor for GithubCodeRabbitFeedbackExecutorWithRunner<R, C>
 where
     R: GithubPrCommandRunner,
@@ -179,23 +145,6 @@ impl<R, C> GithubFeedbackMarkerExecutorWithRunner<R, C> {
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P15
 /// @requirement:REQ-PRFU-015,REQ-PRFU-016,REQ-PRFU-017,REQ-PRFU-020,REQ-PRFU-026
 /// @pseudocode lines 41-49
-impl StepExecutor for GithubFeedbackMarkerExecutor {
-    fn execute(
-        &self,
-        context: &mut StepContext,
-        params: &serde_json::Value,
-    ) -> Result<StepOutcome, EngineError> {
-        mark_coderabbit_feedback(
-            context,
-            params,
-            &SystemGithubPrCommandRunner,
-            &SystemFeedbackClock,
-        )
-    }
-}
-
-/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P15
-/// @requirement:REQ-PRFU-015,REQ-PRFU-016,REQ-PRFU-017,REQ-PRFU-026
 /// @pseudocode lines 41-49
 impl<R, C> StepExecutor for GithubFeedbackMarkerExecutorWithRunner<R, C>
 where
@@ -215,7 +164,7 @@ where
 /// @requirement:REQ-PRFU-008,REQ-PRFU-017
 /// @pseudocode lines 3,24-25
 #[derive(Debug, Default)]
-struct SystemFeedbackClock;
+pub struct SystemFeedbackClock;
 
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P08
 /// @requirement:REQ-PRFU-008,REQ-PRFU-017
@@ -228,42 +177,6 @@ impl ClockSleeper for SystemFeedbackClock {
     fn sleep(&self, duration: Duration) {
         thread::sleep(duration);
     }
-}
-
-/// Fixture-backed feedback runner used by legacy unit-struct tests.
-/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P08
-/// @requirement:REQ-PRFU-008,REQ-PRFU-009,REQ-PRFU-017
-/// @pseudocode lines 4-6,20-23
-#[derive(Debug, Default)]
-struct FixtureGithubFeedbackRunner;
-
-/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P08
-/// @requirement:REQ-PRFU-008,REQ-PRFU-009,REQ-PRFU-017
-/// @pseudocode lines 4-6,20-23
-impl GithubPrCommandRunner for FixtureGithubFeedbackRunner {
-    fn run_github_command(&self, argv: &[String]) -> Result<String, EngineError> {
-        fixture_response_for_feedback(argv).ok_or_else(|| {
-            github_feedback_error(format!("missing fixture response for argv: {argv:?}"))
-        })
-    }
-}
-
-/// No-sleep fixture clock for legacy unit-struct tests.
-/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P08
-/// @requirement:REQ-PRFU-008
-/// @pseudocode lines 3,24-25
-#[derive(Debug, Default)]
-struct FixtureFeedbackClock;
-
-/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P08
-/// @requirement:REQ-PRFU-008
-/// @pseudocode lines 3,24-25
-impl ClockSleeper for FixtureFeedbackClock {
-    fn now_rfc3339(&self) -> String {
-        "2026-04-30T00:00:00Z".to_string()
-    }
-
-    fn sleep(&self, _duration: Duration) {}
 }
 
 /// Normalized feedback item bound to one CodeRabbit observation.
@@ -2755,65 +2668,6 @@ fn is_permission_or_schema_error(value: &Value) -> bool {
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P08
 /// @requirement:REQ-PRFU-008
 /// @pseudocode lines 6,15
-fn readiness_fixture_signal() -> Option<Value> {
-    serde_json::from_str(include_str!(
-        "../../../tests/fixtures/github_api_contract/coderabbit_readiness_ready_empty.json"
-    ))
-    .ok()
-}
-
-/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P08
-/// @requirement:REQ-PRFU-008,REQ-PRFU-009,REQ-PRFU-017
-/// @pseudocode lines 4-6,20-23
-fn fixture_response_for_feedback(argv: &[String]) -> Option<String> {
-    if argv.iter().any(|arg| arg.contains("graphql"))
-        && argv.iter().any(|arg| arg.contains("page=2"))
-    {
-        Some(
-            include_str!(
-                "../../../tests/fixtures/github_api_contract/review_threads_graphql_page2.json"
-            )
-            .to_string(),
-        )
-    } else if argv.iter().any(|arg| arg.contains("graphql")) {
-        Some(
-            include_str!(
-                "../../../tests/fixtures/github_api_contract/review_threads_graphql_page1.json"
-            )
-            .to_string(),
-        )
-    } else if argv
-        .iter()
-        .any(|arg| arg.contains("/pulls/") && arg.contains("/comments"))
-    {
-        Some(
-            include_str!(
-                "../../../tests/fixtures/github_api_contract/review_comments_rest_fallback.json"
-            )
-            .to_string(),
-        )
-    } else if argv
-        .iter()
-        .any(|arg| arg.contains("/issues/") && arg.contains("/comments"))
-    {
-        Some(
-            include_str!(
-                "../../../tests/fixtures/github_api_contract/issue_comments_rest_page2.json"
-            )
-            .to_string(),
-        )
-    } else if argv.iter().any(|arg| arg.contains("check-runs")) {
-        Some(
-            include_str!("../../../tests/fixtures/github_api_contract/check_runs_rest_page2.json")
-                .to_string(),
-        )
-    } else {
-        None
-    }
-}
-
-/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P08
-/// @requirement:REQ-PRFU-008
 /// @pseudocode lines 1
 fn read_json_file(path: &std::path::Path) -> Result<Value, EngineError> {
     let content = std::fs::read_to_string(path)

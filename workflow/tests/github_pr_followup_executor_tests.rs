@@ -14,16 +14,14 @@ use luther_workflow::engine::executor::{
 };
 use luther_workflow::engine::executors::SystemPrFollowupFilesystem;
 use luther_workflow::engine::executors::{
-    ArtifactWriter, ClockSleeper, CommandFeedbackEvaluationAdapter, FeedbackEvaluatorCommandRunner,
-    FeedbackEvaluatorExecutor, FixtureFeedbackEvaluationAdapter, FixtureGithubPrCommandRunner,
-    GithubCheckFailuresExecutor, GithubCheckFailuresExecutorWithRunner,
-    GithubCodeRabbitFeedbackExecutor, GithubCodeRabbitFeedbackExecutorWithRunner,
-    GithubFeedbackMarkerExecutor, GithubFeedbackMarkerExecutorWithRunner,
-    GithubPrChecksExecutorWithRunner, GithubPrCommandRunner, GithubPrIdentityExecutor,
-    GithubPrIdentityExecutorWithRunner, LlxprtInvocationRequest, LlxprtInvocationResult,
-    PostPrFailureTerminalExecutor, PostPrIterationGuardExecutor, PostPrTestCommandRequest,
-    PostPrTestCommandResult, PostPrTestCommandRunner, PrFollowupArtifactStore, PrFollowupBinding,
-    PrFollowupLlxprtCommandRunner, PrFollowupRemediationExecutor,
+    ArtifactWriter, ClockSleeper, CommandFeedbackEvaluationAdapter, FeedbackEvaluationAdapter,
+    FeedbackEvaluationRequest, FeedbackEvaluatorCommandRunner, FeedbackEvaluatorExecutor,
+    GithubCheckFailuresExecutorWithRunner, GithubCodeRabbitFeedbackExecutorWithRunner,
+    GithubFeedbackMarkerExecutorWithRunner, GithubPrChecksExecutorWithRunner,
+    GithubPrCommandRunner, GithubPrIdentityExecutorWithRunner, LlxprtInvocationRequest,
+    LlxprtInvocationResult, PostPrFailureTerminalExecutor, PostPrIterationGuardExecutor,
+    PostPrTestCommandRequest, PostPrTestCommandResult, PostPrTestCommandRunner,
+    PrFollowupArtifactStore, PrFollowupBinding, PrFollowupLlxprtCommandRunner,
     PrFollowupRemediationExecutorWithRunner, PrRemediationPlanExecutor,
     PrRemediationResultExecutor, PushRemediationChangesExecutorWithRunner,
     PushRemediationCommandRequest, PushRemediationCommandResult, PushRemediationCommandRunner,
@@ -118,6 +116,139 @@ impl ClockSleeper for RecordingClock {
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P06
 /// @requirement:REQ-PRFU-001,REQ-PRFU-004,REQ-PRFU-017
 /// @pseudocode lines 3-4,17-18
+#[derive(Clone, Debug, Default)]
+struct FixtureGithubPrCommandRunner;
+
+impl GithubPrCommandRunner for FixtureGithubPrCommandRunner {
+    fn run_github_command(
+        &self,
+        argv: &[String],
+    ) -> Result<String, luther_workflow::engine::runner::EngineError> {
+        if argv.iter().any(|arg| arg == "view") {
+            Ok(
+                include_str!("fixtures/github_api_contract/pr_identity_gh_pr_view.json")
+                    .to_string(),
+            )
+        } else if argv.iter().any(|arg| arg == "checks") {
+            Ok(
+                include_str!("fixtures/github_api_contract/checks_gh_pr_checks_page1.json")
+                    .to_string(),
+            )
+        } else if argv.iter().any(|arg| arg.contains("check-runs")) {
+            Ok(include_str!("fixtures/github_api_contract/check_runs_rest_page2.json").to_string())
+        } else if argv
+            .iter()
+            .any(|arg| arg.contains("actions/runs") && arg.contains("&page=1"))
+        {
+            Ok(include_str!("fixtures/github_api_contract/actions_jobs_page1.json").to_string())
+        } else if argv
+            .iter()
+            .any(|arg| arg.contains("actions/runs") && arg.contains("&page=2"))
+        {
+            Ok(include_str!("fixtures/github_api_contract/actions_jobs_page2.json").to_string())
+        } else if argv
+            .iter()
+            .any(|arg| arg.contains("actions/jobs") && arg.contains("logs"))
+        {
+            Ok(include_str!("fixtures/github_api_contract/actions_job_log.txt").to_string())
+        } else {
+            panic!("unexpected fixture github argv: {argv:?}")
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+struct ScriptedFeedbackEvaluationAdapter {
+    responses: Arc<Mutex<Vec<String>>>,
+    requests: Arc<Mutex<Vec<FeedbackEvaluationRequest>>>,
+}
+
+impl ScriptedFeedbackEvaluationAdapter {
+    fn with_responses(responses: Vec<String>) -> Self {
+        Self {
+            responses: Arc::new(Mutex::new(responses.into_iter().rev().collect())),
+            requests: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    fn requests(&self) -> Vec<FeedbackEvaluationRequest> {
+        self.requests.lock().expect("requests").clone()
+    }
+}
+
+impl FeedbackEvaluationAdapter for ScriptedFeedbackEvaluationAdapter {
+    fn evaluate(
+        &self,
+        request: &FeedbackEvaluationRequest,
+    ) -> Result<String, luther_workflow::engine::runner::EngineError> {
+        self.requests
+            .lock()
+            .expect("requests")
+            .push(request.clone());
+        if let Some(response) = self.responses.lock().expect("responses").pop() {
+            Ok(response)
+        } else {
+            Ok(serde_json::json!({
+                "item_id": request.item_id,
+                "stable_marker_key": request.stable_marker_key,
+                "body_hash": request.body_hash,
+                "head_sha": request.head_sha,
+                "decision": "valid",
+                "reason": "scripted evaluation accepted this feedback item",
+                "recommended_action": "address the feedback item"
+            })
+            .to_string())
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+struct FixturePrFollowupLlxprtRunner;
+
+impl PrFollowupLlxprtCommandRunner for FixturePrFollowupLlxprtRunner {
+    fn invoke(&self, request: LlxprtInvocationRequest) -> LlxprtInvocationResult {
+        let result = serde_json::json!({
+            "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "output_head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "overall_status": "success",
+            "results": [{
+                "source_type": "ci_failure",
+                "source_id": "ci-build",
+                "stable_marker_key": serde_json::Value::Null,
+                "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "status": "fixed",
+                "action": "scripted remediation result",
+                "evidence": { "kind": "test", "current_head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" },
+                "evidence_paths": []
+            }],
+            "verification_commands": []
+        });
+        std::fs::write(
+            &request.remediation_result_path,
+            serde_json::to_vec_pretty(&result).expect("serialize scripted result"),
+        )
+        .expect("write scripted remediation result");
+        LlxprtInvocationResult {
+            argv: request.argv.clone(),
+            working_directory: request.working_directory.clone(),
+            exit_code: Some(0),
+            signal: None,
+            process_class: "success".to_string(),
+            bounded_stdout: "scripted llxprt remediation".to_string(),
+            bounded_stderr: String::new(),
+            stdout_log_path: Some(request.stdout_log_path.clone()),
+            stderr_log_path: Some(request.stderr_log_path.clone()),
+            success_file_present: false,
+            success_file_size: None,
+            result_file_present: true,
+            result_file_size: None,
+            result_file_path: Some(request.remediation_result_path.clone()),
+            changed_paths: Vec::new(),
+            spawn_error: None,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 struct ScriptedGithubRunner {
     pr_json: String,
@@ -175,18 +306,23 @@ impl GithubPrCommandRunner for FlakyThenGreenGithubRunner {
         let mut calls = self.calls.lock().expect("runner calls");
         calls.push(argv.to_vec());
         if argv.iter().any(|arg| arg == "view") {
-            Ok(include_str!("fixtures/github_api_contract/pr_identity_gh_pr_view.json").to_string())
+            Ok(
+                include_str!("fixtures/github_api_contract/pr_identity_gh_pr_view.json")
+                    .to_string(),
+            )
         } else if argv.iter().any(|arg| arg == "checks") {
             let check_calls = calls
                 .iter()
                 .filter(|call| call.iter().any(|arg| arg == "checks"))
                 .count();
             if check_calls == 1 {
-                Err(luther_workflow::engine::runner::EngineError::StepExecutionError {
-                    step_id: "watch_pr_checks".to_string(),
+                Err(
+                    luther_workflow::engine::runner::EngineError::StepExecutionError {
+                        step_id: "watch_pr_checks".to_string(),
 
-                    message: "temporary GitHub checks API failure".to_string(),
-                })
+                        message: "temporary GitHub checks API failure".to_string(),
+                    },
+                )
             } else {
                 Ok(serde_json::json!([
                     { "name": "build", "state": "SUCCESS", "bucket": "pass", "headSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }
@@ -210,7 +346,6 @@ impl GithubPrCommandRunner for FlakyThenGreenGithubRunner {
         }
     }
 }
-
 
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P06
 /// @requirement:REQ-PRFU-001,REQ-PRFU-004,REQ-PRFU-017
@@ -679,9 +814,7 @@ fn execute_step<E: StepExecutor>(executor: E) -> StepOutcome {
         .execute(
             &mut context,
             &serde_json::json!({
-                "artifact_root": artifact_root,
-                "use_fixture_github_runner": true,
-                "use_fixture_llxprt_runner": true
+                "artifact_root": artifact_root
             }),
         )
         .expect("contract executor must return an outcome rather than a harness error")
@@ -689,6 +822,32 @@ fn execute_step<E: StepExecutor>(executor: E) -> StepOutcome {
 
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P03
 /// @requirement:REQ-PRFU-020
+
+#[test]
+fn production_executor_modules_do_not_expose_fixture_selection_seams() {
+    let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let github_pr = std::fs::read_to_string(workspace.join("src/engine/executors/github_pr.rs"))
+        .expect("read github_pr executor source");
+    let feedback_eval =
+        std::fs::read_to_string(workspace.join("src/engine/executors/feedback_eval.rs"))
+            .expect("read feedback_eval executor source");
+    let pr_remediation =
+        std::fs::read_to_string(workspace.join("src/engine/executors/pr_remediation.rs"))
+            .expect("read pr_remediation executor source");
+    let exports = std::fs::read_to_string(workspace.join("src/engine/executors/mod.rs"))
+        .expect("read executor exports");
+
+    assert!(!github_pr.contains("use_fixture_github_runner"));
+    assert!(!github_pr.contains("FixtureGithubPrCommandRunner"));
+    assert!(!pr_remediation.contains("use_fixture_llxprt_runner"));
+    assert!(!feedback_eval.contains("FixtureFeedbackEvaluationAdapter"));
+    assert!(!feedback_eval.contains("impl Default for FeedbackEvaluatorExecutor"));
+    assert!(
+        !exports.contains("Fixture"),
+        "production executor exports must not publicly re-export fixture implementations"
+    );
+}
+
 /// @pseudocode lines 1-53
 #[test]
 fn registry_registers_all_post_pr_step_types_by_introspection() {
@@ -1336,7 +1495,10 @@ fn github_pr_param_interpolation_leaves_unresolved_tokens_detectable() {
 /// @pseudocode lines 1-7
 #[test]
 fn pr_identity_capture_writes_pr_json_and_rejects_missing_number_url_or_head_sha() {
-    let outcome = execute_step(GithubPrIdentityExecutor);
+    let outcome = execute_step(GithubPrIdentityExecutorWithRunner::new(
+        FixtureGithubPrCommandRunner,
+        FixedClock,
+    ));
     assert_expected_outcome(
         outcome,
         StepOutcome::Success,
@@ -1636,7 +1798,6 @@ fn check_classification_unknown_current_head_evidence_is_fatal() {
     );
 }
 
-
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P06
 /// @requirement:REQ-PRFU-004,REQ-PRFU-007
 /// @pseudocode lines 16-33
@@ -1668,14 +1829,15 @@ fn pr_checks_clears_previous_api_fatal_source_after_green_retry() {
     );
 }
 
-
-
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P04
 /// @requirement:REQ-PRFU-007
 /// @pseudocode lines 1-21
 #[test]
 fn ci_failure_failed_pending_collects_logs_preserves_pending_and_routes_terminal() {
-    let outcome = execute_step(GithubCheckFailuresExecutor);
+    let outcome = execute_step(GithubCheckFailuresExecutorWithRunner::new(
+        FixtureGithubPrCommandRunner,
+        FixedClock,
+    ));
     assert_expected_outcome(
         outcome,
         StepOutcome::Fatal,
@@ -2490,7 +2652,7 @@ fn feedback_evaluation_single_item_request_rejects_batch_wrong_hash_unknown_deci
         serde_json::json!([p09_feedback_item("item-1", "thread-1", "hash-a")]),
         serde_json::json!([]),
     );
-    let adapter = FixtureFeedbackEvaluationAdapter::with_responses(vec![
+    let adapter = ScriptedFeedbackEvaluationAdapter::with_responses(vec![
         serde_json::json!([{
             "item_id": "item-1",
             "stable_marker_key": "thread-1",
@@ -2592,7 +2754,7 @@ fn feedback_evaluation_ignores_unresolved_identity_params_and_uses_context() {
         serde_json::json!([p09_feedback_item("item-1", "thread-1", "hash-a")]),
         serde_json::json!([]),
     );
-    let adapter = FixtureFeedbackEvaluationAdapter::with_responses(vec![serde_json::json!({
+    let adapter = ScriptedFeedbackEvaluationAdapter::with_responses(vec![serde_json::json!({
         "item_id": "item-1",
         "stable_marker_key": "thread-1",
         "body_hash": "hash-a",
@@ -2634,7 +2796,7 @@ fn feedback_evaluation_ignores_max_attempts_param_override() {
         serde_json::json!([p09_feedback_item("item-1", "thread-1", "hash-a")]),
         serde_json::json!([]),
     );
-    let adapter = FixtureFeedbackEvaluationAdapter::with_responses(vec![
+    let adapter = ScriptedFeedbackEvaluationAdapter::with_responses(vec![
         serde_json::json!({
             "item_id": "item-1",
             "stable_marker_key": "thread-1",
@@ -2759,7 +2921,7 @@ fn feedback_evaluation_reuses_unchanged_accepted_state_without_reinvoking_adapte
             "superseded": false
         }]),
     );
-    let adapter = FixtureFeedbackEvaluationAdapter::with_responses(vec![]);
+    let adapter = ScriptedFeedbackEvaluationAdapter::with_responses(vec![]);
     let mut context = p09_context(&temp);
     let outcome = FeedbackEvaluatorExecutor::new(adapter.clone(), FixedClock)
         .execute(&mut context, &p09_params(&temp))
@@ -2823,7 +2985,7 @@ fn feedback_evaluation_rejects_unbound_reusable_state_as_fatal() {
             "superseded": false
         }]),
     );
-    let adapter = FixtureFeedbackEvaluationAdapter::with_responses(vec![]);
+    let adapter = ScriptedFeedbackEvaluationAdapter::with_responses(vec![]);
     let mut context = p09_context(&temp);
     let outcome = FeedbackEvaluatorExecutor::new(adapter.clone(), FixedClock)
         .execute(&mut context, &p09_params(&temp))
@@ -2864,7 +3026,7 @@ fn feedback_evaluation_rejects_extra_identity_fields() {
         serde_json::json!([p09_feedback_item("item-1", "thread-1", "hash-a")]),
         serde_json::json!([]),
     );
-    let adapter = FixtureFeedbackEvaluationAdapter::with_responses(vec![
+    let adapter = ScriptedFeedbackEvaluationAdapter::with_responses(vec![
         serde_json::json!({
             "item_id": "item-1",
             "alternate_item_id": "item-2",
@@ -2980,7 +3142,7 @@ fn feedback_evaluation_evaluates_matching_state_entry_when_not_reuse_eligible() 
             "reuse_eligible": false
         }]),
     );
-    let adapter = FixtureFeedbackEvaluationAdapter::with_responses(vec![serde_json::json!({
+    let adapter = ScriptedFeedbackEvaluationAdapter::with_responses(vec![serde_json::json!({
         "item_id": "item-1",
         "stable_marker_key": "thread-1",
         "body_hash": "hash-a",
@@ -3708,7 +3870,6 @@ fn remediation_result_accepts_already_satisfied_and_not_reproduced_only_with_det
             .and_then(serde_json::Value::as_str),
         Some("valid")
     );
-
 
     let command_only_evidence = tempfile::tempdir().expect("tempdir");
     write_p11_plan_and_result(
@@ -5531,7 +5692,10 @@ fn marker_comment_success_resolution_failure_is_partial_retryable() {
 /// @pseudocode lines 41-49
 #[test]
 fn marker_idempotency_avoids_duplicate_comments_using_local_and_remote_markers() {
-    let outcome = execute_step(GithubFeedbackMarkerExecutor);
+    let outcome = execute_step(GithubFeedbackMarkerExecutorWithRunner::new(
+        P15MarkerRunner::default(),
+        FixedClock,
+    ));
     assert_expected_outcome(
         outcome,
         StepOutcome::Success,
@@ -5544,7 +5708,10 @@ fn marker_idempotency_avoids_duplicate_comments_using_local_and_remote_markers()
 /// @pseudocode lines 41-49
 #[test]
 fn pending_marker_actions_carry_forward_across_head_change() {
-    let outcome = execute_step(GithubFeedbackMarkerExecutor);
+    let outcome = execute_step(GithubFeedbackMarkerExecutorWithRunner::new(
+        P15MarkerRunner::default(),
+        FixedClock,
+    ));
     assert_expected_outcome(
         outcome,
         StepOutcome::Success,
@@ -5765,7 +5932,10 @@ fn feedback_evaluator_command_shell_safety_writes_raw_llm_text_to_bounded_artifa
 /// @pseudocode lines 12-17
 #[test]
 fn remediation_wrapper_shell_safety_passes_plan_and_result_paths_as_argv() {
-    let outcome = execute_step(PrFollowupRemediationExecutor);
+    let outcome = execute_step(PrFollowupRemediationExecutorWithRunner::new(
+        FixturePrFollowupLlxprtRunner,
+        FixedClock,
+    ));
     assert_expected_outcome(
         outcome,
         StepOutcome::Success,
@@ -5778,7 +5948,10 @@ fn remediation_wrapper_shell_safety_passes_plan_and_result_paths_as_argv() {
 /// @pseudocode lines 41-49
 #[test]
 fn marker_comment_shell_safety_uses_body_files_or_graphql_variables() {
-    let outcome = execute_step(GithubFeedbackMarkerExecutor);
+    let outcome = execute_step(GithubFeedbackMarkerExecutorWithRunner::new(
+        P15MarkerRunner::default(),
+        FixedClock,
+    ));
     assert_expected_outcome(
         outcome,
         StepOutcome::Success,
