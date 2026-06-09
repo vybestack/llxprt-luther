@@ -235,6 +235,34 @@ PLAN_NEEDS_REVISION = "fixable"
 1 = "fatal"
 
 [[steps]]
+step_id = "plan_gate"
+step_type = "shell"
+description = "Deterministically verify plan evaluator approval before implementation"
+
+[steps.parameters]
+command = """
+set -euo pipefail
+if [ -f {artifact_dir}/plan-evaluation.md ] && grep -q '^PLAN_NEEDS_REVISION$' {artifact_dir}/plan-evaluation.md; then
+  echo 'PLAN_REJECTED'
+  exit 0
+fi
+if [ ! -s {artifact_dir}/plan.md ]; then
+  echo 'PLAN_REJECTED'
+  exit 0
+fi
+PLAN_BYTES=$(tr -d '[:space:]' < {artifact_dir}/plan.md | wc -c | tr -d ' ')
+if [ "$PLAN_BYTES" -lt 200 ]; then
+  echo 'PLAN_REJECTED'
+  exit 0
+fi
+echo 'PLAN_GATE_APPROVED'
+"""
+outcome_on_stdout = { PLAN_GATE_APPROVED = "success", PLAN_REJECTED = "fixable" }
+
+[steps.parameters.exit_code_map]
+1 = "fatal"
+
+[[steps]]
 step_id = "implement"
 step_type = "llxprt"
 description = "Invoke llxprt to implement the plan"
@@ -769,7 +797,7 @@ max_iterations = 3
 
 [[transitions]]
 from = "evaluate_plan"
-to = "implement"
+to = "plan_gate"
 condition = "success"
 
 [[transitions]]
@@ -777,6 +805,22 @@ from = "evaluate_plan"
 to = "create_plan"
 condition = "fixable"
 max_iterations = 5
+
+[[transitions]]
+from = "plan_gate"
+to = "implement"
+condition = "success"
+
+[[transitions]]
+from = "plan_gate"
+to = "create_plan"
+condition = "fixable"
+max_iterations = 5
+
+[[transitions]]
+from = "plan_gate"
+to = "abandon_and_log"
+condition = "fatal"
 
 [[transitions]]
 from = "implement"

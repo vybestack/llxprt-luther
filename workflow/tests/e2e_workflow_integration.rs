@@ -1741,6 +1741,54 @@ fn reusable_issue_fix_evaluate_plan_requires_real_llxprt_review() {
 /// @plan:PLAN-20260408-LLXPRT-FIRST.P18
 /// @requirement:REQ-LF-PLAN-002
 #[test]
+fn dogfood_plan_gate_blocks_rejected_plan_artifacts() {
+    let workflow_type = resolve_workflow_type(
+        "llxprt-luther-dogfood-v1",
+        &std::path::PathBuf::from("config"),
+    )
+    .expect("production dogfood workflow type should load");
+
+    let plan_gate = workflow_type
+        .steps
+        .iter()
+        .find(|step| step.step_id == "plan_gate")
+        .expect("plan_gate step exists");
+    let command = plan_gate
+        .parameters
+        .as_ref()
+        .and_then(|params| params.get("command"))
+        .and_then(serde_json::Value::as_str)
+        .expect("plan_gate command exists");
+
+    assert!(
+        command.contains("PLAN_NEEDS_REVISION"),
+        "plan_gate should inspect plan-evaluation rejection artifacts: {command}"
+    );
+    assert!(
+        command.contains("PLAN_BYTES") && command.contains("-lt 200"),
+        "plan_gate should reject obvious placeholder-sized plans: {command}"
+    );
+
+    assert!(workflow_type.transitions.iter().any(|transition|
+        transition.from == "evaluate_plan"
+            && transition.to == "plan_gate"
+            && transition.condition.as_deref() == Some("success")
+    ));
+    assert!(workflow_type.transitions.iter().any(|transition|
+        transition.from == "plan_gate"
+            && transition.to == "implement"
+            && transition.condition.as_deref() == Some("success")
+    ));
+    assert!(workflow_type.transitions.iter().any(|transition|
+        transition.from == "plan_gate"
+            && transition.to == "create_plan"
+            && transition.condition.as_deref() == Some("fixable")
+    ));
+}
+
+/// @plan:PLAN-20260408-LLXPRT-FIRST.P18
+/// @requirement:REQ-LF-PLAN-002
+#[test]
 fn dogfood_agents_are_warned_against_profile_shell_snippets() {
     let workflow_type = resolve_workflow_type(
         "llxprt-luther-dogfood-v1",
