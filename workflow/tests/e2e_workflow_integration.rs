@@ -1769,10 +1769,42 @@ fn dogfood_plan_gate_blocks_rejected_plan_artifacts() {
         "plan_gate should reject obvious placeholder-sized plans: {command}"
     );
 
+    let prepare_plan = workflow_type
+        .steps
+        .iter()
+        .find(|step| step.step_id == "prepare_plan")
+        .expect("prepare_plan step exists");
+    let prepare_command = prepare_plan
+        .parameters
+        .as_ref()
+        .and_then(|params| params.get("command"))
+        .and_then(serde_json::Value::as_str)
+        .expect("prepare_plan command exists");
+    assert!(
+        prepare_command.contains("plan-feedback.md")
+            && prepare_command.contains("rm -f {artifact_dir}/plan.md {artifact_dir}/plan-evaluation.md"),
+        "prepare_plan should preserve feedback and clear stale plan artifacts: {prepare_command}"
+    );
+
+    assert!(workflow_type.transitions.iter().any(|transition|
+        transition.from == "fetch_issue"
+            && transition.to == "prepare_plan"
+            && transition.condition.is_none()
+    ));
+    assert!(workflow_type.transitions.iter().any(|transition|
+        transition.from == "prepare_plan"
+            && transition.to == "create_plan"
+            && transition.condition.as_deref() == Some("success")
+    ));
     assert!(workflow_type.transitions.iter().any(|transition|
         transition.from == "evaluate_plan"
             && transition.to == "plan_gate"
             && transition.condition.as_deref() == Some("success")
+    ));
+    assert!(workflow_type.transitions.iter().any(|transition|
+        transition.from == "evaluate_plan"
+            && transition.to == "prepare_plan"
+            && transition.condition.as_deref() == Some("fixable")
     ));
     assert!(workflow_type.transitions.iter().any(|transition|
         transition.from == "plan_gate"
@@ -1781,7 +1813,7 @@ fn dogfood_plan_gate_blocks_rejected_plan_artifacts() {
     ));
     assert!(workflow_type.transitions.iter().any(|transition|
         transition.from == "plan_gate"
-            && transition.to == "create_plan"
+            && transition.to == "prepare_plan"
             && transition.condition.as_deref() == Some("fixable")
     ));
 }
@@ -1835,10 +1867,10 @@ fn plan_creation_fixable_routes_to_retry() {
         .iter()
         .find(|transition| {
             transition.from == "create_plan"
-                && transition.to == "create_plan"
+                && transition.to == "prepare_plan"
                 && transition.condition.as_deref() == Some("fixable")
         })
-        .expect("create_plan fixable transition should retry planning");
+        .expect("create_plan fixable transition should prepare a fresh retry");
     assert_eq!(
         retry_transition.max_iterations,
         Some(3),

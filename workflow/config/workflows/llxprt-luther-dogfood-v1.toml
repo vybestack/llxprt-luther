@@ -198,6 +198,23 @@ issue_title = ".title"
 issue_url = ".url"
 
 [[steps]]
+step_id = "prepare_plan"
+step_type = "shell"
+description = "Prepare a fresh planning attempt while preserving evaluator feedback"
+
+[steps.parameters]
+command = """
+set -euo pipefail
+if [ -f {artifact_dir}/plan-evaluation.md ]; then
+  cp {artifact_dir}/plan-evaluation.md {artifact_dir}/plan-feedback.md
+fi
+rm -f {artifact_dir}/plan.md {artifact_dir}/plan-evaluation.md
+"""
+
+[steps.parameters.exit_code_map]
+1 = "fatal"
+
+[[steps]]
 step_id = "create_plan"
 step_type = "llxprt"
 description = "Invoke llxprt to create a plan for the issue"
@@ -207,8 +224,8 @@ profile = "{profile_planning}"
 timeout_seconds = 900
 success_file = "{artifact_dir}/plan.md"
 prompt = """
-Do not use subagents. Do not ask questions. Read {artifact_dir}/issue.md and {artifact_dir}/comments.md. Inspect the repository as needed.
-Write a concise implementation plan to {artifact_dir}/plan.md. The plan MUST be specific to Luther issue #{issue_number} and the current issue text, must identify the relevant source/config/test files, must describe the architectural problem from the issue, and must list the intended tests.
+Do not use subagents. Do not ask questions. Read {artifact_dir}/issue.md and {artifact_dir}/comments.md. If {artifact_dir}/plan-feedback.md exists, treat it as required feedback from the prior plan review and address every point in the new plan. Inspect the repository as needed.
+Write a concise implementation plan to {artifact_dir}/plan.md. The plan MUST be specific to Luther issue #{issue_number} and the current issue text, must identify the relevant source/config/test files, must describe the architectural problem from the issue, and must list the intended tests. Do not write placeholder plans.
 You are working on the Luther workflow repository itself in a separate target checkout. Do not implement the fix in this step. Exit after writing {artifact_dir}/plan.md.
 """
 
@@ -782,18 +799,28 @@ condition = "fatal"
 
 [[transitions]]
 from = "fetch_issue"
+to = "prepare_plan"
+
+[[transitions]]
+from = "prepare_plan"
 to = "create_plan"
+condition = "success"
+
+[[transitions]]
+from = "prepare_plan"
+to = "abandon_and_log"
+condition = "fatal"
 
 [[transitions]]
 from = "create_plan"
 to = "evaluate_plan"
+condition = "success"
 
 [[transitions]]
 from = "create_plan"
-to = "create_plan"
+to = "prepare_plan"
 condition = "fixable"
 max_iterations = 3
-
 
 [[transitions]]
 from = "evaluate_plan"
@@ -802,7 +829,7 @@ condition = "success"
 
 [[transitions]]
 from = "evaluate_plan"
-to = "create_plan"
+to = "prepare_plan"
 condition = "fixable"
 max_iterations = 5
 
@@ -813,7 +840,7 @@ condition = "success"
 
 [[transitions]]
 from = "plan_gate"
-to = "create_plan"
+to = "prepare_plan"
 condition = "fixable"
 max_iterations = 5
 
