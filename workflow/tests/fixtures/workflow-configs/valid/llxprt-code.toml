@@ -50,7 +50,7 @@ required_changed_path_pattern = "packages/cli/src/ui/hooks/"
 diff_required_path_regex = "^packages/cli/src/ui/hooks/"
 diff_failure_message = "No issue #{issue_number} source/test diff found and no reusable open PR exists"
 lint_command = """
-CHANGED=$(git status --porcelain --untracked-files=all | sed 's/^...//' | grep -E '[.](ts|tsx|js|jsx)$' | tr '\\n' ' ')
+CHANGED=$(git status --porcelain --untracked-files=all | sed 's/^...//' | grep -E '[.](ts|tsx|js|jsx)$' | tr '\n' ' ')
 if [ -z "$CHANGED" ]; then
   echo 'No changed lint-checked files'
 else
