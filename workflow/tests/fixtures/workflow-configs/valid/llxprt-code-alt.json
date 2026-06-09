@@ -23,6 +23,7 @@
     "diff_failure_message": "No alternate issue source/test diff found and no reusable open PR exists",
     "diff_required_path_regex": "^packages/core/src/core/",
     "format_command": "CHANGED=$(git status --porcelain --untracked-files=all | sed 's/^...//' | grep -E '[.](ts|tsx|js|jsx|json|md)$' | tr '\n' ' ')\n\nif [ -z \"$CHANGED\" ]; then\n  echo 'No changed format-checked files'\nelse\n  npx prettier --write $CHANGED >/tmp/luther-prettier-write.log 2>&1\n  npx prettier --check $CHANGED 2>&1\nfi\n",
+    "issue_number": "1804",
     "lint_command": "CHANGED=$(git status --porcelain --untracked-files=all | sed 's/^...//' | grep -E '[.](ts|tsx|js|jsx)$' | tr '\n' ' ')\nif [ -z \"$CHANGED\" ]; then\n  echo 'No changed lint-checked files'\nelse\n  npx eslint $CHANGED > \"/tmp/luther-artifacts/llxprt-code-alt/lint-output.log\" 2>&1\n  status=$?\n  tail -n 240 \"/tmp/luther-artifacts/llxprt-code-alt/lint-output.log\"\n  exit $status\nfi\n",
     "luther_label": "Luther working",
     "ok_label": "OK for Luther",

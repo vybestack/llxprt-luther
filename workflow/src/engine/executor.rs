@@ -94,7 +94,13 @@ impl StepContext {
         }
 
         // Case 4: Fall back to flat variables (built-ins like work_dir/run_id, pre-namespace bare keys)
-        self.variables.get(key)
+        self.variables.get(key).or_else(|| {
+            if key == "issue_number" {
+                self.get("primary_issue_number")
+            } else {
+                None
+            }
+        })
     }
 
     /// Set a context value.
@@ -201,6 +207,9 @@ pub fn interpolate_string(template: &str, context: &StepContext) -> String {
     }
     if !all_keys.iter().any(|k| k == "run_id") {
         all_keys.push("run_id".to_string());
+    }
+    if !all_keys.iter().any(|k| k == "issue_number") && context.get("issue_number").is_some() {
+        all_keys.push("issue_number".to_string());
     }
 
     // Sort keys by length descending to prevent partial replacements
@@ -378,5 +387,35 @@ impl ExecutorRegistry {
             Box::new(crate::engine::executors::PostPrFailureTerminalExecutor),
         );
         registry
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn issue_number_falls_back_to_primary_issue_number() {
+        let mut context = StepContext::new(PathBuf::from("/tmp/work"), "run-1".to_string());
+        context.set("primary_issue_number", "3");
+
+        assert_eq!(context.get("issue_number").map(String::as_str), Some("3"));
+        assert_eq!(
+            interpolate_string("issue{issue_number}", &context),
+            "issue3"
+        );
+    }
+
+    #[test]
+    fn explicit_issue_number_takes_precedence_over_primary_issue_number() {
+        let mut context = StepContext::new(PathBuf::from("/tmp/work"), "run-1".to_string());
+        context.set("primary_issue_number", "3");
+        context.set("issue_number", "4");
+
+        assert_eq!(context.get("issue_number").map(String::as_str), Some("4"));
+        assert_eq!(
+            interpolate_string("issue{issue_number}", &context),
+            "issue4"
+        );
     }
 }

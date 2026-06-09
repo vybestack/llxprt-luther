@@ -1,0 +1,36 @@
+{
+  "config_id": "llxprt-luther",
+  "guards": {
+    "max_cost": 50.0,
+    "max_file_changes": 200,
+    "max_iterations": 4,
+    "max_tokens": 500000
+  },
+  "repository": {
+    "base_branch": "main",
+    "branch_template": "issue{issue_number}",
+    "workspace_strategy": "temp_clone"
+  },
+  "runtime": {
+    "max_retries": 3,
+    "timeout_seconds": 7200
+  },
+  "variables": {
+    "artifact_dir": "/tmp/luther-artifacts/llxprt-luther",
+    "assignee": "acoliver",
+    "base_branch": "main",
+    "issue_number": "3",
+    "luther_label": "Luther working",
+    "ok_label": "OK for Luther",
+    "primary_issue_number": "3",
+    "profile_evaluating": "gpt55high",
+    "profile_implementing": "gpt55high",
+    "profile_planning": "gpt55high",
+    "profile_remediating": "gpt55high",
+    "repository_name": "llxprt-luther",
+    "repository_owner": "vybestack",
+    "target_repo": "vybestack/llxprt-luther",
+    "work_dir": "/tmp/luther-workspaces/llxprt-luther"
+  },
+  "workflow_type_id": "llxprt-luther-dogfood-v1"
+}
