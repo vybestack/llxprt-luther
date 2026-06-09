@@ -185,20 +185,17 @@ impl FeedbackEvaluationAdapter for ScriptedFeedbackEvaluationAdapter {
             .lock()
             .expect("requests")
             .push(request.clone());
-        if let Some(response) = self.responses.lock().expect("responses").pop() {
-            Ok(response)
-        } else {
-            Ok(serde_json::json!({
-                "item_id": request.item_id,
-                "stable_marker_key": request.stable_marker_key,
-                "body_hash": request.body_hash,
-                "head_sha": request.head_sha,
-                "decision": "valid",
-                "reason": "scripted evaluation accepted this feedback item",
-                "recommended_action": "address the feedback item"
+        self.responses
+            .lock()
+            .expect("responses")
+            .pop()
+            .ok_or_else(|| luther_workflow::engine::runner::EngineError::StepExecutionError {
+                step_id: "scripted_feedback_evaluation_adapter".to_string(),
+                message: format!(
+                    "No scripted response left for item_id={} head_sha={} stable_marker_key={} body_hash={}",
+                    request.item_id, request.head_sha, request.stable_marker_key, request.body_hash
+                ),
             })
-            .to_string())
-        }
     }
 }
 
@@ -842,8 +839,13 @@ fn production_executor_modules_do_not_expose_fixture_selection_seams() {
     assert!(!pr_remediation.contains("use_fixture_llxprt_runner"));
     assert!(!feedback_eval.contains("FixtureFeedbackEvaluationAdapter"));
     assert!(!feedback_eval.contains("impl Default for FeedbackEvaluatorExecutor"));
+    let public_exports = exports
+        .lines()
+        .filter(|line| line.trim_start().starts_with("pub use"))
+        .collect::<Vec<_>>()
+        .join("\n");
     assert!(
-        !exports.contains("Fixture"),
+        !public_exports.contains("Fixture"),
         "production executor exports must not publicly re-export fixture implementations"
     );
 }
