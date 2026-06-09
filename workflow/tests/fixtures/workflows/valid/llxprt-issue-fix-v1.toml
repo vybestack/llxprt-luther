@@ -754,6 +754,13 @@ max_iterations = 5
 
 # Implementation → deterministic verification first
 [[transitions]]
+from = "create_plan"
+to = "create_plan"
+condition = "fixable"
+max_iterations = 3
+
+
+[[transitions]]
 from = "implement"
 to = "run_tests"
 

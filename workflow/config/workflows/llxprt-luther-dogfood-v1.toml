@@ -755,6 +755,13 @@ from = "create_plan"
 to = "evaluate_plan"
 
 [[transitions]]
+from = "create_plan"
+to = "create_plan"
+condition = "fixable"
+max_iterations = 3
+
+
+[[transitions]]
 from = "evaluate_plan"
 to = "implement"
 condition = "success"

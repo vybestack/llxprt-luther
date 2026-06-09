@@ -501,6 +501,13 @@
       "to": "evaluate_plan"
     },
     {
+      "condition": "fixable",
+      "from": "create_plan",
+      "max_iterations": 3,
+      "to": "create_plan"
+    },
+
+    {
       "condition": "success",
       "from": "evaluate_plan",
       "to": "implement"

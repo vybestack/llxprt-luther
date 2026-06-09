@@ -1733,6 +1733,32 @@ fn reusable_issue_fix_evaluate_plan_requires_real_llxprt_review() {
     );
 }
 
+/// @plan:PLAN-20260408-LLXPRT-FIRST.P18
+/// @requirement:REQ-LF-PLAN-002
+#[test]
+fn plan_creation_fixable_routes_to_retry() {
+    let workflow_type = resolve_workflow_type(
+        "llxprt-luther-dogfood-v1",
+        &std::path::PathBuf::from("config"),
+    )
+    .expect("production dogfood workflow type should load");
+
+    let retry_transition = workflow_type
+        .transitions
+        .iter()
+        .find(|transition| {
+            transition.from == "create_plan"
+                && transition.to == "create_plan"
+                && transition.condition.as_deref() == Some("fixable")
+        })
+        .expect("create_plan fixable transition should retry planning");
+    assert_eq!(
+        retry_transition.max_iterations,
+        Some(3),
+        "planner retry should be bounded"
+    );
+}
+
 /// @plan:PLAN-20260408-LLXPRT-FIRST.P17
 /// @requirement:REQ-LF-PLAN-002
 #[test]
