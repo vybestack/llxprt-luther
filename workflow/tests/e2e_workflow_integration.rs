@@ -1813,6 +1813,35 @@ fn create_plan_static_content_is_profile_driven() {
 }
 
 /// @plan:PLAN-20260408-LLXPRT-FIRST.P17
+/// @requirement:REQ-LF-IMPLEMENT-001
+#[test]
+fn dogfood_agents_do_not_escalate_self_authored_shell_syntax_errors() {
+    let workflow_type = resolve_workflow_type(
+        "llxprt-luther-dogfood-v1",
+        &std::path::PathBuf::from("config"),
+    )
+    .expect("production dogfood workflow type should load");
+
+    for step_id in ["implement", "remediate"] {
+        let step = workflow_type
+            .steps
+            .iter()
+            .find(|step| step.step_id == step_id)
+            .expect("llxprt agent step exists");
+        let prompt = step
+            .parameters
+            .as_ref()
+            .and_then(|params| params.get("prompt"))
+            .and_then(serde_json::Value::as_str)
+            .expect("agent prompt exists");
+        assert!(
+            prompt.contains("agent-authored shell syntax mistakes"),
+            "{step_id} prompt should require correcting self-authored shell syntax mistakes instead of escalating: {prompt}"
+        );
+    }
+}
+
+/// @plan:PLAN-20260408-LLXPRT-FIRST.P17
 /// @requirement:REQ-LF-VERIFY-002
 #[test]
 fn run_tests_mirrors_ci_lint_typecheck_and_build_before_push() {
