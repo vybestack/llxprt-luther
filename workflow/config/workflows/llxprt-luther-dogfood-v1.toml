@@ -247,7 +247,7 @@ success_on_diff = true
 success_on_existing_diff = false
 
 continue_on_empty_diff = false
-required_changed_path_patterns = ["workflow/config/", "workflow/tests/fixtures/workflows/valid/", "workflow/tests/fixtures/workflow-configs/valid/", "workflow/tests/e2e_workflow_integration.rs"]
+required_changed_path_patterns = ["workflow/config/", "workflow/tests/", "workflow/src/", "workflow/docs/"]
 
 min_runtime_before_success_seconds = 60
 stdout_file = "{artifact_dir}/implement-stdout.txt"
@@ -256,7 +256,7 @@ prompt = """
 Do not use subagents. Do not ask questions. Read the current issue in {artifact_dir}/issue.md and the approved plan in {artifact_dir}/plan.md, then implement that plan.
 Make the smallest source/config/test changes needed to fix Luther issue #{issue_number}. You MUST leave a non-empty git diff in {work_dir}; if no files are changed, this step is not complete. Do not modify package lockfiles, generated notice files, .luther files, or unrelated files.
 The required source and test scope is whatever the approved plan identifies for this issue. If the plan and issue disagree, follow the issue text and update only files directly relevant to the current issue.
-Add or update focused tests and fixtures. For issue #{issue_number}, implementation is incomplete unless git status includes the production workflow/config change, matching valid fixture workflow/config changes, and workflow/tests/e2e_workflow_integration.rs test updates. Do not stop with only config/workflows/llxprt-issue-fix-v1.toml changed.
+Add or update focused tests and fixtures when the issue or approved plan requires them. Do not apply requirements from a different issue; for issue #{issue_number}, completion means the changed files directly satisfy the current issue text and approved plan, whether those are source, config, fixture, or test files.
 Do not run full project verification commands such as cargo test, cargo build, or cargo clippy. The workflow runs configured checks after this step. You may run narrowly targeted tests/checks related to the files you changed.
 If {artifact_dir}/implementation-evaluation.md exists, treat it as a required remediation checklist and address every unresolved item before finishing this step. Do not stop after partially addressing the feedback.
 Before responding, inspect git diff --stat and git diff. If the diff does not match the current issue and approved plan, continue working or remove the unrelated changes before finishing. Remove any accidental temporary files in {work_dir} before finishing.
