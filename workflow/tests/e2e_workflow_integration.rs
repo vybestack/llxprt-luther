@@ -1769,6 +1769,23 @@ fn dogfood_plan_gate_blocks_rejected_plan_artifacts() {
         "plan_gate should reject obvious placeholder-sized plans: {command}"
     );
 
+
+    let setup_workspace = workflow_type
+        .steps
+        .iter()
+        .find(|step| step.step_id == "setup_workspace")
+        .expect("setup_workspace step exists");
+    let setup_command = setup_workspace
+        .parameters
+        .as_ref()
+        .and_then(|params| params.get("command"))
+        .and_then(serde_json::Value::as_str)
+        .expect("setup_workspace command exists");
+    assert!(
+        setup_command.contains("{artifact_dir}/plan-feedback.md"),
+        "setup_workspace should clear cross-run plan feedback artifacts: {setup_command}"
+    );
+
     let prepare_plan = workflow_type
         .steps
         .iter()

@@ -130,6 +130,7 @@ mkdir -p {artifact_dir}
 rm -f \
   {artifact_dir}/plan.md \
   {artifact_dir}/plan-evaluation.md \
+  {artifact_dir}/plan-feedback.md \
   {artifact_dir}/implement-stdout.txt \
   {artifact_dir}/implement-stderr.txt \
   {artifact_dir}/implementation-evaluation.md \
