@@ -1707,8 +1707,12 @@ fn dogfood_evaluate_plan_requires_real_llxprt_review() {
         .and_then(serde_json::Value::as_str)
         .expect("evaluate_plan prompt exists");
     assert!(
-        prompt.contains("Reject placeholder, generic, or underspecified plans"),
-        "evaluate_plan prompt should reject placeholder plans: {prompt}"
+        prompt.contains("Reject placeholder, generic, underspecified, or shell-unsafe plans"),
+        "evaluate_plan prompt should reject placeholder and shell-unsafe plans: {prompt}"
+    );
+    assert!(
+        prompt.contains("structured argv/path configuration or executor support"),
+        "evaluate_plan prompt should prevent unsafe profile-provided shell snippets: {prompt}"
     );
 }
 
@@ -1731,6 +1735,41 @@ fn reusable_issue_fix_evaluate_plan_requires_real_llxprt_review() {
         params.get("static_stdout").is_none(),
         "reusable issue-fix workflow must not auto-approve plans"
     );
+}
+
+
+/// @plan:PLAN-20260408-LLXPRT-FIRST.P18
+/// @requirement:REQ-LF-PLAN-002
+#[test]
+fn dogfood_agents_are_warned_against_profile_shell_snippets() {
+    let workflow_type = resolve_workflow_type(
+        "llxprt-luther-dogfood-v1",
+        &std::path::PathBuf::from("config"),
+    )
+    .expect("production dogfood workflow type should load");
+
+    for step_id in ["implement", "remediate"] {
+        let step = workflow_type
+            .steps
+            .iter()
+            .find(|step| step.step_id == step_id)
+            .expect("dogfood agent step exists");
+        let prompt = step
+            .parameters
+            .as_ref()
+            .and_then(|params| params.get("prompt"))
+            .and_then(serde_json::Value::as_str)
+            .expect("dogfood agent prompt exists");
+
+        assert!(
+            prompt.contains("Do not insert raw profile-provided shell snippets"),
+            "{step_id} prompt should guard against unsafe profile shell snippets: {prompt}"
+        );
+        assert!(
+            prompt.contains("structured argv/path variables or source-code executor support"),
+            "{step_id} prompt should direct agents toward shell-safe designs: {prompt}"
+        );
+    }
 }
 
 /// @plan:PLAN-20260408-LLXPRT-FIRST.P18
