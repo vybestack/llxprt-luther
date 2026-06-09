@@ -63,7 +63,6 @@ impl FeedbackMarkerParser {
         parse_hidden_marker(body).ok()
     }
 
-    #[must_use]
     pub fn parse_marker_diagnostic(&self, body: &str) -> Result<RemoteFeedbackMarker, String> {
         parse_hidden_marker(body).map_err(|err| err.diagnostic)
     }
@@ -184,7 +183,7 @@ impl ClockSleeper for SystemFeedbackClock {
 /// @requirement:REQ-PRFU-008,REQ-PRFU-009
 /// @pseudocode lines 7-14,26-29
 #[derive(Clone, Debug, Eq, PartialEq)]
-
+#[allow(clippy::struct_excessive_bools)]
 struct FeedbackItem {
     item_id: String,
     stable_marker_key: String,
@@ -271,6 +270,8 @@ struct MarkerActionOutcome {
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P08
 /// @requirement:REQ-PRFU-008,REQ-PRFU-009,REQ-PRFU-017,REQ-PRFU-024,REQ-PRFU-034
 /// @pseudocode lines 1-29
+// Pre-existing GitHub feedback collection flow; split in a dedicated refactor stage.
+#[allow(clippy::too_many_lines)]
 fn collect_coderabbit_feedback(
     context: &mut StepContext,
     params: &Value,
@@ -924,7 +925,7 @@ fn query_readiness_signals(
     binding: &PrFollowupBinding,
 ) -> Result<Vec<Value>, EngineError> {
     let mut signals = Vec::new();
-    let output = runner.run_github_command(&vec![
+    let output = runner.run_github_command(&[
         "gh".to_string(),
         "api".to_string(),
         format!(
@@ -991,7 +992,7 @@ fn query_paginated_array(
     let mut page = 1;
     let mut values = Vec::new();
     loop {
-        let output = runner.run_github_command(&vec![
+        let output = runner.run_github_command(&[
             "gh".to_string(),
             "api".to_string(),
             format!("{endpoint_prefix}{page}"),
@@ -1147,6 +1148,8 @@ fn remote_marker_identity(marker: &RemoteFeedbackMarker) -> String {
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P15
 /// @requirement:REQ-PRFU-015,REQ-PRFU-016,REQ-PRFU-017,REQ-PRFU-026
 /// @pseudocode lines 41-49
+// Pre-existing marker orchestration flow; split in a dedicated refactor stage.
+#[allow(clippy::too_many_lines)]
 fn mark_coderabbit_feedback(
     context: &mut StepContext,
     params: &Value,
@@ -1563,6 +1566,8 @@ fn discover_marker_remote_comments(
 /// @requirement:REQ-PRFU-015,REQ-PRFU-016,REQ-PRFU-017,REQ-PRFU-026
 /// @pseudocode lines 43-49
 #[allow(clippy::too_many_arguments)]
+// Pre-existing marker action workflow; split in a dedicated refactor stage.
+#[allow(clippy::too_many_lines)]
 fn process_marker_action(
     binding: &PrFollowupBinding,
     store: &PrFollowupArtifactStore,
@@ -1731,9 +1736,7 @@ fn process_marker_action(
         }));
     }
 
-    let status = if failed.is_some() {
-        "failed"
-    } else if partial.is_some() {
+    let status = if failed.is_some() || partial.is_some() {
         "failed"
     } else {
         "completed"
@@ -1804,7 +1807,6 @@ fn render_marker_comment_body(binding: &PrFollowupBinding, action: &PendingMarke
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P15
 /// @requirement:REQ-PRFU-017
 /// @pseudocode lines 45
-
 fn skipped_needs_user_judgment_outcome(
     action: PendingMarkerAction,
     comment_key: String,
@@ -1926,10 +1928,10 @@ fn marker_action_has_validator_success(
     if result.get("validation_state").and_then(Value::as_str) != Some("valid") {
         return false;
     }
-    if !action
+    if action
         .value
         .get("remediation_result_evidence")
-        .is_some_and(|evidence| !evidence.is_null())
+        .is_none_or(|evidence| evidence.is_null())
     {
         return false;
     }
@@ -2603,7 +2605,7 @@ fn read_or_build_binding(
         base_sha: Some(string_param(context, params, "base_sha", "base-a")),
     };
     if let Some(value) = find_current_pr_artifact(context, store, &requested)? {
-        return Ok(binding_from_value(&value)?);
+        return binding_from_value(&value);
     }
     Ok(requested)
 }

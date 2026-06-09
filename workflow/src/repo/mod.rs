@@ -135,6 +135,8 @@ pub struct BranchResult {
 /// Branch manager for creating and checking out branches.
 pub struct BranchManager<'a> {
     config: &'a RepositoryConfig,
+    // Retained for branch lifecycle cleanup once real git operations replace the stub.
+    #[allow(dead_code)]
     created_branches: Vec<String>,
 }
 
@@ -210,8 +212,12 @@ cleanup_on_failure = false
             cleanup_on_failure: false,
         };
 
-        let workspace = Workspace::prepare(&config, "/tmp/test-repo").await;
-        // Will fail because path doesn't exist, but we can test the logic
+        let workspace = Workspace::prepare(&config, "/tmp/test-repo")
+            .await
+            .expect("shared workspace should allow the configured path");
+
+        assert!(workspace.is_shared());
+        assert_eq!(workspace.path_for_run("run-001"), PathBuf::from("/tmp/test-repo"));
     }
 
     #[test]
@@ -224,14 +230,11 @@ cleanup_on_failure = false
             cleanup_on_failure: false,
         };
 
-        let mut manager = BranchManager::new(&config);
+        let _manager = BranchManager::new(&config);
 
-        // First call creates the branch
-        let params = BranchParams {
+        let _params = BranchParams {
             issue_number: 123,
             run_id: "run-001".to_string(),
         };
-
-        // We need to use tokio runtime for async test
     }
 }

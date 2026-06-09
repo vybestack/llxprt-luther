@@ -1,9 +1,8 @@
-/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P03
-/// @requirement:REQ-PRFU-020
-/// @pseudocode lines 1-53
-/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P06
-
-/// Registry introspection and Phase 04 behavioral TDD coverage for PR follow-through executors.
+//! @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P03
+//! @requirement:REQ-PRFU-020
+//! @pseudocode lines 1-53
+//! @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P06
+//! Registry introspection and Phase 04 behavioral TDD coverage for PR follow-through executors.
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -467,7 +466,6 @@ fn p04_context() -> StepContext {
 }
 
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P04
-
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P07
 /// @requirement:REQ-PRFU-007
 /// @pseudocode lines 1-21
@@ -2095,6 +2093,7 @@ fn coderabbit_feedback_page2_threads_comments_and_rest_fallback_are_normalized()
 /// @requirement:REQ-PRFU-008,REQ-PRFU-017
 /// @pseudocode lines 4-9
 #[test]
+#[allow(clippy::too_many_lines)]
 fn coderabbit_api_shell_safety_keeps_malicious_feedback_text_out_of_graphql_and_rest_argv() {
     let malicious =
         "CodeRabbit body with `touch /tmp/luther-owned` and $(false) --method DELETE -H X-Evil:1";
@@ -2610,9 +2609,11 @@ fn p09_feedback_item(item_id: &str, key: &str, hash: &str) -> serde_json::Value 
         "commit_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
     })
 }
+type FeedbackEvaluatorCalls = Arc<Mutex<Vec<(Vec<String>, String)>>>;
+
 #[derive(Clone, Debug, Default)]
 struct RecordingFeedbackEvaluatorRunner {
-    calls: Arc<Mutex<Vec<(Vec<String>, String)>>>,
+    calls: FeedbackEvaluatorCalls,
     response: String,
 }
 
@@ -2822,6 +2823,7 @@ fn feedback_evaluation_ignores_unresolved_identity_params_and_uses_context() {
     assert!(p09_evaluations_path(&temp).exists());
 }
 
+#[test]
 fn feedback_evaluation_ignores_max_attempts_param_override() {
     let temp = tempfile::tempdir().expect("tempdir");
     write_p09_feedback(
@@ -5462,7 +5464,6 @@ fn feedback_marker_interpolates_artifact_root_from_context() {
 }
 
 #[test]
-
 fn marker_consumes_invalid_out_of_scope_pending_actions_with_no_remediation_output_head() {
     let temp = tempfile::tempdir().expect("tempdir");
     write_p15_invalid_out_of_scope_pending(&temp);

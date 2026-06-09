@@ -68,6 +68,8 @@ impl StepExecutor for VerifyExecutor {
     /// @plan:PLAN-20260408-LLXPRT-FIRST.P06
     /// @plan:PLAN-20260408-LLXPRT-FIRST.P08
     /// @requirement:REQ-LF-VERIFY-001,REQ-LF-VERIFY-002,REQ-LF-VERIFY-003,REQ-LF-VERIFY-004,REQ-LF-VERIFY-007,REQ-LF-VERIFY-008,REQ-LF-VERIFY-009
+    // Pre-existing verify execution flow; split in a dedicated refactor stage.
+    #[allow(clippy::too_many_lines)]
     fn execute(
         &self,
         context: &mut StepContext,

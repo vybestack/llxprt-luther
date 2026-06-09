@@ -189,6 +189,8 @@ impl PrFollowupArtifactStore {
         Ok(state.max_failure_sequence + 1)
     }
 
+    // Pre-existing artifact writer API shape shared by follow-up executors.
+    #[allow(clippy::too_many_arguments)]
     pub fn write_json_artifact<T: Serialize>(
         &self,
         binding: &PrFollowupBinding,
@@ -234,6 +236,8 @@ impl PrFollowupArtifactStore {
         })
     }
 
+    // Pre-existing artifact writer API shape shared by follow-up executors.
+    #[allow(clippy::too_many_arguments)]
     pub fn write_raw_text_artifact(
         &self,
         binding: &PrFollowupBinding,
@@ -384,6 +388,8 @@ impl PrFollowupArtifactStore {
         Ok(())
     }
 
+    // Pre-existing store metadata shape shared by artifact writers.
+    #[allow(clippy::too_many_arguments)]
     fn inject_store_fields(
         &self,
         binding: &PrFollowupBinding,

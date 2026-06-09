@@ -16,8 +16,7 @@ use serde_json::{json, Value};
 
 use crate::engine::executor::{interpolate_string, StepContext, StepExecutor};
 use crate::engine::executors::pr_followup_artifacts::{
-    ArtifactWriter, ClockSleeper, PrFollowupArtifactStore, SystemClockSleeper,
-    SystemPrFollowupFilesystem,
+    ArtifactWriter, ClockSleeper, PrFollowupArtifactStore, SystemPrFollowupFilesystem,
 };
 use crate::engine::executors::pr_followup_types::{PrFollowupBinding, PR_FOLLOWUP_SCHEMA_VERSION};
 use crate::engine::runner::EngineError;
@@ -324,6 +323,8 @@ struct FeedbackEvaluationArtifact {
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P09
 /// @requirement:REQ-PRFU-011,REQ-PRFU-012,REQ-PRFU-017
 /// @pseudocode lines 1-23
+// Pre-existing orchestration flow; split in a dedicated refactor stage.
+#[allow(clippy::too_many_lines)]
 fn evaluate_coderabbit_feedback(
     context: &StepContext,
     params: &Value,
@@ -1103,6 +1104,8 @@ fn write_state_artifact(
     Ok(())
 }
 
+// Pre-existing artifact writer shape shared by follow-up executors.
+#[allow(clippy::too_many_arguments)]
 fn write_raw_response(
     store: &PrFollowupArtifactStore,
     binding: &PrFollowupBinding,

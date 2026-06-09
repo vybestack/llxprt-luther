@@ -204,6 +204,8 @@ pub struct StatusResponse {
 
 /// IPC client for communicating with service.
 pub struct IpcClient {
+    // Retained for real IPC transport wiring beyond the current test client stub.
+    #[allow(dead_code)]
     socket_path: String,
 }
 

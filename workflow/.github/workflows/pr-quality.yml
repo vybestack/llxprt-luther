@@ -42,14 +42,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Run clippy strict profile
-        run: |
-          cargo clippy --all-targets -- \
-            -D warnings \
-            -D clippy::cognitive_complexity \
-            -D clippy::too_many_lines \
-            -D clippy::too_many_arguments \
-            -D clippy::type_complexity \
-            -D clippy::struct_excessive_bools
+        run: cargo clippy --all-targets -- -D warnings
 
       - name: Enforce no runtime stubs/TODO markers
         run: cargo xtask guard

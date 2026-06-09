@@ -21,7 +21,6 @@ fn env_lock() -> &'static Mutex<()> {
     LOCK.get_or_init(|| Mutex::new(()))
 }
 
-
 // ============================================================================
 // Helper Executors
 // ============================================================================
@@ -242,10 +241,10 @@ fn test_llxprt_executor_requires_new_diff_when_success_on_diff_enabled() {
 
     assert_eq!(outcome, StepOutcome::Fixable);
     let _env_guard = env_lock().lock().expect("env lock should not be poisoned");
-
 }
 
 #[test]
+#[allow(unsafe_code)]
 fn test_llxprt_executor_can_stop_after_required_diff_before_marker() {
     use luther_workflow::engine::executors::LlxprtExecutor;
 
@@ -297,15 +296,16 @@ fn test_llxprt_executor_can_stop_after_required_diff_before_marker() {
         .status()
         .expect("git commit gitignore should run");
 
-
     std::process::Command::new("chmod")
         .arg("+x")
         .arg(&llxprt_script)
         .status()
         .expect("chmod llxprt script");
 
+    let _env_guard = env_lock().lock().expect("env lock should not be poisoned");
     let original_path = std::env::var_os("PATH").unwrap_or_default();
     let path_value = format!("{}:{}", bin_dir.display(), original_path.to_string_lossy());
+    // This integration test must shadow the llxprt executable resolved from PATH.
     unsafe { std::env::set_var("PATH", path_value) };
 
     let mut context = StepContext::new(
@@ -322,12 +322,22 @@ fn test_llxprt_executor_can_stop_after_required_diff_before_marker() {
     let outcome = LlxprtExecutor
         .execute(&mut context, &params)
         .expect("llxprt should execute");
-    eprintln!("status after llxprt: {}", String::from_utf8_lossy(&std::process::Command::new("git").args(["status", "--porcelain", "--untracked-files=all"]).current_dir(temp_dir.path()).output().expect("git status").stdout));
+    eprintln!(
+        "status after llxprt: {}",
+        String::from_utf8_lossy(
+            &std::process::Command::new("git")
+                .args(["status", "--porcelain", "--untracked-files=all"])
+                .current_dir(temp_dir.path())
+                .output()
+                .expect("git status")
+                .stdout
+        )
+    );
 
+    // Restore PATH before releasing the process-env lock.
     unsafe { std::env::set_var("PATH", original_path) };
     assert_eq!(outcome, StepOutcome::Success);
 }
-
 
 // ============================================================================
 // Test 1: Config variables available in shell steps

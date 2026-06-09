@@ -322,7 +322,6 @@ pub fn is_systemd_available() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
 
     #[test]
     fn test_get_systemd_user_dir() {

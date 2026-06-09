@@ -13,6 +13,13 @@ fn workspace_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
 
+fn assert_lint_not_allowed(content: &str, lint_name: &str) {
+    assert!(
+        !content.contains(&format!("{lint_name} = \"allow\"")),
+        "Cargo.toml should not globally suppress {lint_name}"
+    );
+}
+
 /// Test: xtask qa command exists and is executable.
 /// GIVEN: the xtask qa automation tool
 /// WHEN: running "cargo xtask qa"
@@ -245,4 +252,101 @@ fn test_release_secrets_validation() {
         has_validation,
         "Release workflow should validate or reference secrets"
     );
+}
+
+#[test]
+fn test_lint_policy_removes_global_suppressions() {
+    let workspace_root = workspace_root();
+    let cargo_toml =
+        fs::read_to_string(workspace_root.join("Cargo.toml")).expect("Failed to read Cargo.toml");
+
+    for suppressed_lint in [
+        "unused",
+        "dead_code",
+        "unused_imports",
+        "unused_variables",
+        "unused_mut",
+        "all",
+        "pedantic",
+        "nursery",
+    ] {
+        assert_lint_not_allowed(&cargo_toml, suppressed_lint);
+    }
+}
+
+#[test]
+fn test_lint_policy_contains_high_signal_clippy_denies() {
+    let workspace_root = workspace_root();
+    let cargo_toml =
+        fs::read_to_string(workspace_root.join("Cargo.toml")).expect("Failed to read Cargo.toml");
+
+    for denied_lint in [
+        "cognitive_complexity = \"deny\"",
+        "too_many_lines = \"deny\"",
+        "too_many_arguments = \"deny\"",
+        "type_complexity = \"deny\"",
+        "struct_excessive_bools = \"deny\"",
+    ] {
+        assert!(
+            cargo_toml.contains(denied_lint),
+            "Cargo.toml should deny high-signal lint {denied_lint}"
+        );
+    }
+}
+
+#[test]
+fn test_pr_quality_uses_cargo_lint_policy() {
+    let workspace_root = workspace_root();
+    let workflow_path = workspace_root
+        .join(".github")
+        .join("workflows")
+        .join("pr-quality.yml");
+    let workflow = fs::read_to_string(&workflow_path).expect("Failed to read pr-quality.yml");
+
+    assert!(
+        workflow.contains("cargo clippy --all-targets -- -D warnings"),
+        "PR quality workflow should run clippy with the Cargo.toml lint policy"
+    );
+
+    for duplicated_lint in [
+        "clippy::cognitive_complexity",
+        "clippy::too_many_lines",
+        "clippy::too_many_arguments",
+        "clippy::type_complexity",
+        "clippy::struct_excessive_bools",
+    ] {
+        assert!(
+            !workflow.contains(duplicated_lint),
+            "PR quality workflow should not duplicate {duplicated_lint}"
+        );
+    }
+}
+
+#[test]
+fn test_xtask_clippy_uses_shared_cargo_lint_policy_command() {
+    let workspace_root = workspace_root();
+    let xtask_path = workspace_root.join("xtask").join("src").join("main.rs");
+    let xtask = fs::read_to_string(&xtask_path).expect("Failed to read xtask main.rs");
+
+    assert!(
+        xtask.contains("const CLIPPY_ARGS"),
+        "xtask should share one clippy argv definition"
+    );
+    assert!(
+        xtask.contains("\"clippy\", \"--all-targets\", \"--\", \"-D\", \"warnings\""),
+        "xtask should run cargo clippy --all-targets -- -D warnings"
+    );
+
+    for duplicated_lint in [
+        "clippy::cognitive_complexity",
+        "clippy::too_many_lines",
+        "clippy::too_many_arguments",
+        "clippy::type_complexity",
+        "clippy::struct_excessive_bools",
+    ] {
+        assert!(
+            !xtask.contains(duplicated_lint),
+            "xtask should not duplicate {duplicated_lint}"
+        );
+    }
 }

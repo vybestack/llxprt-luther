@@ -116,8 +116,7 @@ impl SqliteStore {
                 })?,
                 updated_at: row
                     .get::<_, Option<String>>(5)?
-                    .map(|s| s.parse().ok())
-                    .flatten(),
+                    .and_then(|s| s.parse().ok()),
                 current_step: row.get(6)?,
             }))
         } else {
@@ -160,8 +159,7 @@ impl SqliteStore {
                 })?,
                 updated_at: row
                     .get::<_, Option<String>>(5)?
-                    .map(|s| s.parse().ok())
-                    .flatten(),
+                    .and_then(|s| s.parse().ok()),
                 current_step: row.get(6)?,
             })
         })?;

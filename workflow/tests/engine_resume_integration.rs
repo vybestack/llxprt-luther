@@ -107,8 +107,10 @@ fn test_resume_from_checkpoint_continues_at_step() {
     let run_id = instance.run_id;
 
     // Create a checkpoint indicating we completed step_a and are now at step_b
-    let mut snapshot = StateSnapshot::default();
-    snapshot.status = "interrupted".to_string();
+    let snapshot = StateSnapshot {
+        status: "interrupted".to_string(),
+        ..StateSnapshot::default()
+    };
     let checkpoint = Checkpoint::with_snapshot(&run_id, "step_b", snapshot);
 
     // Save the checkpoint

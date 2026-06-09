@@ -14,6 +14,7 @@ const FILE_LINES_WARN: usize = 750;
 const RELEASE_BINARY_NAME: &str = "luther-workflow";
 const DEFAULT_HOMEBREW_TAP_REPO: &str = "acoliver/homebrew-tap";
 const DEFAULT_HOMEBREW_FORMULA_NAME: &str = "luther-workflow";
+const CLIPPY_ARGS: [&str; 5] = ["clippy", "--all-targets", "--", "-D", "warnings"];
 
 fn main() {
     if let Err(error) = run() {
@@ -37,29 +38,7 @@ fn run() -> Result<()> {
             command("cargo", ["fmt", "--all", "--", "--check"]),
             "cargo fmt",
         ),
-        Some("clippy") => run_checked(
-            command(
-                "cargo",
-                [
-                    "clippy",
-                    "--all-targets",
-                    "--",
-                    "-D",
-                    "warnings",
-                    "-D",
-                    "clippy::cognitive_complexity",
-                    "-D",
-                    "clippy::too_many_lines",
-                    "-D",
-                    "clippy::too_many_arguments",
-                    "-D",
-                    "clippy::type_complexity",
-                    "-D",
-                    "clippy::struct_excessive_bools",
-                ],
-            ),
-            "cargo clippy",
-        ),
+        Some("clippy") => run_checked(command("cargo", CLIPPY_ARGS), "cargo clippy"),
         Some("test") => run_checked(command("cargo", ["test", "--lib", "--tests"]), "cargo test"),
         Some(cmd) => bail!("unknown xtask command: {cmd}"),
         None => {
@@ -77,29 +56,7 @@ fn qa() -> Result<()> {
         command("cargo", ["fmt", "--all", "--", "--check"]),
         "cargo fmt",
     )?;
-    run_checked(
-        command(
-            "cargo",
-            [
-                "clippy",
-                "--all-targets",
-                "--",
-                "-D",
-                "warnings",
-                "-D",
-                "clippy::cognitive_complexity",
-                "-D",
-                "clippy::too_many_lines",
-                "-D",
-                "clippy::too_many_arguments",
-                "-D",
-                "clippy::type_complexity",
-                "-D",
-                "clippy::struct_excessive_bools",
-            ],
-        ),
-        "cargo clippy",
-    )?;
+    run_checked(command("cargo", CLIPPY_ARGS), "cargo clippy")?;
     complexity()?;
     run_checked(command("cargo", ["test", "--lib", "--tests"]), "cargo test")?;
     coverage()

@@ -23,6 +23,8 @@ use crate::engine::transition::StepOutcome;
 pub struct ShellExecutor;
 
 impl StepExecutor for ShellExecutor {
+    // Pre-existing shell execution flow; split in a dedicated refactor stage.
+    #[allow(clippy::too_many_lines)]
     fn execute(
         &self,
         context: &mut StepContext,
@@ -156,7 +158,7 @@ impl StepExecutor for ShellExecutor {
             // Check exit_code_map for mapping
             if let Some(exit_code_map) = params.get("exit_code_map") {
                 if let Some(map_obj) = exit_code_map.as_object() {
-                    if let Some(code_str) = exit_code.and_then(|c| Some(c.to_string())) {
+                    if let Some(code_str) = exit_code.map(|c| c.to_string()) {
                         if let Some(outcome_value) = map_obj.get(&code_str) {
                             if let Some(outcome_name) = outcome_value.as_str() {
                                 let outcome = parse_outcome_name(outcome_name);

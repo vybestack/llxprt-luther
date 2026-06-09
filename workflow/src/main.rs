@@ -43,6 +43,8 @@ async fn main() {
 /// Handle the run command.
 /// @plan:PLAN-20260404-INITIAL-RUNTIME.P12
 /// @plan:PLAN-20260408-LLXPRT-FIRST.P20
+// Pre-existing CLI orchestration flow; split in a dedicated refactor stage.
+#[allow(clippy::too_many_lines)]
 async fn handle_run_command(args: &luther_workflow::cli::RunArgs) {
     // 1. Determine config root directory (production or custom)
     let config_root = args

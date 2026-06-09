@@ -83,11 +83,15 @@ impl RepoPrepError {
         diag.insert("timestamp".to_string(), chrono::Utc::now().to_rfc3339());
 
         match self {
-            RepoPrepError::GitError { exit_code, .. } => {
-                if let Some(code) = exit_code {
-                    diag.insert("exit_code".to_string(), code.to_string());
-                }
+            RepoPrepError::GitError {
+                exit_code: Some(code),
+                ..
+            } => {
+                diag.insert("exit_code".to_string(), code.to_string());
             }
+            RepoPrepError::GitError {
+                exit_code: None, ..
+            } => {}
             RepoPrepError::InvalidPath { path } => {
                 diag.insert("path".to_string(), path.clone());
             }
@@ -331,8 +335,6 @@ pub fn init_repository(path: &Path) -> Result<(), RepoPrepError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
-    use tempfile::TempDir;
 
     #[test]
     fn resolve_workspace_path_shared_strategy() {
