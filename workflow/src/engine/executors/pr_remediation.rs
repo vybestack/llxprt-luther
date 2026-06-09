@@ -1064,69 +1064,6 @@ pub struct PrFollowupRemediationExecutor;
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P12
 /// @requirement:REQ-PRFU-013,REQ-PRFU-017
 /// @pseudocode lines 12-17
-impl StepExecutor for PrFollowupRemediationExecutor {
-    fn execute(
-        &self,
-        context: &mut StepContext,
-        params: &serde_json::Value,
-    ) -> Result<StepOutcome, EngineError> {
-        if use_fixture_llxprt_runner(params) {
-            let runner = FixturePrFollowupLlxprtCommandRunner;
-            remediate_pr_followup(context, params, &SystemClockSleeper, &runner)
-        } else {
-            remediate_pr_followup(
-                context,
-                params,
-                &SystemClockSleeper,
-                &SystemPrFollowupLlxprtCommandRunner,
-            )
-        }
-    }
-}
-
-#[derive(Debug, Default)]
-struct FixturePrFollowupLlxprtCommandRunner;
-
-impl PrFollowupLlxprtCommandRunner for FixturePrFollowupLlxprtCommandRunner {
-    fn invoke(&self, request: LlxprtInvocationRequest) -> LlxprtInvocationResult {
-        let result = json!({
-            "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-            "output_head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-            "overall_status": "success",
-            "results": [{
-                "source_type": "ci_failure",
-                "source_id": "ci-build",
-                "stable_marker_key": Value::Null,
-                "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-                "status": "fixed",
-                "action": "fixture remediation result",
-                "evidence": { "kind": "fixture", "current_head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" },
-                "evidence_paths": []
-            }],
-            "verification_commands": []
-        });
-        let _ = std::fs::write(
-            &request.remediation_result_path,
-            serde_json::to_vec_pretty(&result).unwrap_or_default(),
-        );
-        invocation_result_from_request(
-            &request,
-            Some(0),
-            None,
-            "success",
-            "fixture llxprt remediation".to_string(),
-            String::new(),
-            None,
-        )
-    }
-}
-
-fn use_fixture_llxprt_runner(params: &Value) -> bool {
-    params
-        .get("use_fixture_llxprt_runner")
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
-}
 
 /// Owned PR follow-up llxprt invocation seam.
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P12

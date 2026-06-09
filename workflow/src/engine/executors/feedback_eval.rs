@@ -4,11 +4,11 @@
 //! @requirement:REQ-PRFU-011,REQ-PRFU-012,REQ-PRFU-017,REQ-PRFU-020
 //! @pseudocode lines 1-23
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use serde_json::{json, Value};
 
@@ -20,6 +20,23 @@ use crate::engine::executors::pr_followup_artifacts::{
 use crate::engine::executors::pr_followup_types::{PrFollowupBinding, PR_FOLLOWUP_SCHEMA_VERSION};
 use crate::engine::runner::EngineError;
 use crate::engine::transition::StepOutcome;
+
+pub const DEFAULT_FEEDBACK_EVALUATOR_ARGV: &[&str] = &[
+    "llxprt",
+    "--set",
+    "reasoning.includeInResponse=false",
+    "--yolo",
+    "-p",
+    "Evaluate the single CodeRabbit feedback request JSON from stdin. Respond with exactly one JSON object containing item_id, stable_marker_key, body_hash, head_sha, decision, reason, and recommended_action. Do not return arrays or extra item identities.",
+];
+
+#[must_use]
+pub fn default_feedback_evaluator_argv() -> Vec<String> {
+    DEFAULT_FEEDBACK_EVALUATOR_ARGV
+        .iter()
+        .map(|arg| (*arg).to_string())
+        .collect()
+}
 
 const MAX_ATTEMPTS_PER_ITEM: u64 = 3;
 const RAW_RESPONSE_LIMIT_BYTES: usize = 16 * 1024;
@@ -165,60 +182,6 @@ impl<R: FeedbackEvaluatorCommandRunner> FeedbackEvaluationAdapter
     }
 }
 
-/// Deterministic fixture adapter used by default executor wiring until workflow config supplies a process adapter.
-/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P09
-/// @requirement:REQ-PRFU-011,REQ-PRFU-012,REQ-PRFU-017
-/// @pseudocode lines 8-17
-#[derive(Clone, Debug, Default)]
-pub struct FixtureFeedbackEvaluationAdapter {
-    responses: Arc<Mutex<VecDeque<String>>>,
-    requests: Arc<Mutex<Vec<FeedbackEvaluationRequest>>>,
-}
-
-/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P09
-/// @requirement:REQ-PRFU-011,REQ-PRFU-012,REQ-PRFU-017
-/// @pseudocode lines 8-17
-impl FixtureFeedbackEvaluationAdapter {
-    #[must_use]
-    pub fn with_responses(responses: Vec<String>) -> Self {
-        Self {
-            responses: Arc::new(Mutex::new(VecDeque::from(responses))),
-            requests: Arc::new(Mutex::new(Vec::new())),
-        }
-    }
-
-    #[must_use]
-    pub fn requests(&self) -> Vec<FeedbackEvaluationRequest> {
-        self.requests.lock().expect("requests").clone()
-    }
-}
-
-/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P09
-/// @requirement:REQ-PRFU-011,REQ-PRFU-012,REQ-PRFU-017
-/// @pseudocode lines 8-17
-impl FeedbackEvaluationAdapter for FixtureFeedbackEvaluationAdapter {
-    fn evaluate(&self, request: &FeedbackEvaluationRequest) -> Result<String, EngineError> {
-        self.requests
-            .lock()
-            .expect("requests")
-            .push(request.clone());
-        if let Some(response) = self.responses.lock().expect("responses").pop_front() {
-            Ok(response)
-        } else {
-            Ok(json!({
-                "item_id": request.item_id,
-                "stable_marker_key": request.stable_marker_key,
-                "body_hash": request.body_hash,
-                "head_sha": request.head_sha,
-                "decision": "valid",
-                "reason": "fixture evaluation accepted this feedback item",
-                "recommended_action": "address the feedback item"
-            })
-            .to_string())
-        }
-    }
-}
-
 /// Feedback evaluator executor for `feedback_evaluator`.
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P03
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P09
@@ -236,18 +199,6 @@ pub struct FeedbackEvaluatorExecutor {
 impl std::fmt::Debug for FeedbackEvaluatorExecutor {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.debug_struct("FeedbackEvaluatorExecutor").finish()
-    }
-}
-
-/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P09
-/// @requirement:REQ-PRFU-011,REQ-PRFU-012,REQ-PRFU-017
-/// @pseudocode lines 1-23
-impl Default for FeedbackEvaluatorExecutor {
-    fn default() -> Self {
-        Self::new(
-            FixtureFeedbackEvaluationAdapter::default(),
-            SystemClockSleeper,
-        )
     }
 }
 

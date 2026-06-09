@@ -29,21 +29,20 @@ pub mod write_file;
 
 // Re-export executor implementations for tests
 pub use feedback_eval::{
-    CommandFeedbackEvaluationAdapter, FeedbackEvaluationAdapter, FeedbackEvaluationRequest,
-    FeedbackEvaluationResponse, FeedbackEvaluatorCommandRunner, FeedbackEvaluatorExecutor,
-    FixtureFeedbackEvaluationAdapter, ProcessFeedbackEvaluatorCommandRunner,
+    default_feedback_evaluator_argv, CommandFeedbackEvaluationAdapter, FeedbackEvaluationAdapter,
+    FeedbackEvaluationRequest, FeedbackEvaluationResponse, FeedbackEvaluatorCommandRunner,
+    FeedbackEvaluatorExecutor, ProcessFeedbackEvaluatorCommandRunner,
 };
 
 pub use github_feedback::{
     FeedbackMarkerParser, GithubCodeRabbitFeedbackExecutor,
     GithubCodeRabbitFeedbackExecutorWithRunner, GithubFeedbackMarkerExecutor,
-    GithubFeedbackMarkerExecutorWithRunner, RemoteFeedbackMarker,
+    GithubFeedbackMarkerExecutorWithRunner, RemoteFeedbackMarker, SystemFeedbackClock,
 };
 pub use github_pr::{
-    FixtureGithubPrCommandRunner, GithubCheckFailuresExecutor,
-    GithubCheckFailuresExecutorWithRunner, GithubPrChecksExecutor,
+    GithubCheckFailuresExecutor, GithubCheckFailuresExecutorWithRunner, GithubPrChecksExecutor,
     GithubPrChecksExecutorWithRunner, GithubPrCommandRunner, GithubPrIdentityExecutor,
-    GithubPrIdentityExecutorWithRunner,
+    GithubPrIdentityExecutorWithRunner, SystemGithubPrCommandRunner,
 };
 pub use llxprt::LlxprtExecutor;
 pub use noop::NoOpExecutor;
@@ -65,7 +64,7 @@ pub use pr_remediation::{
     PrRemediationResultExecutor, PushRemediationChangesExecutor,
     PushRemediationChangesExecutorWithRunner, PushRemediationCommandRequest,
     PushRemediationCommandResult, PushRemediationCommandRunner, RunPostPrTestsExecutor,
-    RunPostPrTestsExecutorWithRunner,
+    RunPostPrTestsExecutorWithRunner, SystemPrFollowupLlxprtCommandRunner,
 };
 pub use shell::ShellExecutor;
 pub use verify::VerifyExecutor;

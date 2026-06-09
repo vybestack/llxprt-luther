@@ -12,7 +12,7 @@ use serde_json::{json, Value};
 
 use crate::engine::executor::{interpolate_string, StepContext, StepExecutor};
 use crate::engine::executors::pr_followup_artifacts::{
-    ArtifactWriter, ClockSleeper, PrFollowupArtifactStore, SystemClockSleeper,
+    ArtifactWriter, ClockSleeper, PrFollowupArtifactStore,
 };
 use crate::engine::executors::pr_followup_types::{PrFollowupBinding, PR_FOLLOWUP_SCHEMA_VERSION};
 use crate::engine::runner::EngineError;
@@ -32,32 +32,6 @@ pub trait GithubPrCommandRunner: Send + Sync {
 /// @pseudocode lines 3-4,17-18
 #[derive(Debug, Default)]
 pub struct SystemGithubPrCommandRunner;
-
-/// Fixture-backed command runner used by legacy unit-struct tests.
-/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P06
-/// @requirement:REQ-PRFU-001,REQ-PRFU-004,REQ-PRFU-017
-/// @pseudocode lines 3-4,17-18
-#[derive(Debug, Default)]
-pub struct FixtureGithubPrCommandRunner;
-
-#[derive(Debug, Default)]
-struct NoSleepFixtureClock;
-
-impl ClockSleeper for NoSleepFixtureClock {
-    fn now_rfc3339(&self) -> String {
-        FixedFixtureTime::now()
-    }
-
-    fn sleep(&self, _duration: Duration) {}
-}
-
-struct FixedFixtureTime;
-
-impl FixedFixtureTime {
-    fn now() -> String {
-        "2026-04-29T17:00:00Z".to_string()
-    }
-}
 
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P06
 /// @requirement:REQ-PRFU-017
@@ -93,16 +67,6 @@ pub struct GithubPrIdentityExecutor;
 /// Injectable PR identity capture executor for tests and alternate runners.
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P06
 
-/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P06
-/// @requirement:REQ-PRFU-001,REQ-PRFU-004,REQ-PRFU-017
-/// @pseudocode lines 3-4,17-18
-impl GithubPrCommandRunner for FixtureGithubPrCommandRunner {
-    fn run_github_command(&self, argv: &[String]) -> Result<String, EngineError> {
-        fixture_response_for_command(argv)
-            .ok_or_else(|| github_pr_error(format!("missing fixture response for argv: {argv:?}")))
-    }
-}
-
 /// @requirement:REQ-PRFU-001,REQ-PRFU-002
 /// @pseudocode lines 1-7
 pub struct GithubPrIdentityExecutorWithRunner<R, C> {
@@ -123,23 +87,6 @@ impl<R, C> GithubPrIdentityExecutorWithRunner<R, C> {
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P06
 /// @requirement:REQ-PRFU-001,REQ-PRFU-002
 /// @pseudocode lines 1-7
-impl StepExecutor for GithubPrIdentityExecutor {
-    fn execute(
-        &self,
-        context: &mut StepContext,
-        params: &serde_json::Value,
-    ) -> Result<StepOutcome, EngineError> {
-        if use_fixture_github_runner(params) {
-            let runner = FixtureGithubPrCommandRunner;
-            let clock = NoSleepFixtureClock;
-            capture_pr_identity(context, params, &runner, &clock)
-        } else {
-            let runner = SystemGithubPrCommandRunner;
-            let clock = SystemClockSleeper;
-            capture_pr_identity(context, params, &runner, &clock)
-        }
-    }
-}
 
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P06
 /// @requirement:REQ-PRFU-001,REQ-PRFU-002
@@ -187,23 +134,6 @@ impl<R, C> GithubPrChecksExecutorWithRunner<R, C> {
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P06
 /// @requirement:REQ-PRFU-004,REQ-PRFU-005,REQ-PRFU-006
 /// @pseudocode lines 16-33
-impl StepExecutor for GithubPrChecksExecutor {
-    fn execute(
-        &self,
-        context: &mut StepContext,
-        params: &serde_json::Value,
-    ) -> Result<StepOutcome, EngineError> {
-        if use_fixture_github_runner(params) {
-            let runner = FixtureGithubPrCommandRunner;
-            let clock = NoSleepFixtureClock;
-            watch_pr_checks(context, params, &runner, &clock)
-        } else {
-            let runner = SystemGithubPrCommandRunner;
-            let clock = SystemClockSleeper;
-            watch_pr_checks(context, params, &runner, &clock)
-        }
-    }
-}
 
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P06
 /// @requirement:REQ-PRFU-004,REQ-PRFU-005,REQ-PRFU-006
@@ -251,23 +181,6 @@ impl<R, C> GithubCheckFailuresExecutorWithRunner<R, C> {
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P07
 /// @requirement:REQ-PRFU-007
 /// @pseudocode lines 1-21
-impl StepExecutor for GithubCheckFailuresExecutor {
-    fn execute(
-        &self,
-        context: &mut StepContext,
-        params: &serde_json::Value,
-    ) -> Result<StepOutcome, EngineError> {
-        if use_fixture_github_runner(params) {
-            let runner = FixtureGithubPrCommandRunner;
-            let clock = NoSleepFixtureClock;
-            collect_ci_failures(context, params, &runner, &clock)
-        } else {
-            let runner = SystemGithubPrCommandRunner;
-            let clock = SystemClockSleeper;
-            collect_ci_failures(context, params, &runner, &clock)
-        }
-    }
-}
 
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P07
 /// @requirement:REQ-PRFU-007
@@ -1632,62 +1545,6 @@ fn read_json_without_store_validation(path: &std::path::Path) -> Result<Value, E
         .map_err(|err| github_pr_error(format!("read {}: {err}", path.display())))?;
     serde_json::from_str(&content)
         .map_err(|err| github_pr_error(format!("parse {}: {err}", path.display())))
-}
-
-/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P06
-/// @requirement:REQ-PRFU-001,REQ-PRFU-004
-/// @pseudocode lines 3-4,17-18
-fn fixture_response_for_command(argv: &[String]) -> Option<String> {
-    if argv.iter().any(|arg| arg == "view") {
-        Some(
-            include_str!("../../../tests/fixtures/github_api_contract/pr_identity_gh_pr_view.json")
-                .to_string(),
-        )
-    } else if argv.iter().any(|arg| arg == "checks") {
-        Some(
-            include_str!(
-                "../../../tests/fixtures/github_api_contract/checks_gh_pr_checks_page1.json"
-            )
-            .to_string(),
-        )
-    } else if argv.iter().any(|arg| arg.contains("check-runs")) {
-        Some(
-            include_str!("../../../tests/fixtures/github_api_contract/check_runs_rest_page2.json")
-                .to_string(),
-        )
-    } else if argv
-        .iter()
-        .any(|arg| arg.contains("actions/runs") && arg.contains("&page=1"))
-    {
-        Some(
-            include_str!("../../../tests/fixtures/github_api_contract/actions_jobs_page1.json")
-                .to_string(),
-        )
-    } else if argv
-        .iter()
-        .any(|arg| arg.contains("actions/runs") && arg.contains("&page=2"))
-    {
-        Some(
-            include_str!("../../../tests/fixtures/github_api_contract/actions_jobs_page2.json")
-                .to_string(),
-        )
-    } else if argv
-        .iter()
-        .any(|arg| arg.contains("actions/jobs") && arg.contains("logs"))
-    {
-        Some(
-            include_str!("../../../tests/fixtures/github_api_contract/actions_job_log.txt")
-                .to_string(),
-        )
-    } else {
-        None
-    }
-}
-fn use_fixture_github_runner(params: &Value) -> bool {
-    params
-        .get("use_fixture_github_runner")
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
 }
 
 /// @requirement:REQ-PRFU-004
