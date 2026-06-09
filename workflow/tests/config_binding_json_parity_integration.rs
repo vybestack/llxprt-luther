@@ -8,7 +8,7 @@ use std::path::PathBuf;
 
 use luther_workflow::workflow::{
     parse_workflow_config_json, parse_workflow_config_toml, parse_workflow_type_json,
-    parse_workflow_type_toml,
+    parse_workflow_type_toml, WorkflowConfig,
 };
 
 /// Helper to get the fixtures root path.
@@ -128,101 +128,117 @@ fn test_toml_json_produce_equivalent_workflow_type() {
     );
 }
 
+fn load_config_pair(fixture_id: &str) -> (WorkflowConfig, WorkflowConfig) {
+    let fixture_root = fixtures_root();
+    let toml_path = fixture_root.join(format!("workflow-configs/valid/{fixture_id}.toml"));
+    let json_path = fixture_root.join(format!("workflow-configs/valid/{fixture_id}.json"));
+
+    assert!(
+        toml_path.exists(),
+        "TOML fixture should exist for {fixture_id}"
+    );
+    assert!(
+        json_path.exists(),
+        "JSON fixture should exist for {fixture_id}"
+    );
+
+    let toml_content = fs::read_to_string(&toml_path).expect("Failed to read TOML fixture");
+    let json_content = fs::read_to_string(&json_path).expect("Failed to read JSON fixture");
+
+    let toml_config = parse_workflow_config_toml(&toml_content)
+        .unwrap_or_else(|err| panic!("TOML parsing should succeed for {fixture_id}: {err:?}"));
+    let json_config = parse_workflow_config_json(&json_content)
+        .unwrap_or_else(|err| panic!("JSON parsing should succeed for {fixture_id}: {err:?}"));
+
+    (toml_config, json_config)
+}
+
+fn assert_configs_equivalent(
+    fixture_id: &str,
+    toml_config: &WorkflowConfig,
+    json_config: &WorkflowConfig,
+) {
+    assert_eq!(
+        toml_config.config_id, json_config.config_id,
+        "config_id should match for {fixture_id}"
+    );
+    assert_eq!(
+        toml_config.workflow_type_id, json_config.workflow_type_id,
+        "workflow_type_id should match for {fixture_id}"
+    );
+
+    assert_eq!(
+        toml_config.runtime.timeout_seconds, json_config.runtime.timeout_seconds,
+        "runtime.timeout_seconds should match for {fixture_id}"
+    );
+    assert_eq!(
+        toml_config.runtime.max_retries, json_config.runtime.max_retries,
+        "runtime.max_retries should match for {fixture_id}"
+    );
+    assert_eq!(
+        toml_config.runtime.parallel_steps, json_config.runtime.parallel_steps,
+        "runtime.parallel_steps should match for {fixture_id}"
+    );
+    assert_eq!(
+        toml_config.runtime.log_level, json_config.runtime.log_level,
+        "runtime.log_level should match for {fixture_id}"
+    );
+
+    assert_eq!(
+        toml_config.repo.workspace_strategy, json_config.repo.workspace_strategy,
+        "repo.workspace_strategy should match for {fixture_id}"
+    );
+    assert_eq!(
+        toml_config.repo.branch_template, json_config.repo.branch_template,
+        "repo.branch_template should match for {fixture_id}"
+    );
+    assert_eq!(
+        toml_config.repo.base_branch, json_config.repo.base_branch,
+        "repo.base_branch should match for {fixture_id}"
+    );
+    assert_eq!(
+        toml_config.repo.workspace_root, json_config.repo.workspace_root,
+        "repo.workspace_root should match for {fixture_id}"
+    );
+
+    assert_eq!(
+        toml_config.guard_limits.max_iterations, json_config.guard_limits.max_iterations,
+        "guard_limits.max_iterations should match for {fixture_id}"
+    );
+    assert_eq!(
+        toml_config.guard_limits.max_file_changes, json_config.guard_limits.max_file_changes,
+        "guard_limits.max_file_changes should match for {fixture_id}"
+    );
+    assert_eq!(
+        toml_config.guard_limits.max_tokens, json_config.guard_limits.max_tokens,
+        "guard_limits.max_tokens should match for {fixture_id}"
+    );
+    assert_eq!(
+        toml_config.guard_limits.max_cost, json_config.guard_limits.max_cost,
+        "guard_limits.max_cost should match for {fixture_id}"
+    );
+    assert_eq!(
+        toml_config.variables, json_config.variables,
+        "variables should match for {fixture_id}"
+    );
+}
+
 /// Test: TOML and JSON fixtures produce equivalent `WorkflowConfig` structs.
 /// @plan:PLAN-20260404-INITIAL-RUNTIME.P04
 /// @requirement:REQ-EARS-WF-004
 #[test]
 fn test_toml_json_produce_equivalent_config() {
-    // GIVEN: both TOML and JSON fixtures exist for profile-0
-    let fixture_root = fixtures_root();
-    let toml_path = fixture_root.join("workflow-configs/valid/profile-0.toml");
-    let json_path = fixture_root.join("workflow-configs/valid/profile-0.json");
-
-    assert!(toml_path.exists(), "TOML fixture should exist");
-    assert!(json_path.exists(), "JSON fixture should exist");
-
-    // Load the file contents
-    let toml_content = fs::read_to_string(&toml_path).expect("Failed to read TOML fixture");
-    let json_content = fs::read_to_string(&json_path).expect("Failed to read JSON fixture");
-
-    // WHEN: parsing both
-    let toml_result = parse_workflow_config_toml(&toml_content);
-    let json_result = parse_workflow_config_json(&json_content);
-
-    // THEN: both parse successfully
-    assert!(
-        toml_result.is_ok(),
-        "TOML parsing should succeed: {:?}",
-        toml_result.err()
-    );
-    assert!(
-        json_result.is_ok(),
-        "JSON parsing should succeed: {:?}",
-        json_result.err()
-    );
-
-    let toml_config = toml_result.unwrap();
-    let json_config = json_result.unwrap();
-
-    // AND: resulting WorkflowConfig structs are equal
-    assert_eq!(
-        toml_config.config_id, json_config.config_id,
-        "config_id should match"
-    );
-    assert_eq!(
-        toml_config.workflow_type_id, json_config.workflow_type_id,
-        "workflow_type_id should match"
-    );
-
-    // Verify runtime config
-    assert_eq!(
-        toml_config.runtime.timeout_seconds, json_config.runtime.timeout_seconds,
-        "runtime.timeout_seconds should match"
-    );
-    assert_eq!(
-        toml_config.runtime.max_retries, json_config.runtime.max_retries,
-        "runtime.max_retries should match"
-    );
-    assert_eq!(
-        toml_config.runtime.parallel_steps, json_config.runtime.parallel_steps,
-        "runtime.parallel_steps should match"
-    );
-    assert_eq!(
-        toml_config.runtime.log_level, json_config.runtime.log_level,
-        "runtime.log_level should match"
-    );
-
-    // Verify repo config
-    assert_eq!(
-        toml_config.repo.workspace_strategy, json_config.repo.workspace_strategy,
-        "repo.workspace_strategy should match"
-    );
-    assert_eq!(
-        toml_config.repo.branch_template, json_config.repo.branch_template,
-        "repo.branch_template should match"
-    );
-    assert_eq!(
-        toml_config.repo.base_branch, json_config.repo.base_branch,
-        "repo.base_branch should match"
-    );
-
-    // Verify guard limits
-    assert_eq!(
-        toml_config.guard_limits.max_iterations, json_config.guard_limits.max_iterations,
-        "guard_limits.max_iterations should match"
-    );
-    assert_eq!(
-        toml_config.guard_limits.max_file_changes, json_config.guard_limits.max_file_changes,
-        "guard_limits.max_file_changes should match"
-    );
-    assert_eq!(
-        toml_config.guard_limits.max_tokens, json_config.guard_limits.max_tokens,
-        "guard_limits.max_tokens should match"
-    );
-    assert_eq!(
-        toml_config.guard_limits.max_cost, json_config.guard_limits.max_cost,
-        "guard_limits.max_cost should match"
-    );
+    for fixture_id in [
+        "profile-0",
+        "hello-world-config",
+        "llxprt-code",
+        "llxprt-code-alt",
+        "llxprt-luther",
+        "llxprt-luther-issue-fix",
+    ] {
+        let (toml_config, json_config) = load_config_pair(fixture_id);
+        assert_configs_equivalent(fixture_id, &toml_config, &json_config);
+    }
 }
 
 /// Test: All valid workflow fixtures have both TOML and JSON versions.

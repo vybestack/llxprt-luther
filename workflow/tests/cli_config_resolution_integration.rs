@@ -100,29 +100,34 @@ fn test_resolve_workflow_config_from_config_dir() {
     assert_eq!(config.config_id, "test");
 }
 
-/// Test resolving production workflow from actual config/ directory
+/// Test resolving production workflows from actual config/ directory
 #[test]
-fn test_resolve_production_workflow_from_config() {
-    // Resolve production workflow type from config/workflows/
-    let result = resolve_workflow_type("llxprt-issue-fix-v1", &PathBuf::from("config"));
-    assert!(
-        result.is_ok(),
-        "Expected production workflow type to resolve: {:?}",
-        result.err()
-    );
-    let workflow_type = result.unwrap();
-    assert_eq!(workflow_type.workflow_type_id, "llxprt-issue-fix-v1");
+fn test_resolve_production_workflows_from_config() {
+    let config_root = PathBuf::from("config");
 
-    // Resolve production workflow config from config/workflow-configs/
-    let result = resolve_workflow_config("llxprt-code", &PathBuf::from("config"));
-    assert!(
-        result.is_ok(),
-        "Expected production workflow config to resolve: {:?}",
-        result.err()
-    );
-    let config = result.unwrap();
-    assert_eq!(config.config_id, "llxprt-code");
-    assert_eq!(config.workflow_type_id, "llxprt-issue-fix-v1");
+    for workflow_type_id in [
+        "issue-fix-v1",
+        "llxprt-issue-fix-v1",
+        "llxprt-luther-dogfood-v1",
+    ] {
+        let workflow_type =
+            resolve_workflow_type(workflow_type_id, &config_root).unwrap_or_else(|err| {
+                panic!("Expected production workflow type {workflow_type_id} to resolve: {err:?}")
+            });
+        assert_eq!(workflow_type.workflow_type_id, workflow_type_id);
+    }
+
+    for (config_id, expected_workflow_type_id) in [
+        ("profile-0", "issue-fix-v1"),
+        ("llxprt-code", "llxprt-issue-fix-v1"),
+        ("llxprt-luther", "llxprt-luther-dogfood-v1"),
+    ] {
+        let config = resolve_workflow_config(config_id, &config_root).unwrap_or_else(|err| {
+            panic!("Expected production workflow config {config_id} to resolve: {err:?}")
+        });
+        assert_eq!(config.config_id, config_id);
+        assert_eq!(config.workflow_type_id, expected_workflow_type_id);
+    }
 }
 
 /// Test that flat layout takes precedence over valid/ subdirectory
@@ -241,18 +246,22 @@ fn test_resolve_json_from_valid_subdir() {
 fn test_existing_test_fixtures_resolve() {
     let fixture_root = PathBuf::from("tests/fixtures");
 
-    // These should resolve using the valid/ subdirectory fallback
-    let result = resolve_workflow_type("issue-fix-v1", &fixture_root);
-    assert!(
-        result.is_ok(),
-        "Expected issue-fix-v1 to resolve from fixtures: {:?}",
-        result.err()
-    );
+    for workflow_type_id in ["issue-fix-v1", "hello-world-v1", "llxprt-issue-fix-v1"] {
+        let workflow_type =
+            resolve_workflow_type(workflow_type_id, &fixture_root).unwrap_or_else(|err| {
+                panic!("Expected {workflow_type_id} to resolve from fixtures: {err:?}")
+            });
+        assert_eq!(workflow_type.workflow_type_id, workflow_type_id);
+    }
 
-    let result = resolve_workflow_config("hello-world-config", &fixture_root);
-    assert!(
-        result.is_ok(),
-        "Expected hello-world-config to resolve from fixtures: {:?}",
-        result.err()
-    );
+    for (config_id, expected_workflow_type_id) in [
+        ("profile-0", "issue-fix-v1"),
+        ("hello-world-config", "hello-world-v1"),
+        ("llxprt-code", "llxprt-issue-fix-v1"),
+    ] {
+        let config = resolve_workflow_config(config_id, &fixture_root)
+            .unwrap_or_else(|err| panic!("Expected {config_id} to resolve from fixtures: {err:?}"));
+        assert_eq!(config.config_id, config_id);
+        assert_eq!(config.workflow_type_id, expected_workflow_type_id);
+    }
 }
