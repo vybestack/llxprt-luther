@@ -75,8 +75,8 @@
           "PLAN_NEEDS_REVISION": "fixable"
         },
         "profile": "{profile_evaluating}",
-        "prompt": "Do not use subagents. Do not ask questions. Read the issue in {artifact_dir}/issue.md and the plan in {artifact_dir}/plan.md. Evaluate whether the plan adequately addresses the issue and is narrowly scoped. If the plan is ready, respond with exactly PLAN_APPROVED on its own line. If it needs revision, respond with exactly PLAN_NEEDS_REVISION on its own line, followed by your feedback. Write any detailed feedback to {artifact_dir}/plan-evaluation.md, then exit.\n",
-        "static_stdout": "PLAN_APPROVED",
+        "prompt": "Do not use subagents. Do not ask questions. Read the issue in {artifact_dir}/issue.md and the plan in {artifact_dir}/plan.md. Evaluate whether the plan adequately addresses the issue and is narrowly scoped. Reject placeholder, generic, or underspecified plans. If the plan is ready, respond with exactly PLAN_APPROVED on its own line. If it needs revision, respond with exactly PLAN_NEEDS_REVISION on its own line, followed by your feedback. Write any detailed feedback to {artifact_dir}/plan-evaluation.md, then exit.\n",
+
         "timeout_seconds": 600
       },
       "step_id": "evaluate_plan",

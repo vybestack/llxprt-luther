@@ -1681,6 +1681,61 @@ fn implement_required_changed_paths_are_profile_driven() {
 /// @plan:PLAN-20260408-LLXPRT-FIRST.P17
 /// @requirement:REQ-LF-PLAN-002
 #[test]
+fn dogfood_evaluate_plan_requires_real_llxprt_review() {
+    let workflow_type = resolve_workflow_type(
+        "llxprt-luther-dogfood-v1",
+        &std::path::PathBuf::from("config"),
+    )
+    .expect("production dogfood workflow type should load");
+
+    let evaluate_plan = workflow_type
+        .steps
+        .iter()
+        .find(|step| step.step_id == "evaluate_plan")
+        .expect("evaluate_plan step exists");
+    let params = evaluate_plan
+        .parameters
+        .as_ref()
+        .expect("evaluate_plan parameters exist");
+
+    assert!(
+        params.get("static_stdout").is_none(),
+        "dogfood plan evaluation must invoke the evaluator instead of auto-approving placeholder plans"
+    );
+    let prompt = params
+        .get("prompt")
+        .and_then(serde_json::Value::as_str)
+        .expect("evaluate_plan prompt exists");
+    assert!(
+        prompt.contains("Reject placeholder, generic, or underspecified plans"),
+        "evaluate_plan prompt should reject placeholder plans: {prompt}"
+    );
+}
+
+/// @plan:PLAN-20260408-LLXPRT-FIRST.P17
+/// @requirement:REQ-LF-PLAN-002
+#[test]
+fn reusable_issue_fix_evaluate_plan_requires_real_llxprt_review() {
+    let workflow_type = post_pr_workflow();
+    let evaluate_plan = workflow_type
+        .steps
+        .iter()
+        .find(|step| step.step_id == "evaluate_plan")
+        .expect("evaluate_plan step exists");
+    let params = evaluate_plan
+        .parameters
+        .as_ref()
+        .expect("evaluate_plan parameters exist");
+
+    assert!(
+        params.get("static_stdout").is_none(),
+        "reusable issue-fix workflow must not auto-approve plans"
+    );
+}
+
+/// @plan:PLAN-20260408-LLXPRT-FIRST.P17
+/// @requirement:REQ-LF-PLAN-002
+#[test]
 fn create_plan_static_content_is_profile_driven() {
     let workflow_type = post_pr_workflow();
     let create_plan = workflow_type
