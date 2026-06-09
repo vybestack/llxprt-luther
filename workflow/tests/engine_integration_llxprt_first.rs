@@ -142,6 +142,25 @@ fn test_llxprt_executor_emits_progress_while_waiting() {
 }
 
 #[test]
+fn test_llxprt_outcome_markers_must_be_exact_lines() {
+    use luther_workflow::engine::executors::LlxprtExecutor;
+
+    let mut context = StepContext::new(std::env::temp_dir(), uuid::Uuid::new_v4().to_string());
+    let params = serde_json::json!({
+        "static_stdout": "diff context mentions REMEDIATION_SYSTEM_ERROR inside a changed line",
+        "outcome_on_stdout": {
+            "REMEDIATION_SYSTEM_ERROR": "fatal"
+        }
+    });
+
+    let outcome = LlxprtExecutor
+        .execute(&mut context, &params)
+        .expect("llxprt static stdout should execute");
+
+    assert_eq!(outcome, StepOutcome::Success);
+}
+
+#[test]
 fn test_llxprt_executor_requires_diff_when_success_on_diff_enabled() {
     use luther_workflow::engine::executors::LlxprtExecutor;
 

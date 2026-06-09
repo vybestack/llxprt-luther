@@ -290,7 +290,8 @@ impl StepExecutor for LlxprtExecutor {
         }
 
         let timed_out = start.elapsed() >= timeout && !success_seen && outcome_seen.is_none();
-        let idle_timed_out = idle_timeout.is_some_and(|timeout| last_output_change.elapsed() >= timeout)
+        let idle_timed_out = idle_timeout
+            .is_some_and(|timeout| last_output_change.elapsed() >= timeout)
             && !success_seen
             && outcome_seen.is_none();
         if success_seen || timed_out || idle_timed_out || outcome_seen.is_some() {
@@ -357,7 +358,12 @@ impl StepExecutor for LlxprtExecutor {
             let diagnostic = if idle_timed_out {
                 idle_timeout.map_or_else(
                     || "llxprt timed out after stalled output".to_string(),
-                    |timeout| format!("llxprt produced no new output for {} seconds", timeout.as_secs()),
+                    |timeout| {
+                        format!(
+                            "llxprt produced no new output for {} seconds",
+                            timeout.as_secs()
+                        )
+                    },
                 )
             } else {
                 format!("llxprt timed out after {} seconds", timeout.as_secs())
@@ -366,35 +372,24 @@ impl StepExecutor for LlxprtExecutor {
             return Ok(StepOutcome::Fatal);
         }
 
-        if let Some(outcome_on_stdout) = params.get("outcome_on_stdout") {
-            if let Some(pattern_map) = outcome_on_stdout.as_object() {
-                for (pattern, outcome_value) in pattern_map {
-                    if stdout.contains(pattern) {
-                        if let Some(outcome_name) = outcome_value.as_str() {
-                            let outcome = parse_outcome_name(outcome_name);
-                            if outcome == StepOutcome::Success
-                                && (success_file.is_some() || success_on_diff)
-                            {
-                                if initial_success_condition_met {
-                                    return Ok(StepOutcome::Fixable);
-                                }
-                                if !success_condition_met(
-                                    context,
-                                    success_file.as_deref(),
-                                    success_on_diff,
-                                    &required_changed_paths,
-                                    &required_changed_path_patterns,
-                                    &initial_changed_paths,
-                                ) {
-                                    return Ok(StepOutcome::Fixable);
-                                }
-                            }
-
-                            return Ok(outcome);
-                        }
-                    }
+        if let Some(outcome) = match_static_stdout_outcome(params, &stdout) {
+            if outcome == StepOutcome::Success && (success_file.is_some() || success_on_diff) {
+                if initial_success_condition_met {
+                    return Ok(StepOutcome::Fixable);
+                }
+                if !success_condition_met(
+                    context,
+                    success_file.as_deref(),
+                    success_on_diff,
+                    &required_changed_paths,
+                    &required_changed_path_patterns,
+                    &initial_changed_paths,
+                ) {
+                    return Ok(StepOutcome::Fixable);
                 }
             }
+
+            return Ok(outcome);
         }
 
         if !initial_success_condition_met
@@ -476,7 +471,7 @@ fn read_stream_into_buffer<R: Read>(reader: &mut R, buffer: &Arc<Mutex<String>>)
 fn match_static_stdout_outcome(params: &serde_json::Value, stdout: &str) -> Option<StepOutcome> {
     let pattern_map = params.get("outcome_on_stdout")?.as_object()?;
     for (pattern, outcome_value) in pattern_map {
-        if stdout.contains(pattern) {
+        if contains_outcome_marker_line(stdout, pattern) {
             return outcome_value.as_str().map(parse_outcome_name);
         }
     }
@@ -490,11 +485,15 @@ fn match_stdout_outcome(
     let stdout = stdout_buffer.lock().ok()?;
     let pattern_map = params.get("outcome_on_stdout")?.as_object()?;
     for (pattern, outcome_value) in pattern_map {
-        if stdout.contains(pattern) {
+        if contains_outcome_marker_line(&stdout, pattern) {
             return outcome_value.as_str().map(parse_outcome_name);
         }
     }
     None
+}
+
+fn contains_outcome_marker_line(stdout: &str, marker: &str) -> bool {
+    stdout.lines().any(|line| line.trim() == marker)
 }
 
 fn success_condition_met(
