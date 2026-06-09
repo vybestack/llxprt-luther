@@ -242,7 +242,7 @@ description = "Invoke llxprt to implement the plan"
 
 [steps.parameters]
 profile = "{profile_implementing}"
-timeout_seconds = 900
+timeout_seconds = 1800
 success_on_diff = true
 success_on_existing_diff = false
 
