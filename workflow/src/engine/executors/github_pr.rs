@@ -14,7 +14,9 @@ use crate::engine::executor::{interpolate_string, StepContext, StepExecutor};
 use crate::engine::executors::pr_followup_artifacts::{
     ArtifactWriter, ClockSleeper, PrFollowupArtifactStore,
 };
-use crate::engine::executors::pr_followup_types::{PrFollowupBinding, PR_FOLLOWUP_SCHEMA_VERSION};
+use crate::engine::executors::pr_followup_types::{
+    PrCheckStatus, PrFollowupBinding, PR_FOLLOWUP_SCHEMA_VERSION,
+};
 use crate::engine::runner::EngineError;
 use crate::engine::transition::StepOutcome;
 
@@ -913,10 +915,20 @@ fn collect_ci_failures(
         }
     };
     let source_sequence = require_u64(&check_status, "artifact_sequence")?;
-    let overall_state = require_string(&check_status, "overall_state")?;
-    let watcher_fatal_source = check_status
-        .get("fatal_source")
-        .cloned()
+    // Route from the invariant-validated typed view of the artifact so a stale
+    // or contradictory raw field cannot drive the decision.
+    // @requirement:REQ-PRFU-007
+    let typed_check_status: PrCheckStatus =
+        serde_json::from_value(check_status.clone()).map_err(|err| {
+            EngineError::StepExecutionError {
+                step_id: "collect_ci_failures".to_string(),
+                message: format!("deserialize pr-check-status artifact: {err}"),
+            }
+        })?;
+    let overall_state = typed_check_status.overall_state.clone();
+    let watcher_fatal_source = typed_check_status
+        .fatal_source
+        .clone()
         .unwrap_or(Value::Null);
     let mut collection = CiFailureCollection::default();
 

@@ -12,7 +12,9 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 use serde_json::{Map, Value};
 
-use crate::engine::executors::pr_followup_types::{ArtifactSequenceMetadata, PrFollowupBinding};
+use crate::engine::executors::pr_followup_types::{
+    ArtifactSequenceMetadata, CiFailures, PrCheckStatus, PrFollowupBinding,
+};
 use crate::engine::runner::EngineError;
 
 /// Filesystem seam for artifact store root canonicalization.
@@ -298,6 +300,7 @@ impl PrFollowupArtifactStore {
         let path = self.canonical_path(binding, artifact_family);
         let value = read_json_file(&path)?;
         self.validate_artifact_value(binding, artifact_family, &value)?;
+        self.validate_artifact_invariants(artifact_family, &value)?;
         Ok(value)
     }
 
@@ -320,6 +323,19 @@ impl PrFollowupArtifactStore {
             return Err(artifact_error("artifact binding mismatch"));
         }
         self.validate_artifact_metadata(artifact_family, value)
+    }
+
+    /// Validates per-family typed invariants for routing-relevant artifacts.
+    /// Kept separate from `validate_artifact_value` so the family-agnostic
+    /// sequence-recovery path is not subject to routing-state invariants.
+    /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P05
+    /// @requirement:REQ-PRFU-007
+    pub fn validate_artifact_invariants(
+        &self,
+        artifact_family: &str,
+        value: &Value,
+    ) -> Result<(), EngineError> {
+        validate_family_invariants(artifact_family, value)
     }
 
     fn validate_sequence_artifact_value(
@@ -781,6 +797,29 @@ fn binding_from_value(value: &Value) -> Result<PrFollowupBinding, EngineError> {
             .transpose()?
             .flatten(),
     })
+}
+
+/// Dispatches per-family typed invariant validation for the artifact families
+/// that participate in workflow routing decisions. Unknown families pass
+/// through (only generic envelope/binding checks apply to them).
+/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P05
+/// @requirement:REQ-PRFU-007
+fn validate_family_invariants(artifact_family: &str, value: &Value) -> Result<(), EngineError> {
+    match artifact_family {
+        "pr-check-status" => {
+            let typed: PrCheckStatus = serde_json::from_value(value.clone()).map_err(|err| {
+                artifact_error(format!("deserialize pr-check-status artifact: {err}"))
+            })?;
+            typed.validate_invariants().map_err(artifact_error)
+        }
+        "ci-failures" => {
+            let typed: CiFailures = serde_json::from_value(value.clone()).map_err(|err| {
+                artifact_error(format!("deserialize ci-failures artifact: {err}"))
+            })?;
+            typed.validate_invariants().map_err(artifact_error)
+        }
+        _ => Ok(()),
+    }
 }
 
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P05
