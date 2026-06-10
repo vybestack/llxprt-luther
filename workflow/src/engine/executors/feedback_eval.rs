@@ -442,7 +442,27 @@ fn evaluate_coderabbit_feedback(
                 let mut accepted: Option<Value> = None;
                 for attempt in 1..=max_attempts {
                     let request = build_request(&binding, item);
-                    let raw = adapter.evaluate(&request)?;
+                    let raw = match adapter.evaluate(&request) {
+                        Ok(raw) => raw,
+                        Err(err) => {
+                            let raw = format!("feedback evaluator command error: {err}");
+                            let raw_response_artifact_path = write_raw_response(
+                                &store, &binding, &step_id, step_order, item, attempt, &raw, clock,
+                            )?;
+                            rejected_attempts.push(json!({
+                                "attempt_number": attempt,
+                                "item_id": item.item_id,
+                                "stable_marker_key": item.stable_marker_key,
+                                "body_hash": item.body_hash,
+                                "raw_response_artifact_path": raw_response_artifact_path.display().to_string(),
+                                "reject_reason": "command_error",
+                                "command_error": err.to_string(),
+                                "parsed_decision": null,
+                                "observed_head_sha": null
+                            }));
+                            continue;
+                        }
+                    };
                     let raw_response_artifact_path = write_raw_response(
                         &store, &binding, &step_id, step_order, item, attempt, &raw, clock,
                     )?;

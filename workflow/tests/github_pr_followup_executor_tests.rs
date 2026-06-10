@@ -2642,6 +2642,35 @@ impl FeedbackEvaluatorCommandRunner for RecordingFeedbackEvaluatorRunner {
         Ok(self.response.clone())
     }
 }
+#[derive(Clone, Debug, Default)]
+struct FailingFeedbackEvaluatorRunner {
+    calls: Arc<Mutex<Vec<(Vec<String>, String)>>>,
+}
+
+impl FailingFeedbackEvaluatorRunner {
+    fn calls(&self) -> Vec<(Vec<String>, String)> {
+        self.calls.lock().expect("feedback evaluator calls").clone()
+    }
+}
+
+impl FeedbackEvaluatorCommandRunner for FailingFeedbackEvaluatorRunner {
+    fn run_feedback_evaluator_command(
+        &self,
+        argv: &[String],
+        stdin_json: &str,
+    ) -> Result<String, luther_workflow::engine::runner::EngineError> {
+        self.calls
+            .lock()
+            .expect("feedback evaluator calls")
+            .push((argv.to_vec(), stdin_json.to_string()));
+        Err(luther_workflow::engine::runner::EngineError::StepExecutionError {
+            step_id: "evaluate_coderabbit_feedback".to_string(),
+            message: "feedback evaluator command timed out after 300 seconds".to_string(),
+        })
+    }
+}
+
+
 
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P04
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P09
@@ -6010,6 +6039,43 @@ fn feedback_evaluator_default_argv_loads_noninteractive_profile() {
         "production feedback evaluator should use the same noninteractive llxprt profile shape as other dogfood LLM steps: {argv:?}"
     );
 }
+#[test]
+fn feedback_evaluator_command_errors_consume_budget_without_panicking() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_p09_feedback(
+        &temp,
+        serde_json::json!([p09_feedback_item(
+            "item-timeout",
+            "thread-timeout",
+            "hash-timeout"
+        )]),
+        serde_json::json!([]),
+    );
+    let runner = FailingFeedbackEvaluatorRunner::default();
+    let adapter = CommandFeedbackEvaluationAdapter::new(
+        vec!["feedback-evaluator-bin".to_string()],
+        runner.clone(),
+    );
+    let mut context = p09_context(&temp);
+    let outcome = FeedbackEvaluatorExecutor::new(adapter, FixedClock)
+        .execute(&mut context, &p09_params(&temp))
+        .expect("feedback evaluator command errors are recorded");
+    let artifact = read_json(&p09_evaluations_path(&temp));
+
+    assert_expected_outcome(
+        outcome,
+        StepOutcome::Fatal,
+        "command failures should be artifact-backed rejected attempts, not executor errors",
+    );
+    assert_eq!(runner.calls().len(), 3);
+    assert!(artifact.to_string().contains("command_error"));
+    assert!(artifact
+        .get("budget_exhausted_items")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|items| items.len() == 1));
+}
+
+
 
 
 #[test]
