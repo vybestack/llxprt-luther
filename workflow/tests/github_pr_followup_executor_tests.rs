@@ -4545,6 +4545,25 @@ fn remediate_pr_followup_prompt_contract() {
     let temp = tempfile::tempdir().expect("tempdir");
     let runner = P12FakeLlxprtRunner::new(p12_result("success"));
     let mut context = p12_context(&temp);
+    let binding = p10_binding();
+    PrFollowupArtifactStore::new(temp.path().join("artifacts"))
+        .write_json_artifact(
+            &binding,
+            "pr-remediation-result",
+            "validate_remediation_result",
+            9,
+            &serde_json::json!({
+                "validation_state": "fixable_malformed",
+                "validation_errors": [
+                    "fixed evidence for coderabbit_feedback:cr-valid is not tied to current head",
+                    "already_satisfied result coderabbit_feedback:summary lacks deterministic passed command evidence"
+                ]
+            }),
+            None,
+            &FixedClock,
+        )
+        .expect("write previous validation feedback");
+
     PrFollowupRemediationExecutorWithRunner::new(runner.clone(), FixedClock)
         .execute(&mut context, &p12_params(&temp))
         .expect("p12 prompt");
@@ -4574,6 +4593,14 @@ fn remediate_pr_followup_prompt_contract() {
     assert!(prompt.contains(
         "fixed | changed | already_satisfied | not_reproduced | not_fixed | skipped | failed"
     ));
+    assert!(prompt.contains("input_head_sha set to aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"));
+    assert!(prompt.contains("evidence.current_head_sha equal to the current PR head"));
+    assert!(prompt
+        .contains("evidence.commands with at least one command object whose status is passed"));
+    assert!(prompt.contains("Previous pr-remediation-result.json validation_errors"));
+    assert!(prompt
+        .contains("fixed evidence for coderabbit_feedback:cr-valid is not tied to current head"));
+
     assert!(prompt.contains("structured evidence"));
     assert!(prompt.contains("Free-form-only completion is not acceptable"));
 }

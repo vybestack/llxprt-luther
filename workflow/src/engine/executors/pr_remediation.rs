@@ -1199,7 +1199,10 @@ fn remediate_pr_followup(
         .get("success_file")
         .and_then(Value::as_str)
         .map(|path| resolve_path(context.work_dir(), path));
-    let prompt = render_remediation_prompt(&binding, &plan, &result_path);
+    let previous_result = store
+        .read_current_raw_json(&binding, "pr-remediation-result")
+        .ok();
+    let prompt = render_remediation_prompt(&binding, &plan, &result_path, previous_result.as_ref());
     let argv = remediation_argv(params, &prompt, context);
 
     let request = LlxprtInvocationRequest {
@@ -1313,19 +1316,40 @@ fn render_remediation_prompt(
     binding: &PrFollowupBinding,
     plan: &Value,
     result_path: &Path,
+    previous_result: Option<&Value>,
 ) -> String {
     let plan_path = plan
         .pointer("/history_metadata/canonical_path")
         .and_then(Value::as_str)
         .unwrap_or("pr-remediation-plan.json");
+    let validation_feedback = previous_result
+        .and_then(|result| result.get("validation_errors"))
+        .and_then(Value::as_array)
+        .filter(|errors| !errors.is_empty())
+        .map(|errors| {
+            let details = serde_json::to_string_pretty(errors).unwrap_or_else(|_| {
+                errors
+                    .iter()
+                    .map(Value::to_string)
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            });
+            format!(
+                "\n\nPrevious pr-remediation-result.json validation_errors must be corrected before finishing:\n{details}"
+            )
+        })
+        .unwrap_or_default();
     format!(
-        "PR follow-up remediation for {}/{}, PR #{} at head {}.\n\nRead {}. Fix only pr-remediation-plan.json.must_fix. Do not fix pr-remediation-plan.json.mark_invalid, out_of_scope feedback, or pr-remediation-plan.json.needs_user_judgment. Write {}. Use only canonical statuses fixed | changed | already_satisfied | not_reproduced | not_fixed | skipped | failed. Include structured evidence for every result item. Free-form-only completion is not acceptable; pr-remediation-result.json is required.",
+        "PR follow-up remediation for {}/{}, PR #{} at head {}.\n\nRead {}. Fix only pr-remediation-plan.json.must_fix. Do not fix pr-remediation-plan.json.mark_invalid, out_of_scope feedback, or pr-remediation-plan.json.needs_user_judgment. Write {}. Use only canonical statuses fixed | changed | already_satisfied | not_reproduced | not_fixed | skipped | failed. Include structured evidence for every result item. Required result schema: every result item must include input_head_sha set to {} and output_head_sha set to the current PR head after remediation; fixed or changed results must include evidence.current_head_sha equal to the current PR head; already_satisfied or not_reproduced results must include evidence.current_head_sha equal to {}. already_satisfied results must also include evidence.commands with at least one command object whose status is passed and whose argv array is non-empty. Free-form-only completion is not acceptable; pr-remediation-result.json is required.{}",
         binding.repository_owner,
         binding.repository_name,
         binding.pr_number,
         binding.head_sha,
         plan_path,
-        result_path.display()
+        result_path.display(),
+        binding.head_sha,
+        binding.head_sha,
+        validation_feedback
     )
 }
 
