@@ -5432,6 +5432,8 @@ fn feedback_marker_interpolates_artifact_root_from_context() {
     );
 }
 
+#[test]
+
 fn marker_consumes_invalid_out_of_scope_pending_actions_with_no_remediation_output_head() {
     let temp = tempfile::tempdir().expect("tempdir");
     write_p15_invalid_out_of_scope_pending(&temp);
