@@ -13,10 +13,49 @@ fn workspace_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
 
+fn lint_level(value: &toml::Value) -> Option<&str> {
+    value
+        .as_str()
+        .or_else(|| value.get("level").and_then(toml::Value::as_str))
+}
+
 fn assert_lint_not_allowed(content: &str, lint_name: &str) {
+    let manifest: toml::Value = toml::from_str(content).expect("Cargo.toml should be valid TOML");
+
+    for lint_table in ["rust", "clippy"] {
+        let lint_level = manifest
+            .get("lints")
+            .and_then(|lints| lints.get(lint_table))
+            .and_then(|lints| lints.get(lint_name))
+            .and_then(lint_level);
+
+        assert_ne!(
+            lint_level,
+            Some("allow"),
+            "Cargo.toml should not globally suppress {lint_name} in lints.{lint_table}"
+        );
+    }
+}
+
+#[test]
+fn test_lint_suppression_guard_parses_toml_variants() {
+    for cargo_toml in [
+        "[lints.rust]\nunused='allow'\n",
+        "[lints.clippy]\nunused = 'allow'\n",
+        "[lints.clippy]\nunused={ level = 'allow', priority = -1 }\n",
+    ] {
+        assert!(
+            std::panic::catch_unwind(|| assert_lint_not_allowed(cargo_toml, "unused")).is_err(),
+            "guard should reject allow suppression in {cargo_toml}"
+        );
+    }
+
     assert!(
-        !content.contains(&format!("{lint_name} = \"allow\"")),
-        "Cargo.toml should not globally suppress {lint_name}"
+        std::panic::catch_unwind(|| {
+            assert_lint_not_allowed("[lints.clippy]\nunused = 'deny'\n", "unused");
+        })
+        .is_ok(),
+        "guard should accept non-allow lint levels"
     );
 }
 
