@@ -81,6 +81,8 @@ pub struct EngineRunner {
     /// Per-edge loop counter keyed by "from:to" step pair.
     edge_loop_counts: HashMap<String, u32>,
     /// Maximum retries allowed from config.
+    /// Retained for the configured retry policy while retry transitions are expanded.
+    #[allow(dead_code)]
     max_retries: u32,
     /// Maximum remediation loops allowed.
     max_loops: u32,
@@ -123,15 +125,15 @@ impl EngineRunner {
         let mut context = StepContext::new(work_dir, instance.run_id.clone());
 
         // Load config variables into context
-        /// @plan:PLAN-20260408-LLXPRT-FIRST.P15
-        /// @requirement:REQ-LF-PROF-003
+        // @plan:PLAN-20260408-LLXPRT-FIRST.P15
+        // @requirement:REQ-LF-PROF-003
         for (key, value) in &instance.config.variables {
             context.set(key, value);
         }
 
         // If work_dir is specified in config variables, create it and set it
-        /// @plan:PLAN-20260408-LLXPRT-FIRST.P15
-        /// @requirement:REQ-LF-WS-001
+        // @plan:PLAN-20260408-LLXPRT-FIRST.P15
+        // @requirement:REQ-LF-WS-001
         if let Some(work_dir_str) = instance.config.variables.get("work_dir") {
             let path = std::path::PathBuf::from(work_dir_str);
             std::fs::create_dir_all(&path).map_err(|e| {
@@ -199,15 +201,15 @@ impl EngineRunner {
         let mut context = StepContext::new(work_dir, instance.run_id.clone());
 
         // Load config variables into context
-        /// @plan:PLAN-20260408-LLXPRT-FIRST.P15
-        /// @requirement:REQ-LF-PROF-003
+        // @plan:PLAN-20260408-LLXPRT-FIRST.P15
+        // @requirement:REQ-LF-PROF-003
         for (key, value) in &instance.config.variables {
             context.set(key, value);
         }
 
         // If work_dir is specified in config variables, create it and set it
-        /// @plan:PLAN-20260408-LLXPRT-FIRST.P15
-        /// @requirement:REQ-LF-WS-001
+        // @plan:PLAN-20260408-LLXPRT-FIRST.P15
+        // @requirement:REQ-LF-WS-001
         if let Some(work_dir_str) = instance.config.variables.get("work_dir") {
             let path = std::path::PathBuf::from(work_dir_str);
             std::fs::create_dir_all(&path).map_err(|e| {
@@ -238,6 +240,8 @@ impl EngineRunner {
     /// @plan:PLAN-20260408-LLXPRT-FIRST.P14
     /// @plan:PLAN-20260408-LLXPRT-FIRST.P15
     /// @requirement:REQ-EARS-ENG-002,REQ-EARS-ENG-003,REQ-EARS-ROUTE-001,REQ-LF-LOOP-001,REQ-LF-LOOP-002,REQ-LF-LOOP-003,REQ-LF-LOOP-004,REQ-LF-FAIL-001,REQ-LF-FAIL-005
+    // Pre-existing engine orchestration flow; split in a dedicated refactor stage.
+    #[allow(clippy::too_many_lines)]
     pub fn run(&mut self) -> Result<RunOutcome, EngineError> {
         // Check if we should resume from a checkpoint
         let conn = self.conn.borrow();
@@ -300,8 +304,8 @@ impl EngineRunner {
             drop(conn);
 
             // Check for Abandon outcome (early return - terminal)
-            /// @plan:PLAN-20260408-LLXPRT-FIRST.P15
-            /// @requirement:REQ-LF-FAIL-001
+            // @plan:PLAN-20260408-LLXPRT-FIRST.P15
+            // @requirement:REQ-LF-FAIL-001
             if outcome == StepOutcome::Abandon {
                 let run_outcome = RunOutcome::Abandoned {
                     step_id: current_step_id.clone(),
@@ -312,8 +316,8 @@ impl EngineRunner {
             }
 
             // Resolve the next step based on outcome
-            /// @plan:PLAN-20260408-LLXPRT-FIRST.P15
-            /// @requirement:REQ-LF-FAIL-001
+            // @plan:PLAN-20260408-LLXPRT-FIRST.P15
+            // @requirement:REQ-LF-FAIL-001
             let next_step = self.resolve_next_step(&current_step_id, &outcome)?;
 
             match next_step {
@@ -348,8 +352,8 @@ impl EngineRunner {
                 }
                 None => {
                     // No transition found - determine outcome based on step outcome
-                    /// @plan:PLAN-20260408-LLXPRT-FIRST.P15
-                    /// @requirement:REQ-LF-FAIL-001
+                    // @plan:PLAN-20260408-LLXPRT-FIRST.P15
+                    // @requirement:REQ-LF-FAIL-001
                     let run_outcome = match outcome {
                         StepOutcome::Success => RunOutcome::Success,
                         StepOutcome::Fatal => RunOutcome::Failure {

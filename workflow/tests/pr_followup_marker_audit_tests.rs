@@ -373,7 +373,6 @@ fn p17_markers_cover_all_touched_items() {
 
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P10
 /// @requirement:REQ-PRFU-013
-
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P11
 /// @requirement:REQ-PRFU-012,REQ-PRFU-014
 /// @pseudocode lines 18-28

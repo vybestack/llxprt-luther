@@ -1,5 +1,5 @@
-/// @plan:PLAN-20260404-INITIAL-RUNTIME.P03
-/// dagrs integration contract for workflow execution.
+//! @plan:PLAN-20260404-INITIAL-RUNTIME.P03
+//! dagrs integration contract for workflow execution.
 
 /// Runtime wrapper for dagrs workflow engine.
 /// @plan:PLAN-20260404-INITIAL-RUNTIME.P03

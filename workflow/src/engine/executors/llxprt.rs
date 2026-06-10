@@ -13,6 +13,8 @@ use crate::engine::transition::StepOutcome;
 pub struct LlxprtExecutor;
 
 impl StepExecutor for LlxprtExecutor {
+    // Pre-existing llxprt process orchestration flow; split in a dedicated refactor stage.
+    #[allow(clippy::cognitive_complexity, clippy::too_many_lines)]
     fn execute(
         &self,
         context: &mut StepContext,

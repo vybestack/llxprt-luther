@@ -39,6 +39,8 @@ pub struct ConfigProfile {
 
 /// Monitor instance for supervising workflow runs.
 pub struct Monitor {
+    // Retained so monitor runtime policy remains available as supervision expands.
+    #[allow(dead_code)]
     config: process::MonitorConfig,
     instance_id: String,
     start_time: Instant,
@@ -155,6 +157,8 @@ impl Monitor {
 /// Singleton lock for single-instance mode.
 #[derive(Debug)]
 pub struct SingletonLock {
+    // Kept for diagnostics when lock-acquisition reporting is extended.
+    #[allow(dead_code)]
     path: String,
     guard: Option<SingletonGuard>,
 }

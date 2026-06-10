@@ -297,12 +297,6 @@ impl HeartbeatWriter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::TempDir;
-
-    fn setup_test_dir() {
-        // Note: This would require refactoring to inject paths for testing
-        // For now, we test the core logic without file operations
-    }
 
     #[test]
     fn test_heartbeat_creation() {

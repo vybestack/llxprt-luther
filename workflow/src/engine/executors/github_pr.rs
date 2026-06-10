@@ -66,7 +66,6 @@ pub struct GithubPrIdentityExecutor;
 
 /// Injectable PR identity capture executor for tests and alternate runners.
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P06
-
 /// @requirement:REQ-PRFU-001,REQ-PRFU-002
 /// @pseudocode lines 1-7
 pub struct GithubPrIdentityExecutorWithRunner<R, C> {
@@ -83,10 +82,6 @@ impl<R, C> GithubPrIdentityExecutorWithRunner<R, C> {
         Self { runner, clock }
     }
 }
-
-/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P06
-/// @requirement:REQ-PRFU-001,REQ-PRFU-002
-/// @pseudocode lines 1-7
 
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P06
 /// @requirement:REQ-PRFU-001,REQ-PRFU-002
@@ -134,10 +129,6 @@ impl<R, C> GithubPrChecksExecutorWithRunner<R, C> {
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P06
 /// @requirement:REQ-PRFU-004,REQ-PRFU-005,REQ-PRFU-006
 /// @pseudocode lines 16-33
-
-/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P06
-/// @requirement:REQ-PRFU-004,REQ-PRFU-005,REQ-PRFU-006
-/// @pseudocode lines 16-33
 impl<R, C> StepExecutor for GithubPrChecksExecutorWithRunner<R, C>
 where
     R: GithubPrCommandRunner,
@@ -177,10 +168,6 @@ impl<R, C> GithubCheckFailuresExecutorWithRunner<R, C> {
         Self { runner, clock }
     }
 }
-
-/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P07
-/// @requirement:REQ-PRFU-007
-/// @pseudocode lines 1-21
 
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P07
 /// @requirement:REQ-PRFU-007
@@ -356,20 +343,16 @@ fn watch_pr_checks(
     let max_duration_seconds = u64_param(params, "max_duration_seconds", 3600);
     let mut observations = Vec::new();
     let mut final_classification = CheckClassification::empty("unknown");
-    let mut fatal_source = Value::Null;
 
     for attempt in 1..=max_attempts {
         let observed_at = clock.now_rfc3339();
         let checks_result = query_checks(&binding, runner);
-        let classification = match checks_result {
-            Ok(checks) => {
-                fatal_source = Value::Null;
-                classify_checks(&binding.head_sha, checks)
-            }
-            Err(err) => {
-                fatal_source = Value::String("api".to_string());
-                CheckClassification::fatal(err.to_string())
-            }
+        let (classification, fatal_source) = match checks_result {
+            Ok(checks) => (classify_checks(&binding.head_sha, checks), Value::Null),
+            Err(err) => (
+                CheckClassification::fatal(err.to_string()),
+                Value::String("api".to_string()),
+            ),
         };
         final_classification = classification.clone();
         observations.push(observation_json(
@@ -529,7 +512,7 @@ fn query_checks(
     runner: &dyn GithubPrCommandRunner,
 ) -> Result<Vec<NormalizedCheck>, EngineError> {
     let repo = format!("{}/{}", binding.repository_owner, binding.repository_name);
-    let preferred = runner.run_github_command(&vec![
+    let preferred = runner.run_github_command(&[
         "gh".to_string(),
         "pr".to_string(),
         "checks".to_string(),
@@ -544,7 +527,7 @@ fn query_checks(
             .map_err(|err| github_pr_error(format!("parse gh pr checks json: {err}")))?,
         &binding.head_sha,
     )?;
-    let rest = runner.run_github_command(&vec![
+    let rest = runner.run_github_command(&[
         "gh".to_string(),
         "api".to_string(),
         format!(
@@ -795,6 +778,8 @@ fn check_bucket(check: &NormalizedCheck) -> String {
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P06
 /// @requirement:REQ-PRFU-002,REQ-PRFU-004
 /// @pseudocode lines 25,31-32
+// Pre-existing check status artifact shape; split in a dedicated refactor stage.
+#[allow(clippy::too_many_arguments)]
 fn write_check_status_artifact(
     store: &PrFollowupArtifactStore,
     binding: &PrFollowupBinding,
@@ -908,6 +893,8 @@ fn terminal_counts_json(classification: &CheckClassification) -> Value {
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P07
 /// @requirement:REQ-PRFU-007
 /// @pseudocode lines 1-21
+// Pre-existing CI failure collection flow; split in a dedicated refactor stage.
+#[allow(clippy::too_many_lines)]
 fn collect_ci_failures(
     context: &StepContext,
     params: &Value,
@@ -1534,8 +1521,6 @@ fn require_u64(value: &Value, field: &str) -> Result<u64, EngineError> {
         .and_then(Value::as_u64)
         .ok_or_else(|| github_pr_error(format!("missing or invalid integer field {field}")))
 }
-
-/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P06
 
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P06
 /// @requirement:REQ-PRFU-001,REQ-PRFU-004

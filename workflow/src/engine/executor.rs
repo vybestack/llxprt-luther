@@ -112,7 +112,7 @@ impl StepContext {
         if let Some(ref step_id) = self.current_step_id {
             self.namespaced_vars
                 .entry(step_id.clone())
-                .or_insert_with(HashMap::new)
+                .or_default()
                 .insert(key.to_string(), value.to_string());
         }
         // Always store bare key in variables (backward compat + pre-namespace-era bare keys)

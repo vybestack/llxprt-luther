@@ -47,16 +47,6 @@ fn get_base_branch() -> String {
         .unwrap_or_else(|| "main".to_string())
 }
 
-/// Get assignee from config.
-fn get_assignee() -> String {
-    let config = load_config();
-    config
-        .variables
-        .get("assignee")
-        .cloned()
-        .expect("assignee not found in config")
-}
-
 /// Run a shell command and return stdout.
 fn run_command(cmd: &mut Command) -> Result<String, String> {
     let output = cmd

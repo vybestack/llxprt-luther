@@ -15,9 +15,6 @@ use luther_workflow::engine::runner::{EngineError, EngineRunner, RunOutcome};
 use luther_workflow::engine::transition::StepOutcome;
 use luther_workflow::persistence::SqliteStore;
 use luther_workflow::workflow::config_loader::{resolve_workflow_config, resolve_workflow_type};
-use luther_workflow::workflow::target_profile::{
-    apply_target_profile_overrides, validate_target_profile, TargetProfileOverrides,
-};
 
 // ============================================================================
 // SharedMockExecutor — Thread-safe mock executor
@@ -38,15 +35,6 @@ impl SharedMockExecutor {
             outcomes: Arc::new(Mutex::new(outcomes)),
             call_counts: Arc::new(Mutex::new(HashMap::new())),
         }
-    }
-
-    fn call_count(&self, step_id: &str) -> usize {
-        self.call_counts
-            .lock()
-            .unwrap()
-            .get(step_id)
-            .copied()
-            .unwrap_or(0)
     }
 }
 
@@ -1171,6 +1159,7 @@ fn post_pr_failure_terminal_is_terminal_and_fatal_routes_target_it() {
 /// @requirement:REQ-PRFU-018,REQ-PRFU-020A
 /// @pseudocode lines 1-53
 #[test]
+#[allow(clippy::too_many_lines)]
 fn post_pr_exact_p17_routing_contract_is_present() {
     let workflow_type = post_pr_workflow();
     for step_id in [
@@ -1737,7 +1726,6 @@ fn reusable_issue_fix_evaluate_plan_requires_real_llxprt_review() {
     );
 }
 
-
 /// @plan:PLAN-20260408-LLXPRT-FIRST.P18
 /// @requirement:REQ-LF-PLAN-002
 #[test]
@@ -1769,7 +1757,6 @@ fn dogfood_plan_gate_blocks_rejected_plan_artifacts() {
         "plan_gate should reject obvious placeholder-sized plans: {command}"
     );
 
-
     let setup_workspace = workflow_type
         .steps
         .iter()
@@ -1799,40 +1786,47 @@ fn dogfood_plan_gate_blocks_rejected_plan_artifacts() {
         .expect("prepare_plan command exists");
     assert!(
         prepare_command.contains("plan-feedback.md")
-            && prepare_command.contains("rm -f {artifact_dir}/plan.md {artifact_dir}/plan-evaluation.md"),
+            && prepare_command
+                .contains("rm -f {artifact_dir}/plan.md {artifact_dir}/plan-evaluation.md"),
         "prepare_plan should preserve feedback and clear stale plan artifacts: {prepare_command}"
     );
 
-    assert!(workflow_type.transitions.iter().any(|transition|
-        transition.from == "fetch_issue"
+    assert!(workflow_type
+        .transitions
+        .iter()
+        .any(|transition| transition.from == "fetch_issue"
             && transition.to == "prepare_plan"
-            && transition.condition.is_none()
-    ));
-    assert!(workflow_type.transitions.iter().any(|transition|
-        transition.from == "prepare_plan"
+            && transition.condition.is_none()));
+    assert!(workflow_type
+        .transitions
+        .iter()
+        .any(|transition| transition.from == "prepare_plan"
             && transition.to == "create_plan"
-            && transition.condition.as_deref() == Some("success")
-    ));
-    assert!(workflow_type.transitions.iter().any(|transition|
-        transition.from == "evaluate_plan"
+            && transition.condition.as_deref() == Some("success")));
+    assert!(workflow_type
+        .transitions
+        .iter()
+        .any(|transition| transition.from == "evaluate_plan"
             && transition.to == "plan_gate"
-            && transition.condition.as_deref() == Some("success")
-    ));
-    assert!(workflow_type.transitions.iter().any(|transition|
-        transition.from == "evaluate_plan"
+            && transition.condition.as_deref() == Some("success")));
+    assert!(workflow_type
+        .transitions
+        .iter()
+        .any(|transition| transition.from == "evaluate_plan"
             && transition.to == "prepare_plan"
-            && transition.condition.as_deref() == Some("fixable")
-    ));
-    assert!(workflow_type.transitions.iter().any(|transition|
-        transition.from == "plan_gate"
+            && transition.condition.as_deref() == Some("fixable")));
+    assert!(workflow_type
+        .transitions
+        .iter()
+        .any(|transition| transition.from == "plan_gate"
             && transition.to == "implement"
-            && transition.condition.as_deref() == Some("success")
-    ));
-    assert!(workflow_type.transitions.iter().any(|transition|
-        transition.from == "plan_gate"
+            && transition.condition.as_deref() == Some("success")));
+    assert!(workflow_type
+        .transitions
+        .iter()
+        .any(|transition| transition.from == "plan_gate"
             && transition.to == "prepare_plan"
-            && transition.condition.as_deref() == Some("fixable")
-    ));
+            && transition.condition.as_deref() == Some("fixable")));
 }
 
 /// @plan:PLAN-20260408-LLXPRT-FIRST.P18

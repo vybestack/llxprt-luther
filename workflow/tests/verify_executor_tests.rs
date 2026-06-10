@@ -631,7 +631,6 @@ fn test_verify_interpolates_context_in_custom_check_commands() {
     assert_eq!(check.exit_code, 1);
 }
 
-
 #[test]
 fn test_verify_parses_eslint_stylish_errors_without_storing_all_warnings_as_error() {
     let executor = VerifyExecutor;

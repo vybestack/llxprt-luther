@@ -33,7 +33,7 @@ impl From<rusqlite::Error> for PersistenceError {
 
 // Thread-local storage for default database connection (for backwards compatibility)
 thread_local! {
-    static DEFAULT_CONN: RefCell<Option<Connection>> = RefCell::new(None);
+    static DEFAULT_CONN: RefCell<Option<Connection>> = const { RefCell::new(None) };
 }
 
 /// Initialize the default connection (for backwards-compatible API).

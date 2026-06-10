@@ -31,20 +31,18 @@ dirs = "5"
 rstest = "0.25"
 tempfile = "3"
 
+# Stage 1 lint policy: keep high-signal warnings visible for new code and
+# preserve the current CI quality gates in Cargo.toml. Later stages can expand
+# selected pedantic lints and split legacy orchestration hotspots.
 [lints.rust]
 unsafe_code = "warn"
-unused = "allow"
-dead_code = "allow"
-unused_doc_comments = "allow"
-unused_imports = "allow"
-unused_variables = "allow"
-unused_mut = "allow"
 
 [lints.clippy]
-all = "allow"
-pedantic = "allow"
-nursery = "allow"
-cognitive_complexity = "allow"
+cognitive_complexity = "deny"
+too_many_lines = "deny"
+too_many_arguments = "deny"
+type_complexity = "deny"
+struct_excessive_bools = "deny"
 
 [profile.dev]
 incremental = false

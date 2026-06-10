@@ -256,7 +256,6 @@ pub fn disable_launchd_service(spec: &ServiceSpec, domain: &str) -> Result<(), L
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
 
     #[test]
     fn test_get_launch_agents_dir() {

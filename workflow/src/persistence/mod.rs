@@ -26,7 +26,7 @@ use std::path::Path;
 pub fn init_database(db_path: &Path) -> Result<(), checkpoint::PersistenceError> {
     // Ensure parent directory exists
     if let Some(parent) = db_path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| checkpoint::PersistenceError::Io(e))?;
+        std::fs::create_dir_all(parent).map_err(checkpoint::PersistenceError::Io)?;
     }
 
     // Open and initialize the database
