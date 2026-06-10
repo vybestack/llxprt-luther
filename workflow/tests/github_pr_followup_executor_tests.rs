@@ -18,15 +18,14 @@ use luther_workflow::engine::executors::{
     FeedbackEvaluationRequest, FeedbackEvaluatorCommandRunner, FeedbackEvaluatorExecutor,
     GithubCheckFailuresExecutorWithRunner, GithubCodeRabbitFeedbackExecutorWithRunner,
     GithubFeedbackMarkerExecutorWithRunner, GithubPrChecksExecutorWithRunner,
-    ProcessFeedbackEvaluatorCommandRunner,
     GithubPrCommandRunner, GithubPrIdentityExecutorWithRunner, LlxprtInvocationRequest,
     LlxprtInvocationResult, PostPrFailureTerminalExecutor, PostPrIterationGuardExecutor,
     PostPrTestCommandRequest, PostPrTestCommandResult, PostPrTestCommandRunner,
     PrFollowupArtifactStore, PrFollowupBinding, PrFollowupLlxprtCommandRunner,
     PrFollowupRemediationExecutorWithRunner, PrRemediationPlanExecutor,
-    PrRemediationResultExecutor, PushRemediationChangesExecutorWithRunner,
-    PushRemediationCommandRequest, PushRemediationCommandResult, PushRemediationCommandRunner,
-    RunPostPrTestsExecutorWithRunner,
+    PrRemediationResultExecutor, ProcessFeedbackEvaluatorCommandRunner,
+    PushRemediationChangesExecutorWithRunner, PushRemediationCommandRequest,
+    PushRemediationCommandResult, PushRemediationCommandRunner, RunPostPrTestsExecutorWithRunner,
 };
 
 static LEGACY_ARTIFACT_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -2664,14 +2663,14 @@ impl FeedbackEvaluatorCommandRunner for FailingFeedbackEvaluatorRunner {
             .lock()
             .expect("feedback evaluator calls")
             .push((argv.to_vec(), stdin_json.to_string()));
-        Err(luther_workflow::engine::runner::EngineError::StepExecutionError {
-            step_id: "evaluate_coderabbit_feedback".to_string(),
-            message: "feedback evaluator command timed out after 300 seconds".to_string(),
-        })
+        Err(
+            luther_workflow::engine::runner::EngineError::StepExecutionError {
+                step_id: "evaluate_coderabbit_feedback".to_string(),
+                message: "feedback evaluator command timed out after 300 seconds".to_string(),
+            },
+        )
     }
 }
-
-
 
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P04
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P09
@@ -4635,7 +4634,6 @@ fn remediate_pr_followup_prompt_contract() {
         .contains("fixed evidence for coderabbit_feedback:cr-valid is not tied to current head"));
     assert!(prompt.contains("do not create, copy, or modify any pr-followup/history files"));
 
-
     assert!(prompt.contains("structured evidence"));
     assert!(prompt.contains("Free-form-only completion is not acceptable"));
 }
@@ -5493,8 +5491,7 @@ fn marker_consumes_invalid_out_of_scope_pending_actions_with_no_remediation_outp
         2
     );
     assert!(runner.calls().iter().any(|call| {
-        call.iter().any(|arg| arg == "--field")
-            && call.iter().any(|arg| arg.starts_with("body=@"))
+        call.iter().any(|arg| arg == "--field") && call.iter().any(|arg| arg.starts_with("body=@"))
     }));
     let body_arg = runner
         .calls()
@@ -5505,8 +5502,6 @@ fn marker_consumes_invalid_out_of_scope_pending_actions_with_no_remediation_outp
     let body = std::fs::read_to_string(&body_arg).expect("posted body file");
     assert!(body.contains("luther-pr-followup"));
     assert!(!body.trim_start().starts_with('{'));
-
-
 }
 
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P15
@@ -6013,14 +6008,19 @@ fn feedback_evaluator_accepts_json_object_wrapped_by_llxprt_cli_progress() {
     );
     let raw = "## Todo Progress\n[gpt55high]\n{\"item_id\":\"item-json\",\"stable_marker_key\":\"thread-json\",\"body_hash\":\"hash-json\",\"head_sha\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"decision\":\"valid\",\"reason\":\"actionable\",\"recommended_action\":\"fix it\"}\n";
     let runner = RecordingFeedbackEvaluatorRunner::new(raw.to_string());
-    let adapter = CommandFeedbackEvaluationAdapter::new(vec!["feedback-evaluator-bin".to_string()], runner);
+    let adapter =
+        CommandFeedbackEvaluationAdapter::new(vec!["feedback-evaluator-bin".to_string()], runner);
     let mut context = p09_context(&temp);
     let outcome = FeedbackEvaluatorExecutor::new(adapter, FixedClock)
         .execute(&mut context, &p09_params(&temp))
         .expect("feedback evaluator wrapped JSON");
     let artifact = read_json(&p09_evaluations_path(&temp));
 
-    assert_expected_outcome(outcome, StepOutcome::Success, "wrapped llxprt progress should not hide the single JSON response object");
+    assert_expected_outcome(
+        outcome,
+        StepOutcome::Success,
+        "wrapped llxprt progress should not hide the single JSON response object",
+    );
     assert_eq!(
         artifact
             .get("accepted_results")
@@ -6029,7 +6029,6 @@ fn feedback_evaluator_accepts_json_object_wrapped_by_llxprt_cli_progress() {
         Some(1)
     );
 }
-
 
 #[test]
 fn feedback_evaluator_default_argv_loads_noninteractive_profile() {
@@ -6105,25 +6104,18 @@ fn feedback_evaluator_classifies_coderabbit_summary_without_llm_command() {
     );
     assert!(runner.calls().is_empty());
     assert_eq!(
-        artifact.pointer("/accepted_results/0/source").and_then(serde_json::Value::as_str),
+        artifact
+            .pointer("/accepted_results/0/source")
+            .and_then(serde_json::Value::as_str),
         Some("deterministic")
     );
 }
-
-
-
-
-
 
 #[test]
 fn feedback_evaluator_process_runner_times_out_hung_llxprt_command() {
     let runner = ProcessFeedbackEvaluatorCommandRunner::with_timeout(Duration::from_secs(0));
     let result = runner.run_feedback_evaluator_command(
-        &[
-            "sh".to_string(),
-            "-c".to_string(),
-            "sleep 5".to_string(),
-        ],
+        &["sh".to_string(), "-c".to_string(), "sleep 5".to_string()],
         "{}",
     );
 

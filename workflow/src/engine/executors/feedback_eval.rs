@@ -440,7 +440,8 @@ fn evaluate_coderabbit_feedback(
                 unevaluated_items.push(unevaluated_item(item, "fatal_prior_state"));
             }
             ReuseLookup::NoMatch => {
-                let mut accepted: Option<Value> = deterministic_feedback_evaluation(item, clock.now_rfc3339());
+                let mut accepted: Option<Value> =
+                    deterministic_feedback_evaluation(item, clock.now_rfc3339());
                 if accepted.is_some() {
                     if let Some(accepted_value) = accepted.as_ref() {
                         upsert_state_entry(
@@ -754,7 +755,8 @@ fn parse_feedback_evaluator_json(raw: &str) -> Result<Value, serde_json::Error> 
         Ok(value) => Ok(value),
         Err(original) => {
             for (index, _) in raw.match_indices('{') {
-                let mut stream = serde_json::Deserializer::from_str(&raw[index..]).into_iter::<Value>();
+                let mut stream =
+                    serde_json::Deserializer::from_str(&raw[index..]).into_iter::<Value>();
                 if let Some(Ok(value)) = stream.next() {
                     if value.is_object() {
                         return Ok(value);
@@ -765,7 +767,6 @@ fn parse_feedback_evaluator_json(raw: &str) -> Result<Value, serde_json::Error> 
         }
     }
 }
-
 
 fn deterministic_feedback_evaluation(item: &FeedbackItem, accepted_at: String) -> Option<Value> {
     if !is_coderabbit_summary_item(item) {
