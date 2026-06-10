@@ -1617,8 +1617,8 @@ fn process_marker_action(
             ),
             "--method".to_string(),
             "POST".to_string(),
-            "--input".to_string(),
-            body_path.display().to_string(),
+            "--field".to_string(),
+            format!("body=@{}", body_path.display()),
         ])?;
         let parsed: Value =
             serde_json::from_str(&response).unwrap_or_else(|_| json!({ "raw_response": response }));

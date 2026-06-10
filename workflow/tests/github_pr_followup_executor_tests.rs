@@ -5460,10 +5460,11 @@ fn marker_consumes_invalid_out_of_scope_pending_actions_with_no_remediation_outp
             .len(),
         2
     );
-    assert!(runner
-        .calls()
-        .iter()
-        .any(|call| call.iter().any(|arg| arg == "--input")));
+    assert!(runner.calls().iter().any(|call| {
+        call.iter().any(|arg| arg == "--field")
+            && call.iter().any(|arg| arg.starts_with("body=@"))
+    }));
+
 }
 
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P15
