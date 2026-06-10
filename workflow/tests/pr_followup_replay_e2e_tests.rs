@@ -19,6 +19,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use luther_workflow::engine::executor::ExecutorRegistry;
+use luther_workflow::engine::executors::ClockSleeper;
 use luther_workflow::engine::executors::{
     FeedbackEvaluationAdapter, FeedbackEvaluationRequest, FeedbackEvaluatorExecutor,
     GithubCheckFailuresExecutorWithRunner, GithubCodeRabbitFeedbackExecutorWithRunner,
@@ -26,12 +27,12 @@ use luther_workflow::engine::executors::{
     GithubPrCommandRunner, GithubPrIdentityExecutorWithRunner, LlxprtInvocationRequest,
     LlxprtInvocationResult, NoOpExecutor, PostPrFailureTerminalExecutor,
     PostPrIterationGuardExecutor, PostPrTestCommandRequest, PostPrTestCommandResult,
-    PostPrTestCommandRunner, PrFollowupLlxprtCommandRunner, PrFollowupRemediationExecutorWithRunner,
-    PrRemediationPlanExecutor, PrRemediationResultExecutor, PushRemediationChangesExecutorWithRunner,
+    PostPrTestCommandRunner, PrFollowupLlxprtCommandRunner,
+    PrFollowupRemediationExecutorWithRunner, PrRemediationPlanExecutor,
+    PrRemediationResultExecutor, PushRemediationChangesExecutorWithRunner,
     PushRemediationCommandRequest, PushRemediationCommandResult, PushRemediationCommandRunner,
     RunPostPrTestsExecutorWithRunner, ShellExecutor,
 };
-use luther_workflow::engine::executors::ClockSleeper;
 use luther_workflow::engine::instance::WorkflowInstance;
 use luther_workflow::engine::runner::{EngineError, EngineRunner, RunOutcome};
 use luther_workflow::workflow::config_loader::{resolve_workflow_config, resolve_workflow_type};
@@ -285,7 +286,9 @@ impl ReplayGithubRunner {
             .unwrap_or_else(|| json!({ "total_count": 0, "check_runs": [] }));
         Self {
             pr_view: pr_identity_view(),
-            checks: Arc::new(Mutex::new(scenario.check_observations.iter().cloned().collect())),
+            checks: Arc::new(Mutex::new(
+                scenario.check_observations.iter().cloned().collect(),
+            )),
             last_check,
             review_thread_pages: if scenario.review_thread_pages.is_empty() {
                 vec![empty_review_threads()]
@@ -302,7 +305,9 @@ impl ReplayGithubRunner {
             } else {
                 scenario.issue_comment_pages.clone()
             },
-            readiness: Arc::new(Mutex::new(scenario.readiness_pages.iter().cloned().collect())),
+            readiness: Arc::new(Mutex::new(
+                scenario.readiness_pages.iter().cloned().collect(),
+            )),
             last_readiness,
             calls: Arc::new(Mutex::new(Vec::new())),
         }
@@ -365,9 +370,8 @@ impl GithubPrCommandRunner for ReplayGithubRunner {
                     .expect("github calls")
                     .iter()
                     .filter(|call| {
-                        call.iter().any(|arg| {
-                            arg.starts_with("query=") && arg.contains("reviewThreads")
-                        })
+                        call.iter()
+                            .any(|arg| arg.starts_with("query=") && arg.contains("reviewThreads"))
                     })
                     .count();
                 let value = self
@@ -397,7 +401,10 @@ impl GithubPrCommandRunner for ReplayGithubRunner {
             }
             let page = argv
                 .iter()
-                .find_map(|arg| arg.rsplit_once("page=").and_then(|(_, v)| v.parse::<usize>().ok()))
+                .find_map(|arg| {
+                    arg.rsplit_once("page=")
+                        .and_then(|(_, v)| v.parse::<usize>().ok())
+                })
                 .unwrap_or(1);
             let value = self
                 .issue_comment_pages
@@ -451,7 +458,10 @@ impl ReplayFeedbackAdapter {
 
 impl FeedbackEvaluationAdapter for ReplayFeedbackAdapter {
     fn evaluate(&self, request: &FeedbackEvaluationRequest) -> Result<String, EngineError> {
-        self.requests.lock().expect("decisions requests").push(request.clone());
+        self.requests
+            .lock()
+            .expect("decisions requests")
+            .push(request.clone());
         let decision = self
             .decisions
             .lock()
@@ -488,7 +498,10 @@ impl PrFollowupLlxprtCommandRunner for ReplayLlxprtRunner {
             .ok()
             .and_then(|raw| serde_json::from_str(&raw).ok())
             .unwrap_or_else(|| json!({}));
-        let plan_sequence = plan.get("artifact_sequence").cloned().unwrap_or(Value::Null);
+        let plan_sequence = plan
+            .get("artifact_sequence")
+            .cloned()
+            .unwrap_or(Value::Null);
         let results: Vec<Value> = plan
             .get("must_fix")
             .and_then(Value::as_array)
@@ -511,10 +524,10 @@ impl PrFollowupLlxprtCommandRunner for ReplayLlxprtRunner {
                     "source_id": source_id,
                     "stable_marker_key": item.get("stable_marker_key").cloned().unwrap_or(Value::Null),
                     "input_head_sha": HEAD_SHA,
-                    "output_head_sha": HEAD_SHA,
+                    "output_head_sha": NEXT_HEAD_SHA,
                     "status": "fixed",
                     "action": "scripted remediation",
-                    "evidence": { "kind": "current_repository_test", "current_head_sha": HEAD_SHA },
+                    "evidence": { "kind": "current_repository_test", "current_head_sha": NEXT_HEAD_SHA },
                     "evidence_paths": ["src/lib.rs"]
                 });
                 if let Some(key) = item.get("stable_marker_key").and_then(Value::as_str) {
@@ -763,7 +776,14 @@ fn build_replay_registry(scenario: &ScenarioFixtures) -> (ExecutorRegistry, Repl
         Box::new(PostPrFailureTerminalExecutor),
     );
 
-    (registry, ReplayHandles { github, feedback, push })
+    (
+        registry,
+        ReplayHandles {
+            github,
+            feedback,
+            push,
+        },
+    )
 }
 
 /// Load the real workflow type + a config fixture whose `artifact_dir`/`work_dir`
@@ -771,8 +791,8 @@ fn build_replay_registry(scenario: &ScenarioFixtures) -> (ExecutorRegistry, Repl
 /// post-PR steps interpolate.
 fn load_tail_workflow(temp: &TempDir) -> (WorkflowType, WorkflowConfig) {
     let fixture_root = std::path::PathBuf::from("tests/fixtures");
-    let workflow_type = resolve_workflow_type("llxprt-issue-fix-v1", &fixture_root)
-        .expect("resolve workflow type");
+    let workflow_type =
+        resolve_workflow_type("llxprt-issue-fix-v1", &fixture_root).expect("resolve workflow type");
     let mut config =
         resolve_workflow_config("llxprt-code", &fixture_root).expect("resolve workflow config");
 
@@ -782,18 +802,27 @@ fn load_tail_workflow(temp: &TempDir) -> (WorkflowType, WorkflowConfig) {
     std::fs::create_dir_all(&work_dir).expect("create work dir");
 
     let vars = &mut config.variables;
-    vars.insert("artifact_dir".to_string(), artifact_dir.display().to_string());
+    vars.insert(
+        "artifact_dir".to_string(),
+        artifact_dir.display().to_string(),
+    );
     vars.insert("work_dir".to_string(), work_dir.display().to_string());
     vars.insert("repository_owner".to_string(), REPO_OWNER.to_string());
     vars.insert("repository_name".to_string(), REPO_NAME.to_string());
     vars.insert("pr_number".to_string(), PR_NUMBER.to_string());
     vars.insert("issue_number".to_string(), ISSUE_NUMBER.to_string());
     vars.insert("primary_issue_number".to_string(), ISSUE_NUMBER.to_string());
-    vars.insert("head_ref".to_string(), format!("luther/issue-{ISSUE_NUMBER}"));
+    vars.insert(
+        "head_ref".to_string(),
+        format!("luther/issue-{ISSUE_NUMBER}"),
+    );
     vars.insert("head_sha".to_string(), HEAD_SHA.to_string());
     vars.insert("base_ref".to_string(), "main".to_string());
     vars.insert("base_sha".to_string(), BASE_SHA.to_string());
-    vars.insert("target_repo".to_string(), format!("{REPO_OWNER}/{REPO_NAME}"));
+    vars.insert(
+        "target_repo".to_string(),
+        format!("{REPO_OWNER}/{REPO_NAME}"),
+    );
 
     (workflow_type, config)
 }
@@ -848,8 +877,7 @@ fn read_artifact(run: &TailRun, family: &str) -> Value {
     let path = current_artifact_path(run, family);
     let raw = std::fs::read_to_string(&path)
         .unwrap_or_else(|err| panic!("read artifact {family} at {}: {err}", path.display()));
-    serde_json::from_str(&raw)
-        .unwrap_or_else(|err| panic!("parse artifact {family}: {err}"))
+    serde_json::from_str(&raw).unwrap_or_else(|err| panic!("parse artifact {family}: {err}"))
 }
 
 fn assert_artifact_absent(run: &TailRun, family: &str) {
@@ -904,7 +932,10 @@ fn assert_check_status_consistent(run: &TailRun, expected_state: &str) {
     // Invariant: a passed status must never carry a non-null fatal_source.
     if expected_state == "passed" {
         assert!(
-            status.get("fatal_source").map(Value::is_null).unwrap_or(true),
+            status
+                .get("fatal_source")
+                .map(Value::is_null)
+                .unwrap_or(true),
             "passed check status must carry null fatal_source, got {:?}",
             status.get("fatal_source")
         );
