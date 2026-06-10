@@ -287,7 +287,7 @@ description = "Invoke llxprt to implement the plan"
 
 [steps.parameters]
 profile = "{profile_implementing}"
-timeout_seconds = 1800
+timeout_seconds = 3600
 success_on_diff = true
 success_on_existing_diff = false
 
@@ -299,6 +299,7 @@ stdout_file = "{artifact_dir}/implement-stdout.txt"
 stderr_file = "{artifact_dir}/implement-stderr.txt"
 prompt = """
 Do not use subagents. Do not ask questions. Read the current issue in {artifact_dir}/issue.md and the approved plan in {artifact_dir}/plan.md, then implement that plan.
+The approved plan already identifies the relevant files and line references; trust them. Do not exhaustively re-read entire large source files before writing. Open a file only to confirm the specific lines you are about to change or the exact API you are calling, and start writing the implementation early so you finish well within the time budget. Begin editing within the first few minutes rather than reading the whole codebase first.
 Make the smallest source/config/test changes needed to fix Luther issue #{issue_number}. You MUST leave a non-empty git diff in {work_dir}; if no files are changed, this step is not complete. Do not modify package lockfiles, generated notice files, .luther files, or unrelated files.
 The required source and test scope is whatever the approved plan identifies for this issue. If the plan and issue disagree, follow the issue text and update only files directly relevant to the current issue.
 Add or update focused tests and fixtures when the issue or approved plan requires them. Do not apply requirements from a different issue; for issue #{issue_number}, completion means the changed files directly satisfy the current issue text and approved plan, whether those are source, config, fixture, or test files.
