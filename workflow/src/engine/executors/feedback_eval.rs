@@ -626,7 +626,7 @@ fn validate_response(
     raw: &str,
     request: &FeedbackEvaluationRequest,
 ) -> Result<FeedbackEvaluationResponse, RejectReason> {
-    let value: Value = serde_json::from_str(raw).map_err(|err| RejectReason {
+    let value = parse_feedback_evaluator_json(raw).map_err(|err| RejectReason {
         reason: format!("malformed_json: {err}"),
         parsed_decision: None,
         observed_head_sha: None,
@@ -713,6 +713,24 @@ fn validate_response(
     }
     Ok(response)
 }
+
+fn parse_feedback_evaluator_json(raw: &str) -> Result<Value, serde_json::Error> {
+    match serde_json::from_str(raw) {
+        Ok(value) => Ok(value),
+        Err(original) => {
+            for (index, _) in raw.match_indices('{') {
+                let mut stream = serde_json::Deserializer::from_str(&raw[index..]).into_iter::<Value>();
+                if let Some(Ok(value)) = stream.next() {
+                    if value.is_object() {
+                        return Ok(value);
+                    }
+                }
+            }
+            Err(original)
+        }
+    }
+}
+
 
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P09
 /// @requirement:REQ-PRFU-011,REQ-PRFU-012
