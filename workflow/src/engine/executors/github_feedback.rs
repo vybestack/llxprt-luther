@@ -1996,7 +1996,14 @@ fn write_marker_comment_body_file(
         body,
         clock,
     )?;
-    Ok(record.history_path)
+    let body_path = record.history_path.with_extension("body.md");
+    std::fs::write(&body_path, body).map_err(|err| {
+        github_feedback_error(format!(
+            "write marker comment body file {}: {err}",
+            body_path.display()
+        ))
+    })?;
+    Ok(body_path)
 }
 
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P15

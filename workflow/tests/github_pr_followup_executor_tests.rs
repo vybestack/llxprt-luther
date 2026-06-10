@@ -5464,6 +5464,16 @@ fn marker_consumes_invalid_out_of_scope_pending_actions_with_no_remediation_outp
         call.iter().any(|arg| arg == "--field")
             && call.iter().any(|arg| arg.starts_with("body=@"))
     }));
+    let body_arg = runner
+        .calls()
+        .into_iter()
+        .flat_map(|call| call.into_iter())
+        .find_map(|arg| arg.strip_prefix("body=@").map(ToString::to_string))
+        .expect("body file arg");
+    let body = std::fs::read_to_string(&body_arg).expect("posted body file");
+    assert!(body.contains("luther-pr-followup"));
+    assert!(!body.trim_start().starts_with('{'));
+
 
 }
 
