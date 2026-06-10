@@ -299,7 +299,12 @@ stdout_file = "{artifact_dir}/implement-stdout.txt"
 stderr_file = "{artifact_dir}/implement-stderr.txt"
 prompt = """
 Do not use subagents. Do not ask questions. Read the current issue in {artifact_dir}/issue.md and the approved plan in {artifact_dir}/plan.md, then implement that plan.
-The approved plan already identifies the relevant files and line references; trust them. Do not exhaustively re-read entire large source files before writing. Open a file only to confirm the specific lines you are about to change or the exact API you are calling, and start writing the implementation early so you finish well within the time budget. Begin editing within the first few minutes rather than reading the whole codebase first.
+CRITICAL WORKING METHOD — write first, read minimally:
+- The approved plan already lists the exact files and line references you need. Trust the plan. Do NOT try to fully understand the entire codebase before writing.
+- Your FIRST tool action after reading the plan MUST be to create or modify a file (write the new file skeleton, or make the first concrete edit). Do not spend the early part of this step reading: a long sequence of read-only file inspections with no writes is the primary failure mode of this step and is forbidden.
+- Read at most a handful of targeted file ranges, and only to confirm an exact API signature or the specific lines you are about to edit. If you find yourself reading a fourth or fifth file before your first write, stop reading and start writing instead.
+- Build incrementally: create the file(s) with an initial version early so a non-empty git diff exists, then iterate to fill in details. It is far better to have a scoped, compiling first draft than to keep reading.
+- You have a generous time budget, but exploration does not count as progress. Only written edits do.
 Make the smallest source/config/test changes needed to fix Luther issue #{issue_number}. You MUST leave a non-empty git diff in {work_dir}; if no files are changed, this step is not complete. Do not modify package lockfiles, generated notice files, .luther files, or unrelated files.
 The required source and test scope is whatever the approved plan identifies for this issue. If the plan and issue disagree, follow the issue text and update only files directly relevant to the current issue.
 Add or update focused tests and fixtures when the issue or approved plan requires them. Do not apply requirements from a different issue; for issue #{issue_number}, completion means the changed files directly satisfy the current issue text and approved plan, whether those are source, config, fixture, or test files.
