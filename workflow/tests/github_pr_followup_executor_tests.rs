@@ -2061,6 +2061,45 @@ fn coderabbit_feedback_summary_comment_can_satisfy_readiness_when_check_run_abse
     assert_eq!(feedback["readiness_state"], "ready");
     assert_eq!(feedback["stable_observation_count"], 2);
 }
+#[test]
+fn coderabbit_feedback_rate_limit_notice_satisfies_readiness_when_check_run_absent() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let rate_limit_comment = serde_json::json!({
+        "id": 9100,
+        "node_id": "IC_coderabbit_rate_limit",
+        "body": "<!-- This is an auto-generated comment: summarize by coderabbit.ai -->\n<!-- This is an auto-generated comment: rate limited by coderabbit.ai -->\n\n> [!WARNING]\n> ## Review limit reached\n>\n> `@acoliver`, we couldn't start this review because you've reached your PR review rate limit.\n>\n> Your organization has run out of usage credits.",
+        "html_url": "https://github.com/example/workflow/pull/1910#issuecomment-9100",
+        "created_at": "2026-04-29T18:12:00Z",
+        "updated_at": "2026-04-29T18:12:00Z",
+        "user": { "login": "coderabbitai[bot]", "type": "Bot" }
+    });
+    let runner = P08FeedbackRunner::with_pages(
+        vec![serde_json::json!({
+            "data": { "repository": { "pullRequest": { "reviewThreads": {
+                "nodes": [],
+                "pageInfo": { "hasNextPage": false }
+            } } } }
+        })],
+        vec![serde_json::json!([])],
+        vec![serde_json::json!([rate_limit_comment])],
+        vec![
+            serde_json::json!({ "check_runs": [] }),
+            serde_json::json!({ "check_runs": [] }),
+        ],
+    );
+    let mut context = p08_context(&temp);
+    let outcome = GithubCodeRabbitFeedbackExecutorWithRunner::new(runner, FixedClock)
+        .execute(&mut context, &p08_params(&temp, 2))
+        .expect("feedback executor");
+
+    assert_eq!(outcome, StepOutcome::Success);
+    let feedback: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(p08_feedback_path(&temp)).expect("feedback artifact"),
+    )
+    .expect("feedback json");
+    assert_eq!(feedback["readiness_state"], "ready");
+    assert_eq!(feedback["stable_observation_count"], 2);
+}
 
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P04
 /// @requirement:REQ-PRFU-008

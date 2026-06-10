@@ -791,8 +791,12 @@ fn is_coderabbit_summary_item(item: &FeedbackItem) -> bool {
     let body = item.body.to_ascii_lowercase();
     key.starts_with("summary:")
         || body.contains("summary by coderabbit")
+        || body.contains("summarize by coderabbit")
         || (body.contains("walkthrough") && body.contains("coderabbit"))
         || body.contains("coderabbit finished reviewing this pull request")
+        || body.contains("rate limited by coderabbit")
+        || body.contains("review limit reached")
+        || (body.contains("coderabbit") && body.contains("run out of usage credits"))
 }
 
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P09

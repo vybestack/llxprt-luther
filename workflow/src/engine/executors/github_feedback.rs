@@ -763,10 +763,24 @@ fn is_coderabbit_summary_feedback_item(item: &FeedbackItem) -> bool {
     if item.source != "issue_comment" || item.stale {
         return false;
     }
-    let body = item.body.to_ascii_lowercase();
+    coderabbit_body_is_non_actionable_notice(&item.body)
+}
+
+/// Recognizes CodeRabbit auto-generated issue comments that signal a completed
+/// (or unavailable) review and therefore carry no actionable feedback: the
+/// summary/walkthrough comment, the "finished reviewing" notice, and the
+/// rate-limit / out-of-credits "review limit reached" warning. Any of these
+/// confirms CodeRabbit has reported on the current head, so readiness can be
+/// satisfied without an actual review thread.
+fn coderabbit_body_is_non_actionable_notice(body: &str) -> bool {
+    let body = body.to_ascii_lowercase();
     body.contains("summary by coderabbit")
+        || body.contains("summarize by coderabbit")
         || (body.contains("walkthrough") && body.contains("coderabbit"))
         || body.contains("coderabbit finished reviewing this pull request")
+        || body.contains("rate limited by coderabbit")
+        || body.contains("review limit reached")
+        || (body.contains("coderabbit") && body.contains("run out of usage credits"))
 }
 
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P08
