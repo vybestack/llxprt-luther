@@ -4602,6 +4602,8 @@ fn remediate_pr_followup_prompt_contract() {
     assert!(prompt.contains("Previous pr-remediation-result.json validation_errors"));
     assert!(prompt
         .contains("fixed evidence for coderabbit_feedback:cr-valid is not tied to current head"));
+    assert!(prompt.contains("do not create, copy, or modify any pr-followup/history files"));
+
 
     assert!(prompt.contains("structured evidence"));
     assert!(prompt.contains("Free-form-only completion is not acceptable"));
