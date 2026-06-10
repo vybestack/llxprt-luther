@@ -226,6 +226,11 @@ impl PrFollowupArtifactStore {
             &mut value,
         )?;
         validate_json_object(&value)?;
+        // Reject contradictory routing states at the source: a contradictory
+        // artifact must never be persisted, so the same per-family invariants
+        // enforced on the read path are also enforced here before the write.
+        // @requirement:REQ-PRFU-007
+        validate_family_invariants(artifact_family, &value)?;
         let bytes = serde_json::to_vec_pretty(&value)
             .map_err(|err| artifact_error(format!("serialize artifact json: {err}")))?;
         atomic_write(&history_path, &bytes)?;

@@ -51,10 +51,11 @@ pub use pr_followup_artifacts::{
     SystemClockSleeper, SystemPrFollowupFilesystem,
 };
 pub use pr_followup_types::{
-    ArtifactSequenceMetadata, CiFailures, CodeRabbitFeedback, FeedbackEvaluations,
-    FeedbackMarkerReport, FeedbackState, PostPrFailureTerminal, PostPrIterationGuard,
-    PostPrTestResult, PrCheckStatus, PrFollowupBinding, PrIdentity, PrRemediationPlan,
-    PrRemediationResult, PushRemediationResult, PR_FOLLOWUP_SCHEMA_VERSION,
+    ArtifactSequenceMetadata, CiFailures, CodeRabbitFeedback, CollectionState, EvaluationState,
+    FeedbackEvaluations, FeedbackMarkerReport, FeedbackState, OverallState, PlanState,
+    PostPrFailureTerminal, PostPrIterationGuard, PostPrTestResult, PrCheckStatus,
+    PrFollowupBinding, PrIdentity, PrRemediationPlan, PrRemediationResult, PushRemediationResult,
+    ValidationState, PR_FOLLOWUP_SCHEMA_VERSION,
 };
 pub use pr_remediation::{
     LlxprtInvocationRequest, LlxprtInvocationResult, PostPrFailureTerminalExecutor,

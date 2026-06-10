@@ -14,12 +14,12 @@ use luther_workflow::engine::executor::{
 };
 use luther_workflow::engine::executors::SystemPrFollowupFilesystem;
 use luther_workflow::engine::executors::{
-    ArtifactWriter, CiFailures, ClockSleeper, CommandFeedbackEvaluationAdapter,
+    ArtifactWriter, CiFailures, ClockSleeper, CollectionState, CommandFeedbackEvaluationAdapter,
     FeedbackEvaluationAdapter, FeedbackEvaluationRequest, FeedbackEvaluatorCommandRunner,
     FeedbackEvaluatorExecutor, GithubCheckFailuresExecutorWithRunner,
     GithubCodeRabbitFeedbackExecutorWithRunner, GithubFeedbackMarkerExecutorWithRunner,
     GithubPrChecksExecutorWithRunner, GithubPrCommandRunner, GithubPrIdentityExecutorWithRunner,
-    LlxprtInvocationRequest, LlxprtInvocationResult, PostPrFailureTerminalExecutor,
+    LlxprtInvocationRequest, LlxprtInvocationResult, OverallState, PostPrFailureTerminalExecutor,
     PostPrIterationGuardExecutor, PostPrTestCommandRequest, PostPrTestCommandResult,
     PostPrTestCommandRunner, PrCheckStatus, PrFollowupArtifactStore, PrFollowupBinding,
     PrFollowupLlxprtCommandRunner, PrFollowupRemediationExecutorWithRunner,
@@ -383,9 +383,28 @@ impl GithubPrCommandRunner for ScriptedGithubRunner {
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P05
 /// @requirement:REQ-PRFU-002
 /// @pseudocode lines 5-7
-#[derive(serde::Serialize)]
 struct TestArtifactPayload {
     payload_state: String,
+}
+
+// Generic sequence-test vehicle. Because routing-state invariants are now
+// enforced on every write (not just reads), this payload must serialize with
+// schema-valid routing-state fields so the per-family validators accept it when
+// it is written under the `pr-check-status` / `ci-failures` families. The
+// validators only inspect their own field (and `payload_state` is ignored), and
+// `failed` + `collected` form no contradictory state.
+impl serde::Serialize for TestArtifactPayload {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+        let mut state = serializer.serialize_struct("TestArtifactPayload", 3)?;
+        state.serialize_field("payload_state", &self.payload_state)?;
+        state.serialize_field("overall_state", "failed")?;
+        state.serialize_field("collection_state", "collected")?;
+        state.end()
+    }
 }
 
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P04
@@ -1569,7 +1588,7 @@ fn pr_check_status_deserializes_from_existing_fixture() {
     typed
         .validate_invariants()
         .expect("existing fixture must satisfy invariants");
-    assert_eq!(typed.overall_state, "failed");
+    assert_eq!(typed.overall_state, OverallState::Failed);
 }
 
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P05
@@ -1587,7 +1606,7 @@ fn ci_failures_deserializes_from_existing_fixture() {
     typed
         .validate_invariants()
         .expect("existing fixture must satisfy invariants");
-    assert_eq!(typed.collection_state, "collected");
+    assert_eq!(typed.collection_state, CollectionState::Collected);
 }
 
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P07
@@ -6643,4 +6662,249 @@ fn executor_error_policy_writes_best_effort_failure_artifact_before_fatal_outcom
         .get("failure_sequence")
         .and_then(serde_json::Value::as_u64)
         .is_some());
+}
+
+// ---------------------------------------------------------------------------
+// Issue #5: typed PR follow-up routing-state transition matrix and write-path
+// rejection of contradictory artifacts.
+// ---------------------------------------------------------------------------
+
+/// Drives collect_ci_failures from a seeded pr-check-status whose typed
+/// `overall_state` determines routing, asserting both the persisted
+/// `collection_state` and the StepOutcome for each terminal state.
+/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P07
+/// @requirement:REQ-PRFU-007
+fn run_ci_failures_transition(
+    overall_state: &str,
+    checks: serde_json::Value,
+    stale_checks: serde_json::Value,
+    fatal_source: serde_json::Value,
+) -> (StepOutcome, serde_json::Value) {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_p07_check_status(&temp, overall_state, checks, stale_checks, fatal_source);
+    let mut context = p07_context(&temp);
+    let outcome = GithubCheckFailuresExecutorWithRunner::new(
+        ScriptedGithubRunner::new(
+            serde_json::json!([]),
+            serde_json::json!({ "total_count": 0, "check_runs": [] }),
+        ),
+        FixedClock,
+    )
+    .execute(&mut context, &p07_params(&temp))
+    .expect("collect ci failures");
+    let artifact = read_json(&p07_ci_failures_path(&temp));
+    (outcome, artifact)
+}
+
+/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P07
+/// @requirement:REQ-PRFU-007
+#[test]
+fn collect_ci_failures_transition_matrix_routes_from_typed_overall_state() {
+    // passed -> collected -> Success
+    let (outcome, artifact) = run_ci_failures_transition(
+        "passed",
+        serde_json::json!([{ "check_id": "build", "name": "build", "state": "success", "conclusion": "success", "bucket": "passed", "url": null, "run_id": null, "job_id": null }]),
+        serde_json::json!([]),
+        serde_json::Value::Null,
+    );
+    assert_expected_outcome(
+        outcome,
+        StepOutcome::Success,
+        "passed checks must collect cleanly and route Success",
+    );
+    assert_eq!(
+        artifact
+            .get("collection_state")
+            .and_then(serde_json::Value::as_str),
+        Some("collected")
+    );
+
+    // fatal + fatal_source=api -> fatal -> Fatal
+    let (outcome, artifact) = run_ci_failures_transition(
+        "fatal",
+        serde_json::json!([]),
+        serde_json::json!([]),
+        serde_json::json!("api"),
+    );
+    assert_expected_outcome(
+        outcome,
+        StepOutcome::Fatal,
+        "fatal overall_state with api fatal_source must route Fatal",
+    );
+    assert_eq!(
+        artifact
+            .get("collection_state")
+            .and_then(serde_json::Value::as_str),
+        Some("fatal")
+    );
+    assert_eq!(
+        artifact.get("watcher_fatal_source"),
+        Some(&serde_json::json!("api"))
+    );
+
+    // fatal + fatal_source=null (stale-only) -> fatal -> Fatal
+    let (outcome, artifact) = run_ci_failures_transition(
+        "fatal",
+        serde_json::json!([]),
+        serde_json::json!([]),
+        serde_json::Value::Null,
+    );
+    assert_expected_outcome(
+        outcome,
+        StepOutcome::Fatal,
+        "fatal overall_state with null fatal_source (stale-only) must still route Fatal",
+    );
+    assert_eq!(
+        artifact
+            .get("collection_state")
+            .and_then(serde_json::Value::as_str),
+        Some("fatal")
+    );
+}
+
+/// A green (`passed`) pr-check-status must never route the collection step
+/// fatal. The contradictory `passed` + stale `fatal_source` artifact cannot be
+/// persisted (write-path validation) and, even read directly, the typed routing
+/// view keeps `passed` non-fatal. This is the exact smoke failure from issue #5.
+/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P07
+/// @requirement:REQ-PRFU-007
+#[test]
+fn passed_checks_after_transient_api_error_cannot_route_fatal() {
+    let (outcome, artifact) = run_ci_failures_transition(
+        "passed",
+        serde_json::json!([{ "check_id": "build", "name": "build", "state": "success", "conclusion": "success", "bucket": "passed", "url": null, "run_id": null, "job_id": null }]),
+        serde_json::json!([]),
+        serde_json::Value::Null,
+    );
+    assert_expected_outcome(
+        outcome,
+        StepOutcome::Success,
+        "green checks after a transient API error must route Success, never Fatal",
+    );
+    assert_eq!(
+        artifact
+            .get("collection_state")
+            .and_then(serde_json::Value::as_str),
+        Some("collected")
+    );
+    assert_eq!(
+        artifact.get("fatal_source"),
+        Some(&serde_json::Value::Null),
+        "a collected, all-passed artifact must not carry a fatal_source"
+    );
+}
+
+/// Write-path enforcement: persisting a contradictory `passed` +
+/// `fatal_source="api"` pr-check-status must be rejected at write time so the
+/// contradictory state can never reach the routing read site.
+/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P05
+/// @requirement:REQ-PRFU-007
+#[test]
+fn write_json_artifact_rejects_contradictory_passed_with_fatal_source() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let store = PrFollowupArtifactStore::new(temp.path().join("artifacts"));
+    let binding = p07_binding();
+    let err = store
+        .write_json_artifact(
+            &binding,
+            "pr-check-status",
+            "watch_pr_checks",
+            3,
+            &serde_json::json!({
+                "pr_url": "https://github.com/example/workflow/pull/1910",
+                "overall_state": "passed",
+                "fatal_source": "api"
+            }),
+            None,
+            &FixedClock,
+        )
+        .expect_err("contradictory passed+fatal_source must be rejected on write");
+    assert!(
+        format!("{err}").contains("fatal_source"),
+        "write rejection must cite the contradictory passed+fatal_source state; err={err:?}"
+    );
+    assert!(
+        !store.canonical_path(&binding, "pr-check-status").exists(),
+        "a rejected contradictory artifact must never be persisted"
+    );
+}
+
+/// Write-path enforcement: persisting a contradictory `collected` +
+/// non-null `watcher_fatal_source` ci-failures artifact must be rejected.
+/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P05
+/// @requirement:REQ-PRFU-007
+#[test]
+fn write_json_artifact_rejects_contradictory_collected_with_watcher_fatal_source() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let store = PrFollowupArtifactStore::new(temp.path().join("artifacts"));
+    let binding = p07_binding();
+    let err = store
+        .write_json_artifact(
+            &binding,
+            "ci-failures",
+            "collect_ci_failures",
+            4,
+            &serde_json::json!({
+                "collection_state": "collected",
+                "failures": [],
+                "pending_or_unknown": [],
+                "fatal_source": serde_json::Value::Null,
+                "watcher_fatal_source": { "class": "api_error" }
+            }),
+            None,
+            &FixedClock,
+        )
+        .expect_err("collected + non-null watcher_fatal_source must be rejected on write");
+    assert!(
+        format!("{err}").contains("watcher_fatal_source"),
+        "write rejection must cite the contradictory collected+watcher_fatal_source state; err={err:?}"
+    );
+    assert!(
+        !store.canonical_path(&binding, "ci-failures").exists(),
+        "a rejected contradictory ci-failures artifact must never be persisted"
+    );
+}
+
+/// Write-path enforcement accepts valid routing states for both families so the
+/// validator does not over-reject legitimate artifacts.
+/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P05
+/// @requirement:REQ-PRFU-007
+#[test]
+fn write_json_artifact_accepts_valid_routing_states() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let store = PrFollowupArtifactStore::new(temp.path().join("artifacts"));
+    let binding = p07_binding();
+    store
+        .write_json_artifact(
+            &binding,
+            "pr-check-status",
+            "watch_pr_checks",
+            3,
+            &serde_json::json!({
+                "overall_state": "passed",
+                "fatal_source": serde_json::Value::Null
+            }),
+            None,
+            &FixedClock,
+        )
+        .expect("valid passed + null fatal_source must persist");
+    store
+        .write_json_artifact(
+            &binding,
+            "ci-failures",
+            "collect_ci_failures",
+            4,
+            &serde_json::json!({
+                "collection_state": "fatal",
+                "failures": [],
+                "pending_or_unknown": [],
+                "fatal_source": "api",
+                "watcher_fatal_source": "api"
+            }),
+            None,
+            &FixedClock,
+        )
+        .expect("valid fatal + api watcher_fatal_source must persist");
+    assert!(store.canonical_path(&binding, "pr-check-status").exists());
+    assert!(store.canonical_path(&binding, "ci-failures").exists());
 }

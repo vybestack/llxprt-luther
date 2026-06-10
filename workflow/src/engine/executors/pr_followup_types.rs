@@ -18,6 +18,164 @@ fn is_present_non_null(field: &Option<Value>) -> bool {
 /// @pseudocode lines 1-53
 pub const PR_FOLLOWUP_SCHEMA_VERSION: u32 = 1;
 
+/// Typed terminal `overall_state` produced by PR check watching. Modeling the
+/// routing state as an enum makes invalid states unrepresentable instead of
+/// relying on ad hoc string comparisons against loosely validated JSON.
+/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P03
+/// @requirement:REQ-PRFU-007
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OverallState {
+    /// All required checks reported success.
+    Passed,
+    /// At least one required check failed.
+    Failed,
+    /// Check state could not be determined.
+    #[default]
+    Unknown,
+    /// Watching terminated fatally (e.g. a non-recoverable API error).
+    Fatal,
+    /// Pending checks never resolved within the configured timeout.
+    PendingTimeout,
+}
+
+impl OverallState {
+    /// Returns the canonical snake_case wire string for this state, matching
+    /// the serde representation used in persisted artifacts.
+    /// @requirement:REQ-PRFU-007
+    pub fn as_str(self) -> &'static str {
+        match self {
+            OverallState::Passed => "passed",
+            OverallState::Failed => "failed",
+            OverallState::Unknown => "unknown",
+            OverallState::Fatal => "fatal",
+            OverallState::PendingTimeout => "pending_timeout",
+        }
+    }
+}
+
+/// Typed `collection_state` produced by CI failure collection.
+/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P03
+/// @requirement:REQ-PRFU-007
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CollectionState {
+    /// Failures (if any) were collected without a fatal upstream signal.
+    #[default]
+    Collected,
+    /// Collection routed fatal because the upstream watcher was fatal.
+    Fatal,
+}
+
+impl CollectionState {
+    /// Returns the canonical snake_case wire string for this state.
+    /// @requirement:REQ-PRFU-007
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CollectionState::Collected => "collected",
+            CollectionState::Fatal => "fatal",
+        }
+    }
+}
+
+/// Typed `evaluation_state` produced by CodeRabbit feedback evaluation.
+/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P03
+/// @requirement:REQ-PRFU-007
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EvaluationState {
+    /// Evaluation completed and a decision is available.
+    #[default]
+    Complete,
+    /// The evaluation budget was exhausted before completion.
+    BudgetExhausted,
+    /// Evaluation could not complete but is neither budget-exhausted nor fatal.
+    Incomplete,
+    /// Evaluation terminated fatally.
+    Fatal,
+}
+
+impl EvaluationState {
+    /// Returns the canonical snake_case wire string for this state.
+    /// @requirement:REQ-PRFU-007
+    pub fn as_str(self) -> &'static str {
+        match self {
+            EvaluationState::Complete => "complete",
+            EvaluationState::BudgetExhausted => "budget_exhausted",
+            EvaluationState::Incomplete => "incomplete",
+            EvaluationState::Fatal => "fatal",
+        }
+    }
+}
+
+/// Typed `plan_state` produced by remediation planning.
+/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P03
+/// @requirement:REQ-PRFU-007
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlanState {
+    /// No remediation work is required.
+    #[default]
+    Clean,
+    /// Remediation work is required and can proceed.
+    NeedsRemediation,
+    /// Remediation is blocked pending human judgment.
+    BlockedNeedsUserJudgment,
+    /// Planning terminated fatally.
+    Fatal,
+}
+
+impl PlanState {
+    /// Returns the canonical snake_case wire string for this state.
+    /// @requirement:REQ-PRFU-007
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PlanState::Clean => "clean",
+            PlanState::NeedsRemediation => "needs_remediation",
+            PlanState::BlockedNeedsUserJudgment => "blocked_needs_user_judgment",
+            PlanState::Fatal => "fatal",
+        }
+    }
+}
+
+/// Typed `validation_state` produced by remediation result validation.
+/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P03
+/// @requirement:REQ-PRFU-007
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ValidationState {
+    /// No validation has been performed yet (initial artifact state).
+    #[default]
+    Unvalidated,
+    /// The remediation result validated successfully.
+    Valid,
+    /// The result was malformed but remediation can be retried.
+    FixableMalformed,
+    /// The malformed-result retry cap was exhausted.
+    MalformedCapExhausted,
+    /// The result was well-formed but remediation was unsuccessful.
+    ValidButUnsuccessful,
+    /// The unsuccessful-remediation attempt cap was exhausted.
+    UnsuccessfulRemediationCapExhausted,
+}
+
+impl ValidationState {
+    /// Returns the canonical snake_case wire string for this state.
+    /// @requirement:REQ-PRFU-007
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ValidationState::Unvalidated => "unvalidated",
+            ValidationState::Valid => "valid",
+            ValidationState::FixableMalformed => "fixable_malformed",
+            ValidationState::MalformedCapExhausted => "malformed_cap_exhausted",
+            ValidationState::ValidButUnsuccessful => "valid_but_unsuccessful",
+            ValidationState::UnsuccessfulRemediationCapExhausted => {
+                "unsuccessful_remediation_cap_exhausted"
+            }
+        }
+    }
+}
+
 /// Common PR artifact binding fields shared by PR follow-through artifacts.
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P03
 /// @requirement:REQ-PRFU-002
@@ -68,7 +226,7 @@ pub struct PrCheckStatus {
     pub binding: PrFollowupBinding,
     #[serde(flatten)]
     pub sequence: ArtifactSequenceMetadata,
-    pub overall_state: String,
+    pub overall_state: OverallState,
     /// Watcher fatal source recorded when check polling failed fatally.
     /// @requirement:REQ-PRFU-007
     #[serde(default)]
@@ -78,24 +236,15 @@ pub struct PrCheckStatus {
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P03
 /// @requirement:REQ-PRFU-007
 impl PrCheckStatus {
-    /// Allowed terminal `overall_state` values produced by check watching.
-    /// @requirement:REQ-PRFU-007
-    const ALLOWED_OVERALL_STATES: [&'static str; 5] =
-        ["passed", "failed", "fatal", "unknown", "pending_timeout"];
-
-    /// Validates routing invariants: known `overall_state` and the
-    /// "passed implies no fatal_source" contradiction guard.
+    /// Validates routing invariants. `overall_state` is now an exhaustive enum,
+    /// so the only remaining check is the "passed implies no fatal_source"
+    /// cross-field contradiction guard.
     /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P03
     /// @requirement:REQ-PRFU-007
     pub fn validate_invariants(&self) -> Result<(), String> {
-        if !Self::ALLOWED_OVERALL_STATES.contains(&self.overall_state.as_str()) {
-            return Err(format!(
-                "pr-check-status overall_state must be one of {:?}, got {:?}",
-                Self::ALLOWED_OVERALL_STATES,
-                self.overall_state
-            ));
-        }
-        if self.overall_state == "passed" && is_present_non_null(&self.fatal_source) {
+        if matches!(self.overall_state, OverallState::Passed)
+            && is_present_non_null(&self.fatal_source)
+        {
             return Err(
                 "pr-check-status overall_state 'passed' must not carry a non-null fatal_source"
                     .to_string(),
@@ -115,7 +264,7 @@ pub struct CiFailures {
     pub binding: PrFollowupBinding,
     #[serde(flatten)]
     pub sequence: ArtifactSequenceMetadata,
-    pub collection_state: String,
+    pub collection_state: CollectionState,
     /// Fatal source carried forward into the collection artifact.
     /// @requirement:REQ-PRFU-007
     #[serde(default)]
@@ -129,28 +278,21 @@ pub struct CiFailures {
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P03
 /// @requirement:REQ-PRFU-007
 impl CiFailures {
-    /// Allowed `collection_state` values produced by failure collection.
-    /// @requirement:REQ-PRFU-007
-    const ALLOWED_COLLECTION_STATES: [&'static str; 2] = ["collected", "fatal"];
-
-    /// Validates routing invariants for the collection artifact. A non-fatal
-    /// `collected` state must not carry an upstream `watcher_fatal_source`,
-    /// because the collector only emits `collected` when the watcher fatal
-    /// source was null; a stale value here is exactly the contradictory state
-    /// that can misroute the workflow. (Note: a `collected` artifact may still
-    /// carry a non-null `fatal_source` derived from `overall_state` when
-    /// pending/unknown checks remain, so that field is not constrained here.)
+    /// Validates routing invariants for the collection artifact. `collection_state`
+    /// is now an exhaustive enum, so the only remaining check is the cross-field
+    /// contradiction guard: a non-fatal `collected` state must not carry an
+    /// upstream `watcher_fatal_source`, because the collector only emits
+    /// `collected` when the watcher fatal source was null; a stale value here is
+    /// exactly the contradictory state that can misroute the workflow. (Note: a
+    /// `collected` artifact may still carry a non-null `fatal_source` derived
+    /// from `overall_state` when pending/unknown checks remain, so that field is
+    /// not constrained here.)
     /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P03
     /// @requirement:REQ-PRFU-007
     pub fn validate_invariants(&self) -> Result<(), String> {
-        if !Self::ALLOWED_COLLECTION_STATES.contains(&self.collection_state.as_str()) {
-            return Err(format!(
-                "ci-failures collection_state must be one of {:?}, got {:?}",
-                Self::ALLOWED_COLLECTION_STATES,
-                self.collection_state
-            ));
-        }
-        if self.collection_state == "collected" && is_present_non_null(&self.watcher_fatal_source) {
+        if matches!(self.collection_state, CollectionState::Collected)
+            && is_present_non_null(&self.watcher_fatal_source)
+        {
             return Err(
                 "ci-failures collection_state 'collected' must not carry a non-null watcher_fatal_source"
                     .to_string(),
@@ -190,7 +332,7 @@ pub struct FeedbackState {
 pub struct FeedbackEvaluations {
     pub binding: PrFollowupBinding,
     pub sequence: ArtifactSequenceMetadata,
-    pub evaluation_state: String,
+    pub evaluation_state: EvaluationState,
 }
 
 /// Remediation plan artifact schema contract for `pr-remediation-plan.json`.
@@ -201,7 +343,7 @@ pub struct FeedbackEvaluations {
 pub struct PrRemediationPlan {
     pub binding: PrFollowupBinding,
     pub sequence: ArtifactSequenceMetadata,
-    pub plan_state: String,
+    pub plan_state: PlanState,
 }
 
 /// Remediation result artifact schema contract for `pr-remediation-result.json`.
@@ -212,7 +354,7 @@ pub struct PrRemediationPlan {
 pub struct PrRemediationResult {
     pub binding: PrFollowupBinding,
     pub sequence: ArtifactSequenceMetadata,
-    pub validation_state: String,
+    pub validation_state: ValidationState,
 }
 
 /// Post-PR test result artifact schema contract for `post-pr-test-result.json`.

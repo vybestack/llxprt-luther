@@ -15,7 +15,7 @@ use crate::engine::executors::pr_followup_artifacts::{
     ArtifactWriter, ClockSleeper, PrFollowupArtifactStore,
 };
 use crate::engine::executors::pr_followup_types::{
-    PrCheckStatus, PrFollowupBinding, PR_FOLLOWUP_SCHEMA_VERSION,
+    CollectionState, OverallState, PrCheckStatus, PrFollowupBinding, PR_FOLLOWUP_SCHEMA_VERSION,
 };
 use crate::engine::runner::EngineError;
 use crate::engine::transition::StepOutcome;
@@ -230,7 +230,7 @@ struct NormalizedCheck {
 /// @pseudocode lines 19-33
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct CheckClassification {
-    overall_state: String,
+    overall_state: OverallState,
     current_checks: Vec<NormalizedCheck>,
     stale_checks: Vec<NormalizedCheck>,
     pending_count: usize,
@@ -344,7 +344,7 @@ fn watch_pr_checks(
     let interval_seconds = u64_param(params, "poll_interval_seconds", 300);
     let max_duration_seconds = u64_param(params, "max_duration_seconds", 3600);
     let mut observations = Vec::new();
-    let mut final_classification = CheckClassification::empty("unknown");
+    let mut final_classification = CheckClassification::empty(OverallState::Unknown);
 
     for attempt in 1..=max_attempts {
         let observed_at = clock.now_rfc3339();
@@ -382,10 +382,12 @@ fn watch_pr_checks(
         clock.sleep(Duration::from_secs(interval_seconds));
     }
 
-    Ok(match final_classification.overall_state.as_str() {
-        "passed" => StepOutcome::Success,
-        "failed" => StepOutcome::Fixable,
-        _ => StepOutcome::Fatal,
+    Ok(match final_classification.overall_state {
+        OverallState::Passed => StepOutcome::Success,
+        OverallState::Failed => StepOutcome::Fixable,
+        OverallState::Unknown | OverallState::Fatal | OverallState::PendingTimeout => {
+            StepOutcome::Fatal
+        }
     })
 }
 
@@ -688,11 +690,10 @@ fn classify_checks(head_sha: &str, checks: Vec<NormalizedCheck>) -> CheckClassif
     if current_checks.is_empty() {
         return CheckClassification {
             overall_state: if stale_checks.is_empty() {
-                "unknown"
+                OverallState::Unknown
             } else {
-                "fatal"
-            }
-            .to_string(),
+                OverallState::Fatal
+            },
             current_checks,
             stale_checks,
             pending_count: 0,
@@ -714,16 +715,16 @@ fn classify_checks(head_sha: &str, checks: Vec<NormalizedCheck>) -> CheckClassif
         }
     }
     let overall_state = if pending_count > 0 {
-        "pending_timeout"
+        OverallState::PendingTimeout
     } else if unknown_count > 0 {
-        "unknown"
+        OverallState::Unknown
     } else if failed_count > 0 {
-        "failed"
+        OverallState::Failed
     } else {
-        "passed"
+        OverallState::Passed
     };
     CheckClassification {
-        overall_state: overall_state.to_string(),
+        overall_state,
         current_checks,
         stale_checks,
         pending_count,
@@ -809,14 +810,13 @@ fn write_check_status_artifact(
         "fatal_source": fatal_source,
         "terminal_counts": terminal_counts_json(classification)
     });
-    let failure = if classification.overall_state == "passed" {
-        None
-    } else {
-        Some((
-            classification.overall_state.as_str(),
-            classification.overall_state.as_str(),
+    let failure = match classification.overall_state {
+        OverallState::Passed => None,
+        other => Some((
+            other.as_str(),
+            other.as_str(),
             json!({ "terminal_counts": terminal_counts_json(classification) }),
-        ))
+        )),
     };
     store.write_json_artifact(
         binding,
@@ -925,7 +925,7 @@ fn collect_ci_failures(
                 message: format!("deserialize pr-check-status artifact: {err}"),
             }
         })?;
-    let overall_state = typed_check_status.overall_state.clone();
+    let overall_state = typed_check_status.overall_state;
     let watcher_fatal_source = typed_check_status
         .fatal_source
         .clone()
@@ -970,7 +970,8 @@ fn collect_ci_failures(
             source_sequence,
         ));
     }
-    if !watcher_fatal_source.is_null() || overall_state == "fatal" {
+    let overall_is_fatal = matches!(overall_state, OverallState::Fatal);
+    if !watcher_fatal_source.is_null() || overall_is_fatal {
         collection.pending_or_unknown.push(json!({
             "source": "watch_pr_checks",
             "reason": "watcher_fatal",
@@ -981,17 +982,22 @@ fn collect_ci_failures(
         }));
     }
 
-    let collection_state = if overall_state == "fatal" || !watcher_fatal_source.is_null() {
-        "fatal"
+    // Route from the typed `overall_state`. A `passed` artifact is never fatal,
+    // even if a stale `fatal_source` slipped through, because the invariant
+    // validator rejects that contradiction before we reach here.
+    // @requirement:REQ-PRFU-007
+    let collection_state = if overall_is_fatal || !watcher_fatal_source.is_null() {
+        CollectionState::Fatal
     } else {
-        "collected"
+        CollectionState::Collected
     };
-    let fatal_source = if collection_state == "fatal" {
+    let collection_is_fatal = matches!(collection_state, CollectionState::Fatal);
+    let fatal_source = if collection_is_fatal {
         watcher_fatal_source.clone()
     } else if collection.pending_or_unknown.is_empty() {
         Value::Null
     } else {
-        Value::String(overall_state.clone())
+        Value::String(overall_state.as_str().to_string())
     };
     let payload = json!({
         "collection_state": collection_state,
@@ -1008,14 +1014,14 @@ fn collect_ci_failures(
         .get("pending_or_unknown")
         .and_then(Value::as_array)
         .map_or(0, Vec::len);
-    let failure = if collection_state == "fatal" || pending_count > 0 {
+    let failure = if collection_is_fatal || pending_count > 0 {
         Some((
-            if collection_state == "fatal" {
+            if collection_is_fatal {
                 "fatal"
             } else {
                 overall_state.as_str()
             },
-            if collection_state == "fatal" {
+            if collection_is_fatal {
                 "watcher_fatal"
             } else {
                 overall_state.as_str()
@@ -1039,7 +1045,7 @@ fn collect_ci_failures(
         clock,
     )?;
 
-    if collection_state == "fatal" || pending_count > 0 {
+    if collection_is_fatal || pending_count > 0 {
         Ok(StepOutcome::Fatal)
     } else {
         Ok(StepOutcome::Success)
@@ -1390,9 +1396,9 @@ fn classification_is_terminal(classification: &CheckClassification) -> bool {
 /// @requirement:REQ-PRFU-004
 /// @pseudocode lines 24,29
 impl CheckClassification {
-    fn empty(overall_state: &str) -> Self {
+    fn empty(overall_state: OverallState) -> Self {
         Self {
-            overall_state: overall_state.to_string(),
+            overall_state,
             current_checks: Vec::new(),
             stale_checks: Vec::new(),
             pending_count: 0,
@@ -1403,7 +1409,7 @@ impl CheckClassification {
     }
 
     fn fatal(reason: String) -> Self {
-        let mut fatal = Self::empty("fatal");
+        let mut fatal = Self::empty(OverallState::Fatal);
         fatal.unknown_count = 1;
         fatal.current_checks.push(NormalizedCheck {
             check_id: "fatal".to_string(),
