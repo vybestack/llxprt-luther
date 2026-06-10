@@ -83,7 +83,10 @@ struct NoSleepClock {
 impl ClockSleeper for NoSleepClock {
     fn now_rfc3339(&self) -> String {
         let mut ticks = self.ticks.lock().expect("clock ticks");
-        let stamp = format!("2026-04-30T00:{:02}:{:02}Z", *ticks / 60, *ticks % 60);
+        let hours = *ticks / 3600;
+        let minutes = (*ticks % 3600) / 60;
+        let seconds = *ticks % 60;
+        let stamp = format!("2026-04-30T{hours:02}:{minutes:02}:{seconds:02}Z");
         *ticks += 1;
         stamp
     }
