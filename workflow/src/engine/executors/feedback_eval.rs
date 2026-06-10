@@ -439,8 +439,22 @@ fn evaluate_coderabbit_feedback(
                 unevaluated_items.push(unevaluated_item(item, "fatal_prior_state"));
             }
             ReuseLookup::NoMatch => {
-                let mut accepted: Option<Value> = None;
+                let mut accepted: Option<Value> = deterministic_feedback_evaluation(item, clock.now_rfc3339());
+                if accepted.is_some() {
+                    if let Some(accepted_value) = accepted.as_ref() {
+                        upsert_state_entry(
+                            &mut new_state_entries,
+                            &binding,
+                            item,
+                            accepted_value,
+                            clock.now_rfc3339(),
+                        );
+                    }
+                }
                 for attempt in 1..=max_attempts {
+                    if accepted.is_some() {
+                        break;
+                    }
                     let request = build_request(&binding, item);
                     let raw = match adapter.evaluate(&request) {
                         Ok(raw) => raw,
@@ -751,6 +765,34 @@ fn parse_feedback_evaluator_json(raw: &str) -> Result<Value, serde_json::Error> 
     }
 }
 
+
+fn deterministic_feedback_evaluation(item: &FeedbackItem, accepted_at: String) -> Option<Value> {
+    if !is_coderabbit_summary_item(item) {
+        return None;
+    }
+    Some(json!({
+        "item_id": item.item_id,
+        "stable_marker_key": item.stable_marker_key,
+        "body_hash": item.body_hash,
+        "head_sha": item.head_sha,
+        "decision": "invalid",
+        "reason": "CodeRabbit summary/walkthrough comments are informational and do not identify a specific actionable feedback item.",
+        "recommended_action": "No code changes or review-thread response are required for the summary comment.",
+        "accepted_at": accepted_at,
+        "attempt_count": 0,
+        "source": "deterministic",
+        "reuse_state": "not_reused"
+    }))
+}
+
+fn is_coderabbit_summary_item(item: &FeedbackItem) -> bool {
+    let key = item.stable_marker_key.to_ascii_lowercase();
+    let body = item.body.to_ascii_lowercase();
+    key.starts_with("summary:")
+        || body.contains("summary by coderabbit")
+        || (body.contains("walkthrough") && body.contains("coderabbit"))
+        || body.contains("coderabbit finished reviewing this pull request")
+}
 
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P09
 /// @requirement:REQ-PRFU-011,REQ-PRFU-012

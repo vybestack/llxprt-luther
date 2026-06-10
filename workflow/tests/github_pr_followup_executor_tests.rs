@@ -6074,6 +6074,42 @@ fn feedback_evaluator_command_errors_consume_budget_without_panicking() {
         .and_then(serde_json::Value::as_array)
         .is_some_and(|items| items.len() == 1));
 }
+#[test]
+fn feedback_evaluator_classifies_coderabbit_summary_without_llm_command() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_p09_feedback(
+        &temp,
+        serde_json::json!([p09_feedback_item(
+            "summary-item",
+            "summary:IC_123:fnv64:summary",
+            "fnv64:summary"
+        )]),
+        serde_json::json!([]),
+    );
+    let runner = FailingFeedbackEvaluatorRunner::default();
+    let adapter = CommandFeedbackEvaluationAdapter::new(
+        vec!["feedback-evaluator-bin".to_string()],
+        runner.clone(),
+    );
+    let mut context = p09_context(&temp);
+    let outcome = FeedbackEvaluatorExecutor::new(adapter, FixedClock)
+        .execute(&mut context, &p09_params(&temp))
+        .expect("deterministic summary evaluation");
+    let artifact = read_json(&p09_evaluations_path(&temp));
+
+    assert_expected_outcome(
+        outcome,
+        StepOutcome::Success,
+        "summary comments should not require an LLM evaluator call",
+    );
+    assert!(runner.calls().is_empty());
+    assert_eq!(
+        artifact.pointer("/accepted_results/0/source").and_then(serde_json::Value::as_str),
+        Some("deterministic")
+    );
+}
+
+
 
 
 
