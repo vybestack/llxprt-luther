@@ -2021,7 +2021,7 @@ fn evaluate_remediation_result(
         if matches!(status.as_str(), "already_satisfied" | "not_reproduced") {
             validate_deterministic_evidence(binding, plan_item, item, &status, &key, &mut errors);
         } else if matches!(status.as_str(), "fixed" | "changed") {
-            validate_fixed_evidence(binding, item, &key, &mut errors);
+            validate_fixed_evidence(&output_head_sha, item, &key, &mut errors);
         }
     }
     validate_complete_result_coverage(&plan_items, &result_counts, &mut errors);
@@ -2169,13 +2169,19 @@ fn validate_result_binding(
 }
 
 fn validate_fixed_evidence(
-    binding: &PrFollowupBinding,
+    output_head_sha: &str,
     item: &Value,
     key: &str,
     errors: &mut Vec<String>,
 ) {
+    // A genuine fixed/changed remediation commits a new change, so the PR head
+    // advances past the pre-remediation input head. The authoritative
+    // post-remediation head is the result's output_head_sha (derived from the
+    // working tree by the engine), and the agent contract requires
+    // evidence.current_head_sha to equal that post-remediation head. Validating
+    // against the input head here would make every real fix unverifiable.
     let evidence = item.get("evidence").unwrap_or(&Value::Null);
-    if evidence.get("current_head_sha").and_then(Value::as_str) != Some(binding.head_sha.as_str()) {
+    if evidence.get("current_head_sha").and_then(Value::as_str) != Some(output_head_sha) {
         errors.push(format!(
             "fixed evidence for {key} is not tied to current head"
         ));

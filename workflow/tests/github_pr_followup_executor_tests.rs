@@ -4405,8 +4405,8 @@ fn remediation_validator_status_enum() {
     write_p11_plan_and_result(
         &temp,
         serde_json::json!([
-            { "source_type": "ci_failure", "source_id": "ci-build", "status": "fixed", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "fixed", "evidence": { "kind": "change", "current_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "paths": ["src/lib.rs"] }, "evidence_paths": ["src/lib.rs"] },
-            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "thread-valid", "body_hash": "hash-valid", "status": "changed", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "changed", "evidence": { "kind": "change", "current_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "paths": ["src/lib.rs"] }, "evidence_paths": ["src/lib.rs"] }
+            { "source_type": "ci_failure", "source_id": "ci-build", "status": "fixed", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "fixed", "evidence": { "kind": "change", "current_head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "paths": ["src/lib.rs"] }, "evidence_paths": ["src/lib.rs"] },
+            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "thread-valid", "body_hash": "hash-valid", "status": "changed", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "changed", "evidence": { "kind": "change", "current_head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "paths": ["src/lib.rs"] }, "evidence_paths": ["src/lib.rs"] }
         ]),
     );
     let mut context = p11_context(&temp);
@@ -4424,7 +4424,7 @@ fn remediation_validator_status_enum() {
         &unknown,
         serde_json::json!([
             { "source_type": "ci_failure", "source_id": "ci-build", "status": "needs_user_judgment", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "invalid", "evidence": { "kind": "text" }, "evidence_paths": [] },
-            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "thread-valid", "body_hash": "hash-valid", "status": "fixed", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "fixed", "evidence": { "kind": "change", "current_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "paths": ["src/lib.rs"] }, "evidence_paths": ["src/lib.rs"] }
+            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "thread-valid", "body_hash": "hash-valid", "status": "fixed", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "fixed", "evidence": { "kind": "change", "current_head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "paths": ["src/lib.rs"] }, "evidence_paths": ["src/lib.rs"] }
         ]),
     );
     let mut unknown_context = p11_context(&unknown);
@@ -4448,7 +4448,7 @@ fn remediation_validator_rejects_unknown_status_outside_canonical_enum() {
         &temp,
         serde_json::json!([
             { "source_type": "ci_failure", "source_id": "ci-build", "status": "needs_user_judgment", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "invalid", "evidence": { "kind": "text" }, "evidence_paths": [] },
-            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "thread-valid", "body_hash": "hash-valid", "status": "fixed", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "fixed", "evidence": { "kind": "change", "current_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "paths": ["src/lib.rs"] }, "evidence_paths": ["src/lib.rs"] }
+            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "thread-valid", "body_hash": "hash-valid", "status": "fixed", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "fixed", "evidence": { "kind": "change", "current_head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "paths": ["src/lib.rs"] }, "evidence_paths": ["src/lib.rs"] }
         ]),
     );
     let mut context = p11_context(&temp);
@@ -4472,8 +4472,8 @@ fn remediation_validator_rejects_unknown_status_outside_canonical_enum() {
     write_p11_plan_and_result(
         &changed,
         serde_json::json!([
-            { "source_type": "ci_failure", "source_id": "ci-build", "status": "fixed", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "fixed", "evidence": { "kind": "change", "current_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "paths": ["src/lib.rs"] }, "evidence_paths": ["src/lib.rs"] },
-            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "thread-valid", "body_hash": "hash-valid", "status": "changed", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "changed", "evidence": { "kind": "change", "current_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "paths": ["src/lib.rs"] }, "evidence_paths": ["src/lib.rs"] }
+            { "source_type": "ci_failure", "source_id": "ci-build", "status": "fixed", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "fixed", "evidence": { "kind": "change", "current_head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "paths": ["src/lib.rs"] }, "evidence_paths": ["src/lib.rs"] },
+            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "thread-valid", "body_hash": "hash-valid", "status": "changed", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "changed", "evidence": { "kind": "change", "current_head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "paths": ["src/lib.rs"] }, "evidence_paths": ["src/lib.rs"] }
         ]),
     );
     let mut changed_context = p11_context(&changed);
@@ -4491,6 +4491,60 @@ fn remediation_validator_rejects_unknown_status_outside_canonical_enum() {
             .get("validation_state")
             .and_then(serde_json::Value::as_str),
         Some("valid")
+    );
+}
+/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P11
+/// @requirement:REQ-PRFU-014
+#[test]
+fn remediation_validator_ties_fixed_evidence_to_post_remediation_head() {
+    // A genuine fixed remediation commits a new change, so the PR head advances
+    // from the input head (aaaa) to the post-remediation output head (bbbb).
+    // The fixed evidence must be tied to that post-remediation head, not the
+    // pre-remediation input head. Evidence still pinned to the input head must
+    // be rejected as not tied to current head.
+    let stale = tempfile::tempdir().expect("tempdir");
+    write_p11_plan_and_result(
+        &stale,
+        serde_json::json!([
+            { "source_type": "ci_failure", "source_id": "ci-build", "status": "fixed", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "fixed", "evidence": { "kind": "change", "current_head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "paths": ["src/lib.rs"] }, "evidence_paths": ["src/lib.rs"] },
+            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "thread-valid", "body_hash": "hash-valid", "status": "fixed", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "fixed", "evidence": { "kind": "change", "current_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "paths": ["src/lib.rs"] }, "evidence_paths": ["src/lib.rs"] }
+        ]),
+    );
+    let mut stale_context = p11_context(&stale);
+    let stale_outcome = PrRemediationResultExecutor
+        .execute(&mut stale_context, &p11_params(&stale))
+        .expect("validate stale-head fixed evidence");
+    let stale_artifact = read_json(&p11_result_path(&stale));
+    assert_expected_outcome(
+        stale_outcome,
+        StepOutcome::Fixable,
+        "fixed evidence still pinned to the pre-remediation input head must not validate",
+    );
+    assert!(stale_artifact
+        .get("validation_errors")
+        .and_then(serde_json::Value::as_array)
+        .expect("validation errors")
+        .iter()
+        .any(|error| error
+            .as_str()
+            .is_some_and(|text| text.contains("not tied to current head"))));
+
+    let fresh = tempfile::tempdir().expect("tempdir");
+    write_p11_plan_and_result(
+        &fresh,
+        serde_json::json!([
+            { "source_type": "ci_failure", "source_id": "ci-build", "status": "fixed", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "fixed", "evidence": { "kind": "change", "current_head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "paths": ["src/lib.rs"] }, "evidence_paths": ["src/lib.rs"] },
+            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "thread-valid", "body_hash": "hash-valid", "status": "fixed", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "fixed", "evidence": { "kind": "change", "current_head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "paths": ["src/lib.rs"] }, "evidence_paths": ["src/lib.rs"] }
+        ]),
+    );
+    let mut fresh_context = p11_context(&fresh);
+    let fresh_outcome = PrRemediationResultExecutor
+        .execute(&mut fresh_context, &p11_params(&fresh))
+        .expect("validate post-remediation-head fixed evidence");
+    assert_expected_outcome(
+        fresh_outcome,
+        StepOutcome::Success,
+        "fixed evidence tied to the post-remediation output head must validate",
     );
 }
 
@@ -4563,8 +4617,8 @@ fn remediation_validator_writes_pending_marker_action_for_fixed_valid_feedback_b
     write_p11_plan_and_result(
         &temp,
         serde_json::json!([
-            { "source_type": "ci_failure", "source_id": "ci-build", "status": "fixed", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "fixed", "evidence": { "kind": "change", "current_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "paths": ["src/lib.rs"] }, "evidence_paths": ["src/lib.rs"] },
-            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "thread-valid", "body_hash": "hash-valid", "status": "fixed", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "fixed", "evidence": { "kind": "change", "current_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "paths": ["src/lib.rs"] }, "evidence_paths": ["src/lib.rs"] }
+            { "source_type": "ci_failure", "source_id": "ci-build", "status": "fixed", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "fixed", "evidence": { "kind": "change", "current_head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "paths": ["src/lib.rs"] }, "evidence_paths": ["src/lib.rs"] },
+            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "thread-valid", "body_hash": "hash-valid", "status": "fixed", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "fixed", "evidence": { "kind": "change", "current_head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "paths": ["src/lib.rs"] }, "evidence_paths": ["src/lib.rs"] }
         ]),
     );
     let mut context = p11_context(&temp);
