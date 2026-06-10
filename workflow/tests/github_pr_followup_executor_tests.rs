@@ -6353,6 +6353,25 @@ fn feedback_evaluator_default_argv_loads_noninteractive_profile() {
         "production feedback evaluator should use the same noninteractive llxprt profile shape as other dogfood LLM steps: {argv:?}"
     );
 }
+
+#[test]
+fn feedback_evaluator_default_argv_forbids_agentic_tool_loops() {
+    // The evaluator is a pure stdin-JSON classification call. Granting it tool
+    // access (via --yolo) with unbounded turns let the model spend its whole
+    // turn budget running git/grep and never emit the required JSON verdict,
+    // exhausting the per-item attempt budget. The invocation must be capped to
+    // a single turn and must not enable yolo/tool auto-approval.
+    let argv = luther_workflow::engine::executors::default_feedback_evaluator_argv();
+    assert!(
+        !argv.iter().any(|arg| arg == "--yolo"),
+        "feedback evaluator must not enable tool auto-approval: {argv:?}"
+    );
+    assert!(
+        argv.windows(2)
+            .any(|window| window[0] == "--set" && window[1] == "maxTurnsPerPrompt=1"),
+        "feedback evaluator must cap the model to a single turn so it cannot loop on tool calls: {argv:?}"
+    );
+}
 #[test]
 fn feedback_evaluator_command_errors_consume_budget_without_panicking() {
     let temp = tempfile::tempdir().expect("tempdir");

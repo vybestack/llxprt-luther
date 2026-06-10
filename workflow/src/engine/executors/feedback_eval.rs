@@ -28,9 +28,10 @@ pub const DEFAULT_FEEDBACK_EVALUATOR_ARGV: &[&str] = &[
     "opusthinking",
     "--set",
     "reasoning.includeInResponse=false",
-    "--yolo",
+    "--set",
+    "maxTurnsPerPrompt=1",
     "-p",
-    "Evaluate the single CodeRabbit feedback request JSON from stdin. Respond with exactly one JSON object containing item_id, stable_marker_key, body_hash, head_sha, decision, reason, and recommended_action. Do not return arrays or extra item identities.",
+    "Evaluate the single CodeRabbit feedback request JSON from stdin. Classify it using only the JSON provided; do not use any tools, do not run commands, and do not inspect the repository. Respond with exactly one JSON object containing item_id, stable_marker_key, body_hash, head_sha, decision, reason, and recommended_action. Do not return arrays or extra item identities.",
 ];
 
 #[must_use]
