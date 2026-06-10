@@ -19,7 +19,9 @@ use crate::engine::executors::pr_followup_artifacts::{
     ArtifactWriter, ClockSleeper, PrFollowupArtifactStore, SystemClockSleeper,
     SystemPrFollowupFilesystem,
 };
-use crate::engine::executors::pr_followup_types::{PrFollowupBinding, PR_FOLLOWUP_SCHEMA_VERSION};
+use crate::engine::executors::pr_followup_types::{
+    PlanState, PrFollowupBinding, ValidationState, PR_FOLLOWUP_SCHEMA_VERSION,
+};
 use crate::engine::runner::EngineError;
 use crate::engine::transition::StepOutcome;
 
@@ -50,7 +52,7 @@ impl StepExecutor for PrRemediationPlanExecutor {
 /// @pseudocode lines 1-11
 #[derive(Clone, Debug, serde::Serialize)]
 struct RemediationPlanArtifact {
-    plan_state: String,
+    plan_state: PlanState,
     must_fix: Vec<Value>,
     mark_invalid: Vec<Value>,
     needs_user_judgment: Vec<Value>,
@@ -276,15 +278,15 @@ fn build_remediation_plan(
     }
 
     let plan_state = if !needs_user_judgment.is_empty() {
-        "blocked_needs_user_judgment"
+        PlanState::BlockedNeedsUserJudgment
     } else if must_fix.is_empty() {
-        "clean"
+        PlanState::Clean
     } else {
-        "needs_remediation"
+        PlanState::NeedsRemediation
     };
 
     let payload = RemediationPlanArtifact {
-        plan_state: plan_state.to_string(),
+        plan_state,
         must_fix,
         mark_invalid: mark_invalid.clone(),
         needs_user_judgment,
@@ -298,9 +300,9 @@ fn build_remediation_plan(
         built_at: clock.now_rfc3339(),
     };
 
-    let failure = if plan_state == "blocked_needs_user_judgment" {
+    let failure = if matches!(plan_state, PlanState::BlockedNeedsUserJudgment) {
         Some((
-            plan_state,
+            plan_state.as_str(),
             "needs_user_judgment_required",
             json!({
                 "needs_user_judgment_count": payload.needs_user_judgment.len(),
@@ -314,7 +316,7 @@ fn build_remediation_plan(
         &store, &binding, &step_id, step_order, &payload, clock, failure,
     )?;
 
-    if plan_state == "clean" {
+    if matches!(plan_state, PlanState::Clean) {
         write_pending_marker_actions_for_invalid_feedback(
             &store,
             &binding,
@@ -326,9 +328,9 @@ fn build_remediation_plan(
     }
 
     Ok(match plan_state {
-        "clean" => StepOutcome::Success,
-        "needs_remediation" => StepOutcome::Fixable,
-        _ => StepOutcome::Fatal,
+        PlanState::Clean => StepOutcome::Success,
+        PlanState::NeedsRemediation => StepOutcome::Fixable,
+        PlanState::BlockedNeedsUserJudgment | PlanState::Fatal => StepOutcome::Fatal,
     })
 }
 
@@ -751,7 +753,7 @@ fn fatal_plan_payload(
     source_artifacts: Vec<Value>,
 ) -> RemediationPlanArtifact {
     RemediationPlanArtifact {
-        plan_state: "fatal".to_string(),
+        plan_state: PlanState::Fatal,
         must_fix: Vec::new(),
         mark_invalid: Vec::new(),
         needs_user_judgment: Vec::new(),
@@ -1418,7 +1420,7 @@ fn write_validator_readable_remediation_failure_result(
         "results": results,
         "verification_commands": [],
         "success_file_path": Value::Null,
-        "validation_state": "unvalidated",
+        "validation_state": ValidationState::Unvalidated.as_str(),
         "validation_retry_index": 0,
         "max_validation_retries": 2,
         "remediation_attempt_index": 0,
@@ -1847,7 +1849,7 @@ struct RemediationResultValidationArtifact {
     results: Vec<Value>,
     verification_commands: Value,
     success_file_path: Value,
-    validation_state: String,
+    validation_state: ValidationState,
     validation_retry_index: u64,
     max_validation_retries: u64,
     remediation_attempt_index: u64,
@@ -1863,7 +1865,7 @@ struct RemediationResultValidationArtifact {
 #[derive(Clone, Debug)]
 struct RemediationResultValidation {
     outcome: StepOutcome,
-    state: String,
+    state: ValidationState,
     failure_reason: String,
     errors: Vec<String>,
     unsuccessful_statuses: Vec<String>,
@@ -2035,9 +2037,9 @@ fn evaluate_remediation_result(
                 StepOutcome::Fixable
             },
             state: if exhausted {
-                "malformed_cap_exhausted".to_string()
+                ValidationState::MalformedCapExhausted
             } else {
-                "fixable_malformed".to_string()
+                ValidationState::FixableMalformed
             },
             failure_reason: "remediation_result_validation_failed".to_string(),
             errors,
@@ -2060,9 +2062,9 @@ fn evaluate_remediation_result(
                 StepOutcome::Fixable
             },
             state: if exhausted {
-                "unsuccessful_remediation_cap_exhausted".to_string()
+                ValidationState::UnsuccessfulRemediationCapExhausted
             } else {
-                "valid_but_unsuccessful".to_string()
+                ValidationState::ValidButUnsuccessful
             },
             failure_reason: "remediation_unsuccessful".to_string(),
             errors,
@@ -2077,7 +2079,7 @@ fn evaluate_remediation_result(
 
     RemediationResultValidation {
         outcome: StepOutcome::Success,
-        state: "valid".to_string(),
+        state: ValidationState::Valid,
         failure_reason: String::new(),
         errors,
         unsuccessful_statuses,
@@ -2271,7 +2273,7 @@ fn remediation_result_payload(
             .get("success_file_path")
             .cloned()
             .unwrap_or(Value::Null),
-        validation_state: validation.state.clone(),
+        validation_state: validation.state,
         validation_retry_index: validation.validation_retry_index,
         max_validation_retries: validation.max_validation_retries,
         remediation_attempt_index: validation.remediation_attempt_index,

@@ -18,7 +18,9 @@ use crate::engine::executor::{interpolate_string, StepContext, StepExecutor};
 use crate::engine::executors::pr_followup_artifacts::{
     ArtifactWriter, ClockSleeper, PrFollowupArtifactStore, SystemPrFollowupFilesystem,
 };
-use crate::engine::executors::pr_followup_types::{PrFollowupBinding, PR_FOLLOWUP_SCHEMA_VERSION};
+use crate::engine::executors::pr_followup_types::{
+    EvaluationState, PrFollowupBinding, PR_FOLLOWUP_SCHEMA_VERSION,
+};
 use crate::engine::runner::EngineError;
 use crate::engine::transition::StepOutcome;
 
@@ -309,7 +311,7 @@ struct FeedbackItem {
 /// @pseudocode lines 6,14-21
 #[derive(Clone, Debug, serde::Serialize)]
 struct FeedbackEvaluationArtifact {
-    evaluation_state: String,
+    evaluation_state: EvaluationState,
     items_seen: u64,
     accepted_results: Vec<Value>,
     rejected_attempts: Vec<Value>,
@@ -343,7 +345,7 @@ fn evaluate_coderabbit_feedback(
         Ok(value) => value,
         Err(err) => {
             let payload = empty_artifact(
-                "fatal",
+                EvaluationState::Fatal,
                 0,
                 max_attempts,
                 vec![json!({
@@ -370,7 +372,7 @@ fn evaluate_coderabbit_feedback(
 
     if feedback.get("readiness_state").and_then(Value::as_str) != Some("ready") {
         let payload = empty_artifact(
-            "fatal",
+            EvaluationState::Fatal,
             0,
             max_attempts,
             vec![source_artifact(&feedback, "coderabbit-feedback")],
@@ -534,17 +536,17 @@ fn evaluate_coderabbit_feedback(
         && unevaluated_items.is_empty()
         && exactly_one_accepted_per_item(&items, &accepted_results);
     let evaluation_state = if complete {
-        "complete"
+        EvaluationState::Complete
     } else if !budget_exhausted_items.is_empty() {
-        "budget_exhausted"
+        EvaluationState::BudgetExhausted
     } else if !fatal_reuse_errors.is_empty() {
-        "fatal"
+        EvaluationState::Fatal
     } else {
-        "incomplete"
+        EvaluationState::Incomplete
     };
 
     let payload = FeedbackEvaluationArtifact {
-        evaluation_state: evaluation_state.to_string(),
+        evaluation_state,
         items_seen: items.len() as u64,
         accepted_results,
         rejected_attempts,
@@ -570,11 +572,10 @@ fn evaluate_coderabbit_feedback(
         None
     } else {
         Some((
-            evaluation_state,
-            if evaluation_state == "budget_exhausted" {
-                "evaluation_budget_exhausted"
-            } else {
-                "evaluation_incomplete_or_fatal"
+            evaluation_state.as_str(),
+            match evaluation_state {
+                EvaluationState::BudgetExhausted => "evaluation_budget_exhausted",
+                _ => "evaluation_incomplete_or_fatal",
             },
             json!({
                 "fatal_reuse_errors": fatal_reuse_errors,
@@ -997,13 +998,13 @@ fn exactly_one_accepted_per_item(items: &[FeedbackItem], accepted: &[Value]) -> 
 }
 
 fn empty_artifact(
-    state: &str,
+    state: EvaluationState,
     items_seen: u64,
     max_attempts: u64,
     source_artifacts: Vec<Value>,
 ) -> FeedbackEvaluationArtifact {
     FeedbackEvaluationArtifact {
-        evaluation_state: state.to_string(),
+        evaluation_state: state,
         items_seen,
         accepted_results: Vec::new(),
         rejected_attempts: Vec::new(),
