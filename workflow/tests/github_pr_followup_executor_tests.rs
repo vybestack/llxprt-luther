@@ -5959,6 +5959,17 @@ fn feedback_evaluator_command_shell_safety_writes_raw_llm_text_to_bounded_artifa
 }
 
 #[test]
+fn feedback_evaluator_default_argv_loads_noninteractive_profile() {
+    let argv = luther_workflow::engine::executors::default_feedback_evaluator_argv();
+    assert!(
+        argv.windows(2)
+            .any(|window| window[0] == "--profile-load" && window[1] == "gpt55high"),
+        "production feedback evaluator should use the same noninteractive llxprt profile shape as other dogfood LLM steps: {argv:?}"
+    );
+}
+
+
+#[test]
 fn feedback_evaluator_process_runner_times_out_hung_llxprt_command() {
     let runner = ProcessFeedbackEvaluatorCommandRunner::with_timeout(Duration::from_secs(0));
     let result = runner.run_feedback_evaluator_command(
