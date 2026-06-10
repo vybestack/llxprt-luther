@@ -3,6 +3,7 @@
 use std::path::Path;
 
 use crate::workflow::schema::{WorkflowConfig, WorkflowRunRef, WorkflowType};
+use crate::workflow::validation::validate_workflow_graph;
 
 /// Error type for configuration loading and validation failures.
 /// @plan:PLAN-20260404-INITIAL-RUNTIME.P05
@@ -62,7 +63,9 @@ pub fn resolve_workflow_type(id: &str, root: &Path) -> Result<WorkflowType> {
             source_path: Some(prod_toml.to_string_lossy().to_string()),
             kind: ConfigErrorKind::NotFound,
         })?;
-        return parse_workflow_type_toml(&content);
+        let workflow_type = parse_workflow_type_toml(&content)?;
+        validate_workflow_type(&workflow_type)?;
+        return Ok(workflow_type);
     }
 
     // Try production layout JSON
@@ -72,7 +75,9 @@ pub fn resolve_workflow_type(id: &str, root: &Path) -> Result<WorkflowType> {
             source_path: Some(prod_json.to_string_lossy().to_string()),
             kind: ConfigErrorKind::NotFound,
         })?;
-        return parse_workflow_type_json(&content);
+        let workflow_type = parse_workflow_type_json(&content)?;
+        validate_workflow_type(&workflow_type)?;
+        return Ok(workflow_type);
     }
 
     // Fall back to test fixture layout TOML
@@ -82,7 +87,9 @@ pub fn resolve_workflow_type(id: &str, root: &Path) -> Result<WorkflowType> {
             source_path: Some(valid_toml.to_string_lossy().to_string()),
             kind: ConfigErrorKind::NotFound,
         })?;
-        return parse_workflow_type_toml(&content);
+        let workflow_type = parse_workflow_type_toml(&content)?;
+        validate_workflow_type(&workflow_type)?;
+        return Ok(workflow_type);
     }
 
     // Fall back to test fixture layout JSON
@@ -92,7 +99,9 @@ pub fn resolve_workflow_type(id: &str, root: &Path) -> Result<WorkflowType> {
             source_path: Some(valid_json.to_string_lossy().to_string()),
             kind: ConfigErrorKind::NotFound,
         })?;
-        return parse_workflow_type_json(&content);
+        let workflow_type = parse_workflow_type_json(&content)?;
+        validate_workflow_type(&workflow_type)?;
+        return Ok(workflow_type);
     }
 
     // Neither file exists in any location
@@ -273,6 +282,24 @@ pub fn validate_workflow_type(workflow_type: &WorkflowType) -> Result<()> {
                 kind: ConfigErrorKind::ValidationError,
             });
         }
+    }
+
+    // Graph-structural validation: reject dangling transition targets, duplicate
+    // outcome branches, unreachable required steps, and unsafe post-PR routes
+    // before the workflow can be executed.
+    // @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P16
+    // @requirement:REQ-PRFU-018,REQ-PRFU-020
+    if let Err(graph_errors) = validate_workflow_graph(workflow_type) {
+        let message = graph_errors
+            .iter()
+            .map(|e| e.to_string())
+            .collect::<Vec<_>>()
+            .join("; ");
+        return Err(ConfigError {
+            message: format!("workflow graph validation failed: {}", message),
+            source_path: None,
+            kind: ConfigErrorKind::ValidationError,
+        });
     }
 
     Ok(())

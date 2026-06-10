@@ -3,6 +3,7 @@
 pub mod config_loader;
 pub mod schema;
 pub mod target_profile;
+pub mod validation;
 
 pub use config_loader::{
     parse_workflow_config_json, parse_workflow_config_toml, parse_workflow_type_json,
@@ -17,4 +18,7 @@ pub use schema::{
 pub use target_profile::{
     apply_target_profile_overrides, target_profile_validation_required, validate_target_profile,
     TargetProfileOverrides,
+};
+pub use validation::{
+    compute_reachable_steps, validate_workflow_graph, GraphErrorKind, GraphValidationError,
 };
