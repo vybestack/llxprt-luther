@@ -365,7 +365,7 @@ step_type = "verify"
 description = "Run lint, typecheck, test, format, build checks"
 
 [steps.parameters]
-checks = ["diff_or_existing_pr", "test", "diff_or_existing_pr"]
+checks = ["diff_or_existing_pr", "format", "clippy", "test", "diff_or_existing_pr"]
 timeout_seconds = 2400
 artifact_root = "{artifact_dir}"
 
@@ -382,6 +382,7 @@ echo 'No Luther source/config/test/doc diff found and no reusable open PR exists
 exit 1
 """
 format = "cargo fmt --check --manifest-path workflow/Cargo.toml 2>&1"
+clippy = "cargo clippy --quiet --manifest-path workflow/Cargo.toml --all-targets -- -D warnings 2>&1"
 test = "cargo test --quiet --manifest-path workflow/Cargo.toml 2>&1"
 
 
