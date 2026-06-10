@@ -6006,7 +6006,7 @@ fn feedback_evaluator_accepts_json_object_wrapped_by_llxprt_cli_progress() {
         serde_json::json!([p09_feedback_item("item-json", "thread-json", "hash-json")]),
         serde_json::json!([]),
     );
-    let raw = "## Todo Progress\n[gpt55high]\n{\"item_id\":\"item-json\",\"stable_marker_key\":\"thread-json\",\"body_hash\":\"hash-json\",\"head_sha\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"decision\":\"valid\",\"reason\":\"actionable\",\"recommended_action\":\"fix it\"}\n";
+    let raw = "## Todo Progress\n[opusthinking]\n{\"item_id\":\"item-json\",\"stable_marker_key\":\"thread-json\",\"body_hash\":\"hash-json\",\"head_sha\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"decision\":\"valid\",\"reason\":\"actionable\",\"recommended_action\":\"fix it\"}\n";
     let runner = RecordingFeedbackEvaluatorRunner::new(raw.to_string());
     let adapter =
         CommandFeedbackEvaluationAdapter::new(vec!["feedback-evaluator-bin".to_string()], runner);
@@ -6035,7 +6035,7 @@ fn feedback_evaluator_default_argv_loads_noninteractive_profile() {
     let argv = luther_workflow::engine::executors::default_feedback_evaluator_argv();
     assert!(
         argv.windows(2)
-            .any(|window| window[0] == "--profile-load" && window[1] == "gpt55high"),
+            .any(|window| window[0] == "--profile-load" && window[1] == "opusthinking"),
         "production feedback evaluator should use the same noninteractive llxprt profile shape as other dogfood LLM steps: {argv:?}"
     );
 }

@@ -25,8 +25,7 @@ use crate::engine::transition::StepOutcome;
 pub const DEFAULT_FEEDBACK_EVALUATOR_ARGV: &[&str] = &[
     "llxprt",
     "--profile-load",
-    "gpt55high",
-
+    "opusthinking",
     "--set",
     "reasoning.includeInResponse=false",
     "--yolo",
