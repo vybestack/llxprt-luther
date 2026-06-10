@@ -14,16 +14,16 @@ use luther_workflow::engine::executor::{
 };
 use luther_workflow::engine::executors::SystemPrFollowupFilesystem;
 use luther_workflow::engine::executors::{
-    ArtifactWriter, ClockSleeper, CommandFeedbackEvaluationAdapter, FeedbackEvaluationAdapter,
-    FeedbackEvaluationRequest, FeedbackEvaluatorCommandRunner, FeedbackEvaluatorExecutor,
-    GithubCheckFailuresExecutorWithRunner, GithubCodeRabbitFeedbackExecutorWithRunner,
-    GithubFeedbackMarkerExecutorWithRunner, GithubPrChecksExecutorWithRunner,
-    GithubPrCommandRunner, GithubPrIdentityExecutorWithRunner, LlxprtInvocationRequest,
-    LlxprtInvocationResult, PostPrFailureTerminalExecutor, PostPrIterationGuardExecutor,
-    PostPrTestCommandRequest, PostPrTestCommandResult, PostPrTestCommandRunner,
-    PrFollowupArtifactStore, PrFollowupBinding, PrFollowupLlxprtCommandRunner,
-    PrFollowupRemediationExecutorWithRunner, PrRemediationPlanExecutor,
-    PrRemediationResultExecutor, ProcessFeedbackEvaluatorCommandRunner,
+    ArtifactWriter, CiFailures, ClockSleeper, CommandFeedbackEvaluationAdapter,
+    FeedbackEvaluationAdapter, FeedbackEvaluationRequest, FeedbackEvaluatorCommandRunner,
+    FeedbackEvaluatorExecutor, GithubCheckFailuresExecutorWithRunner,
+    GithubCodeRabbitFeedbackExecutorWithRunner, GithubFeedbackMarkerExecutorWithRunner,
+    GithubPrChecksExecutorWithRunner, GithubPrCommandRunner, GithubPrIdentityExecutorWithRunner,
+    LlxprtInvocationRequest, LlxprtInvocationResult, PostPrFailureTerminalExecutor,
+    PostPrIterationGuardExecutor, PostPrTestCommandRequest, PostPrTestCommandResult,
+    PostPrTestCommandRunner, PrCheckStatus, PrFollowupArtifactStore, PrFollowupBinding,
+    PrFollowupLlxprtCommandRunner, PrFollowupRemediationExecutorWithRunner,
+    PrRemediationPlanExecutor, PrRemediationResultExecutor, ProcessFeedbackEvaluatorCommandRunner,
     PushRemediationChangesExecutorWithRunner, PushRemediationCommandRequest,
     PushRemediationCommandResult, PushRemediationCommandRunner, RunPostPrTestsExecutorWithRunner,
 };
@@ -1356,6 +1356,281 @@ fn artifact_schema_validation_rejects_missing_common_binding_and_history_metadat
     assert!(
         store.validate_artifact_value(&sample_binding(), "pr-check-status", &invalid).is_err(),
         "artifact schema validation must reject missing or mismatched binding fields and required history_metadata"
+    );
+}
+
+/// Builds a fully-formed flat `pr-check-status` artifact value (binding +
+/// store envelope + history_metadata) so validator tests exercise only the
+/// per-family invariants rather than envelope failures.
+/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P05
+/// @requirement:REQ-PRFU-007
+fn flat_pr_check_status_value(
+    binding: &PrFollowupBinding,
+    overall_state: &str,
+    fatal_source: serde_json::Value,
+) -> serde_json::Value {
+    serde_json::json!({
+        "schema_version": binding.schema_version,
+        "run_id": binding.run_id,
+        "repository_owner": binding.repository_owner,
+        "repository_name": binding.repository_name,
+        "pr_number": binding.pr_number,
+        "head_ref": binding.head_ref,
+        "head_sha": binding.head_sha,
+        "base_ref": binding.base_ref,
+        "base_sha": binding.base_sha,
+        "artifact_sequence": 2,
+        "write_sequence": 2,
+        "producer_step_id": "watch_pr_checks",
+        "step_order_index": 3,
+        "history_metadata": {
+            "canonical_path": "current/pr-check-status.json",
+            "history_path": "history/pr-check-status/2-2-watch_pr_checks.json",
+            "artifact_family": "pr-check-status",
+            "is_canonical": true,
+            "history_written_at": "2026-04-30T00:05:00Z"
+        },
+        "overall_state": overall_state,
+        "fatal_source": fatal_source
+    })
+}
+
+/// Builds a fully-formed flat `ci-failures` artifact value (binding + store
+/// envelope + history_metadata) for per-family invariant tests.
+/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P05
+/// @requirement:REQ-PRFU-007
+fn flat_ci_failures_value(
+    binding: &PrFollowupBinding,
+    collection_state: &str,
+    fatal_source: serde_json::Value,
+    watcher_fatal_source: serde_json::Value,
+) -> serde_json::Value {
+    serde_json::json!({
+        "schema_version": binding.schema_version,
+        "run_id": binding.run_id,
+        "repository_owner": binding.repository_owner,
+        "repository_name": binding.repository_name,
+        "pr_number": binding.pr_number,
+        "head_ref": binding.head_ref,
+        "head_sha": binding.head_sha,
+        "base_ref": binding.base_ref,
+        "base_sha": binding.base_sha,
+        "artifact_sequence": 3,
+        "write_sequence": 1,
+        "producer_step_id": "collect_ci_failures",
+        "step_order_index": 4,
+        "history_metadata": {
+            "canonical_path": "current/ci-failures.json",
+            "history_path": "history/ci-failures/3-1-collect_ci_failures.json",
+            "artifact_family": "ci-failures",
+            "is_canonical": true,
+            "history_written_at": "2026-04-30T00:06:00Z"
+        },
+        "collection_state": collection_state,
+        "fatal_source": fatal_source,
+        "watcher_fatal_source": watcher_fatal_source
+    })
+}
+
+/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P05
+/// @requirement:REQ-PRFU-007
+/// @pseudocode lines 16-33
+#[test]
+fn pr_check_status_passed_with_non_null_fatal_source_is_rejected_by_validator() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let store = PrFollowupArtifactStore::new(temp.path().to_path_buf());
+    let binding = sample_binding();
+    let value = flat_pr_check_status_value(&binding, "passed", serde_json::json!("api"));
+
+    let err = store
+        .validate_artifact_invariants("pr-check-status", &value)
+        .expect_err("passed + non-null fatal_source must be rejected");
+    assert!(
+        format!("{err}").contains("fatal_source"),
+        "validator must explain the contradictory passed+fatal_source state; err={err:?}"
+    );
+}
+
+/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P05
+/// @requirement:REQ-PRFU-007
+/// @pseudocode lines 16-33
+#[test]
+fn pr_check_status_unknown_overall_state_is_rejected_by_validator() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let store = PrFollowupArtifactStore::new(temp.path().to_path_buf());
+    let binding = sample_binding();
+    let value = flat_pr_check_status_value(&binding, "not_a_real_state", serde_json::Value::Null);
+
+    assert!(
+        store
+            .validate_artifact_invariants("pr-check-status", &value)
+            .is_err(),
+        "validator must reject an unknown overall_state value"
+    );
+}
+
+/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P05
+/// @requirement:REQ-PRFU-007
+/// @pseudocode lines 16-33
+#[test]
+fn pr_check_status_valid_passed_null_fatal_source_passes_validator() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let store = PrFollowupArtifactStore::new(temp.path().to_path_buf());
+    let binding = sample_binding();
+    let value = flat_pr_check_status_value(&binding, "passed", serde_json::Value::Null);
+
+    store
+        .validate_artifact_invariants("pr-check-status", &value)
+        .expect("passed + null fatal_source must validate");
+}
+
+/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P05
+/// @requirement:REQ-PRFU-007
+/// @pseudocode lines 1-21
+#[test]
+fn ci_failures_collected_with_non_null_watcher_fatal_source_is_rejected_by_validator() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let store = PrFollowupArtifactStore::new(temp.path().to_path_buf());
+    let binding = sample_binding();
+    let value = flat_ci_failures_value(
+        &binding,
+        "collected",
+        serde_json::Value::Null,
+        serde_json::json!({ "class": "api_error" }),
+    );
+
+    let err = store
+        .validate_artifact_invariants("ci-failures", &value)
+        .expect_err("collected + non-null watcher_fatal_source must be rejected");
+    assert!(
+        format!("{err}").contains("watcher_fatal_source"),
+        "validator must explain the contradictory collected+watcher_fatal_source state; err={err:?}"
+    );
+}
+
+/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P05
+/// @requirement:REQ-PRFU-007
+/// @pseudocode lines 1-21
+#[test]
+fn ci_failures_unknown_collection_state_is_rejected_by_validator() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let store = PrFollowupArtifactStore::new(temp.path().to_path_buf());
+    let binding = sample_binding();
+    let value = flat_ci_failures_value(
+        &binding,
+        "not_a_real_state",
+        serde_json::Value::Null,
+        serde_json::Value::Null,
+    );
+
+    assert!(
+        store
+            .validate_artifact_invariants("ci-failures", &value)
+            .is_err(),
+        "validator must reject an unknown collection_state value"
+    );
+}
+
+/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P05
+/// @requirement:REQ-PRFU-007
+/// @pseudocode lines 1-21
+#[test]
+fn ci_failures_fatal_with_null_sources_passes_validator() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let store = PrFollowupArtifactStore::new(temp.path().to_path_buf());
+    let binding = sample_binding();
+    // A stale-only / pending-driven terminal collection legitimately writes
+    // collection_state="fatal" without a fatal_source; this must not be
+    // rejected as contradictory.
+    let value = flat_ci_failures_value(
+        &binding,
+        "fatal",
+        serde_json::Value::Null,
+        serde_json::Value::Null,
+    );
+
+    store
+        .validate_artifact_invariants("ci-failures", &value)
+        .expect("fatal collection with null sources must validate");
+}
+
+/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P05
+/// @requirement:REQ-PRFU-007
+/// @pseudocode lines 16-33
+#[test]
+fn pr_check_status_deserializes_from_existing_fixture() {
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/github_pr/current/pr-check-status.json");
+    let value: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&fixture).expect("read fixture"))
+            .expect("parse fixture");
+    let typed: PrCheckStatus =
+        serde_json::from_value(value).expect("flat fixture must deserialize into PrCheckStatus");
+    typed
+        .validate_invariants()
+        .expect("existing fixture must satisfy invariants");
+    assert_eq!(typed.overall_state, "failed");
+}
+
+/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P05
+/// @requirement:REQ-PRFU-007
+/// @pseudocode lines 1-21
+#[test]
+fn ci_failures_deserializes_from_existing_fixture() {
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/github_pr/current/ci-failures.json");
+    let value: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&fixture).expect("read fixture"))
+            .expect("parse fixture");
+    let typed: CiFailures =
+        serde_json::from_value(value).expect("flat fixture must deserialize into CiFailures");
+    typed
+        .validate_invariants()
+        .expect("existing fixture must satisfy invariants");
+    assert_eq!(typed.collection_state, "collected");
+}
+
+/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P07
+/// @requirement:REQ-PRFU-007
+/// @pseudocode lines 1-21
+#[test]
+fn collect_ci_failures_rejects_contradictory_passed_with_fatal_source() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    // Seed a valid passed pr-check-status, then corrupt the canonical artifact
+    // on disk into the contradictory passed+fatal_source state. The read-time
+    // validator used by collect_ci_failures (store.read_current_json on
+    // "pr-check-status") must reject this artifact so the stale fatal_source can
+    // never drive the watcher_fatal routing branch into StepOutcome::Fatal.
+    write_p07_check_status(
+        &temp,
+        "passed",
+        serde_json::json!([{ "check_id": "build", "name": "build", "state": "success", "conclusion": "success", "bucket": "passed", "url": null, "run_id": null, "job_id": null }]),
+        serde_json::json!([]),
+        serde_json::Value::Null,
+    );
+    let store = PrFollowupArtifactStore::new(temp.path().join("artifacts"));
+    let binding = p07_binding();
+    let path = store.canonical_path(&binding, "pr-check-status");
+    let mut artifact: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).expect("read status"))
+            .expect("parse status");
+    // Sanity: before corruption the routing read accepts the passed artifact.
+    store
+        .read_current_json(&binding, "pr-check-status")
+        .expect("valid passed artifact must read cleanly before corruption");
+    artifact["fatal_source"] = serde_json::json!("api");
+    std::fs::write(
+        &path,
+        serde_json::to_vec_pretty(&artifact).expect("serialize status"),
+    )
+    .expect("rewrite status");
+
+    let err = store
+        .read_current_json(&binding, "pr-check-status")
+        .expect_err("contradictory passed+fatal_source must be rejected at the routing read site");
+    assert!(
+        format!("{err}").contains("fatal_source"),
+        "rejection must cite the contradictory passed+fatal_source state instead of silently routing Fatal; err={err:?}"
     );
 }
 
