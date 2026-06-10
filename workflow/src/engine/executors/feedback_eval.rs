@@ -5,10 +5,12 @@
 //! @pseudocode lines 1-23
 
 use std::collections::BTreeMap;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::Arc;
+use std::thread;
+use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
@@ -40,6 +42,7 @@ pub fn default_feedback_evaluator_argv() -> Vec<String> {
 
 const MAX_ATTEMPTS_PER_ITEM: u64 = 3;
 const RAW_RESPONSE_LIMIT_BYTES: usize = 16 * 1024;
+const DEFAULT_FEEDBACK_EVALUATOR_TIMEOUT_SECONDS: u64 = 300;
 
 /// Single-item feedback evaluation request.
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P03
@@ -103,7 +106,23 @@ pub trait FeedbackEvaluatorCommandRunner: Send + Sync {
 /// @requirement:REQ-PRFU-011,REQ-PRFU-012,REQ-PRFU-017
 /// @pseudocode lines 8-17
 #[derive(Clone, Debug, Default)]
-pub struct ProcessFeedbackEvaluatorCommandRunner;
+pub struct ProcessFeedbackEvaluatorCommandRunner {
+    timeout: Option<Duration>,
+}
+
+impl ProcessFeedbackEvaluatorCommandRunner {
+    #[must_use]
+    pub fn with_timeout(timeout: Duration) -> Self {
+        Self {
+            timeout: Some(timeout),
+        }
+    }
+
+    fn timeout(&self) -> Duration {
+        self.timeout
+            .unwrap_or_else(|| Duration::from_secs(DEFAULT_FEEDBACK_EVALUATOR_TIMEOUT_SECONDS))
+    }
+}
 
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P09
 /// @requirement:REQ-PRFU-011,REQ-PRFU-012,REQ-PRFU-017
@@ -126,25 +145,62 @@ impl FeedbackEvaluatorCommandRunner for ProcessFeedbackEvaluatorCommandRunner {
             .map_err(|err| {
                 feedback_eval_error(format!("spawn feedback evaluator command: {err}"))
             })?;
-        child
+        let mut stdin = child
             .stdin
-            .as_mut()
-            .ok_or_else(|| feedback_eval_error("feedback evaluator command stdin unavailable"))?
+            .take()
+            .ok_or_else(|| feedback_eval_error("feedback evaluator command stdin unavailable"))?;
+        stdin
             .write_all(stdin_json.as_bytes())
             .map_err(|err| feedback_eval_error(format!("write feedback evaluator stdin: {err}")))?;
-        let output = child.wait_with_output().map_err(|err| {
-            feedback_eval_error(format!("wait for feedback evaluator command: {err}"))
-        })?;
-        if !output.status.success() {
+        drop(stdin);
+
+        let status = wait_for_feedback_evaluator(&mut child, self.timeout())?;
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        if let Some(mut pipe) = child.stdout.take() {
+            pipe.read_to_end(&mut stdout).map_err(|err| {
+                feedback_eval_error(format!("read feedback evaluator stdout: {err}"))
+            })?;
+        }
+        if let Some(mut pipe) = child.stderr.take() {
+            pipe.read_to_end(&mut stderr).map_err(|err| {
+                feedback_eval_error(format!("read feedback evaluator stderr: {err}"))
+            })?;
+        }
+        if !status.success() {
             return Err(feedback_eval_error(format!(
                 "feedback evaluator command exited with status {}: {}",
-                output.status,
-                String::from_utf8_lossy(&output.stderr)
+                status,
+                String::from_utf8_lossy(&stderr)
             )));
         }
-        String::from_utf8(output.stdout).map_err(|err| {
+        String::from_utf8(stdout).map_err(|err| {
             feedback_eval_error(format!("feedback evaluator stdout was not utf-8: {err}"))
         })
+    }
+}
+
+fn wait_for_feedback_evaluator(
+    child: &mut std::process::Child,
+    timeout: Duration,
+) -> Result<std::process::ExitStatus, EngineError> {
+    let started = Instant::now();
+    loop {
+        if let Some(status) = child
+            .try_wait()
+            .map_err(|err| feedback_eval_error(format!("poll feedback evaluator command: {err}")))?
+        {
+            return Ok(status);
+        }
+        if started.elapsed() >= timeout {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(feedback_eval_error(format!(
+                "feedback evaluator command timed out after {} seconds",
+                timeout.as_secs()
+            )));
+        }
+        thread::sleep(Duration::from_millis(200));
     }
 }
 

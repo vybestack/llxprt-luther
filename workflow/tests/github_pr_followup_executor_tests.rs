@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use luther_workflow::engine::executor::{
     interpolate_string, ExecutorRegistry, StepContext, StepExecutor,
@@ -18,6 +19,7 @@ use luther_workflow::engine::executors::{
     FeedbackEvaluationRequest, FeedbackEvaluatorCommandRunner, FeedbackEvaluatorExecutor,
     GithubCheckFailuresExecutorWithRunner, GithubCodeRabbitFeedbackExecutorWithRunner,
     GithubFeedbackMarkerExecutorWithRunner, GithubPrChecksExecutorWithRunner,
+    ProcessFeedbackEvaluatorCommandRunner,
     GithubPrCommandRunner, GithubPrIdentityExecutorWithRunner, LlxprtInvocationRequest,
     LlxprtInvocationResult, PostPrFailureTerminalExecutor, PostPrIterationGuardExecutor,
     PostPrTestCommandRequest, PostPrTestCommandResult, PostPrTestCommandRunner,
@@ -5953,6 +5955,27 @@ fn feedback_evaluator_command_shell_safety_writes_raw_llm_text_to_bounded_artifa
     assert!(
         artifact.to_string().contains("malformed_json"),
         "malicious free-form text must be rejected as malformed JSON"
+    );
+}
+
+#[test]
+fn feedback_evaluator_process_runner_times_out_hung_llxprt_command() {
+    let runner = ProcessFeedbackEvaluatorCommandRunner::with_timeout(Duration::from_secs(0));
+    let result = runner.run_feedback_evaluator_command(
+        &[
+            "sh".to_string(),
+            "-c".to_string(),
+            "sleep 5".to_string(),
+        ],
+        "{}",
+    );
+
+    assert!(
+        result
+            .expect_err("hung evaluator command should time out")
+            .to_string()
+            .contains("timed out"),
+        "hung feedback evaluator commands must be bounded"
     );
 }
 

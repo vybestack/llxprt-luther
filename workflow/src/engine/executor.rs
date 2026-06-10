@@ -379,7 +379,7 @@ impl ExecutorRegistry {
             Box::new(crate::engine::executors::FeedbackEvaluatorExecutor::new(
                 crate::engine::executors::CommandFeedbackEvaluationAdapter::new(
                     crate::engine::executors::default_feedback_evaluator_argv(),
-                    crate::engine::executors::ProcessFeedbackEvaluatorCommandRunner,
+                    crate::engine::executors::ProcessFeedbackEvaluatorCommandRunner::default(),
                 ),
                 crate::engine::executors::SystemClockSleeper,
             )),
