@@ -2644,7 +2644,7 @@ impl FeedbackEvaluatorCommandRunner for RecordingFeedbackEvaluatorRunner {
 }
 #[derive(Clone, Debug, Default)]
 struct FailingFeedbackEvaluatorRunner {
-    calls: Arc<Mutex<Vec<(Vec<String>, String)>>>,
+    calls: FeedbackEvaluatorCalls,
 }
 
 impl FailingFeedbackEvaluatorRunner {

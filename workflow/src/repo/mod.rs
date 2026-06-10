@@ -217,7 +217,10 @@ cleanup_on_failure = false
             .expect("shared workspace should allow the configured path");
 
         assert!(workspace.is_shared());
-        assert_eq!(workspace.path_for_run("run-001"), PathBuf::from("/tmp/test-repo"));
+        assert_eq!(
+            workspace.path_for_run("run-001"),
+            PathBuf::from("/tmp/test-repo")
+        );
     }
 
     #[test]
