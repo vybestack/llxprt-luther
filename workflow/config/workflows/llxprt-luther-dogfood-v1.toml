@@ -880,19 +880,19 @@ condition = "success"
 from = "run_tests"
 to = "remediate"
 condition = "fixable"
-max_iterations = 6
+max_iterations = 10
 
 [[transitions]]
 from = "remediate"
 to = "run_tests"
 condition = "success"
-max_iterations = 6
+max_iterations = 10
 
 [[transitions]]
 from = "remediate"
 to = "run_tests"
 condition = "fixable"
-max_iterations = 6
+max_iterations = 10
 
 [[transitions]]
 from = "evaluate_impl"
