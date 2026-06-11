@@ -41,14 +41,33 @@ fn validate_step_tokens_reports_only_unresolvable() {
 }
 
 #[test]
-fn validate_step_tokens_accepts_namespaced_via_bare_fallback() {
-    // Bare name present -> namespaced token resolves through the documented fallback.
-    let available = available_set(&["existing_pr_number"]);
+fn validate_step_tokens_accepts_exact_namespaced_match() {
+    // Namespaced token resolves only against the exact `namespace.name` key,
+    // mirroring the runtime resolver `StepContext::get`.
+    let available = available_set(&["setup_workspace.existing_pr_number"]);
     let step = shell_step("post", "gh pr view {setup_workspace.existing_pr_number}");
 
     let unresolved = validate_step_tokens(&step, &available);
 
     assert!(unresolved.is_empty());
+}
+
+#[test]
+fn validate_step_tokens_flags_namespaced_when_only_bare_available() {
+    // Exact-match only: a bare name in the available set must NOT satisfy a
+    // namespaced token. Otherwise dry-run would be more permissive than
+    // runtime, suppressing genuine unresolved-token errors.
+    let available = available_set(&["existing_pr_number"]);
+    let step = shell_step("post", "gh pr view {setup_workspace.existing_pr_number}");
+
+    let unresolved = validate_step_tokens(&step, &available);
+
+    assert_eq!(unresolved.len(), 1);
+    assert_eq!(unresolved[0].step_id, "post");
+    assert_eq!(
+        unresolved[0].token_name,
+        "setup_workspace.existing_pr_number"
+    );
 }
 
 #[test]
@@ -117,6 +136,64 @@ fn validate_workflow_tokens_clean_when_all_declared() {
     let config = parse_workflow_config_toml(MINIMAL_CONFIG).expect("parse config");
 
     assert!(validate_workflow_tokens(&wf, &config).is_empty());
+}
+
+const STEP_PRODUCED_ISSUE_NUMBER_WORKFLOW: &str = r#"
+workflow_type_id = "tok-alias-v1"
+
+[[steps]]
+step_id = "identity"
+step_type = "shell"
+[steps.parameters]
+command = "echo identity"
+[steps.parameters.context_map]
+primary_issue_number = ".number"
+
+[[steps]]
+step_id = "consume"
+step_type = "shell"
+[steps.parameters]
+command = "echo issue #{issue_number}"
+
+[[transitions]]
+from = "identity"
+to = "consume"
+condition = "success"
+"#;
+
+const ALIAS_CONFIG: &str = r#"
+config_id = "tok-alias-config"
+workflow_type_id = "tok-alias-v1"
+
+[runtime]
+timeout_seconds = 300
+max_retries = 3
+
+[repository]
+workspace_strategy = "fresh"
+branch_template = "luther/{issue_number}"
+
+[guards]
+
+[variables]
+"#;
+
+#[test]
+fn issue_number_alias_resolves_from_step_produced_primary_issue_number() {
+    // `primary_issue_number` is produced by a step's context_map (not a config
+    // variable). The documented `issue_number` alias must still be seeded, so
+    // a later `{issue_number}` reference is not a dry-run false positive. This
+    // guards the ordering fix: the alias is evaluated AFTER step outputs are
+    // registered.
+    let wf = parse_workflow_type_toml(STEP_PRODUCED_ISSUE_NUMBER_WORKFLOW).expect("parse workflow");
+    let config = parse_workflow_config_toml(ALIAS_CONFIG).expect("parse config");
+
+    let unresolved = validate_workflow_tokens(&wf, &config);
+
+    assert!(
+        unresolved.is_empty(),
+        "expected issue_number alias to resolve from step-produced primary_issue_number, got: {unresolved:?}"
+    );
 }
 
 #[test]

@@ -470,17 +470,17 @@ fn collect_unresolved_in_value(
 
 /// Whether a token name resolves against the available set.
 ///
-/// For namespaced tokens (`a.b`), the full `a.b` form or the bare `b` form is
-/// accepted, mirroring `interpolate_string`'s bare-name fallback.
+/// Resolution is exact-match only, mirroring the runtime resolver
+/// `StepContext::get`: namespaced tokens (`a.b`) are looked up as a strict
+/// `namespace.name` key, never via a bare-name (`b`) fallback. The available
+/// set already registers every statically-declarable output in both bare and
+/// namespaced forms (see `register_context_map_outputs` /
+/// `register_known_executor_outputs`), so a bare-name fallback here would make
+/// dry-run validation more permissive than runtime and suppress genuine
+/// unresolved-token errors.
 /// @plan:PLAN-20260408-LLXPRT-FIRST.P11
 fn token_is_resolvable(token: &str, available: &HashSet<String>) -> bool {
-    if available.contains(token) {
-        return true;
-    }
-    if let Some((_, bare)) = token.split_once('.') {
-        return available.contains(bare);
-    }
-    false
+    available.contains(token)
 }
 
 /// Validate a single step's parameters for unresolved interpolation tokens.
@@ -561,15 +561,18 @@ pub fn build_available_variables(wf: &WorkflowType, config: &WorkflowConfig) -> 
     available.insert("work_dir".to_string());
     available.insert("run_id".to_string());
     available.insert("current_step_id".to_string());
-    // Documented issue_number -> primary_issue_number fallback.
-    if available.contains("primary_issue_number") {
-        available.insert("issue_number".to_string());
-    }
     // Statically-declarable step outputs from context_map declarations and
     // from executors that set known context variables at runtime.
     for step in &wf.steps {
         register_context_map_outputs(step, &mut available);
         register_known_executor_outputs(step, &mut available);
+    }
+    // Documented issue_number -> primary_issue_number fallback. Evaluated after
+    // step outputs are registered so a `primary_issue_number` produced by a
+    // step's context_map (not just config variables) also seeds the alias,
+    // matching runtime resolution and avoiding dry-run false positives.
+    if available.contains("primary_issue_number") {
+        available.insert("issue_number".to_string());
     }
     available
 }
