@@ -402,10 +402,8 @@ stderr_file = "{artifact_dir}/remediate-stderr.txt"
 outcome_on_stdout = { REMEDIATION_COMPLETE = "success", REMEDIATION_SYSTEM_ERROR = "fatal" }
 success_on_existing_diff = true
 
-success_on_diff = true
-min_runtime_before_success_seconds = 30
-max_runtime_after_required_diff_seconds = 30
-idle_timeout_seconds = 180
+success_on_diff = false
+idle_timeout_seconds = 300
 
 
 prompt = """
