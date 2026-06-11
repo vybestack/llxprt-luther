@@ -14,7 +14,9 @@ use luther_workflow::persistence::init_database;
 use luther_workflow::service::{Service, ServiceConfig};
 use luther_workflow::workflow::config_loader::{
     resolve_workflow, resolve_workflow_config, resolve_workflow_type,
+    validate_artifact_dependencies, validate_workflow_tokens,
 };
+use luther_workflow::workflow::schema::{WorkflowConfig, WorkflowType};
 use luther_workflow::workflow::target_profile::{
     apply_target_profile_overrides, target_profile_validation_required, validate_target_profile,
     TargetProfileOverrides,
@@ -38,6 +40,39 @@ async fn main() {
             handle_service_command(&args).await;
         }
     }
+}
+
+/// Report dry-run semantic validation: unresolved interpolation tokens and
+/// missing artifact producers. Returns `true` if any error was reported.
+///
+/// Output uses stable, greppable prefixes (`unresolved token:` /
+/// `missing artifact producer:`) so callers and tests can assert on them.
+/// @plan:PLAN-20260408-LLXPRT-FIRST.P11
+fn report_dry_run_validation(workflow_type: &WorkflowType, config: &WorkflowConfig) -> bool {
+    let unresolved = validate_workflow_tokens(workflow_type, config);
+    let missing = validate_artifact_dependencies(workflow_type);
+
+    if !unresolved.is_empty() {
+        println!("\nUnresolved interpolation tokens:");
+        for token in &unresolved {
+            println!(
+                "  unresolved token: step '{}' {} references '{{{}}}'",
+                token.step_id, token.parameter_path, token.token_name
+            );
+        }
+    }
+
+    if !missing.is_empty() {
+        println!("\nMissing artifact producers:");
+        for producer in &missing {
+            println!(
+                "  missing artifact producer: step '{}' consumes '{}' which no step produces",
+                producer.consumer_step_id, producer.artifact_name
+            );
+        }
+    }
+
+    !unresolved.is_empty() || !missing.is_empty()
 }
 
 /// Handle the run command.
@@ -147,6 +182,11 @@ async fn handle_run_command(args: &luther_workflow::cli::RunArgs) {
                 step.step_type,
                 step.description.as_deref().unwrap_or("No description")
             );
+        }
+        let had_errors = report_dry_run_validation(&workflow_type, &config);
+        if had_errors {
+            eprintln!("\nDry run found validation errors. No changes made.");
+            process::exit(1);
         }
         println!("\nDry run complete. No changes made.");
         process::exit(0);

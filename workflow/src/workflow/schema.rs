@@ -68,6 +68,15 @@ pub struct StepDef {
     pub step_type: String,
     pub description: Option<String>,
     pub parameters: Option<serde_json::Value>,
+    /// Logical artifact names this step produces (e.g. `"plan"`, `"verify_report"`).
+    /// Used by dry-run artifact-dependency validation. Not file paths.
+    /// @plan:PLAN-20260408-LLXPRT-FIRST.P11
+    #[serde(default)]
+    pub produces: Option<Vec<String>>,
+    /// Logical artifact names this step consumes. Each must be produced by some step.
+    /// @plan:PLAN-20260408-LLXPRT-FIRST.P11
+    #[serde(default)]
+    pub consumes: Option<Vec<String>>,
 }
 
 /// Definition of a transition between steps.

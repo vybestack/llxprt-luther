@@ -181,3 +181,72 @@ fn test_cli_invalid_command_error() {
         "Invalid command should show error message. stdout: {stdout}, stderr: {stderr}"
     );
 }
+
+/// Test: dry-run reports unresolved tokens and missing artifact producers,
+/// exiting non-zero. Guards Luther issue #11 acceptance criteria.
+/// @plan:PLAN-20260408-LLXPRT-FIRST.P11
+#[test]
+fn test_cli_dry_run_reports_validation_errors_and_exits_nonzero() {
+    let mut cmd = luther_workflow_bin();
+    cmd.args([
+        "run",
+        "--workflow-type",
+        "dry-run-invalid-v1",
+        "--config",
+        "dry-run-invalid-config",
+        "--config-dir",
+        "tests/fixtures/dry_run_validation",
+        "--run-id",
+        "dry-run-validation-errors",
+        "--dry-run",
+    ]);
+
+    let output = cmd.output().expect("Failed to execute dry-run command");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        !output.status.success(),
+        "dry-run with validation errors must exit non-zero. stdout: {stdout}, stderr: {stderr}"
+    );
+    assert!(
+        stdout.contains("unresolved token:") && stdout.contains("artifact_root"),
+        "dry-run should report the unresolved token. stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("missing artifact producer:") && stdout.contains("plan"),
+        "dry-run should report the missing artifact producer. stdout: {stdout}"
+    );
+}
+
+/// Test: a clean workflow dry-run exits zero and prints no validation errors.
+/// @plan:PLAN-20260408-LLXPRT-FIRST.P11
+#[test]
+fn test_cli_dry_run_clean_workflow_exits_zero() {
+    let mut cmd = luther_workflow_bin();
+    cmd.args([
+        "run",
+        "--workflow-type",
+        "hello-world-v1",
+        "--config",
+        "hello-world-config",
+        "--config-dir",
+        "tests/fixtures",
+        "--run-id",
+        "dry-run-clean",
+        "--dry-run",
+    ]);
+
+    let output = cmd.output().expect("Failed to execute dry-run command");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        output.status.success(),
+        "clean dry-run should exit zero. stdout: {stdout}, stderr: {stderr}"
+    );
+    assert!(
+        !stdout.contains("unresolved token:") && !stdout.contains("missing artifact producer:"),
+        "clean dry-run should not report validation errors. stdout: {stdout}"
+    );
+}

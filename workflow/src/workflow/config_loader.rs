@@ -1,8 +1,10 @@
 /// @plan:PLAN-20260404-INITIAL-RUNTIME.P05
 /// Configuration loading and resolution for workflow types and configs.
+use std::collections::HashSet;
 use std::path::Path;
 
-use crate::workflow::schema::{WorkflowConfig, WorkflowRunRef, WorkflowType};
+use crate::engine::executor::extract_tokens;
+use crate::workflow::schema::{StepDef, WorkflowConfig, WorkflowRunRef, WorkflowType};
 use crate::workflow::validation::validate_workflow_graph;
 
 /// Error type for configuration loading and validation failures.
@@ -398,4 +400,226 @@ pub fn validate_config_matches_type(
     }
 
     Ok(())
+}
+
+/// A template token that could not be resolved against the available variable set.
+///
+/// Reported by dry-run validation so unresolved interpolation tokens surface
+/// before a step executes, rather than only when the broken value is used.
+/// @plan:PLAN-20260408-LLXPRT-FIRST.P11
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnresolvedToken {
+    pub step_id: String,
+    /// Dotted path to the offending string leaf, e.g. `parameters.command`.
+    pub parameter_path: String,
+    pub token_name: String,
+}
+
+/// A consumed artifact that has no producing step.
+/// @plan:PLAN-20260408-LLXPRT-FIRST.P11
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MissingArtifactProducer {
+    pub consumer_step_id: String,
+    pub artifact_name: String,
+}
+
+/// Recursively walk a JSON value, collecting unresolved tokens from string leaves.
+///
+/// The `context_map` sub-object is skipped as a token source: its values are
+/// `jq` dot-paths/keys, not interpolation templates.
+/// @plan:PLAN-20260408-LLXPRT-FIRST.P11
+fn collect_unresolved_in_value(
+    step_id: &str,
+    path: &str,
+    value: &serde_json::Value,
+    available: &HashSet<String>,
+    out: &mut Vec<UnresolvedToken>,
+) {
+    match value {
+        serde_json::Value::String(s) => {
+            for token in extract_tokens(s) {
+                if token_is_resolvable(&token, available) {
+                    continue;
+                }
+                out.push(UnresolvedToken {
+                    step_id: step_id.to_string(),
+                    parameter_path: path.to_string(),
+                    token_name: token,
+                });
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for (idx, item) in items.iter().enumerate() {
+                let child = format!("{path}[{idx}]");
+                collect_unresolved_in_value(step_id, &child, item, available, out);
+            }
+        }
+        serde_json::Value::Object(map) => {
+            for (key, item) in map {
+                // context_map values are jq paths, not interpolation templates.
+                if key == "context_map" {
+                    continue;
+                }
+                let child = format!("{path}.{key}");
+                collect_unresolved_in_value(step_id, &child, item, available, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Whether a token name resolves against the available set.
+///
+/// Resolution is exact-match only, mirroring the runtime resolver
+/// `StepContext::get`: namespaced tokens (`a.b`) are looked up as a strict
+/// `namespace.name` key, never via a bare-name (`b`) fallback. The available
+/// set already registers every statically-declarable output in both bare and
+/// namespaced forms (see `register_context_map_outputs` /
+/// `register_known_executor_outputs`), so a bare-name fallback here would make
+/// dry-run validation more permissive than runtime and suppress genuine
+/// unresolved-token errors.
+/// @plan:PLAN-20260408-LLXPRT-FIRST.P11
+fn token_is_resolvable(token: &str, available: &HashSet<String>) -> bool {
+    available.contains(token)
+}
+
+/// Validate a single step's parameters for unresolved interpolation tokens.
+/// @plan:PLAN-20260408-LLXPRT-FIRST.P11
+#[must_use]
+pub fn validate_step_tokens(step: &StepDef, available: &HashSet<String>) -> Vec<UnresolvedToken> {
+    let mut out = Vec::new();
+    if let Some(params) = &step.parameters {
+        collect_unresolved_in_value(&step.step_id, "parameters", params, available, &mut out);
+    }
+    out
+}
+
+/// Statically-known context variables produced by a given executor `step_type`.
+///
+/// These executors set context values at runtime via `context.set(...)` rather
+/// than through a declarative `context_map`, so they must be enumerated here to
+/// avoid false positives when later steps interpolate them. Keep in lockstep
+/// with the `context.set(...)` calls in `src/engine/executors/`.
+/// @plan:PLAN-20260408-LLXPRT-FIRST.P11
+fn known_executor_outputs(step_type: &str) -> &'static [&'static str] {
+    match step_type {
+        "github_pr_identity" => &[
+            "repository_owner",
+            "repository_name",
+            "pr_number",
+            "head_ref",
+            "head_sha",
+            "base_ref",
+            "base_sha",
+        ],
+        _ => &[],
+    }
+}
+
+/// Register an executor's statically-known outputs (by `step_type`).
+///
+/// Registered both bare and namespaced (`<step_id>.<name>`).
+/// @plan:PLAN-20260408-LLXPRT-FIRST.P11
+fn register_known_executor_outputs(step: &StepDef, available: &mut HashSet<String>) {
+    for name in known_executor_outputs(&step.step_type) {
+        available.insert((*name).to_string());
+        available.insert(format!("{}.{}", step.step_id, name));
+    }
+}
+
+/// Register a `context_map` declaration's keys as statically-known step outputs.
+///
+/// Each key is registered both bare (`pr_number`) and namespaced
+/// (`<step_id>.pr_number`) so legitimate cross-step references are not flagged.
+/// @plan:PLAN-20260408-LLXPRT-FIRST.P11
+fn register_context_map_outputs(step: &StepDef, available: &mut HashSet<String>) {
+    let Some(params) = &step.parameters else {
+        return;
+    };
+    let Some(context_map) = params.get("context_map").and_then(|v| v.as_object()) else {
+        return;
+    };
+    for key in context_map.keys() {
+        available.insert(key.clone());
+        available.insert(format!("{}.{}", step.step_id, key));
+    }
+}
+
+/// Build the set of variable names that runtime interpolation can resolve.
+///
+/// Mirrors runtime seeding to avoid false positives: config variables, the
+/// always-present built-ins, the `issue_number` fallback, and every
+/// statically-declarable `context_map` output (bare and namespaced).
+///
+/// Known limitation: tokens produced at runtime by non-`context_map` executors
+/// cannot be proven statically and would be reported if referenced.
+/// @plan:PLAN-20260408-LLXPRT-FIRST.P11
+#[must_use]
+pub fn build_available_variables(wf: &WorkflowType, config: &WorkflowConfig) -> HashSet<String> {
+    let mut available: HashSet<String> = config.variables.keys().cloned().collect();
+    // Built-ins always seeded into StepContext.
+    available.insert("work_dir".to_string());
+    available.insert("run_id".to_string());
+    available.insert("current_step_id".to_string());
+    // Statically-declarable step outputs from context_map declarations and
+    // from executors that set known context variables at runtime.
+    for step in &wf.steps {
+        register_context_map_outputs(step, &mut available);
+        register_known_executor_outputs(step, &mut available);
+    }
+    // Documented issue_number -> primary_issue_number fallback. Evaluated after
+    // step outputs are registered so a `primary_issue_number` produced by a
+    // step's context_map (not just config variables) also seeds the alias,
+    // matching runtime resolution and avoiding dry-run false positives.
+    if available.contains("primary_issue_number") {
+        available.insert("issue_number".to_string());
+    }
+    available
+}
+
+/// Validate every step in a workflow for unresolved interpolation tokens.
+/// @plan:PLAN-20260408-LLXPRT-FIRST.P11
+#[must_use]
+pub fn validate_workflow_tokens(
+    wf: &WorkflowType,
+    config: &WorkflowConfig,
+) -> Vec<UnresolvedToken> {
+    let available = build_available_variables(wf, config);
+    let mut out = Vec::new();
+    for step in &wf.steps {
+        out.extend(validate_step_tokens(step, &available));
+    }
+    out
+}
+
+/// Validate that every consumed artifact has a producing step.
+///
+/// Existence-only check: the union of all steps' `produces` must cover every
+/// step's `consumes`. Absent/empty `produces`/`consumes` are no-ops, keeping
+/// existing workflows backward-compatible.
+/// @plan:PLAN-20260408-LLXPRT-FIRST.P11
+#[must_use]
+pub fn validate_artifact_dependencies(wf: &WorkflowType) -> Vec<MissingArtifactProducer> {
+    let mut produced: HashSet<&str> = HashSet::new();
+    for step in &wf.steps {
+        if let Some(names) = &step.produces {
+            for name in names {
+                produced.insert(name.as_str());
+            }
+        }
+    }
+    let mut out = Vec::new();
+    for step in &wf.steps {
+        if let Some(names) = &step.consumes {
+            for name in names {
+                if !produced.contains(name.as_str()) {
+                    out.push(MissingArtifactProducer {
+                        consumer_step_id: step.step_id.clone(),
+                        artifact_name: name.clone(),
+                    });
+                }
+            }
+        }
+    }
+    out
 }

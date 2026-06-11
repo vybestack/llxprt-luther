@@ -1,0 +1,28 @@
+# Dry-run validation fixture with intentional defects.
+# @plan:PLAN-20260408-LLXPRT-FIRST.P11
+#
+# This workflow purposely references an undefined interpolation token
+# ({artifact_root}) and consumes an artifact ("plan") that no step produces, so
+# dry-run semantic validation must report both and exit non-zero.
+
+workflow_type_id = "dry-run-invalid-v1"
+
+[[steps]]
+step_id = "first"
+step_type = "shell"
+description = "References a defined token"
+[steps.parameters]
+command = "echo {artifact_dir}"
+
+[[steps]]
+step_id = "second"
+step_type = "shell"
+description = "References an undefined token and consumes a missing artifact"
+consumes = ["plan"]
+[steps.parameters]
+command = "cp {artifact_root}/in /tmp/out"
+
+[[transitions]]
+from = "first"
+to = "second"
+condition = "success"

@@ -88,6 +88,18 @@ fn make_workflow_type(steps: Vec<StepDef>, transitions: Vec<TransitionDef>) -> W
     }
 }
 
+/// Helper: Create a minimal "sequence" step with the given id.
+fn seq_step(step_id: &str) -> StepDef {
+    StepDef {
+        step_id: step_id.to_string(),
+        step_type: "sequence".to_string(),
+        description: None,
+        produces: None,
+        consumes: None,
+        parameters: None,
+    }
+}
+
 fn make_config_with_vars(
     max_iterations: Option<u32>,
     variables: HashMap<String, String>,
@@ -398,6 +410,8 @@ fn test_config_variables_available_in_shell_steps() {
         step_id: "step_a".to_string(),
         step_type: "shell".to_string(),
         description: None,
+        produces: None,
+        consumes: None,
         parameters: Some(serde_json::json!({
             "command": "echo {my_var}"
         })),
@@ -438,6 +452,8 @@ fn test_different_configs_resolve_different_profiles() {
         step_id: "step_a".to_string(),
         step_type: "shell".to_string(),
         description: None,
+        produces: None,
+        consumes: None,
         parameters: Some(serde_json::json!({
             "command": "echo {profile_planning}"
         })),
@@ -485,6 +501,8 @@ fn test_namespaced_context_across_real_steps() {
             step_id: "step_a".to_string(),
             step_type: "shell".to_string(),
             description: None,
+            produces: None,
+            consumes: None,
             parameters: Some(serde_json::json!({
                 "command": "echo alpha"
             })),
@@ -493,6 +511,8 @@ fn test_namespaced_context_across_real_steps() {
             step_id: "step_b".to_string(),
             step_type: "shell".to_string(),
             description: None,
+            produces: None,
+            consumes: None,
             parameters: Some(serde_json::json!({
                 "command": "echo beta"
             })),
@@ -501,6 +521,8 @@ fn test_namespaced_context_across_real_steps() {
             step_id: "step_c".to_string(),
             step_type: "shell".to_string(),
             description: None,
+            produces: None,
+            consumes: None,
             parameters: Some(serde_json::json!({
                 "command": "echo {step_a.stdout}"
             })),
@@ -553,6 +575,8 @@ fn test_unnamespaced_variable_gets_most_recent() {
             step_id: "step_a".to_string(),
             step_type: "shell".to_string(),
             description: None,
+            produces: None,
+            consumes: None,
             parameters: Some(serde_json::json!({
                 "command": "echo first"
             })),
@@ -561,6 +585,8 @@ fn test_unnamespaced_variable_gets_most_recent() {
             step_id: "step_b".to_string(),
             step_type: "shell".to_string(),
             description: None,
+            produces: None,
+            consumes: None,
             parameters: Some(serde_json::json!({
                 "command": "echo second"
             })),
@@ -569,6 +595,8 @@ fn test_unnamespaced_variable_gets_most_recent() {
             step_id: "step_c".to_string(),
             step_type: "shell".to_string(),
             description: None,
+            produces: None,
+            consumes: None,
             parameters: Some(serde_json::json!({
                 "command": "echo {stdout}"
             })),
@@ -621,12 +649,16 @@ fn test_per_edge_loop_with_real_executor_dispatch() {
             step_id: "step_a".to_string(),
             step_type: "sequence".to_string(),
             description: None,
+            produces: None,
+            consumes: None,
             parameters: None,
         },
         StepDef {
             step_id: "step_b".to_string(),
             step_type: "sequence".to_string(),
             description: None,
+            produces: None,
+            consumes: None,
             parameters: None,
         },
     ];
@@ -699,36 +731,11 @@ fn test_per_edge_loop_with_real_executor_dispatch() {
 #[test]
 fn test_independent_loops_through_engine() {
     let steps = vec![
-        StepDef {
-            step_id: "step_a".to_string(),
-            step_type: "sequence".to_string(),
-            description: None,
-            parameters: None,
-        },
-        StepDef {
-            step_id: "step_b".to_string(),
-            step_type: "sequence".to_string(),
-            description: None,
-            parameters: None,
-        },
-        StepDef {
-            step_id: "step_c".to_string(),
-            step_type: "sequence".to_string(),
-            description: None,
-            parameters: None,
-        },
-        StepDef {
-            step_id: "step_d".to_string(),
-            step_type: "sequence".to_string(),
-            description: None,
-            parameters: None,
-        },
-        StepDef {
-            step_id: "step_e".to_string(),
-            step_type: "sequence".to_string(),
-            description: None,
-            parameters: None,
-        },
+        seq_step("step_a"),
+        seq_step("step_b"),
+        seq_step("step_c"),
+        seq_step("step_d"),
+        seq_step("step_e"),
     ];
 
     let transitions = vec![
@@ -818,6 +825,8 @@ fn test_verify_executor_dispatches_through_registry() {
         step_id: "verify_step".to_string(),
         step_type: "verify".to_string(),
         description: None,
+        produces: None,
+        consumes: None,
         parameters: Some(serde_json::json!({
             "checks": ["test"]
         })),
@@ -866,6 +875,8 @@ fn test_config_variables_and_namespaced_context_combined() {
             step_id: "step_a".to_string(),
             step_type: "shell".to_string(),
             description: None,
+            produces: None,
+            consumes: None,
             parameters: Some(serde_json::json!({
                 "command": "echo {repo}"
             })),
@@ -874,6 +885,8 @@ fn test_config_variables_and_namespaced_context_combined() {
             step_id: "step_b".to_string(),
             step_type: "shell".to_string(),
             description: None,
+            produces: None,
+            consumes: None,
             parameters: Some(serde_json::json!({
                 "command": "echo {step_a.stdout}"
             })),
@@ -921,6 +934,8 @@ fn test_builtin_variables_still_resolve() {
         step_id: "step_a".to_string(),
         step_type: "shell".to_string(),
         description: None,
+        produces: None,
+        consumes: None,
         parameters: Some(serde_json::json!({
             "command": "echo {run_id}"
         })),
@@ -957,18 +972,24 @@ fn test_fatal_with_transition_routes_to_target_step() {
             step_id: "step_a".to_string(),
             step_type: "noop".to_string(),
             description: None,
+            produces: None,
+            consumes: None,
             parameters: None,
         },
         StepDef {
             step_id: "step_b".to_string(),
             step_type: "fatal".to_string(),
             description: None,
+            produces: None,
+            consumes: None,
             parameters: None,
         },
         StepDef {
             step_id: "abandon_step".to_string(),
             step_type: "noop".to_string(),
             description: None,
+            produces: None,
+            consumes: None,
             parameters: None,
         },
     ];
@@ -1023,18 +1044,24 @@ fn test_fatal_without_transition_returns_failure() {
             step_id: "step_a".to_string(),
             step_type: "noop".to_string(),
             description: None,
+            produces: None,
+            consumes: None,
             parameters: None,
         },
         StepDef {
             step_id: "step_b".to_string(),
             step_type: "fatal".to_string(),
             description: None,
+            produces: None,
+            consumes: None,
             parameters: None,
         },
         StepDef {
             step_id: "step_c".to_string(),
             step_type: "noop".to_string(),
             description: None,
+            produces: None,
+            consumes: None,
             parameters: None,
         },
     ];
@@ -1091,6 +1118,8 @@ fn test_run_completion_records_metadata() {
         step_id: "step_a".to_string(),
         step_type: "noop".to_string(),
         description: None,
+        produces: None,
+        consumes: None,
         parameters: None,
     }];
 
@@ -1151,12 +1180,16 @@ fn test_run_abandonment_records_metadata() {
             step_id: "step_a".to_string(),
             step_type: "sequence".to_string(),
             description: None,
+            produces: None,
+            consumes: None,
             parameters: None,
         },
         StepDef {
             step_id: "step_b".to_string(),
             step_type: "sequence".to_string(),
             description: None,
+            produces: None,
+            consumes: None,
             parameters: None,
         },
     ];
@@ -1240,6 +1273,8 @@ fn test_set_work_dir_preserves_seeded_variables() {
         step_id: "step_a".to_string(),
         step_type: "shell".to_string(),
         description: None,
+        produces: None,
+        consumes: None,
         parameters: Some(serde_json::json!({
             "command": "echo {my_var}"
         })),

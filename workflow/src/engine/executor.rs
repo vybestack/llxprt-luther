@@ -227,6 +227,47 @@ pub fn interpolate_string(template: &str, context: &StepContext) -> String {
     result
 }
 
+/// Extract interpolation token names from a template string.
+///
+/// Matches only strict identifier tokens of the form `{name}` or
+/// `{namespace.name}`, mirroring the grammar resolved by
+/// [`interpolate_string`]. Identifiers must start with a letter or underscore
+/// and contain only `[A-Za-z0-9_]`, optionally with a single dotted segment.
+///
+/// `jq` object-construction braces such as `{number, title}` or
+/// `{title: .title}` contain spaces/commas/colons and therefore do **not**
+/// match, so they are never mistaken for interpolation tokens. Likewise
+/// shell-style `${VAR}` references are skipped: the brace is preceded by a `$`,
+/// so it is treated as shell/env interpolation rather than a Luther token (a
+/// bare `{VAR}` is still extracted normally).
+///
+/// Returned in first-seen order without de-duplication of distinct tokens; the
+/// same token appearing twice is reported twice (callers de-duplicate as
+/// needed).
+/// @plan:PLAN-20260408-LLXPRT-FIRST.P11
+#[must_use]
+pub fn extract_tokens(template: &str) -> Vec<String> {
+    use std::sync::OnceLock;
+    static TOKEN_RE: OnceLock<regex::Regex> = OnceLock::new();
+    let re = TOKEN_RE.get_or_init(|| {
+        // Strict identifier, optionally one dotted namespace segment.
+        regex::Regex::new(r"\{([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)?)\}")
+            .expect("static token regex is valid")
+    });
+    let bytes = template.as_bytes();
+    re.captures_iter(template)
+        .filter_map(|c| {
+            let full = c.get(0)?;
+            // Skip shell-style `${VAR}`: a `$` immediately before the `{` marks
+            // this as shell/env interpolation, not a Luther interpolation token.
+            if full.start() > 0 && bytes[full.start() - 1] == b'$' {
+                return None;
+            }
+            c.get(1).map(|m| m.as_str().to_string())
+        })
+        .collect()
+}
+
 /// Trait for step executors. Each step type has a concrete implementation.
 pub trait StepExecutor: Send + Sync {
     /// Execute the step and return an outcome.
@@ -452,6 +493,56 @@ mod tests {
         assert_eq!(
             interpolate_string("issue{issue_number}", &context),
             "issue4"
+        );
+    }
+
+    #[test]
+    fn extract_tokens_simple_and_namespaced() {
+        assert_eq!(extract_tokens("{artifact_dir}"), vec!["artifact_dir"]);
+        assert_eq!(
+            extract_tokens("{setup_workspace.existing_pr_number}"),
+            vec!["setup_workspace.existing_pr_number"]
+        );
+    }
+
+    #[test]
+    fn extract_tokens_multiple_and_adjacent_text() {
+        assert_eq!(
+            extract_tokens("path/{artifact_dir}/x.json"),
+            vec!["artifact_dir"]
+        );
+        assert_eq!(
+            extract_tokens("{owner}/{repo}#{issue_number}"),
+            vec!["owner", "repo", "issue_number"]
+        );
+    }
+
+    #[test]
+    fn extract_tokens_none_when_no_tokens() {
+        assert!(extract_tokens("no tokens here").is_empty());
+        assert!(extract_tokens("").is_empty());
+    }
+
+    #[test]
+    fn extract_tokens_ignores_jq_object_braces() {
+        // jq object construction contains spaces/commas/colons -> not tokens.
+        assert!(extract_tokens("{number, title}").is_empty());
+        assert!(extract_tokens("{title: .title, url: .url}").is_empty());
+    }
+
+    #[test]
+    fn extract_tokens_ignores_shell_style_dollar_brace() {
+        // Shell-style `${VAR}` is env/shell interpolation, not a Luther token.
+        assert!(extract_tokens("echo ${HOME}").is_empty());
+        assert!(extract_tokens("${FOO}/${BAR}").is_empty());
+    }
+
+    #[test]
+    fn extract_tokens_distinguishes_dollar_brace_from_bare_brace() {
+        // Bare `{VAR}` is still extracted; the adjacent `${VAR}` is skipped.
+        assert_eq!(
+            extract_tokens("${HOME}/{artifact_dir}/${USER}"),
+            vec!["artifact_dir"]
         );
     }
 }

@@ -74,6 +74,18 @@ fn make_workflow_type(steps: Vec<StepDef>, transitions: Vec<TransitionDef>) -> W
     }
 }
 
+/// Helper: Create a minimal "sequence" step with the given id.
+fn seq_step(step_id: &str) -> StepDef {
+    StepDef {
+        step_id: step_id.to_string(),
+        step_type: "sequence".to_string(),
+        description: None,
+        produces: None,
+        consumes: None,
+        parameters: None,
+    }
+}
+
 /// Helper: Create a minimal workflow config with configurable loop limit.
 fn make_config(max_iterations: Option<u32>) -> WorkflowConfig {
     WorkflowConfig {
@@ -115,12 +127,16 @@ fn test_per_edge_limit_abandons_when_exceeded() {
             step_id: "step_a".to_string(),
             step_type: "sequence".to_string(),
             description: None,
+            produces: None,
+            consumes: None,
             parameters: None,
         },
         StepDef {
             step_id: "step_b".to_string(),
             step_type: "sequence".to_string(),
             description: None,
+            produces: None,
+            consumes: None,
             parameters: None,
         },
     ];
@@ -202,18 +218,24 @@ fn test_per_edge_limit_allows_iterations_within_limit() {
             step_id: "step_a".to_string(),
             step_type: "sequence".to_string(),
             description: None,
+            produces: None,
+            consumes: None,
             parameters: None,
         },
         StepDef {
             step_id: "step_b".to_string(),
             step_type: "sequence".to_string(),
             description: None,
+            produces: None,
+            consumes: None,
             parameters: None,
         },
         StepDef {
             step_id: "step_c".to_string(),
             step_type: "sequence".to_string(),
             description: None,
+            produces: None,
+            consumes: None,
             parameters: None,
         },
     ];
@@ -287,36 +309,11 @@ fn test_independent_loops_tracked_separately() {
     // Loop 2: C → D → C (fixable, limit 3)
     // Final: E
     let steps = vec![
-        StepDef {
-            step_id: "step_a".to_string(),
-            step_type: "sequence".to_string(),
-            description: None,
-            parameters: None,
-        },
-        StepDef {
-            step_id: "step_b".to_string(),
-            step_type: "sequence".to_string(),
-            description: None,
-            parameters: None,
-        },
-        StepDef {
-            step_id: "step_c".to_string(),
-            step_type: "sequence".to_string(),
-            description: None,
-            parameters: None,
-        },
-        StepDef {
-            step_id: "step_d".to_string(),
-            step_type: "sequence".to_string(),
-            description: None,
-            parameters: None,
-        },
-        StepDef {
-            step_id: "step_e".to_string(),
-            step_type: "sequence".to_string(),
-            description: None,
-            parameters: None,
-        },
+        seq_step("step_a"),
+        seq_step("step_b"),
+        seq_step("step_c"),
+        seq_step("step_d"),
+        seq_step("step_e"),
     ];
 
     let transitions = vec![
@@ -412,12 +409,16 @@ fn test_global_fallback_used_when_no_per_edge_limit() {
             step_id: "step_a".to_string(),
             step_type: "sequence".to_string(),
             description: None,
+            produces: None,
+            consumes: None,
             parameters: None,
         },
         StepDef {
             step_id: "step_b".to_string(),
             step_type: "sequence".to_string(),
             description: None,
+            produces: None,
+            consumes: None,
             parameters: None,
         },
     ];
@@ -486,12 +487,16 @@ fn test_per_edge_limit_overrides_global() {
             step_id: "step_a".to_string(),
             step_type: "sequence".to_string(),
             description: None,
+            produces: None,
+            consumes: None,
             parameters: None,
         },
         StepDef {
             step_id: "step_b".to_string(),
             step_type: "sequence".to_string(),
             description: None,
+            produces: None,
+            consumes: None,
             parameters: None,
         },
     ];
@@ -609,12 +614,16 @@ fn test_abandoned_reason_identifies_edge() {
             step_id: "step_a".to_string(),
             step_type: "sequence".to_string(),
             description: None,
+            produces: None,
+            consumes: None,
             parameters: None,
         },
         StepDef {
             step_id: "step_b".to_string(),
             step_type: "sequence".to_string(),
             description: None,
+            produces: None,
+            consumes: None,
             parameters: None,
         },
     ];
@@ -690,24 +699,32 @@ fn test_forward_transitions_not_counted() {
             step_id: "step_a".to_string(),
             step_type: "sequence".to_string(),
             description: None,
+            produces: None,
+            consumes: None,
             parameters: None,
         },
         StepDef {
             step_id: "step_b".to_string(),
             step_type: "sequence".to_string(),
             description: None,
+            produces: None,
+            consumes: None,
             parameters: None,
         },
         StepDef {
             step_id: "step_c".to_string(),
             step_type: "sequence".to_string(),
             description: None,
+            produces: None,
+            consumes: None,
             parameters: None,
         },
         StepDef {
             step_id: "step_d".to_string(),
             step_type: "sequence".to_string(),
             description: None,
+            produces: None,
+            consumes: None,
             parameters: None,
         },
     ];
@@ -777,12 +794,16 @@ fn test_loop_count_accessor_returns_sum_of_edge_counts() {
             step_id: "step_a".to_string(),
             step_type: "sequence".to_string(),
             description: None,
+            produces: None,
+            consumes: None,
             parameters: None,
         },
         StepDef {
             step_id: "step_b".to_string(),
             step_type: "sequence".to_string(),
             description: None,
+            produces: None,
+            consumes: None,
             parameters: None,
         },
     ];
@@ -844,24 +865,32 @@ fn test_mixed_per_edge_and_global_limits() {
             step_id: "step_a".to_string(),
             step_type: "sequence".to_string(),
             description: None,
+            produces: None,
+            consumes: None,
             parameters: None,
         },
         StepDef {
             step_id: "step_b".to_string(),
             step_type: "sequence".to_string(),
             description: None,
+            produces: None,
+            consumes: None,
             parameters: None,
         },
         StepDef {
             step_id: "step_c".to_string(),
             step_type: "sequence".to_string(),
             description: None,
+            produces: None,
+            consumes: None,
             parameters: None,
         },
         StepDef {
             step_id: "step_d".to_string(),
             step_type: "sequence".to_string(),
             description: None,
+            produces: None,
+            consumes: None,
             parameters: None,
         },
     ];
