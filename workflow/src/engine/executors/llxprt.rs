@@ -300,7 +300,10 @@ impl StepExecutor for LlxprtExecutor {
             terminate_process_tree(&mut child);
         }
 
-        let _ = child.wait();
+        let exit_status = child.wait().map_err(|e| EngineError::StepExecutionError {
+            step_id: "llxprt".to_string(),
+            message: format!("Failed to wait for llxprt: {e}"),
+        })?;
         if let Some(reader) = stdout_reader {
             let _ = reader.join();
         }
@@ -320,6 +323,10 @@ impl StepExecutor for LlxprtExecutor {
         if let Some(path_template) = stderr_file.as_deref() {
             write_artifact_file(context, path_template, &stderr)?;
         }
+        if let Some(code) = exit_status.code() {
+            context.set("exit_code", &code.to_string());
+        }
+
         context.set("stdout", &stdout);
         context.set("stderr", &stderr);
 
@@ -372,6 +379,17 @@ impl StepExecutor for LlxprtExecutor {
             };
             context.set("diagnostic", &diagnostic);
             return Ok(StepOutcome::Fatal);
+        }
+
+        if !exit_status.success() {
+            let diagnostic = exit_status.code().map_or_else(
+                || "llxprt exited without an exit code".to_string(),
+                |code| format!("llxprt exited with status {code}"),
+            );
+            context.set("diagnostic", &diagnostic);
+            return Ok(
+                match_exit_code_outcome(params, exit_status.code()).unwrap_or(StepOutcome::Fatal)
+            );
         }
 
         if let Some(outcome) = match_static_stdout_outcome(params, &stdout) {
@@ -468,6 +486,19 @@ fn read_stream_into_buffer<R: Read>(reader: &mut R, buffer: &Arc<Mutex<String>>)
             Err(_) => break,
         }
     }
+}
+
+fn match_exit_code_outcome(
+    params: &serde_json::Value,
+    exit_code: Option<i32>,
+) -> Option<StepOutcome> {
+    let code = exit_code?.to_string();
+    let outcome_name = params
+        .get("exit_code_map")?
+        .as_object()?
+        .get(&code)?
+        .as_str()?;
+    Some(parse_outcome_name(outcome_name))
 }
 
 fn match_static_stdout_outcome(params: &serde_json::Value, stdout: &str) -> Option<StepOutcome> {

@@ -339,6 +339,49 @@ fn test_llxprt_executor_can_stop_after_required_diff_before_marker() {
     assert_eq!(outcome, StepOutcome::Success);
 }
 
+#[test]
+#[allow(unsafe_code)]
+fn test_llxprt_executor_nonzero_exit_overrides_partial_diff() {
+    use luther_workflow::engine::executors::LlxprtExecutor;
+
+    let temp_dir = tempfile::tempdir().expect("temp dir should be created");
+    std::process::Command::new("git")
+        .arg("init")
+        .current_dir(temp_dir.path())
+        .status()
+        .expect("git init should run");
+    let bin_dir = temp_dir.path().join("bin");
+    std::fs::create_dir(&bin_dir).expect("create bin dir");
+    let llxprt_script = bin_dir.join("llxprt");
+    std::fs::write(
+        &llxprt_script,
+        "#!/bin/sh\nprintf partial > \"$PWD/partial.txt\"\nprintf 'provider failed\\n' >&2\nexit 1\n",
+    )
+    .expect("write llxprt script");
+    std::process::Command::new("chmod")
+        .arg("+x")
+        .arg(&llxprt_script)
+        .status()
+        .expect("chmod llxprt script");
+
+    let _env_guard = env_lock().lock().expect("env lock should not be poisoned");
+    let original_path = std::env::var_os("PATH").unwrap_or_default();
+    let path_value = format!("{}:{}", bin_dir.display(), original_path.to_string_lossy());
+    unsafe { std::env::set_var("PATH", path_value) };
+    let mut context = StepContext::new(
+        temp_dir.path().to_path_buf(),
+        uuid::Uuid::new_v4().to_string(),
+    );
+    let params = serde_json::json!({ "success_on_diff": true, "exit_code_map": { "1": "fatal" } });
+    let outcome = LlxprtExecutor
+        .execute(&mut context, &params)
+        .expect("llxprt should execute");
+    unsafe { std::env::set_var("PATH", original_path) };
+
+    assert_eq!(outcome, StepOutcome::Fatal);
+    assert_eq!(context.get("exit_code").map(String::as_str), Some("1"));
+}
+
 // ============================================================================
 // Test 1: Config variables available in shell steps
 // ============================================================================
