@@ -3,6 +3,7 @@
 use std::path::Path;
 
 use crate::workflow::schema::{WorkflowConfig, WorkflowRunRef, WorkflowType};
+use crate::workflow::validation::validate_workflow_graph;
 
 /// Error type for configuration loading and validation failures.
 /// @plan:PLAN-20260404-INITIAL-RUNTIME.P05
@@ -62,7 +63,7 @@ pub fn resolve_workflow_type(id: &str, root: &Path) -> Result<WorkflowType> {
             source_path: Some(prod_toml.to_string_lossy().to_string()),
             kind: ConfigErrorKind::NotFound,
         })?;
-        return parse_workflow_type_toml(&content);
+        return load_and_validate_workflow_type_toml(&content, &prod_toml);
     }
 
     // Try production layout JSON
@@ -72,7 +73,7 @@ pub fn resolve_workflow_type(id: &str, root: &Path) -> Result<WorkflowType> {
             source_path: Some(prod_json.to_string_lossy().to_string()),
             kind: ConfigErrorKind::NotFound,
         })?;
-        return parse_workflow_type_json(&content);
+        return load_and_validate_workflow_type_json(&content, &prod_json);
     }
 
     // Fall back to test fixture layout TOML
@@ -82,7 +83,7 @@ pub fn resolve_workflow_type(id: &str, root: &Path) -> Result<WorkflowType> {
             source_path: Some(valid_toml.to_string_lossy().to_string()),
             kind: ConfigErrorKind::NotFound,
         })?;
-        return parse_workflow_type_toml(&content);
+        return load_and_validate_workflow_type_toml(&content, &valid_toml);
     }
 
     // Fall back to test fixture layout JSON
@@ -92,7 +93,7 @@ pub fn resolve_workflow_type(id: &str, root: &Path) -> Result<WorkflowType> {
             source_path: Some(valid_json.to_string_lossy().to_string()),
             kind: ConfigErrorKind::NotFound,
         })?;
-        return parse_workflow_type_json(&content);
+        return load_and_validate_workflow_type_json(&content, &valid_json);
     }
 
     // Neither file exists in any location
@@ -213,6 +214,37 @@ pub fn parse_workflow_type_json(json_str: &str) -> Result<WorkflowType> {
     })
 }
 
+/// Parse a workflow type from TOML and run full (field + graph) validation,
+/// attaching `source_path` to any resulting error. Used by the resolution path
+/// so invalid graphs are rejected at load time before engine construction.
+/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P16
+/// @requirement:REQ-PRFU-018,REQ-PRFU-020
+fn load_and_validate_workflow_type_toml(content: &str, source_path: &Path) -> Result<WorkflowType> {
+    let workflow_type =
+        parse_workflow_type_toml(content).map_err(|e| attach_source_path(e, source_path))?;
+    validate_workflow_type(&workflow_type).map_err(|e| attach_source_path(e, source_path))?;
+    Ok(workflow_type)
+}
+
+/// Parse a workflow type from JSON and run full (field + graph) validation,
+/// attaching `source_path` to any resulting error.
+/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P16
+/// @requirement:REQ-PRFU-018,REQ-PRFU-020
+fn load_and_validate_workflow_type_json(content: &str, source_path: &Path) -> Result<WorkflowType> {
+    let workflow_type =
+        parse_workflow_type_json(content).map_err(|e| attach_source_path(e, source_path))?;
+    validate_workflow_type(&workflow_type).map_err(|e| attach_source_path(e, source_path))?;
+    Ok(workflow_type)
+}
+
+/// Attach a source path to a `ConfigError` if it does not already have one.
+fn attach_source_path(mut error: ConfigError, source_path: &Path) -> ConfigError {
+    if error.source_path.is_none() {
+        error.source_path = Some(source_path.to_string_lossy().to_string());
+    }
+    error
+}
+
 /// Parse workflow config from TOML string.
 /// @plan:PLAN-20260404-INITIAL-RUNTIME.P05
 pub fn parse_workflow_config_toml(toml_str: &str) -> Result<WorkflowConfig> {
@@ -273,6 +305,25 @@ pub fn validate_workflow_type(workflow_type: &WorkflowType) -> Result<()> {
                 kind: ConfigErrorKind::ValidationError,
             });
         }
+    }
+
+    // Graph-structural validation: reject invalid or unsafe routing (dangling
+    // transition targets, duplicate outcome branches, unreachable required
+    // steps, and direct fatal routes that bypass required post-PR collectors)
+    // before the workflow is ever handed to the engine.
+    // @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P16
+    // @requirement:REQ-PRFU-018,REQ-PRFU-020
+    if let Err(graph_errors) = validate_workflow_graph(workflow_type) {
+        let message = graph_errors
+            .iter()
+            .map(|error| error.detail.clone())
+            .collect::<Vec<_>>()
+            .join("; ");
+        return Err(ConfigError {
+            message: format!("invalid workflow graph: {}", message),
+            source_path: None,
+            kind: ConfigErrorKind::ValidationError,
+        });
     }
 
     Ok(())

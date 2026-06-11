@@ -1,0 +1,29 @@
+# Invalid workflow fixture: a transition whose `to` names a non-existent step.
+# Used to assert that graph validation rejects dangling transition targets
+# before execution.
+# @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P16
+# @requirement:REQ-PRFU-018,REQ-PRFU-020
+
+workflow_type_id = "p10-dangling-transition-target"
+
+[[steps]]
+step_id = "start"
+step_type = "shell"
+description = "Entry step"
+
+[[steps]]
+step_id = "finish"
+step_type = "shell"
+description = "Terminal step"
+
+# Valid edge: start -> finish on success.
+[[transitions]]
+from = "start"
+to = "finish"
+condition = "success"
+
+# Invalid edge: `to` references a step that does not exist.
+[[transitions]]
+from = "start"
+to = "does_not_exist"
+condition = "fatal"

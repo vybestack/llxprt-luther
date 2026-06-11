@@ -1,0 +1,69 @@
+# Invalid workflow fixture: a required post-PR collector step is declared but
+# unreachable from the post-PR entry (`capture_pr_identity`). The route from
+# `collect_ci_failures` skips `collect_coderabbit_feedback` entirely, bypassing
+# a required collector. Used to assert graph validation rejects this.
+# @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P16
+# @requirement:REQ-PRFU-018,REQ-PRFU-020
+
+workflow_type_id = "p10-unreachable-required-step"
+
+[[steps]]
+step_id = "capture_pr_identity"
+step_type = "shell"
+description = "Post-PR entry step"
+
+[[steps]]
+step_id = "watch_pr_checks"
+step_type = "shell"
+description = "Watch PR CI checks"
+
+[[steps]]
+step_id = "collect_ci_failures"
+step_type = "shell"
+description = "Required collector: CI failures"
+
+[[steps]]
+step_id = "collect_coderabbit_feedback"
+step_type = "shell"
+description = "Required collector: CodeRabbit feedback (made unreachable)"
+
+[[steps]]
+step_id = "post_pr_failure_terminal"
+step_type = "shell"
+description = "Post-PR failure terminal"
+
+# capture_pr_identity -> watch_pr_checks
+[[transitions]]
+from = "capture_pr_identity"
+to = "watch_pr_checks"
+condition = "success"
+
+[[transitions]]
+from = "capture_pr_identity"
+to = "post_pr_failure_terminal"
+condition = "fatal"
+
+# watch_pr_checks -> collect_ci_failures
+[[transitions]]
+from = "watch_pr_checks"
+to = "collect_ci_failures"
+condition = "success"
+
+# collect_ci_failures skips collect_coderabbit_feedback, going straight to the
+# terminal. This makes the required CodeRabbit collector unreachable.
+[[transitions]]
+from = "collect_ci_failures"
+to = "post_pr_failure_terminal"
+condition = "success"
+
+[[transitions]]
+from = "collect_ci_failures"
+to = "post_pr_failure_terminal"
+condition = "fatal"
+
+# collect_coderabbit_feedback has an outgoing edge but no incoming edge, so it is
+# declared yet unreachable from the post-PR entry.
+[[transitions]]
+from = "collect_coderabbit_feedback"
+to = "post_pr_failure_terminal"
+condition = "success"
