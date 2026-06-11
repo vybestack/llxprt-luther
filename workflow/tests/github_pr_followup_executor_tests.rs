@@ -5548,6 +5548,46 @@ fn push_remediation_changes_no_change_routes_fixable_for_marker_handling() {
     );
 }
 
+#[test]
+fn push_remediation_changes_pushes_clean_local_head_when_already_committed() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_p11_plan_and_result(
+        &temp,
+        serde_json::json!([
+            { "source_type": "ci_failure", "source_id": "ci-build", "status": "changed", "evidence": { "kind": "current_repository_test", "current_head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" } },
+            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "thread-valid", "body_hash": "hash-valid", "status": "changed", "evidence": { "kind": "current_repository_test", "current_head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" } }
+        ]),
+    );
+    write_p14_post_pr_test_result(&temp, "passed");
+    let mut runner = P14RecordingPushRunner::new();
+    runner.status_output = String::new();
+    runner.local_before = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string();
+    runner.remote_before = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string();
+    runner.remote_after = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string();
+    let mut context = p11_context(&temp);
+    let outcome = PushRemediationChangesExecutorWithRunner::new(runner.clone(), FixedClock)
+        .execute(&mut context, &p11_params(&temp))
+        .expect("push already committed remediation");
+    let artifact = read_json(&p11_current_artifact_path(&temp, "push-remediation-result"));
+    let calls = runner.calls();
+
+    assert_expected_outcome(
+        outcome,
+        StepOutcome::Success,
+        "clean local remediation commit ahead of the PR ref must be pushed instead of treated as a fatal no-change mismatch",
+    );
+    assert_eq!(
+        artifact
+            .get("push_state")
+            .and_then(serde_json::Value::as_str),
+        Some("pushed_existing_head")
+    );
+    assert!(calls.iter().any(|call| call.command_id == "push"));
+    assert!(calls
+        .iter()
+        .all(|call| call.command_id != "stage" && call.command_id != "commit"));
+}
+
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P14
 /// @requirement:REQ-PRFU-015,REQ-PRFU-017
 /// @pseudocode lines 34-40

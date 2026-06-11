@@ -3253,6 +3253,119 @@ fn push_remediation_changes(
         &remote_ref,
     )?;
     if inspection.included_paths.is_empty() {
+        if inspection.pre_push_remote_head_sha != inspection.pre_push_local_head_sha {
+            let push = push_runner_command(
+                runner,
+                "push",
+                vec![
+                    "git".to_string(),
+                    "push".to_string(),
+                    remote_name.clone(),
+                    format!("HEAD:{remote_ref}"),
+                ],
+                &working_directory,
+                &log_dir,
+                timeout_seconds,
+            );
+            let push_ok = push.status == "passed";
+            commands.push(push_command_result_json(&push));
+            if !push_ok {
+                return write_retryable_push_failure(
+                    &store,
+                    &binding,
+                    &step_id,
+                    step_order,
+                    retry_index,
+                    max_push_retries,
+                    &remote_ref,
+                    "push_failed",
+                    commands,
+                    &inspection,
+                    &plan,
+                    &result,
+                    &test_result,
+                    clock,
+                );
+            }
+            let remote_after = match remote_head_sha(
+                runner,
+                &working_directory,
+                &log_dir,
+                timeout_seconds,
+                &remote_name,
+                &remote_ref,
+            ) {
+                Ok((head, observed)) => {
+                    commands.extend(observed);
+                    head
+                }
+                Err((reason, observed)) => {
+                    commands.extend(observed);
+                    return write_push_failure_from_observation(
+                        &store,
+                        &binding,
+                        &step_id,
+                        step_order,
+                        max_push_retries,
+                        &remote_ref,
+                        "retryable_failed",
+                        reason.as_str(),
+                        commands,
+                        &plan,
+                        &result,
+                        &test_result,
+                        clock,
+                    );
+                }
+            };
+            let verified = remote_after == inspection.pre_push_local_head_sha;
+            let payload = push_payload(
+                &binding,
+                if verified {
+                    "pushed_existing_head"
+                } else {
+                    "retryable_failed"
+                },
+                retry_index,
+                max_push_retries,
+                &remote_ref,
+                &inspection.pre_push_local_head_sha,
+                &inspection.pre_push_remote_head_sha,
+                &binding.head_sha,
+                Some(&inspection.pre_push_local_head_sha),
+                &inspection.pre_push_local_head_sha,
+                Some(&remote_after),
+                &inspection.pre_push_local_head_sha,
+                verified,
+                Vec::new(),
+                inspection.excluded_paths,
+                None,
+                (!verified).then_some("remote_head_mismatch_after_push"),
+                commands,
+                &plan,
+                &result,
+                &test_result,
+                clock,
+            );
+            let failure = (!verified).then(|| {
+                (
+                    "retryable_failed",
+                    "remote_head_mismatch_after_push",
+                    json!({ "committed_head": inspection.pre_push_local_head_sha, "remote_head": remote_after }),
+                )
+            });
+            write_push_result(
+                &store, &binding, &step_id, step_order, payload, failure, clock,
+            )?;
+            return Ok(if verified {
+                StepOutcome::Success
+            } else if retry_index >= max_push_retries {
+                StepOutcome::Fatal
+            } else {
+                StepOutcome::Retryable
+            });
+        }
+
         let state = if inspection.excluded_paths.is_empty() {
             "no_change"
         } else {
