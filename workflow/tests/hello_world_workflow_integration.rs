@@ -25,6 +25,8 @@ fn hello_world_workflow_type(work_dir: &std::path::Path) -> WorkflowType {
                 step_id: "init_project".to_string(),
                 step_type: "shell".to_string(),
                 description: Some("Init Rust project".to_string()),
+                produces: None,
+                consumes: None,
                 parameters: Some(serde_json::json!({
                     "command": format!("cargo init --name hello_world {}", work_dir.display())
                 })),
@@ -33,6 +35,8 @@ fn hello_world_workflow_type(work_dir: &std::path::Path) -> WorkflowType {
                 step_id: "write_test".to_string(),
                 step_type: "write_file".to_string(),
                 description: Some("Write test".to_string()),
+                produces: None,
+                consumes: None,
                 parameters: Some(serde_json::json!({
                     "path": "tests/greeting_test.rs",
                     "content": "#[test]\nfn test_greet() {\n    assert_eq!(hello_world::greet(\"World\"), \"Hello, World!\");\n}\n"
@@ -42,6 +46,8 @@ fn hello_world_workflow_type(work_dir: &std::path::Path) -> WorkflowType {
                 step_id: "write_impl".to_string(),
                 step_type: "write_file".to_string(),
                 description: Some("Write implementation".to_string()),
+                produces: None,
+                consumes: None,
                 parameters: Some(serde_json::json!({
                     "path": "src/lib.rs",
                     "content": "pub fn greet(name: &str) -> String {\n    format!(\"Hello, {}!\", name)\n}\n"
@@ -51,6 +57,8 @@ fn hello_world_workflow_type(work_dir: &std::path::Path) -> WorkflowType {
                 step_id: "run_tests".to_string(),
                 step_type: "shell".to_string(),
                 description: Some("Run cargo test".to_string()),
+                produces: None,
+                consumes: None,
                 parameters: Some(serde_json::json!({
                     "command": "cargo test"
                 })),
@@ -59,6 +67,8 @@ fn hello_world_workflow_type(work_dir: &std::path::Path) -> WorkflowType {
                 step_id: "complete".to_string(),
                 step_type: "shell".to_string(),
                 description: Some("Echo done".to_string()),
+                produces: None,
+                consumes: None,
                 parameters: Some(serde_json::json!({
                     "command": "echo done"
                 })),
@@ -183,12 +193,16 @@ fn test_engine_dispatches_to_shell_executor() {
                 step_id: "step_a".to_string(),
                 step_type: "shell".to_string(),
                 description: None,
+                produces: None,
+                consumes: None,
                 parameters: Some(serde_json::json!({"command": "echo hello"})),
             },
             StepDef {
                 step_id: "step_b".to_string(),
                 step_type: "shell".to_string(),
                 description: None,
+                produces: None,
+                consumes: None,
                 parameters: Some(serde_json::json!({"command": "echo world"})),
             },
         ],
@@ -227,6 +241,8 @@ fn test_engine_dispatches_to_write_file_executor() {
             step_id: "write_step".to_string(),
             step_type: "write_file".to_string(),
             description: None,
+            produces: None,
+            consumes: None,
             parameters: Some(serde_json::json!({
                 "path": "output.txt",
                 "content": "hello from workflow"
@@ -266,12 +282,16 @@ fn test_context_passes_between_steps_through_engine() {
                 step_id: "produce".to_string(),
                 step_type: "shell".to_string(),
                 description: None,
+                produces: None,
+                consumes: None,
                 parameters: Some(serde_json::json!({"command": "echo context_value_123"})),
             },
             StepDef {
                 step_id: "consume".to_string(),
                 step_type: "write_file".to_string(),
                 description: None,
+                produces: None,
+                consumes: None,
                 parameters: Some(serde_json::json!({
                     "path": "captured.txt",
                     "content": "{stdout}"
@@ -320,6 +340,8 @@ fn test_unregistered_step_type_through_engine_produces_failure() {
             step_id: "bad_step".to_string(),
             step_type: "nonexistent_executor".to_string(),
             description: None,
+            produces: None,
+            consumes: None,
             parameters: Some(serde_json::json!({})),
         }],
         transitions: vec![],

@@ -6,10 +6,12 @@ pub mod target_profile;
 pub mod validation;
 
 pub use config_loader::{
-    parse_workflow_config_json, parse_workflow_config_toml, parse_workflow_type_json,
-    parse_workflow_type_toml, resolve_workflow, resolve_workflow_config, resolve_workflow_type,
-    validate_config_matches_type, validate_workflow_config, validate_workflow_type, ConfigError,
-    ConfigErrorKind, Result as ConfigResult,
+    build_available_variables, parse_workflow_config_json, parse_workflow_config_toml,
+    parse_workflow_type_json, parse_workflow_type_toml, resolve_workflow, resolve_workflow_config,
+    resolve_workflow_type, validate_artifact_dependencies, validate_config_matches_type,
+    validate_step_tokens, validate_workflow_config, validate_workflow_tokens,
+    validate_workflow_type, ConfigError, ConfigErrorKind, MissingArtifactProducer,
+    Result as ConfigResult, UnresolvedToken,
 };
 pub use schema::{
     GuardConfig, GuardLimits, RepoConfig, RuntimeConfig, StepDef, TransitionDef, WorkflowConfig,

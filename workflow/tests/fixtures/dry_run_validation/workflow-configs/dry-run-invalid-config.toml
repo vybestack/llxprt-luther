@@ -1,0 +1,22 @@
+# Config for the dry-run validation fixture.
+# @plan:PLAN-20260408-LLXPRT-FIRST.P11
+
+config_id = "dry-run-invalid-config"
+workflow_type_id = "dry-run-invalid-v1"
+
+[runtime]
+timeout_seconds = 300
+max_retries = 1
+
+[repository]
+workspace_strategy = "fresh"
+branch_template = "luther/{issue_number}"
+
+[guards]
+
+[variables]
+artifact_dir = "/tmp/artifacts"
+work_dir = "/tmp/work"
+primary_issue_number = "11"
+repository_owner = "luther"
+repository_name = "fixture"

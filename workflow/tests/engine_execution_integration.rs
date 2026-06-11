@@ -32,18 +32,24 @@ fn test_workflow_type() -> WorkflowType {
                 step_id: "step_a".to_string(),
                 step_type: "test".to_string(),
                 description: Some("First step".to_string()),
+                produces: None,
+                consumes: None,
                 parameters: None,
             },
             luther_workflow::workflow::schema::StepDef {
                 step_id: "step_b".to_string(),
                 step_type: "test".to_string(),
                 description: Some("Second step".to_string()),
+                produces: None,
+                consumes: None,
                 parameters: None,
             },
             luther_workflow::workflow::schema::StepDef {
                 step_id: "step_c".to_string(),
                 step_type: "test".to_string(),
                 description: Some("Third step".to_string()),
+                produces: None,
+                consumes: None,
                 parameters: None,
             },
         ],
@@ -165,6 +171,8 @@ fn test_fatal_error_routes_to_terminal() {
             step_id: "terminal_failure".to_string(),
             step_type: "cleanup".to_string(),
             description: Some("Terminal failure handler".to_string()),
+            produces: None,
+            consumes: None,
             parameters: None,
         });
 
@@ -241,6 +249,8 @@ fn test_loop_back_transition_increments_counter() {
             step_id: "diagnose".to_string(),
             step_type: "analysis".to_string(),
             description: Some("Diagnose failures".to_string()),
+            produces: None,
+            consumes: None,
             parameters: None,
         });
     workflow_type
@@ -249,6 +259,8 @@ fn test_loop_back_transition_increments_counter() {
             step_id: "remediate".to_string(),
             step_type: "execution".to_string(),
             description: Some("Apply fixes".to_string()),
+            produces: None,
+            consumes: None,
             parameters: None,
         });
 

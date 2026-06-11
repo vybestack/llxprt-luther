@@ -385,6 +385,8 @@ mod tests {
             step_type: "shell".to_string(),
             description: None,
             parameters: None,
+            produces: None,
+            consumes: None,
         }
     }
 
