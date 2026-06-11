@@ -27,6 +27,7 @@ fn hello_world_workflow_type(work_dir: &std::path::Path) -> WorkflowType {
                 description: Some("Init Rust project".to_string()),
                 produces: None,
                 consumes: None,
+                terminal: None,
                 parameters: Some(serde_json::json!({
                     "command": format!("cargo init --name hello_world {}", work_dir.display())
                 })),
@@ -37,6 +38,7 @@ fn hello_world_workflow_type(work_dir: &std::path::Path) -> WorkflowType {
                 description: Some("Write test".to_string()),
                 produces: None,
                 consumes: None,
+                terminal: None,
                 parameters: Some(serde_json::json!({
                     "path": "tests/greeting_test.rs",
                     "content": "#[test]\nfn test_greet() {\n    assert_eq!(hello_world::greet(\"World\"), \"Hello, World!\");\n}\n"
@@ -48,6 +50,7 @@ fn hello_world_workflow_type(work_dir: &std::path::Path) -> WorkflowType {
                 description: Some("Write implementation".to_string()),
                 produces: None,
                 consumes: None,
+                terminal: None,
                 parameters: Some(serde_json::json!({
                     "path": "src/lib.rs",
                     "content": "pub fn greet(name: &str) -> String {\n    format!(\"Hello, {}!\", name)\n}\n"
@@ -59,6 +62,7 @@ fn hello_world_workflow_type(work_dir: &std::path::Path) -> WorkflowType {
                 description: Some("Run cargo test".to_string()),
                 produces: None,
                 consumes: None,
+                terminal: None,
                 parameters: Some(serde_json::json!({
                     "command": "cargo test"
                 })),
@@ -69,6 +73,7 @@ fn hello_world_workflow_type(work_dir: &std::path::Path) -> WorkflowType {
                 description: Some("Echo done".to_string()),
                 produces: None,
                 consumes: None,
+                terminal: None,
                 parameters: Some(serde_json::json!({
                     "command": "echo done"
                 })),
@@ -195,6 +200,7 @@ fn test_engine_dispatches_to_shell_executor() {
                 description: None,
                 produces: None,
                 consumes: None,
+                terminal: None,
                 parameters: Some(serde_json::json!({"command": "echo hello"})),
             },
             StepDef {
@@ -203,6 +209,7 @@ fn test_engine_dispatches_to_shell_executor() {
                 description: None,
                 produces: None,
                 consumes: None,
+                terminal: None,
                 parameters: Some(serde_json::json!({"command": "echo world"})),
             },
         ],
@@ -243,6 +250,7 @@ fn test_engine_dispatches_to_write_file_executor() {
             description: None,
             produces: None,
             consumes: None,
+            terminal: None,
             parameters: Some(serde_json::json!({
                 "path": "output.txt",
                 "content": "hello from workflow"
@@ -284,6 +292,7 @@ fn test_context_passes_between_steps_through_engine() {
                 description: None,
                 produces: None,
                 consumes: None,
+                terminal: None,
                 parameters: Some(serde_json::json!({"command": "echo context_value_123"})),
             },
             StepDef {
@@ -292,6 +301,7 @@ fn test_context_passes_between_steps_through_engine() {
                 description: None,
                 produces: None,
                 consumes: None,
+                terminal: None,
                 parameters: Some(serde_json::json!({
                     "path": "captured.txt",
                     "content": "{stdout}"
@@ -342,6 +352,7 @@ fn test_unregistered_step_type_through_engine_produces_failure() {
             description: None,
             produces: None,
             consumes: None,
+            terminal: None,
             parameters: Some(serde_json::json!({})),
         }],
         transitions: vec![],

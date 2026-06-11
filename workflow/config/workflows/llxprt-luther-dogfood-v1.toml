@@ -873,6 +873,7 @@ max_iterations = 1
 from = "run_tests"
 to = "evaluate_impl"
 condition = "success"
+max_iterations = 50
 
 [[transitions]]
 from = "run_tests"

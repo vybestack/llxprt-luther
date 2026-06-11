@@ -44,6 +44,12 @@ pub enum GraphErrorCategory {
     UnsafePostPrRoute,
     /// A required collector step is missing or unreachable in the post-PR graph.
     MissingRequiredCollector,
+    /// A loop-back transition omits the required explicit `max_iterations` cap.
+    MissingLoopLimit,
+    /// A terminal step declares an outgoing transition.
+    TerminalHasOutgoing,
+    /// A `post_pr_iteration_guard` step omits a positive remediation cap.
+    MissingRemediationCap,
 }
 
 /// A single graph-structural validation error.
@@ -84,6 +90,9 @@ pub fn validate_workflow_graph(workflow: &WorkflowType) -> Result<(), Vec<GraphV
     validate_all_steps_reachable(workflow, &mut errors);
     validate_post_pr_routes(workflow, &mut errors);
     validate_required_collectors_present_and_reachable(workflow, &mut errors);
+    validate_loop_back_limits(workflow, &mut errors);
+    validate_terminal_steps(workflow, &mut errors);
+    validate_pr_remediation_caps(workflow, &mut errors);
 
     if errors.is_empty() {
         Ok(())
@@ -356,6 +365,118 @@ fn validate_required_collectors_present_and_reachable(
     }
 }
 
+/// The step_type marking the PR remediation iteration guard.
+const POST_PR_ITERATION_GUARD: &str = "post_pr_iteration_guard";
+
+/// The parameter that caps post-PR remediation loop iterations.
+const REMEDIATION_CAP_PARAM: &str = "max_post_pr_remediation_iterations";
+
+/// Whether `step` is a terminal step. A step is terminal when it explicitly
+/// declares `terminal = true`, or (for back-compat) when its `step_type` is
+/// `post_pr_failure_terminal`, the historically implicit terminal.
+/// @plan:PLAN-20260404-INITIAL-RUNTIME.P03
+fn is_terminal_step(step: &crate::workflow::schema::StepDef) -> bool {
+    step.terminal == Some(true) || step.step_type == POST_PR_FAILURE_TERMINAL
+}
+
+/// Reject loop-back transitions that omit an explicit `max_iterations` cap.
+///
+/// A transition is a loop-back when its target appears at or before its source
+/// in declaration order. This mirrors `EngineRunner::is_loop_back`
+/// (`next_idx <= current_idx`) so static validation matches runtime behavior.
+/// Loop-back edges must declare an explicit cap rather than silently falling
+/// back to the global `max_iterations` default.
+/// @plan:PLAN-20260404-INITIAL-RUNTIME.P03
+fn validate_loop_back_limits(workflow: &WorkflowType, errors: &mut Vec<GraphValidationError>) {
+    let index_of: HashMap<&str, usize> = workflow
+        .steps
+        .iter()
+        .enumerate()
+        .map(|(idx, step)| (step.step_id.as_str(), idx))
+        .collect();
+
+    for transition in &workflow.transitions {
+        let (Some(&from_idx), Some(&to_idx)) = (
+            index_of.get(transition.from.as_str()),
+            index_of.get(transition.to.as_str()),
+        ) else {
+            // Dangling transitions are reported by another validator.
+            continue;
+        };
+        let is_loop_back = to_idx <= from_idx;
+        if is_loop_back && transition.max_iterations.is_none() {
+            errors.push(GraphValidationError {
+                step_id: Some(transition.from.clone()),
+                detail: format!(
+                    "loop-back transition {} --{}--> {} must declare an explicit max_iterations",
+                    transition.from,
+                    effective_condition(transition.condition.as_deref()),
+                    transition.to
+                ),
+                category: GraphErrorCategory::MissingLoopLimit,
+            });
+        }
+    }
+}
+
+/// Reject terminal steps that declare any outgoing transition.
+///
+/// Terminal steps must not route onward. A step is terminal per
+/// `is_terminal_step` (explicit `terminal = true` or the implicit
+/// `post_pr_failure_terminal` step_type).
+/// @plan:PLAN-20260404-INITIAL-RUNTIME.P03
+fn validate_terminal_steps(workflow: &WorkflowType, errors: &mut Vec<GraphValidationError>) {
+    for step in &workflow.steps {
+        if !is_terminal_step(step) {
+            continue;
+        }
+        for transition in workflow
+            .transitions
+            .iter()
+            .filter(|transition| transition.from == step.step_id)
+        {
+            errors.push(GraphValidationError {
+                step_id: Some(step.step_id.clone()),
+                detail: format!(
+                    "terminal step '{}' must not declare an outgoing transition to '{}'",
+                    step.step_id, transition.to
+                ),
+                category: GraphErrorCategory::TerminalHasOutgoing,
+            });
+        }
+    }
+}
+
+/// Reject `post_pr_iteration_guard` steps without a positive remediation cap.
+///
+/// The `max_post_pr_remediation_iterations` parameter must be present and a
+/// positive integer so PR remediation loops have a configured cap validated
+/// before execution, rather than silently defaulting at runtime.
+/// @plan:PLAN-20260404-INITIAL-RUNTIME.P03
+fn validate_pr_remediation_caps(workflow: &WorkflowType, errors: &mut Vec<GraphValidationError>) {
+    for step in &workflow.steps {
+        if step.step_type != POST_PR_ITERATION_GUARD {
+            continue;
+        }
+        let cap = step
+            .parameters
+            .as_ref()
+            .and_then(|params| params.get(REMEDIATION_CAP_PARAM))
+            .and_then(serde_json::Value::as_u64);
+        let valid = matches!(cap, Some(value) if value > 0);
+        if !valid {
+            errors.push(GraphValidationError {
+                step_id: Some(step.step_id.clone()),
+                detail: format!(
+                    "post_pr_iteration_guard step '{}' must declare a positive {}",
+                    step.step_id, REMEDIATION_CAP_PARAM
+                ),
+                category: GraphErrorCategory::MissingRemediationCap,
+            });
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -387,6 +508,7 @@ mod tests {
             parameters: None,
             produces: None,
             consumes: None,
+            terminal: None,
         }
     }
 
@@ -579,5 +701,148 @@ mod tests {
                 && e.detail.contains("unreachable")
                 && e.detail.contains("collect_coderabbit_feedback")
         }));
+    }
+
+    /// A loop-back transition with an explicit cap.
+    fn capped_loop_back(from: &str, to: &str, max: u32) -> TransitionDef {
+        TransitionDef {
+            from: from.to_string(),
+            to: to.to_string(),
+            condition: None,
+            max_iterations: Some(max),
+        }
+    }
+
+    fn terminal_step(id: &str) -> StepDef {
+        StepDef {
+            terminal: Some(true),
+            ..step(id)
+        }
+    }
+
+    fn guard_step(id: &str, params: Option<serde_json::Value>) -> StepDef {
+        StepDef {
+            step_type: "post_pr_iteration_guard".to_string(),
+            parameters: params,
+            ..step(id)
+        }
+    }
+
+    #[test]
+    fn loop_back_without_max_iterations_is_flagged() {
+        // `b -> a` is a backward edge (a precedes b) with no cap.
+        let wf = workflow(
+            vec![step("a"), step("b")],
+            vec![transition("a", "b", None), transition("b", "a", None)],
+        );
+        let errors = validate_workflow_graph(&wf).unwrap_err();
+        assert!(errors.iter().any(|e| {
+            e.category == GraphErrorCategory::MissingLoopLimit
+                && e.detail.contains("loop-back transition")
+                && e.detail.contains("b --success--> a")
+        }));
+    }
+
+    #[test]
+    fn loop_back_with_max_iterations_passes() {
+        let wf = workflow(
+            vec![step("a"), step("b")],
+            vec![transition("a", "b", None), capped_loop_back("b", "a", 5)],
+        );
+        assert!(validate_workflow_graph(&wf).is_ok());
+    }
+
+    #[test]
+    fn forward_transition_without_max_iterations_passes() {
+        // Only loop-backs require an explicit cap; forward edges do not.
+        let wf = workflow(vec![step("a"), step("b")], vec![transition("a", "b", None)]);
+        assert!(validate_workflow_graph(&wf).is_ok());
+    }
+
+    #[test]
+    fn terminal_step_with_outgoing_transition_is_flagged() {
+        let wf = workflow(
+            vec![step("a"), terminal_step("done")],
+            vec![transition("a", "done", None), transition("done", "a", None)],
+        );
+        let errors = validate_workflow_graph(&wf).unwrap_err();
+        assert!(errors.iter().any(|e| {
+            e.category == GraphErrorCategory::TerminalHasOutgoing
+                && e.detail.contains("terminal step 'done'")
+        }));
+    }
+
+    #[test]
+    fn post_pr_failure_terminal_with_outgoing_transition_is_flagged() {
+        // Implicit terminal recognized solely by step_type.
+        let mut implicit = step("post_pr_failure_terminal");
+        implicit.step_type = "post_pr_failure_terminal".to_string();
+        let wf = workflow(
+            vec![step("a"), implicit],
+            vec![
+                transition("a", "post_pr_failure_terminal", None),
+                capped_loop_back("post_pr_failure_terminal", "a", 2),
+            ],
+        );
+        let errors = validate_workflow_graph(&wf).unwrap_err();
+        assert!(errors.iter().any(|e| {
+            e.category == GraphErrorCategory::TerminalHasOutgoing
+                && e.detail.contains("post_pr_failure_terminal")
+        }));
+    }
+
+    #[test]
+    fn terminal_step_without_outgoing_transition_passes() {
+        let wf = workflow(
+            vec![step("a"), terminal_step("done")],
+            vec![transition("a", "done", None)],
+        );
+        assert!(validate_workflow_graph(&wf).is_ok());
+    }
+
+    #[test]
+    fn non_terminal_step_with_outgoing_transition_passes() {
+        let wf = workflow(
+            vec![step("a"), step("b"), step("c")],
+            vec![transition("a", "b", None), transition("b", "c", None)],
+        );
+        assert!(validate_workflow_graph(&wf).is_ok());
+    }
+
+    #[test]
+    fn iteration_guard_missing_cap_is_flagged() {
+        let wf = workflow(
+            vec![step("a"), guard_step("guard", None)],
+            vec![transition("a", "guard", None)],
+        );
+        let errors = validate_workflow_graph(&wf).unwrap_err();
+        assert!(errors.iter().any(|e| {
+            e.category == GraphErrorCategory::MissingRemediationCap
+                && e.detail.contains("post_pr_iteration_guard step 'guard'")
+        }));
+    }
+
+    #[test]
+    fn iteration_guard_zero_cap_is_flagged() {
+        let params = serde_json::json!({ "max_post_pr_remediation_iterations": 0 });
+        let wf = workflow(
+            vec![step("a"), guard_step("guard", Some(params))],
+            vec![transition("a", "guard", None)],
+        );
+        let errors = validate_workflow_graph(&wf).unwrap_err();
+        assert!(errors.iter().any(|e| {
+            e.category == GraphErrorCategory::MissingRemediationCap
+                && e.detail.contains("must declare a positive")
+        }));
+    }
+
+    #[test]
+    fn iteration_guard_positive_cap_passes() {
+        let params = serde_json::json!({ "max_post_pr_remediation_iterations": 3 });
+        let wf = workflow(
+            vec![step("a"), guard_step("guard", Some(params))],
+            vec![transition("a", "guard", None)],
+        );
+        assert!(validate_workflow_graph(&wf).is_ok());
     }
 }

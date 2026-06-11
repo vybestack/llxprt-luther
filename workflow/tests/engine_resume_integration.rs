@@ -33,6 +33,7 @@ fn test_workflow_type() -> WorkflowType {
                 description: Some("First step".to_string()),
                 produces: None,
                 consumes: None,
+                terminal: None,
                 parameters: None,
             },
             luther_workflow::workflow::schema::StepDef {
@@ -41,6 +42,7 @@ fn test_workflow_type() -> WorkflowType {
                 description: Some("Second step".to_string()),
                 produces: None,
                 consumes: None,
+                terminal: None,
                 parameters: None,
             },
             luther_workflow::workflow::schema::StepDef {
@@ -49,6 +51,7 @@ fn test_workflow_type() -> WorkflowType {
                 description: Some("Third step".to_string()),
                 produces: None,
                 consumes: None,
+                terminal: None,
                 parameters: None,
             },
         ],

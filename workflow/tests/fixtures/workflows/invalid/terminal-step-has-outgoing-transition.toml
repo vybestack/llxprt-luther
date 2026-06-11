@@ -1,0 +1,31 @@
+# Invalid workflow fixture: a terminal step that declares an outgoing
+# transition. Used to assert that graph validation rejects terminal steps with
+# any outgoing route, since terminal steps must not route onward.
+# @plan:PLAN-20260404-INITIAL-RUNTIME.P03
+
+workflow_type_id = "terminal-step-has-outgoing-transition"
+
+[[steps]]
+step_id = "start"
+step_type = "shell"
+description = "Entry step"
+
+[[steps]]
+step_id = "done"
+step_type = "shell"
+description = "Explicit terminal step"
+terminal = true
+
+# Valid forward edge: start -> done on success.
+[[transitions]]
+from = "start"
+to = "done"
+condition = "success"
+
+# Invalid edge: the terminal step declares an outgoing transition (capped, so
+# the loop-back rule is satisfied and the terminal rule is the only violation).
+[[transitions]]
+from = "done"
+to = "start"
+condition = "fixable"
+max_iterations = 2

@@ -82,6 +82,7 @@ fn seq_step(step_id: &str) -> StepDef {
         description: None,
         produces: None,
         consumes: None,
+        terminal: None,
         parameters: None,
     }
 }
@@ -129,6 +130,7 @@ fn test_per_edge_limit_abandons_when_exceeded() {
             description: None,
             produces: None,
             consumes: None,
+            terminal: None,
             parameters: None,
         },
         StepDef {
@@ -137,6 +139,7 @@ fn test_per_edge_limit_abandons_when_exceeded() {
             description: None,
             produces: None,
             consumes: None,
+            terminal: None,
             parameters: None,
         },
     ];
@@ -220,6 +223,7 @@ fn test_per_edge_limit_allows_iterations_within_limit() {
             description: None,
             produces: None,
             consumes: None,
+            terminal: None,
             parameters: None,
         },
         StepDef {
@@ -228,6 +232,7 @@ fn test_per_edge_limit_allows_iterations_within_limit() {
             description: None,
             produces: None,
             consumes: None,
+            terminal: None,
             parameters: None,
         },
         StepDef {
@@ -236,6 +241,7 @@ fn test_per_edge_limit_allows_iterations_within_limit() {
             description: None,
             produces: None,
             consumes: None,
+            terminal: None,
             parameters: None,
         },
     ];
@@ -411,6 +417,7 @@ fn test_global_fallback_used_when_no_per_edge_limit() {
             description: None,
             produces: None,
             consumes: None,
+            terminal: None,
             parameters: None,
         },
         StepDef {
@@ -419,6 +426,7 @@ fn test_global_fallback_used_when_no_per_edge_limit() {
             description: None,
             produces: None,
             consumes: None,
+            terminal: None,
             parameters: None,
         },
     ];
@@ -489,6 +497,7 @@ fn test_per_edge_limit_overrides_global() {
             description: None,
             produces: None,
             consumes: None,
+            terminal: None,
             parameters: None,
         },
         StepDef {
@@ -497,6 +506,7 @@ fn test_per_edge_limit_overrides_global() {
             description: None,
             produces: None,
             consumes: None,
+            terminal: None,
             parameters: None,
         },
     ];
@@ -616,6 +626,7 @@ fn test_abandoned_reason_identifies_edge() {
             description: None,
             produces: None,
             consumes: None,
+            terminal: None,
             parameters: None,
         },
         StepDef {
@@ -624,6 +635,7 @@ fn test_abandoned_reason_identifies_edge() {
             description: None,
             produces: None,
             consumes: None,
+            terminal: None,
             parameters: None,
         },
     ];
@@ -701,6 +713,7 @@ fn test_forward_transitions_not_counted() {
             description: None,
             produces: None,
             consumes: None,
+            terminal: None,
             parameters: None,
         },
         StepDef {
@@ -709,6 +722,7 @@ fn test_forward_transitions_not_counted() {
             description: None,
             produces: None,
             consumes: None,
+            terminal: None,
             parameters: None,
         },
         StepDef {
@@ -717,6 +731,7 @@ fn test_forward_transitions_not_counted() {
             description: None,
             produces: None,
             consumes: None,
+            terminal: None,
             parameters: None,
         },
         StepDef {
@@ -725,6 +740,7 @@ fn test_forward_transitions_not_counted() {
             description: None,
             produces: None,
             consumes: None,
+            terminal: None,
             parameters: None,
         },
     ];
@@ -796,6 +812,7 @@ fn test_loop_count_accessor_returns_sum_of_edge_counts() {
             description: None,
             produces: None,
             consumes: None,
+            terminal: None,
             parameters: None,
         },
         StepDef {
@@ -804,6 +821,7 @@ fn test_loop_count_accessor_returns_sum_of_edge_counts() {
             description: None,
             produces: None,
             consumes: None,
+            terminal: None,
             parameters: None,
         },
     ];
@@ -861,38 +879,10 @@ fn test_loop_count_accessor_returns_sum_of_edge_counts() {
 fn test_mixed_per_edge_and_global_limits() {
     // GIVEN: Two loops - one with per-edge, one with global
     let steps = vec![
-        StepDef {
-            step_id: "step_a".to_string(),
-            step_type: "sequence".to_string(),
-            description: None,
-            produces: None,
-            consumes: None,
-            parameters: None,
-        },
-        StepDef {
-            step_id: "step_b".to_string(),
-            step_type: "sequence".to_string(),
-            description: None,
-            produces: None,
-            consumes: None,
-            parameters: None,
-        },
-        StepDef {
-            step_id: "step_c".to_string(),
-            step_type: "sequence".to_string(),
-            description: None,
-            produces: None,
-            consumes: None,
-            parameters: None,
-        },
-        StepDef {
-            step_id: "step_d".to_string(),
-            step_type: "sequence".to_string(),
-            description: None,
-            produces: None,
-            consumes: None,
-            parameters: None,
-        },
+        seq_step("step_a"),
+        seq_step("step_b"),
+        seq_step("step_c"),
+        seq_step("step_d"),
     ];
 
     let transitions = vec![

@@ -81,6 +81,7 @@ condition = "success"
 from = "run_tests"
 to = "write_impl"
 condition = "fixable"
+max_iterations = 10
 
 [guards]
 max_retries = 2

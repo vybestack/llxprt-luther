@@ -888,8 +888,9 @@ fn test_run_completion_records_metadata() {
 // Phase 16: Post-PR workflow graph TDD
 // ============================================================================
 
-use luther_workflow::workflow::config_loader::parse_workflow_type_toml;
+use luther_workflow::workflow::config_loader::{parse_workflow_type_toml, validate_workflow_type};
 use luther_workflow::workflow::schema::{WorkflowConfig, WorkflowType};
+use luther_workflow::workflow::validation::validate_workflow_graph;
 
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P16
 /// @requirement:REQ-PRFU-018,REQ-PRFU-020
@@ -2464,4 +2465,76 @@ fn production_and_fixture_llxprt_issue_fix_v1_are_equivalent() {
     );
     load_workflow_toml("config/workflows/llxprt-issue-fix-v1.toml");
     load_workflow_toml("tests/fixtures/workflows/valid/llxprt-issue-fix-v1.toml");
+}
+
+// ============================================================================
+// Issue #12: Loop limits and terminal routing as a workflow-level contract
+// ============================================================================
+
+/// Issue #12: the shipped llxprt-issue-fix-v1 workflow must satisfy the new
+/// loop-limit, terminal-routing, and PR-remediation-cap invariants enforced by
+/// the graph validator, so the production workflow still loads after the rules
+/// are added.
+/// @plan:PLAN-20260404-INITIAL-RUNTIME.P03
+#[test]
+fn production_workflow_satisfies_loop_terminal_remediation_contract() {
+    let workflow_type = post_pr_workflow();
+    validate_workflow_graph(&workflow_type)
+        .expect("production workflow must satisfy the loop/terminal/remediation contract");
+    validate_workflow_type(&workflow_type).expect("production workflow must pass full validation");
+}
+
+/// Issue #12: every loop-back transition in the production workflow declares an
+/// explicit `max_iterations` cap (loop-backs must not silently fall back to the
+/// global default).
+/// @plan:PLAN-20260404-INITIAL-RUNTIME.P03
+#[test]
+fn production_workflow_loop_backs_declare_explicit_caps() {
+    let workflow_type = post_pr_workflow();
+    let index_of: HashMap<&str, usize> = workflow_type
+        .steps
+        .iter()
+        .enumerate()
+        .map(|(idx, step)| (step.step_id.as_str(), idx))
+        .collect();
+
+    for transition in &workflow_type.transitions {
+        let (Some(&from_idx), Some(&to_idx)) = (
+            index_of.get(transition.from.as_str()),
+            index_of.get(transition.to.as_str()),
+        ) else {
+            continue;
+        };
+        if to_idx <= from_idx {
+            assert!(
+                transition.max_iterations.is_some(),
+                "loop-back {} --{}--> {} must declare an explicit max_iterations",
+                transition.from,
+                effective_condition(transition.condition.as_deref()),
+                transition.to,
+            );
+        }
+    }
+}
+
+/// Issue #12: the PR remediation iteration guard declares a positive
+/// `max_post_pr_remediation_iterations` cap, validated before execution.
+/// @plan:PLAN-20260404-INITIAL-RUNTIME.P03
+#[test]
+fn production_workflow_pr_iteration_guard_has_positive_cap() {
+    let workflow_type = post_pr_workflow();
+    let guard = workflow_type
+        .steps
+        .iter()
+        .find(|step| step.step_type == "post_pr_iteration_guard")
+        .expect("production workflow must declare a post_pr_iteration_guard step");
+    let cap = guard
+        .parameters
+        .as_ref()
+        .and_then(|params| params.get("max_post_pr_remediation_iterations"))
+        .and_then(serde_json::Value::as_u64);
+    assert!(
+        matches!(cap, Some(value) if value > 0),
+        "post_pr_iteration_guard must declare a positive max_post_pr_remediation_iterations, got {cap:?}"
+    );
 }

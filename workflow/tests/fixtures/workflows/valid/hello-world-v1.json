@@ -49,7 +49,7 @@
     {"from": "write_test", "to": "write_impl", "condition": "success"},
     {"from": "write_impl", "to": "run_tests", "condition": "success"},
     {"from": "run_tests", "to": "complete", "condition": "success"},
-    {"from": "run_tests", "to": "write_impl", "condition": "fixable"}
+    {"from": "run_tests", "to": "write_impl", "condition": "fixable", "max_iterations": 10}
   ],
   "guards": {
     "max_retries": 2,

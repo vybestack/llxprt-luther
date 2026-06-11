@@ -34,6 +34,7 @@ fn test_workflow_type() -> WorkflowType {
                 description: Some("First step".to_string()),
                 produces: None,
                 consumes: None,
+                terminal: None,
                 parameters: None,
             },
             luther_workflow::workflow::schema::StepDef {
@@ -42,6 +43,7 @@ fn test_workflow_type() -> WorkflowType {
                 description: Some("Second step".to_string()),
                 produces: None,
                 consumes: None,
+                terminal: None,
                 parameters: None,
             },
             luther_workflow::workflow::schema::StepDef {
@@ -50,6 +52,7 @@ fn test_workflow_type() -> WorkflowType {
                 description: Some("Third step".to_string()),
                 produces: None,
                 consumes: None,
+                terminal: None,
                 parameters: None,
             },
         ],
@@ -173,6 +176,7 @@ fn test_fatal_error_routes_to_terminal() {
             description: Some("Terminal failure handler".to_string()),
             produces: None,
             consumes: None,
+            terminal: None,
             parameters: None,
         });
 
@@ -251,6 +255,7 @@ fn test_loop_back_transition_increments_counter() {
             description: Some("Diagnose failures".to_string()),
             produces: None,
             consumes: None,
+            terminal: None,
             parameters: None,
         });
     workflow_type
@@ -261,6 +266,7 @@ fn test_loop_back_transition_increments_counter() {
             description: Some("Apply fixes".to_string()),
             produces: None,
             consumes: None,
+            terminal: None,
             parameters: None,
         });
 
