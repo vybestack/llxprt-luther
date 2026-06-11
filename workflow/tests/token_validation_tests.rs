@@ -21,6 +21,7 @@ fn shell_step(step_id: &str, command: &str) -> StepDef {
         parameters: Some(serde_json::json!({ "command": command })),
         produces: None,
         consumes: None,
+        terminal: None,
     }
 }
 
@@ -225,6 +226,7 @@ fn artifact_step(step_id: &str, produces: &[&str], consumes: &[&str]) -> StepDef
             .then(|| produces.iter().map(|s| (*s).to_string()).collect()),
         consumes: (!consumes.is_empty())
             .then(|| consumes.iter().map(|s| (*s).to_string()).collect()),
+        terminal: None,
     }
 }
 

@@ -96,6 +96,7 @@ fn seq_step(step_id: &str) -> StepDef {
         description: None,
         produces: None,
         consumes: None,
+        terminal: None,
         parameters: None,
     }
 }
@@ -412,6 +413,7 @@ fn test_config_variables_available_in_shell_steps() {
         description: None,
         produces: None,
         consumes: None,
+        terminal: None,
         parameters: Some(serde_json::json!({
             "command": "echo {my_var}"
         })),
@@ -454,6 +456,7 @@ fn test_different_configs_resolve_different_profiles() {
         description: None,
         produces: None,
         consumes: None,
+        terminal: None,
         parameters: Some(serde_json::json!({
             "command": "echo {profile_planning}"
         })),
@@ -503,6 +506,7 @@ fn test_namespaced_context_across_real_steps() {
             description: None,
             produces: None,
             consumes: None,
+            terminal: None,
             parameters: Some(serde_json::json!({
                 "command": "echo alpha"
             })),
@@ -513,6 +517,7 @@ fn test_namespaced_context_across_real_steps() {
             description: None,
             produces: None,
             consumes: None,
+            terminal: None,
             parameters: Some(serde_json::json!({
                 "command": "echo beta"
             })),
@@ -523,6 +528,7 @@ fn test_namespaced_context_across_real_steps() {
             description: None,
             produces: None,
             consumes: None,
+            terminal: None,
             parameters: Some(serde_json::json!({
                 "command": "echo {step_a.stdout}"
             })),
@@ -577,6 +583,7 @@ fn test_unnamespaced_variable_gets_most_recent() {
             description: None,
             produces: None,
             consumes: None,
+            terminal: None,
             parameters: Some(serde_json::json!({
                 "command": "echo first"
             })),
@@ -587,6 +594,7 @@ fn test_unnamespaced_variable_gets_most_recent() {
             description: None,
             produces: None,
             consumes: None,
+            terminal: None,
             parameters: Some(serde_json::json!({
                 "command": "echo second"
             })),
@@ -597,6 +605,7 @@ fn test_unnamespaced_variable_gets_most_recent() {
             description: None,
             produces: None,
             consumes: None,
+            terminal: None,
             parameters: Some(serde_json::json!({
                 "command": "echo {stdout}"
             })),
@@ -651,6 +660,7 @@ fn test_per_edge_loop_with_real_executor_dispatch() {
             description: None,
             produces: None,
             consumes: None,
+            terminal: None,
             parameters: None,
         },
         StepDef {
@@ -659,6 +669,7 @@ fn test_per_edge_loop_with_real_executor_dispatch() {
             description: None,
             produces: None,
             consumes: None,
+            terminal: None,
             parameters: None,
         },
     ];
@@ -827,6 +838,7 @@ fn test_verify_executor_dispatches_through_registry() {
         description: None,
         produces: None,
         consumes: None,
+        terminal: None,
         parameters: Some(serde_json::json!({
             "checks": ["test"]
         })),
@@ -877,6 +889,7 @@ fn test_config_variables_and_namespaced_context_combined() {
             description: None,
             produces: None,
             consumes: None,
+            terminal: None,
             parameters: Some(serde_json::json!({
                 "command": "echo {repo}"
             })),
@@ -887,6 +900,7 @@ fn test_config_variables_and_namespaced_context_combined() {
             description: None,
             produces: None,
             consumes: None,
+            terminal: None,
             parameters: Some(serde_json::json!({
                 "command": "echo {step_a.stdout}"
             })),
@@ -936,6 +950,7 @@ fn test_builtin_variables_still_resolve() {
         description: None,
         produces: None,
         consumes: None,
+        terminal: None,
         parameters: Some(serde_json::json!({
             "command": "echo {run_id}"
         })),
@@ -974,6 +989,7 @@ fn test_fatal_with_transition_routes_to_target_step() {
             description: None,
             produces: None,
             consumes: None,
+            terminal: None,
             parameters: None,
         },
         StepDef {
@@ -982,6 +998,7 @@ fn test_fatal_with_transition_routes_to_target_step() {
             description: None,
             produces: None,
             consumes: None,
+            terminal: None,
             parameters: None,
         },
         StepDef {
@@ -990,6 +1007,7 @@ fn test_fatal_with_transition_routes_to_target_step() {
             description: None,
             produces: None,
             consumes: None,
+            terminal: None,
             parameters: None,
         },
     ];
@@ -1046,6 +1064,7 @@ fn test_fatal_without_transition_returns_failure() {
             description: None,
             produces: None,
             consumes: None,
+            terminal: None,
             parameters: None,
         },
         StepDef {
@@ -1054,6 +1073,7 @@ fn test_fatal_without_transition_returns_failure() {
             description: None,
             produces: None,
             consumes: None,
+            terminal: None,
             parameters: None,
         },
         StepDef {
@@ -1062,6 +1082,7 @@ fn test_fatal_without_transition_returns_failure() {
             description: None,
             produces: None,
             consumes: None,
+            terminal: None,
             parameters: None,
         },
     ];
@@ -1120,6 +1141,7 @@ fn test_run_completion_records_metadata() {
         description: None,
         produces: None,
         consumes: None,
+        terminal: None,
         parameters: None,
     }];
 
@@ -1182,6 +1204,7 @@ fn test_run_abandonment_records_metadata() {
             description: None,
             produces: None,
             consumes: None,
+            terminal: None,
             parameters: None,
         },
         StepDef {
@@ -1190,6 +1213,7 @@ fn test_run_abandonment_records_metadata() {
             description: None,
             produces: None,
             consumes: None,
+            terminal: None,
             parameters: None,
         },
     ];
@@ -1275,6 +1299,7 @@ fn test_set_work_dir_preserves_seeded_variables() {
         description: None,
         produces: None,
         consumes: None,
+        terminal: None,
         parameters: Some(serde_json::json!({
             "command": "echo {my_var}"
         })),

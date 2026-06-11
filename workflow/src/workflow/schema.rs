@@ -77,6 +77,13 @@ pub struct StepDef {
     /// @plan:PLAN-20260408-LLXPRT-FIRST.P11
     #[serde(default)]
     pub consumes: Option<Vec<String>>,
+    /// Explicit terminal marker. When `Some(true)` the step is a terminal step
+    /// and must not declare any outgoing transitions. Steps with
+    /// `step_type == "post_pr_failure_terminal"` are also treated as terminal
+    /// for back-compat even when this is `None`.
+    /// @plan:PLAN-20260404-INITIAL-RUNTIME.P03
+    #[serde(default)]
+    pub terminal: Option<bool>,
 }
 
 /// Definition of a transition between steps.

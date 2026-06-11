@@ -1,0 +1,29 @@
+# Invalid workflow fixture: a loop-back transition that omits the required
+# explicit `max_iterations` cap. Used to assert that graph validation rejects
+# uncapped loop-backs before execution (they must not silently fall back to the
+# global iteration default).
+# @plan:PLAN-20260404-INITIAL-RUNTIME.P03
+
+workflow_type_id = "loopback-missing-max-iterations"
+
+[[steps]]
+step_id = "start"
+step_type = "shell"
+description = "Entry step"
+
+[[steps]]
+step_id = "retry"
+step_type = "shell"
+description = "Retryable step"
+
+# Valid forward edge: start -> retry on success.
+[[transitions]]
+from = "start"
+to = "retry"
+condition = "success"
+
+# Invalid loop-back edge: retry -> start without an explicit max_iterations.
+[[transitions]]
+from = "retry"
+to = "start"
+condition = "fixable"

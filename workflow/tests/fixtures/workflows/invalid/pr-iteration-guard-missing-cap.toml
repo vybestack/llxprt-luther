@@ -1,0 +1,23 @@
+# Invalid workflow fixture: a `post_pr_iteration_guard` step that omits the
+# required positive `max_post_pr_remediation_iterations` cap. Used to assert
+# that graph validation rejects PR remediation guards without a configured cap
+# before execution (they must not silently default at runtime).
+# @plan:PLAN-20260404-INITIAL-RUNTIME.P03
+
+workflow_type_id = "pr-iteration-guard-missing-cap"
+
+[[steps]]
+step_id = "start"
+step_type = "shell"
+description = "Entry step"
+
+[[steps]]
+step_id = "guard"
+step_type = "post_pr_iteration_guard"
+description = "PR remediation iteration guard without a cap"
+
+# Valid forward edge: start -> guard on success.
+[[transitions]]
+from = "start"
+to = "guard"
+condition = "success"

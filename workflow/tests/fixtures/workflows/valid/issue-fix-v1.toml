@@ -97,6 +97,7 @@ to = "remediate"
 [[transitions]]
 from = "remediate"
 to = "test"
+max_iterations = 10
 
 [[transitions]]
 from = "commit"
