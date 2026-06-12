@@ -42,6 +42,9 @@ pub struct RunArgs {
     /// Perform a dry run without executing
     #[arg(long)]
     pub dry_run: bool,
+    /// Skip the GitHub `gh` readiness preflight gate (offline/CI fixtures)
+    #[arg(long)]
+    pub skip_preflight: bool,
     /// Workflow type ID
     #[arg(short, long, value_name = "ID")]
     pub workflow_type: Option<String>,
@@ -114,6 +117,7 @@ mod tests {
         let args = RunArgs {
             config: Some(PathBuf::from("/test/config.toml")),
             dry_run: true,
+            skip_preflight: false,
             workflow_type: Some("test-type".to_string()),
             config_dir: None,
             run_id: Some("run-123".to_string()),
