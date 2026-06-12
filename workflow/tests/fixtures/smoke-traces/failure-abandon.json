@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "run_id": "smoke-failure-0001",
+  "workflow_type_id": "llxprt-issue-fix-v1",
+  "config_id": "llxprt-code",
+  "captured_at": "2026-06-11T12:05:00Z",
+  "final_outcome": {
+    "kind": "failure",
+    "step_id": "abandon_and_log",
+    "reason": "Fatal error occurred"
+  },
+  "events": [
+    { "seq": 0, "step_id": "select_issue", "outcome": "success" },
+    { "seq": 1, "step_id": "setup_workspace", "outcome": "success" },
+    { "seq": 2, "step_id": "fetch_issue", "outcome": "success" },
+    { "seq": 3, "step_id": "create_plan", "outcome": "fatal" },
+    { "seq": 4, "step_id": "abandon_and_log", "outcome": "fatal" }
+  ]
+}

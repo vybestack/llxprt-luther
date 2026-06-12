@@ -487,6 +487,27 @@ impl EngineRunner {
         &self.instance.run_id
     }
 
+    /// Export a normalized smoke trace of this run's recorded step/outcome
+    /// sequence plus the terminal `final_outcome`, suitable for deterministic
+    /// offline replay. Borrows the private persistence connection so callers
+    /// using the default in-memory `::new()` path can still capture a trace.
+    /// @plan:PLAN-LUTHER-ISSUE-19-SMOKE-REPLAY
+    /// @requirement:REQ-SMOKE-REPLAY-001
+    pub fn export_trace(
+        &self,
+        final_outcome: &RunOutcome,
+    ) -> Result<crate::persistence::trace::SmokeTrace, EngineError> {
+        let conn = self.conn.borrow();
+        let trace = crate::persistence::trace::export_trace(
+            &conn,
+            &self.instance.run_id,
+            self.instance.workflow_type_id(),
+            self.instance.config_id(),
+            final_outcome,
+        )?;
+        Ok(trace)
+    }
+
     /// Get the total loop count across all edges (for backward compat and testing).
     /// @plan:PLAN-20260404-INITIAL-RUNTIME.P08
     /// @plan:PLAN-20260408-LLXPRT-FIRST.P12
@@ -739,5 +760,83 @@ mod tests {
         let registry = crate::engine::executor::ExecutorRegistry::with_defaults();
         let runner = EngineRunner::new(instance, registry).expect("Failed to create EngineRunner");
         assert!(!runner.run_id().is_empty());
+    }
+
+    /// Build a minimal two-step noop workflow (step1 -> step2, both terminal-ish)
+    /// for exercising the trace export seam without network or `gh`.
+    /// @plan:PLAN-LUTHER-ISSUE-19-SMOKE-REPLAY
+    fn seam_test_instance() -> WorkflowInstance {
+        use crate::workflow::schema::{
+            GuardLimits, RepoConfig, RuntimeConfig, StepDef, TransitionDef, WorkflowConfig,
+            WorkflowType,
+        };
+        let step = |id: &str| StepDef {
+            step_id: id.to_string(),
+            step_type: "noop".to_string(),
+            description: None,
+            parameters: None,
+            produces: None,
+            consumes: None,
+            terminal: None,
+        };
+        let workflow_type = WorkflowType {
+            workflow_type_id: "seam-test".to_string(),
+            steps: vec![step("step1"), step("step2")],
+            transitions: vec![TransitionDef {
+                from: "step1".to_string(),
+                to: "step2".to_string(),
+                condition: None,
+                max_iterations: None,
+            }],
+            guards: Default::default(),
+        };
+        let config = WorkflowConfig {
+            config_id: "seam-config".to_string(),
+            workflow_type_id: "seam-test".to_string(),
+            runtime: RuntimeConfig {
+                timeout_seconds: 3600,
+                max_retries: 3,
+                parallel_steps: None,
+                log_level: None,
+            },
+            repo: RepoConfig {
+                workspace_strategy: "temp".to_string(),
+                branch_template: "test-{run_id}".to_string(),
+                base_branch: Some("main".to_string()),
+                workspace_root: None,
+            },
+            guard_limits: GuardLimits {
+                max_iterations: Some(3),
+                max_file_changes: Some(50),
+                max_tokens: Some(10000),
+                max_cost: Some(10.0),
+            },
+            variables: std::collections::HashMap::new(),
+        };
+        WorkflowInstance::create(workflow_type, config)
+    }
+
+    #[test]
+    fn export_trace_matches_executed_sequence_and_outcome() {
+        // @plan:PLAN-LUTHER-ISSUE-19-SMOKE-REPLAY
+        // @requirement:REQ-SMOKE-REPLAY-001
+        let instance = seam_test_instance();
+        let registry = crate::engine::executor::ExecutorRegistry::with_defaults();
+        let mut runner =
+            EngineRunner::new(instance, registry).expect("Failed to create EngineRunner");
+
+        let outcome = runner.run().expect("run should succeed");
+        assert!(matches!(outcome, RunOutcome::Success));
+
+        let trace = runner
+            .export_trace(&outcome)
+            .expect("export_trace should succeed");
+        assert_eq!(trace.workflow_type_id, "seam-test");
+        assert_eq!(trace.config_id, "seam-config");
+        assert_eq!(trace.run_id, runner.run_id());
+        let steps: Vec<&str> = trace.events.iter().map(|e| e.step_id.as_str()).collect();
+        assert_eq!(steps, vec!["step1", "step2"]);
+        assert!(trace.events.iter().all(|e| e.outcome == "success"));
+        assert!(trace.final_outcome.matches_run_outcome(&outcome));
     }
 }
