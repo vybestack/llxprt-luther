@@ -63,6 +63,10 @@ pub enum MonitorError {
     IpcError { message: String },
     #[error("Monitor already running")]
     AlreadyRunning,
+    #[error("Failed to spawn worker '{id}': {message}")]
+    SpawnFailed { id: String, message: String },
+    #[error("Worker '{id}' exceeded resource limit: {message}")]
+    ResourceLimitExceeded { id: String, message: String },
 }
 
 /// Guard type for singleton lock - ensures lock is released on drop.
@@ -258,6 +262,70 @@ impl ProcessState {
     }
 }
 
+/// A point-in-time sample of a process's resource usage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResourceSample {
+    /// Resident set size in bytes.
+    pub rss_bytes: u64,
+}
+
+impl ResourceSample {
+    /// Resident set size expressed in whole megabytes (truncating).
+    pub fn rss_mb(&self) -> u64 {
+        self.rss_bytes / (1024 * 1024)
+    }
+
+    /// Return true when the sample's RSS strictly exceeds `max_memory_mb`.
+    ///
+    /// Usage exactly at the limit is *not* a violation; one megabyte above is.
+    pub fn exceeds_memory_mb(&self, max_memory_mb: u64) -> bool {
+        self.rss_mb() > max_memory_mb
+    }
+}
+
+/// Parse the resident-set-size (in bytes) from the contents of
+/// `/proc/[pid]/stat`.
+///
+/// Field 24 (1-indexed) of the stat line is `rss`, measured in memory pages.
+/// This is multiplied by the system page size (assumed 4096 bytes here, the
+/// near-universal Linux default) to yield bytes. The parser is pure so it can
+/// be unit-tested with fixture strings on any platform, including macOS where
+/// `/proc` does not exist.
+///
+/// Returns `None` when the input is empty, malformed, or missing the field.
+pub fn parse_proc_stat_rss(stat: &str) -> Option<u64> {
+    // The comm field (field 2) is wrapped in parentheses and may itself
+    // contain spaces or parentheses, so split on the final ')' first.
+    let close = stat.rfind(')')?;
+    let rest = stat.get(close + 1..)?.trim_start();
+
+    // After the comm field, fields are space separated. `state` is field 3,
+    // so `rss` (field 24) is index 21 in this remaining slice (0-indexed).
+    let rss_pages: u64 = rest.split_whitespace().nth(21)?.parse().ok()?;
+
+    const PAGE_SIZE_BYTES: u64 = 4096;
+    Some(rss_pages.saturating_mul(PAGE_SIZE_BYTES))
+}
+
+/// Sample the resource usage of a running process by PID.
+///
+/// On Linux this reads `/proc/[pid]/stat`. On every other platform it returns
+/// `None`, so callers must treat the absence of a sample as "cannot enforce"
+/// rather than "no usage". This keeps the crate compiling and tests passing on
+/// macOS, which is a supported build/release target.
+#[cfg(target_os = "linux")]
+pub fn sample_process(pid: u32) -> Option<ResourceSample> {
+    let stat = fs::read_to_string(format!("/proc/{}/stat", pid)).ok()?;
+    let rss_bytes = parse_proc_stat_rss(&stat)?;
+    Some(ResourceSample { rss_bytes })
+}
+
+/// Non-Linux fallback: resource sampling is unavailable.
+#[cfg(not(target_os = "linux"))]
+pub fn sample_process(_pid: u32) -> Option<ResourceSample> {
+    None
+}
+
 /// Check if a process with the given PID is alive.
 #[cfg(unix)]
 pub fn is_process_alive(pid: u32) -> bool {
@@ -351,5 +419,38 @@ mod tests {
         assert!(state.is_restart_limit_reached());
 
         assert_eq!(state.current_backoff(), Duration::from_secs(4)); // 1 * 2^2
+    }
+
+    #[test]
+    fn test_parse_proc_stat_rss_well_formed() {
+        // Field 24 (rss in pages) is 100 here; comm contains a space + paren.
+        let stat = "1234 (my proc) ) S 1 1234 1234 0 -1 0 0 0 0 0 \
+0 0 0 0 20 0 1 0 100 200000 100 18446744073709551615";
+        let bytes = parse_proc_stat_rss(stat).expect("should parse rss");
+        assert_eq!(bytes, 100 * 4096);
+        let sample = ResourceSample { rss_bytes: bytes };
+        assert_eq!(sample.rss_mb(), (100 * 4096) / (1024 * 1024));
+    }
+
+    #[test]
+    fn test_parse_proc_stat_rss_malformed() {
+        assert_eq!(parse_proc_stat_rss(""), None);
+        assert_eq!(parse_proc_stat_rss("no closing paren here"), None);
+        // Has a paren but too few fields after it.
+        assert_eq!(parse_proc_stat_rss("1 (x) S 1 2 3"), None);
+    }
+
+    #[test]
+    fn test_resource_sample_limit_boundary() {
+        // 2 MiB exactly equals a 2 MB limit -> not a violation.
+        let at_limit = ResourceSample {
+            rss_bytes: 2 * 1024 * 1024,
+        };
+        assert!(!at_limit.exceeds_memory_mb(2));
+        // One MB above the limit -> violation.
+        let over_limit = ResourceSample {
+            rss_bytes: 3 * 1024 * 1024,
+        };
+        assert!(over_limit.exceeds_memory_mb(2));
     }
 }
