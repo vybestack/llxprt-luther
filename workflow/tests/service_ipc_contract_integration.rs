@@ -164,3 +164,34 @@ async fn test_service_failure_diagnostics() {
     // Clean up
     let _ = service.stop().await;
 }
+
+/// @plan:PLAN-20260404-INITIAL-RUNTIME.P09
+/// @requirement:REQ-EARS-SVC-001
+/// Test: Daemon (OS-supervised) mode is explicit without self-forking.
+#[tokio::test]
+async fn test_service_daemon_mode_is_explicit() {
+    // GIVEN: service configuration with foreground disabled
+    let config = luther_workflow::service::ServiceConfig {
+        foreground: false,
+        ipc_socket_path: "/tmp/luther-test-daemon.sock".to_string(),
+        log_level: "info".to_string(),
+    };
+
+    // WHEN: starting service (no self-fork is performed)
+    let mut service = luther_workflow::service::Service::start(config)
+        .await
+        .expect("Should start service in supervised mode");
+
+    // THEN: the mode is reported as daemonized/non-foreground
+    assert!(
+        service.is_daemonized(),
+        "Service should report daemonized mode"
+    );
+    assert!(
+        !service.is_foreground(),
+        "Service should not report foreground mode"
+    );
+
+    // Clean up
+    service.stop().await.expect("Should stop service");
+}

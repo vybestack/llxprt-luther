@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::process::Command;
 use thiserror::Error;
 
-use crate::service::spec::{generate_systemd_unit, ServiceSpec};
+use crate::service::spec::{ensure_log_directories, generate_systemd_unit, ServiceSpec};
 
 /// Error type for systemd service operations.
 #[derive(Debug, Error)]
@@ -18,6 +18,25 @@ pub enum SystemdError {
     AlreadyInstalled(String),
     #[error("Service not found: {0}")]
     NotFound(String),
+}
+
+impl SystemdError {
+    /// Platform-specific remediation guidance for systemd failures.
+    ///
+    /// Satisfies REQ-EARS-SVC-004 by surfacing the log location plus the
+    /// journalctl/systemctl/loginctl commands an operator needs.
+    ///
+    /// @plan:PLAN-20260404-INITIAL-RUNTIME.P10
+    pub fn get_remediation_steps(&self) -> Vec<String> {
+        let log_dir = crate::runtime_paths::get_log_dir();
+        vec![
+            format!("Inspect service logs under: {}", log_dir.display()),
+            "View journal logs with `journalctl --user -u <service> -n 100`.".to_string(),
+            "Check unit status with `systemctl --user status <service>`.".to_string(),
+            "Ensure a user session exists with `loginctl show-user $USER` (enable lingering if missing)."
+                .to_string(),
+        ]
+    }
 }
 
 /// Get the default systemd user unit directory path.
@@ -48,6 +67,10 @@ pub fn install_systemd_service(spec: &ServiceSpec) -> Result<PathBuf, SystemdErr
 
     // Create systemd user directory if it doesn't exist
     std::fs::create_dir_all(&systemd_dir)?;
+
+    // Ensure the stdout/stderr log directories exist so the supervisor can
+    // capture diagnostics on the very first start.
+    ensure_log_directories(spec)?;
 
     // Check if already installed (optional - can be forced)
     if unit_path.exists() {

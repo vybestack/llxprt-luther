@@ -134,6 +134,61 @@ impl ServiceSpec {
     }
 }
 
+/// Build the canonical install specification for the runtime service.
+///
+/// Default stdout/stderr log paths are placed under
+/// [`crate::runtime_paths::get_log_dir`] so an installed service and the error
+/// remediation guidance reference the same log location. The service runs the
+/// foreground command (`service run`) supervised by launchd/systemd, with
+/// keep-alive and run-at-load enabled so the OS restarts it on failure.
+///
+/// # Arguments
+/// * `binary_path` - Path to the executable to launch (e.g. `current_exe()`).
+/// * `working_dir` - Working directory for the supervised process.
+///
+/// @plan:PLAN-20260404-INITIAL-RUNTIME.P10
+pub fn build_install_spec(
+    binary_path: impl Into<PathBuf>,
+    working_dir: impl Into<PathBuf>,
+) -> ServiceSpec {
+    let log_dir = crate::runtime_paths::get_log_dir();
+    ServiceSpec::new("luther-workflow", binary_path)
+        .with_label("com.luther.workflow")
+        .with_arg("service")
+        .with_arg("run")
+        .with_working_dir(working_dir)
+        .with_log_path(log_dir.join("service.out.log"))
+        .with_error_log_path(log_dir.join("service.err.log"))
+        .with_keep_alive(true)
+        .with_run_at_load(true)
+}
+
+/// Ensure the parent directories for a spec's stdout/stderr log files exist.
+///
+/// The install backends only create the LaunchAgents / systemd user-unit
+/// directories, but [`build_install_spec`] points stdout/stderr at
+/// `get_log_dir()`. On a clean machine that directory may not exist yet, so the
+/// first supervised start would fail or silently drop diagnostics. Creating the
+/// parents here keeps log capture working from the very first start.
+///
+/// Both `log_path` and `error_log_path` are optional; `None` paths and paths
+/// without a parent component are skipped.
+///
+/// @plan:PLAN-20260404-INITIAL-RUNTIME.P10
+pub fn ensure_log_directories(spec: &ServiceSpec) -> std::io::Result<()> {
+    for path in [spec.log_path.as_ref(), spec.error_log_path.as_ref()]
+        .into_iter()
+        .flatten()
+    {
+        if let Some(parent) = path.parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent)?;
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Generate a launchd plist from a service specification.
 ///
 /// # Arguments
@@ -228,17 +283,13 @@ pub fn generate_systemd_unit(spec: &ServiceSpec) -> String {
     let binary_path_str = spec.binary_path.to_string_lossy();
     let working_dir_str = spec.working_dir.to_string_lossy();
 
-    // Build the exec start line
-    let mut exec_start = binary_path_str.to_string();
+    // Build the exec start line. The binary path is escaped with the same rules
+    // as the arguments so a path containing whitespace is not split by
+    // systemd's shell-like ExecStart parser.
+    let mut exec_start = escape_systemd_exec_token(&binary_path_str);
     for arg in &spec.args {
-        // Properly escape special characters for systemd
-        let escaped_arg = if arg.contains(' ') || arg.contains('\t') {
-            format!("\"{}\"", arg.replace('\\', "\\\\").replace('"', "\\\""))
-        } else {
-            arg.clone()
-        };
         exec_start.push(' ');
-        exec_start.push_str(&escaped_arg);
+        exec_start.push_str(&escape_systemd_exec_token(arg));
     }
 
     let mut unit = format!(
@@ -294,6 +345,18 @@ WorkingDirectory={}",
     unit.push_str("\n\n[Install]\nWantedBy=default.target");
 
     unit
+}
+
+/// Escape a single token (binary path or argument) for a systemd `ExecStart=`
+/// line. systemd parses `ExecStart` with shell-like word splitting, so any
+/// token containing whitespace must be double-quoted and have backslashes and
+/// double quotes escaped.
+fn escape_systemd_exec_token(token: &str) -> String {
+    if token.contains(' ') || token.contains('\t') {
+        format!("\"{}\"", token.replace('\\', "\\\\").replace('"', "\\\""))
+    } else {
+        token.to_string()
+    }
 }
 
 /// Escape XML special characters.
@@ -353,6 +416,28 @@ mod tests {
     }
 
     #[test]
+    fn test_generate_systemd_unit_quotes_binary_path_with_spaces() {
+        let spec = ServiceSpec::new("luther-monitor", "/opt/Luther Apps/bin/luther")
+            .with_arg("service")
+            .with_arg("run");
+
+        let unit = generate_systemd_unit(&spec);
+
+        // The whitespace-containing binary path must be quoted so systemd does
+        // not split it into multiple tokens.
+        assert!(unit.contains("ExecStart=\"/opt/Luther Apps/bin/luther\" service run"));
+    }
+
+    #[test]
+    fn test_generate_systemd_unit_leaves_plain_binary_path_unquoted() {
+        let spec = ServiceSpec::new("luther-monitor", "/usr/local/bin/luther").with_arg("run");
+
+        let unit = generate_systemd_unit(&spec);
+
+        assert!(unit.contains("ExecStart=/usr/local/bin/luther run"));
+    }
+
+    #[test]
     fn test_service_spec_builder() {
         let spec = ServiceSpec::new("test", "/bin/test")
             .with_label("com.test.service")
@@ -389,5 +474,71 @@ mod tests {
     fn test_unit_file_name() {
         let spec = ServiceSpec::new("test", "/bin/test");
         assert_eq!(spec.unit_file_name(), "test.service");
+    }
+
+    #[test]
+    fn test_ensure_log_directories_creates_missing_parents() {
+        let base = std::env::temp_dir().join(format!(
+            "luther-log-dir-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or_default()
+        ));
+        let log_dir = base.join("logs");
+        // Sanity: the directory must not exist before the call.
+        assert!(!log_dir.exists());
+
+        let spec = ServiceSpec::new("luther-test", "/bin/test")
+            .with_log_path(log_dir.join("service.out.log"))
+            .with_error_log_path(log_dir.join("service.err.log"));
+
+        ensure_log_directories(&spec).expect("create log dirs");
+        assert!(log_dir.exists());
+
+        // Idempotent: a second call succeeds even though the dir now exists.
+        ensure_log_directories(&spec).expect("idempotent create");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn test_ensure_log_directories_noop_without_paths() {
+        let spec = ServiceSpec::new("luther-test", "/bin/test");
+        // No log paths configured: should be a successful no-op.
+        ensure_log_directories(&spec).expect("noop without log paths");
+    }
+
+    #[test]
+    fn test_build_install_spec_defaults() {
+        let spec = build_install_spec("/usr/local/bin/luther", "/var/lib/luther");
+
+        assert_eq!(spec.binary_path, PathBuf::from("/usr/local/bin/luther"));
+        assert_eq!(spec.working_dir, PathBuf::from("/var/lib/luther"));
+        assert_eq!(spec.args, vec!["service", "run"]);
+        assert!(spec.keep_alive);
+        assert!(spec.run_at_load);
+
+        let log_dir = crate::runtime_paths::get_log_dir();
+        assert_eq!(spec.log_path, Some(log_dir.join("service.out.log")));
+        assert_eq!(spec.error_log_path, Some(log_dir.join("service.err.log")));
+    }
+
+    #[test]
+    fn test_build_install_spec_generates_supervisor_directives() {
+        let spec = build_install_spec("/usr/local/bin/luther", "/var/lib/luther");
+
+        let plist = generate_launchd_plist(&spec);
+        assert!(plist.contains("<key>StandardOutPath</key>"));
+        assert!(plist.contains("<key>StandardErrorPath</key>"));
+        assert!(plist.contains("<key>KeepAlive</key>"));
+        assert!(plist.contains("<key>RunAtLoad</key>"));
+
+        let unit = generate_systemd_unit(&spec);
+        assert!(unit.contains("StandardOutput=append:"));
+        assert!(unit.contains("StandardError=append:"));
+        assert!(unit.contains("Restart=on-failure"));
+        assert!(unit.contains("WantedBy="));
     }
 }

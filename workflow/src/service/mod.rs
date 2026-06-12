@@ -2,17 +2,24 @@
 //!
 /// @plan:PLAN-20260404-INITIAL-RUNTIME.P09
 pub mod launchd;
+pub mod manager;
 pub mod spec;
 pub mod systemd;
 
 pub use launchd::{
-    install_launchd_service, is_service_installed as is_launchd_service_installed,
-    start_launchd_service, stop_launchd_service, uninstall_launchd_service, LaunchdError,
+    get_service_status as launchd_service_status, install_launchd_service,
+    is_service_installed as is_launchd_service_installed, start_launchd_service,
+    stop_launchd_service, uninstall_launchd_service, write_launchd_plist, LaunchdError,
 };
-pub use spec::{generate_launchd_plist, generate_systemd_unit, ServiceSpec};
+pub use manager::{
+    get_status, install_service, install_target_path, start_service, stop_service,
+    uninstall_service, ServiceManagerError, ServiceOperation,
+};
+pub use spec::{build_install_spec, generate_launchd_plist, generate_systemd_unit, ServiceSpec};
 pub use systemd::{
-    install_systemd_service, is_service_installed as is_systemd_service_installed,
-    is_systemd_available, restart_systemd_service, start_systemd_service, stop_systemd_service,
+    get_service_status as systemd_service_status, install_systemd_service,
+    is_service_installed as is_systemd_service_installed, is_systemd_available,
+    restart_systemd_service, start_systemd_service, stop_systemd_service,
     uninstall_systemd_service, SystemdError,
 };
 
@@ -116,11 +123,15 @@ pub struct Service {
 
 impl Service {
     /// Start the service.
+    ///
+    /// The service runs as a foreground process supervised by launchd/systemd
+    /// rather than self-daemonizing (REQ-EARS-SVC-001). The `foreground` flag
+    /// distinguishes an explicitly interactive run (`service run --foreground`)
+    /// from an OS-supervised background run; both share the same runtime, so the
+    /// flag is recorded on the config and surfaced via
+    /// [`Service::is_foreground`]/[`Service::is_daemonized`].
     pub async fn start(config: ServiceConfig) -> Result<Self, ServiceError> {
         let instance_id = format!("service-{}", std::process::id());
-
-        // If not foreground mode, this would daemonize
-        // For now, we always run in foreground for testing
 
         Ok(Self {
             config,
