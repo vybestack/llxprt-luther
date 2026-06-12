@@ -20,6 +20,25 @@ pub enum SystemdError {
     NotFound(String),
 }
 
+impl SystemdError {
+    /// Platform-specific remediation guidance for systemd failures.
+    ///
+    /// Satisfies REQ-EARS-SVC-004 by surfacing the log location plus the
+    /// journalctl/systemctl/loginctl commands an operator needs.
+    ///
+    /// @plan:PLAN-20260404-INITIAL-RUNTIME.P10
+    pub fn get_remediation_steps(&self) -> Vec<String> {
+        let log_dir = crate::runtime_paths::get_log_dir();
+        vec![
+            format!("Inspect service logs under: {}", log_dir.display()),
+            "View journal logs with `journalctl --user -u <service> -n 100`.".to_string(),
+            "Check unit status with `systemctl --user status <service>`.".to_string(),
+            "Ensure a user session exists with `loginctl show-user $USER` (enable lingering if missing)."
+                .to_string(),
+        ]
+    }
+}
+
 /// Get the default systemd user unit directory path.
 pub fn get_systemd_user_dir() -> PathBuf {
     dirs::home_dir()

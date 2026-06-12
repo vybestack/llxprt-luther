@@ -20,6 +20,26 @@ pub enum LaunchdError {
     NotFound(String),
 }
 
+impl LaunchdError {
+    /// Platform-specific remediation guidance for launchd failures.
+    ///
+    /// Mirrors the diagnostics style used elsewhere (e.g. GithubError) and
+    /// satisfies REQ-EARS-SVC-004 by surfacing the log location plus the
+    /// launchctl/plutil commands an operator needs.
+    ///
+    /// @plan:PLAN-20260404-INITIAL-RUNTIME.P10
+    pub fn get_remediation_steps(&self) -> Vec<String> {
+        let log_dir = crate::runtime_paths::get_log_dir();
+        vec![
+            format!("Inspect service logs under: {}", log_dir.display()),
+            "Validate the plist with `plutil -lint ~/Library/LaunchAgents/com.luther.*.plist`."
+                .to_string(),
+            "List loaded agents with `launchctl list | grep luther`.".to_string(),
+            "Confirm ~/Library/LaunchAgents is writable for the current user.".to_string(),
+        ]
+    }
+}
+
 /// Get the default LaunchAgents directory path.
 pub fn get_launch_agents_dir() -> PathBuf {
     dirs::home_dir()

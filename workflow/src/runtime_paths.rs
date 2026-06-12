@@ -66,6 +66,34 @@ pub fn get_artifacts_root() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(".luther-workflow/artifacts"))
 }
 
+/// Get the log directory for service stdout/stderr and diagnostics.
+///
+/// Installed services and service error messages share this single log
+/// location so remediation guidance can point users at the right files.
+///
+/// * macOS: `~/Library/Logs/luther/`
+/// * Linux: `~/.local/share/luther/logs/`
+///
+/// # Returns
+/// PathBuf to the log directory
+///
+/// @plan:PLAN-20260404-INITIAL-RUNTIME.P10
+pub fn get_log_dir() -> PathBuf {
+    #[cfg(target_os = "macos")]
+    {
+        if let Some(dirs) = directories::BaseDirs::new() {
+            return dirs.home_dir().join("Library/Logs/luther");
+        }
+        PathBuf::from(".luther-workflow/logs")
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        project_dirs()
+            .map(|d| d.data_dir().join("logs"))
+            .unwrap_or_else(|| PathBuf::from(".luther-workflow/logs"))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -102,6 +130,21 @@ mod tests {
         assert!(
             path.to_string_lossy().contains("artifacts")
                 || path.to_string_lossy().contains(".luther")
+        );
+    }
+
+    #[test]
+    fn get_log_dir_returns_valid_path() {
+        let path = get_log_dir();
+        assert!(!path.as_os_str().is_empty());
+        let path_str = path.to_string_lossy();
+        assert!(
+            path_str.contains("luther") || path_str.contains(".luther"),
+            "log dir should reference luther: {path_str}"
+        );
+        assert!(
+            path_str.contains("log") || path_str.contains("Log"),
+            "log dir should reference logs: {path_str}"
         );
     }
 }

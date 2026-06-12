@@ -134,6 +134,35 @@ impl ServiceSpec {
     }
 }
 
+/// Build the canonical install specification for the runtime service.
+///
+/// Default stdout/stderr log paths are placed under
+/// [`crate::runtime_paths::get_log_dir`] so an installed service and the error
+/// remediation guidance reference the same log location. The service runs the
+/// foreground command (`service run`) supervised by launchd/systemd, with
+/// keep-alive and run-at-load enabled so the OS restarts it on failure.
+///
+/// # Arguments
+/// * `binary_path` - Path to the executable to launch (e.g. `current_exe()`).
+/// * `working_dir` - Working directory for the supervised process.
+///
+/// @plan:PLAN-20260404-INITIAL-RUNTIME.P10
+pub fn build_install_spec(
+    binary_path: impl Into<PathBuf>,
+    working_dir: impl Into<PathBuf>,
+) -> ServiceSpec {
+    let log_dir = crate::runtime_paths::get_log_dir();
+    ServiceSpec::new("luther-workflow", binary_path)
+        .with_label("com.luther.workflow")
+        .with_arg("service")
+        .with_arg("run")
+        .with_working_dir(working_dir)
+        .with_log_path(log_dir.join("service.out.log"))
+        .with_error_log_path(log_dir.join("service.err.log"))
+        .with_keep_alive(true)
+        .with_run_at_load(true)
+}
+
 /// Generate a launchd plist from a service specification.
 ///
 /// # Arguments
@@ -389,5 +418,37 @@ mod tests {
     fn test_unit_file_name() {
         let spec = ServiceSpec::new("test", "/bin/test");
         assert_eq!(spec.unit_file_name(), "test.service");
+    }
+
+    #[test]
+    fn test_build_install_spec_defaults() {
+        let spec = build_install_spec("/usr/local/bin/luther", "/var/lib/luther");
+
+        assert_eq!(spec.binary_path, PathBuf::from("/usr/local/bin/luther"));
+        assert_eq!(spec.working_dir, PathBuf::from("/var/lib/luther"));
+        assert_eq!(spec.args, vec!["service", "run"]);
+        assert!(spec.keep_alive);
+        assert!(spec.run_at_load);
+
+        let log_dir = crate::runtime_paths::get_log_dir();
+        assert_eq!(spec.log_path, Some(log_dir.join("service.out.log")));
+        assert_eq!(spec.error_log_path, Some(log_dir.join("service.err.log")));
+    }
+
+    #[test]
+    fn test_build_install_spec_generates_supervisor_directives() {
+        let spec = build_install_spec("/usr/local/bin/luther", "/var/lib/luther");
+
+        let plist = generate_launchd_plist(&spec);
+        assert!(plist.contains("<key>StandardOutPath</key>"));
+        assert!(plist.contains("<key>StandardErrorPath</key>"));
+        assert!(plist.contains("<key>KeepAlive</key>"));
+        assert!(plist.contains("<key>RunAtLoad</key>"));
+
+        let unit = generate_systemd_unit(&spec);
+        assert!(unit.contains("StandardOutput=append:"));
+        assert!(unit.contains("StandardError=append:"));
+        assert!(unit.contains("Restart=on-failure"));
+        assert!(unit.contains("WantedBy="));
     }
 }

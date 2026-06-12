@@ -454,16 +454,38 @@ async fn handle_status_command(args: &luther_workflow::cli::StatusArgs) {
     }
 }
 
-/// Handle the service command.
+/// Handle the service command by dispatching to the requested subcommand.
 /// @plan:PLAN-20260404-INITIAL-RUNTIME.P12
 async fn handle_service_command(args: &luther_workflow::cli::ServiceArgs) {
-    println!("Starting service mode...");
-    if !args.foreground {
-        println!("Note: Running in foreground mode (daemon mode not available in this build)");
-    }
+    use luther_workflow::cli::ServiceCommand;
 
+    match &args.command {
+        ServiceCommand::Run(run_args) => handle_service_run(run_args).await,
+        ServiceCommand::Install(install_args) => handle_service_install(install_args),
+        ServiceCommand::Start => handle_service_lifecycle(ServiceLifecycle::Start),
+        ServiceCommand::Stop => handle_service_lifecycle(ServiceLifecycle::Stop),
+        ServiceCommand::Uninstall => handle_service_lifecycle(ServiceLifecycle::Uninstall),
+        ServiceCommand::Status(status_args) => handle_service_status(status_args),
+    }
+}
+
+/// Build the install spec for the current executable and working directory.
+/// @plan:PLAN-20260404-INITIAL-RUNTIME.P12
+fn build_service_spec(
+    binary_override: Option<std::path::PathBuf>,
+) -> luther_workflow::service::ServiceSpec {
+    let binary = binary_override
+        .or_else(|| std::env::current_exe().ok())
+        .unwrap_or_else(|| std::path::PathBuf::from("luther-workflow"));
+    let working_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    luther_workflow::service::build_install_spec(binary, working_dir)
+}
+
+/// Run the foreground service process supervised by launchd/systemd.
+/// @plan:PLAN-20260404-INITIAL-RUNTIME.P12
+async fn handle_service_run(args: &luther_workflow::cli::ServiceRunArgs) {
     let config = ServiceConfig {
-        foreground: true,
+        foreground: args.foreground,
         ipc_socket_path: args.socket_path.as_ref().map_or_else(
             || "/tmp/luther.sock".to_string(),
             |p| p.to_string_lossy().to_string(),
@@ -471,19 +493,21 @@ async fn handle_service_command(args: &luther_workflow::cli::ServiceArgs) {
         log_level: "info".to_string(),
     };
 
+    let mode = if config.foreground {
+        "foreground"
+    } else {
+        "supervised"
+    };
+    println!("Starting service ({mode} mode)...");
+
     match Service::start(config).await {
         Ok(service) => {
-            println!("Service started successfully.");
-            println!(
-                "Instance ID: {} (Note: Service runs in foreground for now)",
-                service
-                    .get_status()
-                    .await
-                    .map(|s| s.instance_id)
-                    .unwrap_or_default()
-            );
-
-            // Keep running until interrupted
+            let instance_id = service
+                .get_status()
+                .await
+                .map(|s| s.instance_id)
+                .unwrap_or_default();
+            println!("Service started successfully. Instance ID: {instance_id}");
             println!("Press Ctrl+C to stop...");
             loop {
                 tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
@@ -494,4 +518,114 @@ async fn handle_service_command(args: &luther_workflow::cli::ServiceArgs) {
             process::exit(1);
         }
     }
+}
+
+/// Install the platform service (launchd plist / systemd unit).
+/// @plan:PLAN-20260404-INITIAL-RUNTIME.P12
+fn handle_service_install(args: &luther_workflow::cli::ServiceInstallArgs) {
+    let spec = build_service_spec(args.binary.clone());
+    match luther_workflow::service::install_service(&spec) {
+        Ok(path) => {
+            println!("Service installed at: {}", path.display());
+            println!("Start it with `luther-workflow service start`.");
+        }
+        Err(e) => report_service_error(&e),
+    }
+}
+
+/// Lifecycle operations that share the same dispatch shape.
+enum ServiceLifecycle {
+    Start,
+    Stop,
+    Uninstall,
+}
+
+/// Start/stop/uninstall the platform service.
+/// @plan:PLAN-20260404-INITIAL-RUNTIME.P12
+fn handle_service_lifecycle(action: ServiceLifecycle) {
+    let spec = build_service_spec(None);
+    let (result, success) = match action {
+        ServiceLifecycle::Start => (
+            luther_workflow::service::start_service(&spec),
+            "Service started.",
+        ),
+        ServiceLifecycle::Stop => (
+            luther_workflow::service::stop_service(&spec),
+            "Service stopped.",
+        ),
+        ServiceLifecycle::Uninstall => (
+            luther_workflow::service::uninstall_service(&spec),
+            "Service uninstalled.",
+        ),
+    };
+    match result {
+        Ok(()) => println!("{success}"),
+        Err(e) => report_service_error(&e),
+    }
+}
+
+/// Show the platform service status, optionally as JSON.
+/// @plan:PLAN-20260404-INITIAL-RUNTIME.P12
+fn handle_service_status(args: &luther_workflow::cli::ServiceStatusArgs) {
+    let spec = build_service_spec(None);
+    match luther_workflow::service::get_status(&spec) {
+        Ok(status) => {
+            if args.json {
+                let payload = serde_json::json!({
+                    "status": "ok",
+                    "detail": status,
+                });
+                println!("{payload}");
+            } else {
+                println!("Service status:");
+                println!("{status}");
+            }
+        }
+        Err(e) => {
+            if args.json {
+                report_service_error_json(&e);
+            } else {
+                report_service_error(&e);
+            }
+            process::exit(1);
+        }
+    }
+}
+
+/// Print a structured, human-readable error block for service failures.
+///
+/// Surfaces platform, operation, OS-level message, log location, and
+/// remediation steps (REQ-EARS-SVC-004), then exits non-zero.
+/// @plan:PLAN-20260404-INITIAL-RUNTIME.P12
+fn report_service_error(err: &luther_workflow::service::ServiceManagerError) {
+    eprintln!("Service operation failed.");
+    eprintln!("  Platform: {}", err.platform());
+    if let Some(op) = err.operation() {
+        eprintln!("  Operation: {op}");
+    }
+    eprintln!("  Error: {err}");
+    if let Some(path) = err.log_path() {
+        eprintln!("  Log location: {}", path.display());
+    }
+    eprintln!("  Remediation steps:");
+    for step in err.get_remediation_steps() {
+        eprintln!("    - {step}");
+    }
+    process::exit(1);
+}
+
+/// Emit the same service-error fields as a JSON object for `--json` consumers.
+/// @plan:PLAN-20260404-INITIAL-RUNTIME.P12
+fn report_service_error_json(err: &luther_workflow::service::ServiceManagerError) {
+    let operation = err.operation().map(|op| op.to_string());
+    let log_path = err.log_path().map(|p| p.display().to_string());
+    let payload = serde_json::json!({
+        "status": "error",
+        "platform": err.platform(),
+        "operation": operation,
+        "error": err.to_string(),
+        "log_path": log_path,
+        "remediation": err.get_remediation_steps(),
+    });
+    println!("{payload}");
 }

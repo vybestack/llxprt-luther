@@ -84,12 +84,71 @@ pub struct StatusArgs {
 /// @plan:PLAN-20260404-INITIAL-RUNTIME.P12
 #[derive(Args, Debug)]
 pub struct ServiceArgs {
+    /// Service lifecycle subcommand
+    #[command(subcommand)]
+    pub command: ServiceCommand,
+}
+
+/// Service lifecycle subcommands.
+///
+/// `run` executes the foreground process supervised by launchd/systemd; the
+/// remaining subcommands manage the OS-level service (install/start/stop/
+/// status/uninstall) so "daemon mode" is delivered through the platform
+/// supervisor rather than self-forking (REQ-EARS-SVC-001).
+/// @plan:PLAN-20260404-INITIAL-RUNTIME.P12
+#[derive(Subcommand, Debug)]
+pub enum ServiceCommand {
+    /// Run the service process (foreground, OS-supervised)
+    #[command(name = "run")]
+    Run(ServiceRunArgs),
+    /// Install the platform service (launchd/systemd)
+    #[command(name = "install")]
+    Install(ServiceInstallArgs),
+    /// Start the installed service
+    #[command(name = "start")]
+    Start,
+    /// Stop the running service
+    #[command(name = "stop")]
+    Stop,
+    /// Show the service status
+    #[command(name = "status")]
+    Status(ServiceStatusArgs),
+    /// Uninstall the platform service
+    #[command(name = "uninstall")]
+    Uninstall,
+}
+
+/// Arguments for `service run`.
+/// @plan:PLAN-20260404-INITIAL-RUNTIME.P12
+#[derive(Args, Debug)]
+pub struct ServiceRunArgs {
     /// Run in foreground mode
     #[arg(long)]
     pub foreground: bool,
     /// IPC socket path
     #[arg(long, value_name = "PATH")]
     pub socket_path: Option<PathBuf>,
+}
+
+/// Arguments for `service install`.
+/// @plan:PLAN-20260404-INITIAL-RUNTIME.P12
+#[derive(Args, Debug)]
+pub struct ServiceInstallArgs {
+    /// Binary to launch (defaults to the current executable)
+    #[arg(long, value_name = "PATH")]
+    pub binary: Option<PathBuf>,
+    /// Optional config file passed to the supervised process
+    #[arg(long, value_name = "PATH")]
+    pub config: Option<PathBuf>,
+}
+
+/// Arguments for `service status`.
+/// @plan:PLAN-20260404-INITIAL-RUNTIME.P12
+#[derive(Args, Debug)]
+pub struct ServiceStatusArgs {
+    /// Output in JSON format
+    #[arg(long)]
+    pub json: bool,
 }
 
 /// Parse CLI arguments.
@@ -155,13 +214,84 @@ mod tests {
     }
 
     #[test]
-    fn service_args_parsing() {
+    fn service_run_args_parsing() {
         // @plan:PLAN-20260404-INITIAL-RUNTIME.P12
-        let args = ServiceArgs {
-            foreground: true,
-            socket_path: Some(PathBuf::from("/tmp/test.sock")),
-        };
-        assert!(args.foreground);
-        assert_eq!(args.socket_path, Some(PathBuf::from("/tmp/test.sock")));
+        let cli = Cli::try_parse_from([
+            "luther-workflow",
+            "service",
+            "run",
+            "--foreground",
+            "--socket-path",
+            "/tmp/test.sock",
+        ])
+        .expect("service run should parse");
+        match cli.command {
+            Commands::Service(ServiceArgs {
+                command: ServiceCommand::Run(run),
+            }) => {
+                assert!(run.foreground);
+                assert_eq!(run.socket_path, Some(PathBuf::from("/tmp/test.sock")));
+            }
+            other => panic!("expected service run, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn service_install_args_parsing() {
+        // @plan:PLAN-20260404-INITIAL-RUNTIME.P12
+        let cli = Cli::try_parse_from([
+            "luther-workflow",
+            "service",
+            "install",
+            "--binary",
+            "/usr/local/bin/luther",
+        ])
+        .expect("service install should parse");
+        match cli.command {
+            Commands::Service(ServiceArgs {
+                command: ServiceCommand::Install(install),
+            }) => {
+                assert_eq!(install.binary, Some(PathBuf::from("/usr/local/bin/luther")));
+                assert_eq!(install.config, None);
+            }
+            other => panic!("expected service install, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn service_status_json_parsing() {
+        // @plan:PLAN-20260404-INITIAL-RUNTIME.P12
+        let cli = Cli::try_parse_from(["luther-workflow", "service", "status", "--json"])
+            .expect("service status should parse");
+        match cli.command {
+            Commands::Service(ServiceArgs {
+                command: ServiceCommand::Status(status),
+            }) => {
+                assert!(status.json);
+            }
+            other => panic!("expected service status, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn service_bare_lifecycle_parsing() {
+        // @plan:PLAN-20260404-INITIAL-RUNTIME.P12
+        for (sub, label) in [
+            ("start", "start"),
+            ("stop", "stop"),
+            ("uninstall", "uninstall"),
+        ] {
+            let cli = Cli::try_parse_from(["luther-workflow", "service", sub])
+                .unwrap_or_else(|_| panic!("service {label} should parse"));
+            match cli.command {
+                Commands::Service(ServiceArgs { command }) => match (label, command) {
+                    ("start", ServiceCommand::Start)
+                    | ("stop", ServiceCommand::Stop)
+                    | ("uninstall", ServiceCommand::Uninstall) => {}
+                    (_, other) => panic!("unexpected subcommand for {label}: {other:?}"),
+                },
+                other => panic!("expected service command, got {other:?}"),
+            }
+        }
     }
 }
