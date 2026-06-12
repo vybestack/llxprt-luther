@@ -160,7 +160,16 @@ impl GithubCommandRunner for SystemGithubCommandRunner {
                 stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
             });
         }
-        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+        // Some `gh` subcommands (notably `gh auth status`) write their
+        // human-readable output—including the `Token scopes:` line—to stderr
+        // even on success. Fall back to stderr when stdout is empty so callers
+        // like `check_auth_status`/`parse_token_scopes` receive the text they
+        // need instead of an empty string.
+        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+        if stdout.is_empty() {
+            return Ok(String::from_utf8_lossy(&output.stderr).into_owned());
+        }
+        Ok(stdout)
     }
 }
 
@@ -177,19 +186,31 @@ pub fn check_cli_available(runner: &dyn GithubCommandRunner) -> Result<(), Githu
 
 /// Verify that `gh` reports an authenticated session via `gh auth status`.
 pub fn check_auth_status(runner: &dyn GithubCommandRunner) -> Result<String, GithubError> {
-    // `gh auth status` writes to stderr historically; system runner captures
-    // stdout, while fixtures provide the combined text. A non-zero exit is
-    // mapped to `CommandFailed`, which we re-classify as auth required.
+    // `gh auth status` writes to stderr historically; the system runner falls
+    // back to stderr when stdout is empty, while fixtures provide the combined
+    // text. A non-zero exit is mapped to `CommandFailed`, which we re-classify
+    // as auth required only when the stderr text indicates a logged-out state.
     let output = match runner.run(&argv(&["gh", "auth", "status"])) {
         Ok(out) => out,
-        Err(GithubError::CommandFailed { stderr, .. }) => {
-            // gh returns non-zero when logged out; treat any such failure as
-            // an authentication requirement, preserving the stderr text for
-            // scope parsing fallback.
-            if is_logged_out(&stderr) || stderr.is_empty() {
+        Err(GithubError::CommandFailed {
+            argv,
+            exit_code,
+            stderr,
+        }) => {
+            // gh returns non-zero when logged out; only a recognized
+            // logged-out message maps to AuthenticationRequired. Any other
+            // non-zero exit (process termination, I/O error, gh version
+            // differences) must preserve the original CommandFailed so the
+            // true failure—and its stderr/argv/exit_code—is surfaced rather
+            // than misdirecting users toward `gh auth login`.
+            if is_logged_out(&stderr) {
                 return Err(GithubError::AuthenticationRequired);
             }
-            stderr
+            return Err(GithubError::CommandFailed {
+                argv,
+                exit_code,
+                stderr,
+            });
         }
         Err(other) => return Err(other),
     };
@@ -323,5 +344,114 @@ mod tests {
         let text = "Token scopes: 'repo', 'read:org'";
         let scopes = check_required_scopes(text, &["repo"]).unwrap();
         assert!(scopes.contains(&"repo".to_string()));
+    }
+
+    /// Runner that returns a single canned result for any argv.
+    struct SingleResultRunner(Result<String, GithubError>);
+
+    impl GithubCommandRunner for SingleResultRunner {
+        fn run(&self, argv: &[String]) -> Result<String, GithubError> {
+            match &self.0 {
+                Ok(out) => Ok(out.clone()),
+                Err(GithubError::CommandFailed {
+                    exit_code, stderr, ..
+                }) => Err(GithubError::CommandFailed {
+                    argv: argv.to_vec(),
+                    exit_code: *exit_code,
+                    stderr: stderr.clone(),
+                }),
+                Err(GithubError::AuthenticationRequired) => {
+                    Err(GithubError::AuthenticationRequired)
+                }
+                Err(other) => panic!("unexpected fixture error: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn check_auth_status_maps_logged_out_stderr_to_auth_required() {
+        let runner = SingleResultRunner(Err(GithubError::CommandFailed {
+            argv: vec!["gh".to_string(), "auth".to_string(), "status".to_string()],
+            exit_code: Some(1),
+            stderr: "You are not logged into any GitHub hosts.".to_string(),
+        }));
+        let err = check_auth_status(&runner).unwrap_err();
+        assert!(matches!(err, GithubError::AuthenticationRequired));
+    }
+
+    #[test]
+    fn check_auth_status_preserves_command_failed_for_other_errors() {
+        let runner = SingleResultRunner(Err(GithubError::CommandFailed {
+            argv: vec!["gh".to_string(), "auth".to_string(), "status".to_string()],
+            exit_code: Some(2),
+            stderr: "some other gh failure".to_string(),
+        }));
+        let err = check_auth_status(&runner).unwrap_err();
+        match err {
+            GithubError::CommandFailed {
+                exit_code, stderr, ..
+            } => {
+                assert_eq!(exit_code, Some(2));
+                assert_eq!(stderr, "some other gh failure");
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn check_auth_status_preserves_command_failed_for_empty_stderr() {
+        // Empty stderr is not proof of logout; the original CommandFailed must
+        // be preserved rather than masked as AuthenticationRequired.
+        let runner = SingleResultRunner(Err(GithubError::CommandFailed {
+            argv: vec!["gh".to_string(), "auth".to_string(), "status".to_string()],
+            exit_code: Some(1),
+            stderr: String::new(),
+        }));
+        let err = check_auth_status(&runner).unwrap_err();
+        match err {
+            GithubError::CommandFailed {
+                exit_code, stderr, ..
+            } => {
+                assert_eq!(exit_code, Some(1));
+                assert!(stderr.is_empty());
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn check_auth_status_returns_text_on_success() {
+        let runner = SingleResultRunner(Ok(
+            "Logged in to github.com as octocat\n  - Token scopes: 'repo'".to_string(),
+        ));
+        let text = check_auth_status(&runner).unwrap();
+        assert!(text.contains("Token scopes:"));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn system_runner_falls_back_to_stderr_when_stdout_empty() {
+        // `gh auth status` writes its output to stderr on success; emulate that
+        // with a shell command that succeeds while writing only to stderr. The
+        // runner must surface the stderr text instead of an empty string.
+        let runner = SystemGithubCommandRunner;
+        let out = runner
+            .run(&argv(&["sh", "-c", "printf 'Token scopes: %s' repo >&2"]))
+            .expect("command should succeed");
+        assert_eq!(out, "Token scopes: repo");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn system_runner_prefers_stdout_when_present() {
+        let runner = SystemGithubCommandRunner;
+        let out = runner
+            .run(&argv(&[
+                "sh",
+                "-c",
+                "printf stdout-wins; printf ignored >&2",
+            ]))
+            .expect("command should succeed");
+        assert_eq!(out, "stdout-wins");
     }
 }
