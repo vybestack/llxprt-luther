@@ -4,6 +4,7 @@ pub mod artifacts;
 pub mod checkpoint;
 pub mod run_metadata;
 pub mod sqlite;
+pub mod trace;
 
 pub use artifacts::{
     default_artifacts_root, get_artifacts_dir, list_artifacts, read_artifact, write_artifact,
@@ -16,6 +17,9 @@ pub use checkpoint::{
 };
 pub use run_metadata::{run_metadata_from_ref, RunMetadata, RunStatus};
 pub use sqlite::{SqliteStore, SqliteStoreRef};
+pub use trace::{
+    export_trace, load_trace, save_trace, SmokeTrace, TraceEvent, TraceOutcome, SCHEMA_VERSION,
+};
 
 use rusqlite::Connection;
 use std::path::Path;
