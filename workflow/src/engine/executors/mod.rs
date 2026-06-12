@@ -15,6 +15,7 @@
 //! @requirement:REQ-PRFU-020
 //! @pseudocode lines 1-53
 //! Executors module - concrete step executor implementations.
+pub mod change_detection;
 pub mod feedback_eval;
 pub mod github_feedback;
 pub mod github_pr;
@@ -34,6 +35,7 @@ pub use feedback_eval::{
     FeedbackEvaluatorExecutor, ProcessFeedbackEvaluatorCommandRunner,
 };
 
+pub use change_detection::{ChangeDetectionMode, ChangedPathDetector, GitChangedPathDetector};
 pub use github_feedback::{
     FeedbackMarkerParser, GithubCodeRabbitFeedbackExecutor,
     GithubCodeRabbitFeedbackExecutorWithRunner, GithubFeedbackMarkerExecutor,
@@ -44,7 +46,7 @@ pub use github_pr::{
     GithubPrChecksExecutorWithRunner, GithubPrCommandRunner, GithubPrIdentityExecutor,
     GithubPrIdentityExecutorWithRunner, SystemGithubPrCommandRunner,
 };
-pub use llxprt::LlxprtExecutor;
+pub use llxprt::{LlxprtExecutor, LlxprtExecutorWithDetector};
 pub use noop::NoOpExecutor;
 pub use pr_followup_artifacts::{
     ArtifactWriter, ClockSleeper, PrFollowupArtifactStore, PrFollowupFilesystem,

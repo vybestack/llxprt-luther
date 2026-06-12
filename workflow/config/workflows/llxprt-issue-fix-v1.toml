@@ -259,6 +259,7 @@ profile = "{profile_implementing}"
 timeout_seconds = 900
 success_on_diff = true
 success_on_existing_diff = true
+change_detection_mode = "include_untracked"
 
 continue_on_empty_diff = false
 required_changed_path_patterns = ["{required_changed_path_pattern}"]
