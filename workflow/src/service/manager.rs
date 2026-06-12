@@ -186,6 +186,29 @@ fn operation_error(
     }
 }
 
+/// Resolve the on-disk target path that [`install_service`] would write for the
+/// current platform, **without performing any installation side effects**.
+///
+/// On macOS this is the LaunchAgents plist path; on Linux it is the systemd
+/// user unit path; on unsupported platforms it returns
+/// [`ServiceManagerError::UnsupportedPlatform`]. It never writes files or
+/// invokes `launchctl`/`systemctl`, making it safe for tests and dry-run
+/// tooling that only need to verify the install dispatch routing is well-typed.
+pub fn install_target_path(spec: &ServiceSpec) -> Result<PathBuf, ServiceManagerError> {
+    #[cfg(target_os = "macos")]
+    let result = Ok(launchd::get_plist_path(spec));
+    #[cfg(target_os = "linux")]
+    let result = Ok(systemd::get_unit_path(spec));
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    let result = {
+        let _ = spec;
+        Err(ServiceManagerError::UnsupportedPlatform {
+            platform: current_platform(),
+        })
+    };
+    result
+}
+
 /// Install the service for the current platform.
 pub fn install_service(spec: &ServiceSpec) -> Result<PathBuf, ServiceManagerError> {
     #[cfg(target_os = "macos")]

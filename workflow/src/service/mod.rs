@@ -9,11 +9,11 @@ pub mod systemd;
 pub use launchd::{
     get_service_status as launchd_service_status, install_launchd_service,
     is_service_installed as is_launchd_service_installed, start_launchd_service,
-    stop_launchd_service, uninstall_launchd_service, LaunchdError,
+    stop_launchd_service, uninstall_launchd_service, write_launchd_plist, LaunchdError,
 };
 pub use manager::{
-    get_status, install_service, start_service, stop_service, uninstall_service,
-    ServiceManagerError, ServiceOperation,
+    get_status, install_service, install_target_path, start_service, stop_service,
+    uninstall_service, ServiceManagerError, ServiceOperation,
 };
 pub use spec::{build_install_spec, generate_launchd_plist, generate_systemd_unit, ServiceSpec};
 pub use systemd::{

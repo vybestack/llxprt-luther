@@ -470,15 +470,27 @@ async fn handle_service_command(args: &luther_workflow::cli::ServiceArgs) {
 }
 
 /// Build the install spec for the current executable and working directory.
+///
+/// When `config_override` is provided it is appended to the supervised
+/// process's argument list as `--config <path>` so the persisted service
+/// definition launches `service run --config <path>`, honoring the
+/// `service install --config` flag.
 /// @plan:PLAN-20260404-INITIAL-RUNTIME.P12
 fn build_service_spec(
     binary_override: Option<std::path::PathBuf>,
+    config_override: Option<std::path::PathBuf>,
 ) -> luther_workflow::service::ServiceSpec {
     let binary = binary_override
         .or_else(|| std::env::current_exe().ok())
         .unwrap_or_else(|| std::path::PathBuf::from("luther-workflow"));
     let working_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-    luther_workflow::service::build_install_spec(binary, working_dir)
+    let mut spec = luther_workflow::service::build_install_spec(binary, working_dir);
+    if let Some(config_path) = config_override {
+        spec = spec
+            .with_arg("--config")
+            .with_arg(config_path.to_string_lossy().to_string());
+    }
+    spec
 }
 
 /// Run the foreground service process supervised by launchd/systemd.
@@ -523,7 +535,7 @@ async fn handle_service_run(args: &luther_workflow::cli::ServiceRunArgs) {
 /// Install the platform service (launchd plist / systemd unit).
 /// @plan:PLAN-20260404-INITIAL-RUNTIME.P12
 fn handle_service_install(args: &luther_workflow::cli::ServiceInstallArgs) {
-    let spec = build_service_spec(args.binary.clone());
+    let spec = build_service_spec(args.binary.clone(), args.config.clone());
     match luther_workflow::service::install_service(&spec) {
         Ok(path) => {
             println!("Service installed at: {}", path.display());
@@ -543,7 +555,7 @@ enum ServiceLifecycle {
 /// Start/stop/uninstall the platform service.
 /// @plan:PLAN-20260404-INITIAL-RUNTIME.P12
 fn handle_service_lifecycle(action: ServiceLifecycle) {
-    let spec = build_service_spec(None);
+    let spec = build_service_spec(None, None);
     let (result, success) = match action {
         ServiceLifecycle::Start => (
             luther_workflow::service::start_service(&spec),
@@ -567,7 +579,7 @@ fn handle_service_lifecycle(action: ServiceLifecycle) {
 /// Show the platform service status, optionally as JSON.
 /// @plan:PLAN-20260404-INITIAL-RUNTIME.P12
 fn handle_service_status(args: &luther_workflow::cli::ServiceStatusArgs) {
-    let spec = build_service_spec(None);
+    let spec = build_service_spec(None, None);
     match luther_workflow::service::get_status(&spec) {
         Ok(status) => {
             if args.json {

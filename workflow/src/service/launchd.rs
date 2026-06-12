@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::process::Command;
 use thiserror::Error;
 
-use crate::service::spec::{generate_launchd_plist, ServiceSpec};
+use crate::service::spec::{ensure_log_directories, generate_launchd_plist, ServiceSpec};
 
 /// Error type for launchd service operations.
 #[derive(Debug, Error)]
@@ -52,7 +52,49 @@ pub fn get_plist_path(spec: &ServiceSpec) -> PathBuf {
     get_launch_agents_dir().join(spec.plist_file_name())
 }
 
+/// Write the launchd plist for a service without loading or starting it.
+///
+/// This performs only the filesystem side of installation: it ensures the
+/// `~/Library/LaunchAgents` directory exists and writes the generated plist.
+/// It intentionally does **not** call `launchctl load`, so the daemon is not
+/// started as a side effect of installation. The daemon is started later by
+/// [`start_launchd_service`], keeping the `install` and `start` lifecycle steps
+/// cleanly separated and consistent with the systemd backend.
+///
+/// # Arguments
+/// * `spec` - The service specification
+///
+/// # Returns
+/// Result containing the path to the written plist file
+///
+/// # Errors
+/// Returns LaunchdError if the directory cannot be created or the plist cannot
+/// be written.
+pub fn write_launchd_plist(spec: &ServiceSpec) -> Result<PathBuf, LaunchdError> {
+    let plist_path = get_plist_path(spec);
+    let launch_agents_dir = get_launch_agents_dir();
+
+    // Create LaunchAgents directory if it doesn't exist
+    std::fs::create_dir_all(&launch_agents_dir)?;
+
+    // Ensure the stdout/stderr log directories exist so the supervisor can
+    // capture diagnostics on the very first start.
+    ensure_log_directories(spec)?;
+
+    // Generate and write plist (overwrites any existing plist).
+    let plist_content = generate_launchd_plist(spec);
+    std::fs::write(&plist_path, plist_content)?;
+
+    Ok(plist_path)
+}
+
 /// Install a launchd service.
+///
+/// Installation is side-effect-free with respect to the running daemon: it only
+/// writes the plist to `~/Library/LaunchAgents` and does not load or start the
+/// service. Use [`start_launchd_service`] to load and start it. This mirrors the
+/// systemd backend, which writes/enables the unit at install time without
+/// starting it, so the cross-platform `install` contract is consistent.
 ///
 /// # Arguments
 /// * `spec` - The service specification
@@ -63,40 +105,7 @@ pub fn get_plist_path(spec: &ServiceSpec) -> PathBuf {
 /// # Errors
 /// Returns LaunchdError if installation fails
 pub fn install_launchd_service(spec: &ServiceSpec) -> Result<PathBuf, LaunchdError> {
-    let plist_path = get_plist_path(spec);
-    let launch_agents_dir = get_launch_agents_dir();
-
-    // Create LaunchAgents directory if it doesn't exist
-    std::fs::create_dir_all(&launch_agents_dir)?;
-
-    // Check if already installed (optional - can be forced)
-    if plist_path.exists() {
-        // Overwrite existing
-    }
-
-    // Generate and write plist
-    let plist_content = generate_launchd_plist(spec);
-    std::fs::write(&plist_path, plist_content)?;
-
-    // Load the service using launchctl
-    let output = Command::new("launchctl")
-        .args(["load", &plist_path.to_string_lossy()])
-        .output()?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let exit_code = output.status.code().unwrap_or(-1);
-
-        // Cleanup on failure
-        let _ = std::fs::remove_file(&plist_path);
-
-        return Err(LaunchdError::LaunchctlError {
-            message: format!("Failed to load service: {}", stderr),
-            exit_code,
-        });
-    }
-
-    Ok(plist_path)
+    write_launchd_plist(spec)
 }
 
 /// Uninstall a launchd service.
@@ -136,12 +145,29 @@ pub fn uninstall_launchd_service(spec: &ServiceSpec) -> Result<(), LaunchdError>
 
 /// Start a launchd service.
 ///
+/// Because [`install_launchd_service`] no longer loads the plist, start is
+/// responsible for loading the job (idempotently) before kicking it off. The
+/// plist must already exist on disk (i.e. install must have run first); a
+/// missing plist returns [`LaunchdError::NotFound`].
+///
 /// # Arguments
 /// * `spec` - The service specification
 ///
 /// # Returns
 /// Result indicating success or failure
 pub fn start_launchd_service(spec: &ServiceSpec) -> Result<(), LaunchdError> {
+    let plist_path = get_plist_path(spec);
+    if !plist_path.exists() {
+        return Err(LaunchdError::NotFound(spec.label.clone()));
+    }
+
+    // Load the job first. `launchctl load` is idempotent enough for our needs:
+    // if the job is already loaded it reports an error which we tolerate, since
+    // the subsequent `start` will surface any genuine failure.
+    let _ = Command::new("launchctl")
+        .args(["load", &plist_path.to_string_lossy()])
+        .output()?;
+
     let output = Command::new("launchctl")
         .args(["start", &spec.label])
         .output()?;

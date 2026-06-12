@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::process::Command;
 use thiserror::Error;
 
-use crate::service::spec::{generate_systemd_unit, ServiceSpec};
+use crate::service::spec::{ensure_log_directories, generate_systemd_unit, ServiceSpec};
 
 /// Error type for systemd service operations.
 #[derive(Debug, Error)]
@@ -67,6 +67,10 @@ pub fn install_systemd_service(spec: &ServiceSpec) -> Result<PathBuf, SystemdErr
 
     // Create systemd user directory if it doesn't exist
     std::fs::create_dir_all(&systemd_dir)?;
+
+    // Ensure the stdout/stderr log directories exist so the supervisor can
+    // capture diagnostics on the very first start.
+    ensure_log_directories(spec)?;
 
     // Check if already installed (optional - can be forced)
     if unit_path.exists() {

@@ -10,8 +10,8 @@
 
 use luther_workflow::runtime_paths::get_log_dir;
 use luther_workflow::service::{
-    build_install_spec, generate_launchd_plist, generate_systemd_unit, get_status, install_service,
-    ServiceManagerError, ServiceOperation,
+    build_install_spec, generate_launchd_plist, generate_systemd_unit, get_status,
+    install_target_path, ServiceManagerError, ServiceOperation,
 };
 
 #[test]
@@ -126,20 +126,22 @@ fn log_dir_is_non_empty_and_references_luther() {
 
 #[test]
 fn install_service_dispatch_is_well_typed() {
-    // Smoke-test the install dispatch routing without asserting a real install.
+    // Smoke-test the install dispatch routing without performing a real,
+    // host-mutating install. `install_target_path` resolves the same
+    // platform-specific destination as `install_service` but never writes
+    // files or invokes launchctl/systemctl, so this test stays free of live
+    // side effects (CI runs on ubuntu-latest only).
     let spec = build_install_spec("/nonexistent/luther-binary-xyz", "/tmp");
-    match install_service(&spec) {
-        Ok(_path) => {}
+    match install_target_path(&spec) {
+        Ok(path) => {
+            // On supported platforms we get the plist/unit destination path.
+            assert!(!path.as_os_str().is_empty());
+        }
         Err(ServiceManagerError::UnsupportedPlatform { platform }) => {
             assert!(!platform.is_empty());
         }
-        Err(ServiceManagerError::Operation {
-            operation,
-            log_path,
-            ..
-        }) => {
+        Err(ServiceManagerError::Operation { operation, .. }) => {
             assert_eq!(operation, ServiceOperation::Install);
-            assert!(log_path.is_some());
         }
     }
 }
