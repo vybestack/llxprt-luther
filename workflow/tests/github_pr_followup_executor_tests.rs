@@ -6485,6 +6485,24 @@ fn feedback_evaluator_default_argv_forbids_agentic_tool_loops() {
         "feedback evaluator must cap the model to a single turn so it cannot loop on tool calls: {argv:?}"
     );
 }
+
+#[test]
+fn feedback_evaluator_default_argv_downranks_speculative_nits() {
+    let argv = luther_workflow::engine::executors::default_feedback_evaluator_argv();
+    let prompt = argv
+        .iter()
+        .position(|arg| arg == "-p")
+        .and_then(|index| argv.get(index + 1))
+        .expect("feedback evaluator prompt after -p");
+
+    assert!(
+        prompt.contains("Speculative robustness suggestions")
+            && prompt.contains("low-value nits")
+            && prompt.contains("needs_user_judgment only"),
+        "feedback evaluator prompt should not block workflows on speculative optional CodeRabbit nits: {prompt}"
+    );
+}
+
 #[test]
 fn feedback_evaluator_command_errors_consume_budget_without_panicking() {
     let temp = tempfile::tempdir().expect("tempdir");
