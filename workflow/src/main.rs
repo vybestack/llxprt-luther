@@ -4,6 +4,7 @@ use std::process;
 
 use tracing_subscriber::{fmt, EnvFilter};
 
+use luther_workflow::adapters::github::{run_preflight, GithubError, SystemGithubCommandRunner};
 use luther_workflow::cli::{parse_args, Commands};
 use luther_workflow::engine::executor::ExecutorRegistry;
 use luther_workflow::engine::instance::WorkflowInstance;
@@ -73,6 +74,40 @@ fn report_dry_run_validation(workflow_type: &WorkflowType, config: &WorkflowConf
     }
 
     !unresolved.is_empty() || !missing.is_empty()
+}
+
+/// Determine whether the selected workflow actually depends on the GitHub CLI.
+///
+/// Returns `true` when any step is a registered `github_*` step type, or any
+/// shell step's `command` parameter contains a `gh ` token. Pure
+/// `shell`/`noop` workflows that never call `gh` return `false` so offline runs
+/// are unaffected by the preflight gate.
+fn workflow_requires_github(workflow_type: &WorkflowType) -> bool {
+    workflow_type.steps.iter().any(|step| {
+        if step.step_type.starts_with("github_") {
+            return true;
+        }
+        step.parameters
+            .as_ref()
+            .and_then(|params| params.get("command"))
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|command| command.contains("gh "))
+    })
+}
+
+/// Print actionable diagnostics for a failed GitHub preflight using a stable,
+/// greppable prefix, then exit the process without creating any state.
+fn fail_preflight(err: &GithubError) -> ! {
+    eprintln!("gh preflight failed: {err}");
+    let diagnostics = err.get_diagnostics();
+    let mut keys: Vec<&String> = diagnostics.keys().collect();
+    keys.sort();
+    for key in keys {
+        if let Some(value) = diagnostics.get(key) {
+            eprintln!("  {key}: {value}");
+        }
+    }
+    process::exit(1);
 }
 
 /// Handle the run command.
@@ -166,6 +201,32 @@ async fn handle_run_command(args: &luther_workflow::cli::RunArgs) {
     println!("Starting workflow run: {run_id}");
     println!("  Workflow type: {}", workflow_type.workflow_type_id);
     println!("  Config: {}", config.config_id);
+
+    // 2b. GitHub `gh` readiness preflight — runs before any state (DB, work_dir,
+    // artifacts) is created so a missing/unauthenticated/under-scoped `gh`
+    // aborts cleanly with actionable diagnostics instead of corrupting state.
+    // Skipped under --dry-run, --skip-preflight, or for workflows that never
+    // shell out to `gh`.
+    if !args.dry_run && !args.skip_preflight && workflow_requires_github(&workflow_type) {
+        let repo = config
+            .variables
+            .get("target_repo")
+            .cloned()
+            .or_else(|| args.repo.clone());
+        if let Some(repo) = repo {
+            let runner = SystemGithubCommandRunner;
+            match run_preflight(&runner, &repo, &["repo"]) {
+                Ok(report) => {
+                    println!(
+                        "  GitHub preflight OK: repo {} (scopes: {})",
+                        report.repo,
+                        report.scopes.join(", ")
+                    );
+                }
+                Err(e) => fail_preflight(&e),
+            }
+        }
+    }
 
     // 3. Initialize checkpoint database
     let db_path = luther_workflow::runtime_paths::get_data_dir().join("checkpoints.db");
