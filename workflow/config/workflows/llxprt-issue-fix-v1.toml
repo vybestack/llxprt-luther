@@ -5,6 +5,22 @@
 workflow_type_id = "llxprt-issue-fix-v1"
 
 # =============================================================================
+# llxprt binary path (optional)
+# -----------------------------------------------------------------------------
+# Each `step_type = "llxprt"` step resolves its agent binary as:
+#   1. step parameter `binary_path` (supports {work_dir}-style interpolation)
+#   2. config variable `llxprt_binary_path`
+#   3. default "llxprt" (resolved from PATH)
+# To target a non-PATH install, set the variable in the run config, e.g.:
+#   [variables]
+#   llxprt_binary_path = "/opt/llxprt/bin/llxprt"
+# or override a single step:
+#   [steps.parameters]
+#   binary_path = "/opt/llxprt/bin/llxprt"
+# The startup preflight validates each resolved binary via `--version`.
+# =============================================================================
+
+# =============================================================================
 # STEPS (14 total - write_issue_files eliminated, fetch_issue writes directly)
 # =============================================================================
 

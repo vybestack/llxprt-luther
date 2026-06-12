@@ -1,3 +1,20 @@
+//! llxprt agent step executor.
+//!
+//! Spawns the `llxprt` agent CLI to perform a step's work. The binary is
+//! configurable so deployments can point at a non-`PATH` install:
+//!
+//! - Step parameter `binary_path` (highest precedence). Supports `{...}`
+//!   interpolation, e.g. `"{work_dir}/bin/llxprt"`.
+//! - Workflow variable `llxprt_binary_path` (fallback for all steps).
+//! - Default `"llxprt"` (resolved from `PATH`).
+//!
+//! The same resolution order is shared with the preflight gate in
+//! [`crate::adapters::llxprt`] so they never diverge. Spawn failures map to the
+//! typed [`EngineError::LlxprtBinaryNotFound`] (missing binary) and runtime
+//! failure modes set a `llxprt_failure_reason` context variable
+//! (`timeout` / `idle_timeout` / `agent_failure` / `no_diff` / `process_error`)
+//! so callers can discriminate the cause.
+
 use std::io::Read;
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -164,7 +181,19 @@ impl StepExecutor for LlxprtExecutor {
             return Ok(StepOutcome::Success);
         }
 
-        let mut cmd = Command::new("llxprt");
+        let binary_template = params
+            .get(crate::adapters::llxprt::BINARY_PATH_PARAM)
+            .and_then(serde_json::Value::as_str)
+            .map(ToString::to_string)
+            .or_else(|| {
+                context
+                    .get(crate::adapters::llxprt::BINARY_PATH_VARIABLE)
+                    .cloned()
+            })
+            .unwrap_or_else(|| crate::adapters::llxprt::DEFAULT_LLXPRT_BINARY.to_string());
+        let binary = interpolate_string(&binary_template, context);
+
+        let mut cmd = Command::new(&binary);
         cmd.arg("--set").arg("reasoning.includeInResponse=false");
         if let Some(profile) = profile.as_deref() {
             cmd.arg("--profile-load").arg(profile);
@@ -175,9 +204,19 @@ impl StepExecutor for LlxprtExecutor {
         cmd.stderr(Stdio::piped());
         cmd.stdin(Stdio::null());
 
-        let mut child = cmd.spawn().map_err(|e| EngineError::StepExecutionError {
-            step_id: "llxprt".to_string(),
-            message: format!("Failed to spawn llxprt: {e}"),
+        let mut child = cmd.spawn().map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                context.set("llxprt_failure_reason", "process_error");
+                EngineError::LlxprtBinaryNotFound {
+                    path: binary.clone(),
+                }
+            } else {
+                context.set("llxprt_failure_reason", "process_error");
+                EngineError::StepExecutionError {
+                    step_id: "llxprt".to_string(),
+                    message: format!("Failed to spawn llxprt at `{binary}`: {e}"),
+                }
+            }
         })?;
 
         let stdout_buffer = Arc::new(Mutex::new(String::new()));
@@ -364,6 +403,14 @@ impl StepExecutor for LlxprtExecutor {
 
         if timed_out || idle_timed_out {
             context.set("exit_code", "124");
+            context.set(
+                "llxprt_failure_reason",
+                if idle_timed_out {
+                    "idle_timeout"
+                } else {
+                    "timeout"
+                },
+            );
             let diagnostic = if idle_timed_out {
                 idle_timeout.map_or_else(
                     || "llxprt timed out after stalled output".to_string(),
@@ -382,6 +429,7 @@ impl StepExecutor for LlxprtExecutor {
         }
 
         if !exit_status.success() {
+            context.set("llxprt_failure_reason", "agent_failure");
             let diagnostic = exit_status.code().map_or_else(
                 || "llxprt exited without an exit code".to_string(),
                 |code| format!("llxprt exited with status {code}"),
@@ -433,6 +481,7 @@ impl StepExecutor for LlxprtExecutor {
                 );
                 return Ok(StepOutcome::Success);
             }
+            context.set("llxprt_failure_reason", "no_diff");
             return Ok(StepOutcome::Fixable);
         }
 

@@ -44,11 +44,33 @@ pub enum EngineError {
 
     #[error("step not found: {0}")]
     StepNotFound(String),
+
+    #[error("llxprt binary not found at `{path}`")]
+    LlxprtBinaryNotFound { path: String },
+
+    #[error("llxprt binary at `{path}` failed version check: {message}")]
+    LlxprtVersionError { path: String, message: String },
+
+    #[error("llxprt profile `{profile}` could not be resolved: {message}")]
+    LlxprtProfileError { profile: String, message: String },
 }
 
 impl From<PersistenceError> for EngineError {
     fn from(err: PersistenceError) -> Self {
         EngineError::PersistenceError(err.to_string())
+    }
+}
+
+impl From<crate::adapters::llxprt::LlxprtError> for EngineError {
+    fn from(err: crate::adapters::llxprt::LlxprtError) -> Self {
+        use crate::adapters::llxprt::LlxprtError;
+        match err {
+            LlxprtError::BinaryNotFound { path } => EngineError::LlxprtBinaryNotFound { path },
+            LlxprtError::VersionCheckFailed { path, message }
+            | LlxprtError::NotExecutable { path, message } => {
+                EngineError::LlxprtVersionError { path, message }
+            }
+        }
     }
 }
 
@@ -597,6 +619,55 @@ impl EngineRunner {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn llxprt_engine_error_variants_render() {
+        let not_found = EngineError::LlxprtBinaryNotFound {
+            path: "/opt/llxprt".to_string(),
+        };
+        assert_eq!(
+            not_found.to_string(),
+            "llxprt binary not found at `/opt/llxprt`"
+        );
+        let version = EngineError::LlxprtVersionError {
+            path: "llxprt".to_string(),
+            message: "boom".to_string(),
+        };
+        assert_eq!(
+            version.to_string(),
+            "llxprt binary at `llxprt` failed version check: boom"
+        );
+        let profile = EngineError::LlxprtProfileError {
+            profile: "fast".to_string(),
+            message: "missing".to_string(),
+        };
+        assert_eq!(
+            profile.to_string(),
+            "llxprt profile `fast` could not be resolved: missing"
+        );
+    }
+
+    #[test]
+    fn llxprt_error_maps_to_engine_error() {
+        use crate::adapters::llxprt::LlxprtError;
+        let mapped: EngineError = LlxprtError::BinaryNotFound {
+            path: "llxprt".to_string(),
+        }
+        .into();
+        assert!(matches!(mapped, EngineError::LlxprtBinaryNotFound { .. }));
+        let mapped: EngineError = LlxprtError::VersionCheckFailed {
+            path: "llxprt".to_string(),
+            message: "x".to_string(),
+        }
+        .into();
+        assert!(matches!(mapped, EngineError::LlxprtVersionError { .. }));
+        let mapped: EngineError = LlxprtError::NotExecutable {
+            path: "llxprt".to_string(),
+            message: "x".to_string(),
+        }
+        .into();
+        assert!(matches!(mapped, EngineError::LlxprtVersionError { .. }));
+    }
 
     #[test]
     fn engine_error_display_formats_correctly() {

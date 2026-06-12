@@ -5,6 +5,9 @@ use std::process;
 use tracing_subscriber::{fmt, EnvFilter};
 
 use luther_workflow::adapters::github::{run_preflight, GithubError, SystemGithubCommandRunner};
+use luther_workflow::adapters::llxprt::{
+    run_preflight as run_llxprt_preflight, LlxprtError, SystemLlxprtCommandRunner,
+};
 use luther_workflow::cli::{parse_args, Commands};
 use luther_workflow::engine::executor::ExecutorRegistry;
 use luther_workflow::engine::instance::WorkflowInstance;
@@ -99,6 +102,43 @@ fn workflow_requires_github(workflow_type: &WorkflowType) -> bool {
 /// greppable prefix, then exit the process without creating any state.
 fn fail_preflight(err: &GithubError) -> ! {
     eprintln!("gh preflight failed: {err}");
+    let diagnostics = err.get_diagnostics();
+    let mut keys: Vec<&String> = diagnostics.keys().collect();
+    keys.sort();
+    for key in keys {
+        if let Some(value) = diagnostics.get(key) {
+            eprintln!("  {key}: {value}");
+        }
+    }
+    process::exit(1);
+}
+
+/// Returns `true` when any step is a `llxprt` step that actually spawns the
+/// binary (i.e. is not a pure `static_content` / `static_stdout` step). Pure
+/// static workflows never invoke `llxprt`, so the preflight gate is skipped.
+fn workflow_requires_llxprt(workflow_type: &WorkflowType) -> bool {
+    workflow_type.steps.iter().any(|step| {
+        if step.step_type != "llxprt" {
+            return false;
+        }
+        step.parameters.as_ref().is_none_or(|params| {
+            let has_static = params
+                .get("static_content")
+                .and_then(serde_json::Value::as_str)
+                .is_some()
+                || params
+                    .get("static_stdout")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some();
+            !has_static
+        })
+    })
+}
+
+/// Print actionable diagnostics for a failed llxprt preflight using a stable,
+/// greppable prefix, then exit the process without creating any state.
+fn fail_llxprt_preflight(err: &LlxprtError) -> ! {
+    eprintln!("llxprt preflight failed: {err}");
     let diagnostics = err.get_diagnostics();
     let mut keys: Vec<&String> = diagnostics.keys().collect();
     keys.sort();
@@ -225,6 +265,20 @@ async fn handle_run_command(args: &luther_workflow::cli::RunArgs) {
                 }
                 Err(e) => fail_preflight(&e),
             }
+        }
+    }
+
+    // 2c. llxprt agent binary readiness preflight — mirrors the `gh` gate above
+    // and runs before any state is created so a missing/incompatible llxprt
+    // binary aborts cleanly with actionable diagnostics. Skipped under
+    // --dry-run, --skip-preflight, or for workflows that never spawn llxprt.
+    if !args.dry_run && !args.skip_preflight && workflow_requires_llxprt(&workflow_type) {
+        let runner = SystemLlxprtCommandRunner;
+        match run_llxprt_preflight(&runner, &workflow_type, &config.variables) {
+            Ok(paths) => {
+                println!("  llxprt preflight OK: validated {}", paths.join(", "));
+            }
+            Err(e) => fail_llxprt_preflight(&e),
         }
     }
 

@@ -1330,3 +1330,101 @@ fn test_set_work_dir_preserves_seeded_variables() {
     // Clean up
     let _ = std::fs::remove_dir_all(&new_work_dir);
 }
+
+// ============================================================================
+// Configurable binary path + typed-error / failure-reason coverage
+// (Luther issue #15)
+// ============================================================================
+
+/// Write an executable shell script at `path` with the given body.
+fn write_executable_script(path: &std::path::Path, body: &str) {
+    std::fs::write(path, body).expect("write script");
+    std::process::Command::new("chmod")
+        .arg("+x")
+        .arg(path)
+        .status()
+        .expect("chmod script");
+}
+
+/// An explicit `binary_path` param must run that binary without PATH shadowing.
+#[test]
+fn test_llxprt_executor_honors_explicit_binary_path() {
+    use luther_workflow::engine::executors::LlxprtExecutor;
+
+    let temp_dir = tempfile::tempdir().expect("temp dir should be created");
+    let script = temp_dir.path().join("custom-llxprt");
+    write_executable_script(&script, "#!/bin/sh\nprintf 'LLXPRT_DONE\\n'\nexit 0\n");
+
+    let mut context = StepContext::new(
+        temp_dir.path().to_path_buf(),
+        uuid::Uuid::new_v4().to_string(),
+    );
+    let params = serde_json::json!({
+        "binary_path": script.to_string_lossy(),
+        "outcome_on_stdout": { "LLXPRT_DONE": "success" }
+    });
+
+    let outcome = LlxprtExecutor
+        .execute(&mut context, &params)
+        .expect("custom binary should execute");
+    assert_eq!(outcome, StepOutcome::Success);
+}
+
+/// A resolved `binary_path` that does not exist yields a typed
+/// `LlxprtBinaryNotFound` error with the failure reason recorded.
+#[test]
+fn test_llxprt_executor_missing_binary_path_is_typed_error() {
+    use luther_workflow::engine::executors::LlxprtExecutor;
+
+    let temp_dir = tempfile::tempdir().expect("temp dir should be created");
+    let missing = temp_dir.path().join("does-not-exist-llxprt");
+
+    let mut context = StepContext::new(
+        temp_dir.path().to_path_buf(),
+        uuid::Uuid::new_v4().to_string(),
+    );
+    let params = serde_json::json!({ "binary_path": missing.to_string_lossy() });
+
+    let err = LlxprtExecutor
+        .execute(&mut context, &params)
+        .expect_err("missing binary should error");
+    match err {
+        EngineError::LlxprtBinaryNotFound { path } => {
+            assert_eq!(path, missing.to_string_lossy());
+        }
+        other => panic!("unexpected error: {other:?}"),
+    }
+    assert_eq!(
+        context.get("llxprt_failure_reason").map(String::as_str),
+        Some("process_error")
+    );
+}
+
+/// An idle timeout records `llxprt_failure_reason = "idle_timeout"`.
+#[test]
+fn test_llxprt_executor_idle_timeout_sets_failure_reason() {
+    use luther_workflow::engine::executors::LlxprtExecutor;
+
+    let temp_dir = tempfile::tempdir().expect("temp dir should be created");
+    let script = temp_dir.path().join("idle-llxprt");
+    write_executable_script(&script, "#!/bin/sh\nprintf 'starting\\n'\nsleep 30\n");
+
+    let mut context = StepContext::new(
+        temp_dir.path().to_path_buf(),
+        uuid::Uuid::new_v4().to_string(),
+    );
+    let params = serde_json::json!({
+        "binary_path": script.to_string_lossy(),
+        "idle_timeout_seconds": 1,
+        "timeout_seconds": 30
+    });
+
+    let outcome = LlxprtExecutor
+        .execute(&mut context, &params)
+        .expect("idle script should execute");
+    assert_eq!(outcome, StepOutcome::Fatal);
+    assert_eq!(
+        context.get("llxprt_failure_reason").map(String::as_str),
+        Some("idle_timeout")
+    );
+}
