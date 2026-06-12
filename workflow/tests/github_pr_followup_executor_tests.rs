@@ -5029,7 +5029,7 @@ fn remediate_pr_followup_interpolates_profile_and_omits_unresolved_profile() {
     let temp = tempfile::tempdir().expect("tempdir");
     let runner = P12FakeLlxprtRunner::new(p12_result("success"));
     let mut context = p12_context(&temp);
-    context.set("profile_remediating", "gpt53codexXHigh");
+    context.set("profile_remediating", "gpt55high");
     let mut params = p12_params(&temp);
     params["profile"] = serde_json::json!("{profile_remediating}");
 
@@ -5044,7 +5044,7 @@ fn remediate_pr_followup_interpolates_profile_and_omits_unresolved_profile() {
     assert!(request
         .argv
         .windows(2)
-        .any(|window| window[0] == "--profile-load" && window[1] == "gpt53codexXHigh"));
+        .any(|window| window[0] == "--profile-load" && window[1] == "gpt55high"));
 
     let unresolved_runner = P12FakeLlxprtRunner::new(p12_result("success"));
     let mut unresolved_context = p12_context(&temp);

@@ -820,8 +820,8 @@ fn test_config_variables_injected_into_context() {
     // Verify the config has the expected variable
     assert_eq!(
         config.variables.get("profile_planning"),
-        Some(&"gpt53codexXHigh".to_string()),
-        "Expected profile_planning to be 'gpt53codexXHigh'"
+        Some(&"gpt55high".to_string()),
+        "Expected profile_planning to be 'gpt55high'"
     );
 
     // Create and run the workflow — the variables should be in context
