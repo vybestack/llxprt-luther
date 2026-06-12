@@ -17,7 +17,7 @@ This document explains the current Luther workflow engine as implemented in this
 | Checkpoints/events persistence | [`src/persistence/checkpoint.rs`](../src/persistence/checkpoint.rs) |
 | Run metadata persistence | [`src/persistence/run_metadata.rs`](../src/persistence/run_metadata.rs) |
 
-The engine is a sequential state machine over a declarative workflow graph. It does not use dagrs for real execution yet; [`src/engine/dagrs_runtime.rs`](../src/engine/dagrs_runtime.rs) is still a stub.
+The engine is a sequential state machine over a declarative workflow graph. `EngineRunner` ([`src/engine/runner.rs`](../src/engine/runner.rs)) is the single supported runtime: a durable, resumable, outcome-routed state machine backed by SQLite checkpointing. It is intentionally not built on a static DAG executor (such as `dagrs`), whose parallel task-graph model does not match Luther's dynamic, resumable, transition-driven execution.
 
 ## Conceptual model
 
@@ -300,7 +300,7 @@ Current limitation: checkpoints carry loop counters but do not persist the full 
 ## What might you not like about the engine implementation so far?
 
 1. **It is sequential and graph-simple.** `parallel_steps` exists in config schema, but the runner executes one step at a time.
-2. **The dagrs integration is still a stub.** The actual engine is custom Rust loop code, not a real DAG runtime.
+2. **It is a custom state machine, not a generic DAG runtime.** `EngineRunner` is purpose-built Rust loop code chosen for durable, resumable, outcome-routed execution rather than a static DAG library such as `dagrs`.
 3. **Loop detection depends on step ordering.** A loop is detected when the destination step appears earlier or equal in the `steps` array. That is simple, but brittle if someone reorders steps for readability.
 4. **`retryable` is underused.** The outcome exists, but the current main workflow relies mostly on `success`, `fixable`, and `fatal`.
 5. **Context persistence is incomplete.** Checkpoints persist counters and status, not the full context bus. Robust resume after process death is not complete.

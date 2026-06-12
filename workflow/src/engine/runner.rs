@@ -91,6 +91,14 @@ pub enum RunOutcome {
 
 /// The workflow execution engine.
 /// Manages the execution lifecycle of a workflow instance.
+///
+/// `EngineRunner` is the sole supported execution engine. It implements a
+/// durable, resumable state machine: step outcomes (`StepOutcome`) route
+/// transitions at runtime, runs are checkpointed to SQLite and can be resumed,
+/// and remediation edges are loop-limited per edge. This dynamic,
+/// outcome-routed model is deliberately not built on a static DAG executor
+/// (such as `dagrs`), whose parallel task-graph semantics do not match
+/// Luther's resumable, transition-driven execution.
 /// @plan:PLAN-20260404-INITIAL-RUNTIME.P08
 /// @plan:PLAN-20260408-STEP-EXEC.P06
 /// @plan:PLAN-20260408-LLXPRT-FIRST.P12
