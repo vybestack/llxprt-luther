@@ -154,6 +154,26 @@ fn test_llxprt_executor_emits_progress_while_waiting() {
 }
 
 #[test]
+fn test_llxprt_executor_ignores_blank_static_content() {
+    use luther_workflow::engine::executors::LlxprtExecutor;
+
+    let mut context = StepContext::new(std::env::temp_dir(), uuid::Uuid::new_v4().to_string());
+    let params = serde_json::json!({
+        "static_content": "   ",
+        "static_stdout": "PLAN_APPROVED",
+        "outcome_on_stdout": {
+            "PLAN_APPROVED": "success"
+        }
+    });
+
+    let outcome = LlxprtExecutor
+        .execute(&mut context, &params)
+        .expect("blank static_content should fall through to normal llxprt execution path");
+
+    assert_eq!(outcome, StepOutcome::Success);
+}
+
+#[test]
 fn test_llxprt_outcome_markers_must_be_exact_lines() {
     use luther_workflow::engine::executors::LlxprtExecutor;
 

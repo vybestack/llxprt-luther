@@ -1945,19 +1945,10 @@ fn create_plan_static_content_is_profile_driven() {
     let llxprt_code = workflow_config("llxprt-code");
     let llxprt_code_context = context_from_config(&llxprt_code);
     let llxprt_code_static_plan = interpolate_string(static_plan, &llxprt_code_context);
-
-    for expected in [
-        "contextCleared=true",
-        "useStreamEventHandlers.ts",
-        "geminiMessageBuffer",
-        "AgentExecutionStopped/AgentExecutionBlocked",
-        "separate Gemini messages",
-    ] {
-        assert!(
-            llxprt_code_static_plan.contains(expected),
-            "llxprt-code profile static plan should direct the agent to the issue #1803 stream-buffer fix; missing {expected}: {llxprt_code_static_plan}"
-        );
-    }
+    assert!(
+        llxprt_code_static_plan.trim().is_empty(),
+        "generic llxprt-code profile should let the planning agent read the selected issue instead of replaying an issue-specific static plan: {llxprt_code_static_plan}"
+    );
 
     let alt_config = workflow_config("llxprt-code-alt");
     let alt_context = context_from_config(&alt_config);
@@ -1965,11 +1956,11 @@ fn create_plan_static_content_is_profile_driven() {
     assert!(
         alt_static_plan.contains("StreamProcessor.ts")
             && alt_static_plan.contains("cancellation state"),
-        "alternate profile should provide distinct target-specific static plan content: {alt_static_plan}"
+        "alternate profile can still provide target-specific static plan content: {alt_static_plan}"
     );
     assert_ne!(
         llxprt_code_static_plan, alt_static_plan,
-        "two profiles should load the same workflow type with different target-specific plan content"
+        "blank generic planning and explicit target-specific planning should remain distinguishable"
     );
 }
 
@@ -2378,11 +2369,11 @@ fn run_tests_accepts_existing_pr_when_repeat_run_has_no_new_diff() {
     let diff_command = interpolate_string(diff_command, &context);
     assert!(
         diff_command.contains("git status --porcelain --untracked-files=all")
-            && diff_command.contains("packages/cli/src/ui/hooks/")
-            && diff_command.contains("No issue #1803 source/test diff found")
+            && diff_command.contains("grep -E '.'")
+            && diff_command.contains("No issue #0 source/test diff found")
             && diff_command.contains("\"0\" != \"0\""),
 
-        "diff_or_existing_pr should fail empty or unrelated branches unless setup_workspace found an open reusable PR: {diff_command}"
+        "diff_or_existing_pr should fail empty branches unless setup_workspace found an open reusable PR while allowing any issue-specific changed path: {diff_command}"
     );
 }
 
@@ -2443,10 +2434,10 @@ fn llxprt_issue_fix_workflow_loads_with_two_target_profiles() {
     let alt_diff_command = interpolate_string(diff_command_template, &alt_context);
 
     assert!(
-        llxprt_code_plan.contains("useStreamEventHandlers.ts")
-            && llxprt_code_test_command.contains("useStreamEventHandlers")
-            && llxprt_code_diff_command.contains("packages/cli/src/ui/hooks/"),
-        "llxprt-code profile should inject issue #1803 planning, test, and diff scope"
+        llxprt_code_plan.trim().is_empty()
+            && llxprt_code_test_command == "npm run test --workspace @vybestack/llxprt-code 2>&1"
+            && llxprt_code_diff_command.contains("grep -E '.'"),
+        "generic llxprt-code profile should let planning follow the selected issue while running the package test command and allowing any changed path"
     );
     assert!(
         alt_plan.contains("StreamProcessor.ts")

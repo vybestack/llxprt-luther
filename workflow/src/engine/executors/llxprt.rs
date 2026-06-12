@@ -179,14 +179,16 @@ fn execute_llxprt(
         .and_then(serde_json::Value::as_str)
     {
         let content = interpolate_string(static_content, context);
-        if let Some(path_template) = success_file.as_deref() {
-            write_success_file(context, path_template, &content)?;
-            return Ok(StepOutcome::Success);
+        if !content.trim().is_empty() {
+            if let Some(path_template) = success_file.as_deref() {
+                write_success_file(context, path_template, &content)?;
+                return Ok(StepOutcome::Success);
+            }
+            return Err(EngineError::StepExecutionError {
+                step_id: "llxprt".to_string(),
+                message: "static_content requires success_file".to_string(),
+            });
         }
-        return Err(EngineError::StepExecutionError {
-            step_id: "llxprt".to_string(),
-            message: "static_content requires success_file".to_string(),
-        });
     }
 
     if let Some(static_stdout) = params

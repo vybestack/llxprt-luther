@@ -27,8 +27,8 @@ repository_name = "llxprt-code"
 assignee = "acoliver"
 work_dir = "/tmp/luther-workspaces/llxprt-code"
 artifact_dir = "/tmp/luther-artifacts/llxprt-code"
-primary_issue_number = "1803"
-issue_number = "1803"
+primary_issue_number = "0"
+issue_number = "0"
 
 base_branch = "main"
 profile_planning = "gpt53codexXHigh"
@@ -37,17 +37,9 @@ profile_implementing = "gpt53codexXHigh"
 profile_remediating = "gpt53codexXHigh"
 luther_label = "Luther working"
 ok_label = "OK for Luther"
-plan_static_content = """
-# Implementation Plan
-
-1. Read {artifact_dir}/issue.md and confirm the requested behavior for issue #{issue_number}: when a stream event has contextCleared=true, any pending Gemini response text must be flushed/reset so later content starts a fresh message.
-2. Inspect packages/cli/src/ui/hooks/geminiStream/useStreamEventHandlers.ts, especially processGeminiStreamEvents, geminiMessageBuffer, handleContentEvent, and the AgentExecutionStopped/AgentExecutionBlocked contextCleared branches.
-3. Implement the smallest source change in useStreamEventHandlers.ts so contextCleared flushes any pending Gemini text, clears pending state, resets geminiMessageBuffer, and then preserves the existing "Conversation context has been cleared." info message.
-4. Add or update focused regression tests for the contextCleared stream event path. Prefer a test near the geminiStream hook tests that proves pre-clear and post-clear content become separate Gemini messages and are not merged.
-5. Run targeted verification for the changed package/files only, then keep the final diff narrowly scoped to issue #{issue_number}; do not modify package lockfiles, generated notice files, .luther files, generated build output, or unrelated files.
-"""
-required_changed_path_pattern = "packages/cli/src/ui/hooks/"
-diff_required_path_regex = "^packages/cli/src/ui/hooks/"
+plan_static_content = ""
+required_changed_path_pattern = ""
+diff_required_path_regex = "."
 diff_failure_message = "No issue #{issue_number} source/test diff found and no reusable open PR exists"
 lint_command = """
 CHANGED=$(git status --porcelain --untracked-files=all | sed 's/^...//' | grep -E '[.](ts|tsx|js|jsx)$' | tr '\\n' ' ')
@@ -62,7 +54,7 @@ fi
 """
 typecheck_command = "npm run typecheck 2>&1"
 build_command = "npm run build 2>&1"
-test_command = "npm run test --workspace @vybestack/llxprt-code -- useStreamEventHandlers 2>&1"
+test_command = "npm run test --workspace @vybestack/llxprt-code 2>&1"
 format_command = """
 CHANGED=$(git status --porcelain --untracked-files=all | sed 's/^...//' | grep -E '[.](ts|tsx|js|jsx|json|md)$' | tr '\n' ' ')
 
