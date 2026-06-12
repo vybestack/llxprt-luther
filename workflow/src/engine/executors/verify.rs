@@ -84,6 +84,19 @@ impl StepExecutor for VerifyExecutor {
                 message: "Missing 'checks' parameter".to_string(),
             })?;
 
+        // Validate the verification profile (defaults to npm for backward
+        // compatibility). Unknown profiles are a configuration error.
+        let profile = resolve_profile(params);
+        if !is_valid_profile(profile) {
+            return Err(EngineError::StepExecutionError {
+                step_id: "verify".to_string(),
+                message: format!(
+                    "Unknown verification profile '{profile}'. Valid profiles: {}",
+                    VALID_PROFILES.join(", ")
+                ),
+            });
+        }
+
         // If checks array is empty, return success immediately
         if checks_array.is_empty() {
             context.set("verify_passed", "true");
@@ -398,35 +411,124 @@ fn resolve_artifact_root(
     })
 }
 
-/// Resolve the command for a specific check type.
+/// Valid verification profile names.
 /// @plan:PLAN-20260408-LLXPRT-FIRST.P06
 /// @plan:PLAN-20260408-LLXPRT-FIRST.P08
 /// @requirement:REQ-LF-VERIFY-007
-fn resolve_check_command(
+const VALID_PROFILES: &[&str] = &["npm", "pnpm", "yarn", "cargo", "python", "go", "custom"];
+
+/// Default verification profile used when none is specified.
+const DEFAULT_PROFILE: &str = "npm";
+
+/// Return whether a profile name is recognized.
+/// @requirement:REQ-LF-VERIFY-007
+fn is_valid_profile(profile: &str) -> bool {
+    VALID_PROFILES.contains(&profile)
+}
+
+/// Read the configured verification profile, defaulting to npm.
+/// @requirement:REQ-LF-VERIFY-007
+fn resolve_profile(params: &serde_json::Value) -> &str {
+    params
+        .get("profile")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or(DEFAULT_PROFILE)
+}
+
+/// Map a check type to its default command for the given profile.
+///
+/// Returns `None` when the profile defines no default for that check type
+/// (for example `cargo` has no `typecheck`, and `custom` has no defaults at
+/// all). The `custom` profile intentionally returns `None` for every check
+/// type so that an explicit `check_commands` override is required.
+/// @plan:PLAN-20260408-LLXPRT-FIRST.P06
+/// @plan:PLAN-20260408-LLXPRT-FIRST.P08
+/// @requirement:REQ-LF-VERIFY-007
+pub fn profile_default_command(profile: &str, check_type: &str) -> Option<&'static str> {
+    match profile {
+        "npm" => match check_type {
+            "lint" => Some("npm run lint 2>&1"),
+            "typecheck" => Some("npm run typecheck 2>&1"),
+            "test" => Some("npm run test 2>&1"),
+            "format" => Some("npm run format:check 2>&1"),
+            "build" => Some("npm run build 2>&1"),
+            _ => None,
+        },
+        "pnpm" => match check_type {
+            "lint" => Some("pnpm run lint 2>&1"),
+            "typecheck" => Some("pnpm run typecheck 2>&1"),
+            "test" => Some("pnpm run test 2>&1"),
+            "format" => Some("pnpm run format:check 2>&1"),
+            "build" => Some("pnpm run build 2>&1"),
+            _ => None,
+        },
+        "yarn" => match check_type {
+            "lint" => Some("yarn lint 2>&1"),
+            "typecheck" => Some("yarn typecheck 2>&1"),
+            "test" => Some("yarn test 2>&1"),
+            "format" => Some("yarn format:check 2>&1"),
+            "build" => Some("yarn build 2>&1"),
+            _ => None,
+        },
+        "cargo" => match check_type {
+            "lint" => Some("cargo clippy 2>&1"),
+            "test" => Some("cargo test 2>&1"),
+            "format" => Some("cargo fmt --check 2>&1"),
+            "build" => Some("cargo build 2>&1"),
+            _ => None,
+        },
+        "python" => match check_type {
+            "lint" => Some("ruff check . 2>&1"),
+            "typecheck" => Some("mypy . 2>&1"),
+            "test" => Some("pytest 2>&1"),
+            "format" => Some("ruff format --check . 2>&1"),
+            _ => None,
+        },
+        "go" => match check_type {
+            "lint" => Some("golangci-lint run 2>&1"),
+            "test" => Some("go test ./... 2>&1"),
+            "format" => Some("gofmt -l . 2>&1"),
+            "build" => Some("go build ./... 2>&1"),
+            _ => None,
+        },
+        // "custom" and any other profile define no defaults.
+        _ => None,
+    }
+}
+
+/// Resolve the command for a specific check type.
+///
+/// Precedence (highest first): explicit `check_commands[check_type]` override,
+/// then the selected profile's default command. An error is returned when the
+/// active profile defines no default for the check type and no override was
+/// provided.
+/// @plan:PLAN-20260408-LLXPRT-FIRST.P06
+/// @plan:PLAN-20260408-LLXPRT-FIRST.P08
+/// @requirement:REQ-LF-VERIFY-007
+pub fn resolve_check_command(
     check_type: &str,
     params: &serde_json::Value,
     context: &StepContext,
 ) -> Result<String, EngineError> {
-    // Check custom commands first
+    // Check custom commands first - explicit overrides always win.
     if let Some(custom_commands) = params.get("check_commands") {
         if let Some(custom_cmd) = custom_commands.get(check_type).and_then(|v| v.as_str()) {
             return Ok(interpolate_string(custom_cmd, context));
         }
     }
 
-    // Fall back to standard project-level npm scripts. Repositories define the
-    // authoritative lint/test/typecheck behavior in package.json.
-    match check_type {
-        "lint" => Ok("npm run lint 2>&1".to_string()),
-        "typecheck" => Ok("npm run typecheck 2>&1".to_string()),
-        "test" => Ok("npm run test 2>&1".to_string()),
-        "format" => Ok("npm run format:check 2>&1".to_string()),
-        "build" => Ok("npm run build 2>&1".to_string()),
-        _ => Err(EngineError::StepExecutionError {
-            step_id: "verify".to_string(),
-            message: format!("Unknown check type: {check_type}"),
-        }),
+    // Fall back to the selected profile's ecosystem-appropriate default.
+    let profile = resolve_profile(params);
+    if let Some(command) = profile_default_command(profile, check_type) {
+        return Ok(command.to_string());
     }
+
+    Err(EngineError::StepExecutionError {
+        step_id: "verify".to_string(),
+        message: format!(
+            "Check type '{check_type}' is not defined in profile '{profile}' and no check_commands override was provided"
+        ),
+    })
 }
 
 /// Parse the output of a check and extract errors.

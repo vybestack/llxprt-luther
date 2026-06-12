@@ -1863,6 +1863,36 @@ fn dogfood_agents_are_warned_against_profile_shell_snippets() {
         );
     }
 }
+/// Issue #18: the Luther dogfood workflow is a Rust/cargo project, so its
+/// verify step must select the `cargo` verification profile rather than relying
+/// solely on full `check_commands` overrides for ecosystem-appropriate
+/// defaults. Explicit overrides still take precedence; the profile supplies the
+/// defaults for any non-overridden check type.
+/// @requirement:REQ-LF-VERIFY-007
+#[test]
+fn dogfood_verify_step_uses_cargo_profile() {
+    let workflow_type = resolve_workflow_type(
+        "llxprt-luther-dogfood-v1",
+        &std::path::PathBuf::from("config"),
+    )
+    .expect("production dogfood workflow type should load");
+
+    let run_tests = workflow_type
+        .steps
+        .iter()
+        .find(|step| step.step_id == "run_tests")
+        .expect("dogfood run_tests verify step exists");
+    let params = run_tests
+        .parameters
+        .as_ref()
+        .expect("run_tests parameters exist");
+
+    assert_eq!(
+        params.get("profile").and_then(serde_json::Value::as_str),
+        Some("cargo"),
+        "dogfood verify step must select the cargo verification profile so non-npm defaults apply"
+    );
+}
 
 /// @plan:PLAN-20260408-LLXPRT-FIRST.P18
 /// @requirement:REQ-LF-PLAN-002

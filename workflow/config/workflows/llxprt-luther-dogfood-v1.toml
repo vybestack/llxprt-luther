@@ -368,6 +368,7 @@ step_type = "verify"
 description = "Run lint, typecheck, test, format, build checks"
 
 [steps.parameters]
+profile = "cargo"
 checks = ["diff_or_existing_pr", "format", "clippy", "test", "diff_or_existing_pr"]
 timeout_seconds = 2400
 artifact_root = "{artifact_dir}"
