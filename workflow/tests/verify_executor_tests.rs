@@ -3,7 +3,10 @@
 /// These tests verify the `VerifyExecutor` behavior for configurable check sequences,
 /// result parsing, report generation, and context variable setting.
 use luther_workflow::engine::executor::{StepContext, StepExecutor};
-use luther_workflow::engine::executors::verify::{ErrorRecord, VerifyExecutor, VerifyReport};
+use luther_workflow::engine::executors::verify::{
+    profile_default_command, resolve_check_command, ErrorRecord, VerifyExecutor, VerifyReport,
+};
+use luther_workflow::engine::runner::EngineError;
 use luther_workflow::engine::transition::StepOutcome;
 use serde_json::json;
 use std::fs;
@@ -675,4 +678,167 @@ exit 1"#
     assert_eq!(lint_check.errors[0].column, Some(13));
     assert!(lint_check.errors[0].message.contains("unusedValue"));
     assert!(!lint_check.errors[0].message.contains("10001 warnings"));
+}
+
+// =============================================================================
+// REQ-LF-VERIFY-007: Configurable verification profiles
+// =============================================================================
+
+/// Default profile (no `profile` param) resolves to the npm defaults,
+/// preserving backward compatibility.
+/// @plan:PLAN-20260408-LLXPRT-FIRST.P08
+/// @requirement:REQ-LF-VERIFY-007
+#[test]
+fn test_verify_default_profile_is_npm() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let ctx = StepContext::new(temp_dir.path().to_path_buf(), "run-1".to_string());
+
+    let params = json!({ "checks": ["lint"] });
+
+    let command = resolve_check_command("lint", &params, &ctx).unwrap();
+    assert_eq!(command, "npm run lint 2>&1");
+}
+
+/// Explicitly selecting the npm profile resolves identically to the default.
+/// @plan:PLAN-20260408-LLXPRT-FIRST.P08
+/// @requirement:REQ-LF-VERIFY-007
+#[test]
+fn test_verify_explicit_npm_profile_matches_default() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let ctx = StepContext::new(temp_dir.path().to_path_buf(), "run-1".to_string());
+
+    let default_params = json!({ "checks": ["test"] });
+    let npm_params = json!({ "checks": ["test"], "profile": "npm" });
+
+    let default_cmd = resolve_check_command("test", &default_params, &ctx).unwrap();
+    let npm_cmd = resolve_check_command("test", &npm_params, &ctx).unwrap();
+    assert_eq!(default_cmd, npm_cmd);
+    assert_eq!(npm_cmd, "npm run test 2>&1");
+}
+
+/// The cargo profile resolves to cargo commands rather than npm.
+/// @plan:PLAN-20260408-LLXPRT-FIRST.P08
+/// @requirement:REQ-LF-VERIFY-007
+#[test]
+fn test_verify_cargo_profile_resolves_cargo_commands() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let ctx = StepContext::new(temp_dir.path().to_path_buf(), "run-1".to_string());
+
+    let params = json!({
+        "checks": ["lint", "test", "build", "format"],
+        "profile": "cargo"
+    });
+
+    assert_eq!(
+        resolve_check_command("lint", &params, &ctx).unwrap(),
+        "cargo clippy 2>&1"
+    );
+    assert_eq!(
+        resolve_check_command("test", &params, &ctx).unwrap(),
+        "cargo test 2>&1"
+    );
+    assert_eq!(
+        resolve_check_command("build", &params, &ctx).unwrap(),
+        "cargo build 2>&1"
+    );
+    assert_eq!(
+        resolve_check_command("format", &params, &ctx).unwrap(),
+        "cargo fmt --check 2>&1"
+    );
+
+    // cargo has no separate typecheck default.
+    assert!(profile_default_command("cargo", "typecheck").is_none());
+}
+
+/// The custom profile, combined with explicit check_commands, succeeds.
+/// @plan:PLAN-20260408-LLXPRT-FIRST.P08
+/// @requirement:REQ-LF-VERIFY-007
+#[test]
+fn test_verify_custom_profile_with_check_commands_succeeds() {
+    let executor = VerifyExecutor;
+    let temp_dir = tempfile::tempdir().unwrap();
+    let mut ctx = StepContext::new(temp_dir.path().to_path_buf(), "run-1".to_string());
+
+    let params = json!({
+        "checks": ["lint", "test"],
+        "profile": "custom",
+        "check_commands": {
+            "lint": "echo 'lint passed'",
+            "test": "echo 'test passed'"
+        }
+    });
+
+    let result = executor.execute(&mut ctx, &params);
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap(), StepOutcome::Success);
+}
+
+/// The custom profile without an override for a check type errors, since it
+/// defines no defaults.
+/// @plan:PLAN-20260408-LLXPRT-FIRST.P08
+/// @requirement:REQ-LF-VERIFY-007
+#[test]
+fn test_verify_custom_profile_missing_command_errors() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let ctx = StepContext::new(temp_dir.path().to_path_buf(), "run-1".to_string());
+
+    let params = json!({ "checks": ["lint"], "profile": "custom" });
+
+    let result = resolve_check_command("lint", &params, &ctx);
+    let Err(EngineError::StepExecutionError { message, .. }) = result else {
+        panic!("expected StepExecutionError for custom profile without override");
+    };
+    assert!(message.contains("lint"));
+    assert!(message.contains("custom"));
+}
+
+/// An explicit check_commands override beats the profile default, while
+/// non-overridden check types still use the profile default.
+/// @plan:PLAN-20260408-LLXPRT-FIRST.P08
+/// @requirement:REQ-LF-VERIFY-007
+#[test]
+fn test_verify_check_commands_override_profile_default() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let ctx = StepContext::new(temp_dir.path().to_path_buf(), "run-1".to_string());
+
+    let params = json!({
+        "checks": ["lint", "test"],
+        "profile": "cargo",
+        "check_commands": {
+            "lint": "echo 'override lint'"
+        }
+    });
+
+    // Override wins for lint.
+    assert_eq!(
+        resolve_check_command("lint", &params, &ctx).unwrap(),
+        "echo 'override lint'"
+    );
+    // Non-overridden type falls back to the cargo default.
+    assert_eq!(
+        resolve_check_command("test", &params, &ctx).unwrap(),
+        "cargo test 2>&1"
+    );
+}
+
+/// An unknown profile name is rejected with a StepExecutionError listing the
+/// valid profiles.
+/// @plan:PLAN-20260408-LLXPRT-FIRST.P08
+/// @requirement:REQ-LF-VERIFY-007
+#[test]
+fn test_verify_invalid_profile_returns_error() {
+    let executor = VerifyExecutor;
+    let temp_dir = tempfile::tempdir().unwrap();
+    let mut ctx = StepContext::new(temp_dir.path().to_path_buf(), "run-1".to_string());
+
+    let params = json!({ "checks": ["lint"], "profile": "ruby" });
+
+    let result = executor.execute(&mut ctx, &params);
+    let Err(EngineError::StepExecutionError { message, .. }) = result else {
+        panic!("expected StepExecutionError for invalid profile");
+    };
+    assert!(message.contains("ruby"));
+    assert!(message.contains("npm"));
+    assert!(message.contains("cargo"));
+    assert!(message.contains("custom"));
 }
