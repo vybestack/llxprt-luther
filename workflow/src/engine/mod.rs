@@ -1,7 +1,11 @@
 /// @plan:PLAN-20260404-INITIAL-RUNTIME.P03
 /// @plan:PLAN-20260408-STEP-EXEC.P03
 /// Engine module - workflow execution runtime.
-pub mod dagrs_runtime;
+///
+/// `runner::EngineRunner` is the single supported execution engine: a durable,
+/// resumable, outcome-routed state machine backed by SQLite checkpointing. An
+/// earlier `dagrs`-backed scaffold was removed because the `dagrs` static DAG
+/// model does not fit Luther's dynamic, resumable, transition-routed semantics.
 pub mod executor;
 pub mod executors;
 pub mod instance;

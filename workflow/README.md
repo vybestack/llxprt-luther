@@ -228,7 +228,6 @@ src/
     runner.rs          EngineRunner — the execution loop
     instance.rs        WorkflowInstance (type + config binding)
     transition.rs      StepOutcome enum, transition resolution
-    dagrs_runtime.rs   DAG engine stub (future)
   workflow/
     schema.rs          WorkflowType, WorkflowConfig, StepDef, TransitionDef
     config_loader.rs   TOML/JSON loading, validation, resolution
@@ -255,7 +254,7 @@ These are known gaps — not bugs, just work not yet done:
 
 3. **No timeout enforcement.** `timeout_seconds` is declared in config but not enforced at runtime. A hung shell command will block forever.
 
-4. **dagrs integration is a stub.** The `dagrs` crate is a dependency but `DagrsRuntime` is placeholder-only. The engine uses its own sequential loop.
+4. **Custom state-machine runtime by design.** `EngineRunner` is the single supported engine — a durable, resumable, outcome-routed state machine. A generic DAG library (such as `dagrs`) is intentionally not used because its static parallel task-graph model does not fit Luther's dynamic, resumable, transition-driven execution.
 
 5. **Limited step types.** Only `shell`, `write_file`, and `noop` exist. There are no executors for HTTP, LLM, git operations, or GitHub API calls.
 
