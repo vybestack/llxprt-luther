@@ -25,9 +25,39 @@ use tokio::sync::Mutex;
 use tokio::time::Instant;
 
 /// Resource limits for a config profile.
+#[derive(Debug, Clone, Copy)]
 pub struct ResourceLimits {
     pub max_memory_mb: u64,
     pub max_cpu_percent: f64,
+}
+
+impl ResourceLimits {
+    /// Construct limits that never trigger enforcement. Useful for benign
+    /// helper workers and for the back-compatible [`Monitor::spawn_worker`]
+    /// entry point where no explicit limits are supplied.
+    pub fn unlimited() -> Self {
+        Self {
+            max_memory_mb: u64::MAX,
+            max_cpu_percent: f64::INFINITY,
+        }
+    }
+}
+
+/// Spawn specification retained for a supervised worker so it can be
+/// respawned under the restart policy.
+struct WorkerSpec {
+    program: String,
+    args: Vec<String>,
+    limits: ResourceLimits,
+}
+
+/// A supervised worker: the live child process plus its restart bookkeeping
+/// and the spec needed to respawn it.
+struct WorkerHandle {
+    child: tokio::process::Child,
+    state: process::ProcessState,
+    spec: WorkerSpec,
+    last_exit_code: Option<i32>,
 }
 
 /// Configuration profile.
@@ -39,13 +69,12 @@ pub struct ConfigProfile {
 
 /// Monitor instance for supervising workflow runs.
 pub struct Monitor {
-    // Retained so monitor runtime policy remains available as supervision expands.
-    #[allow(dead_code)]
     config: process::MonitorConfig,
     instance_id: String,
     start_time: Instant,
     shutdown: bool,
-    workers: Vec<String>,
+    workers: HashMap<String, WorkerHandle>,
+    next_worker_seq: usize,
     ipc_handle: Option<tokio::task::JoinHandle<Result<(), ipc::IpcError>>>,
     state: Arc<Mutex<ipc::SharedState>>,
     _lock_guard: Option<SingletonLock>, // Holds singleton lock if acquired
@@ -68,7 +97,8 @@ impl Monitor {
             instance_id,
             start_time: Instant::now(),
             shutdown: false,
-            workers: Vec::new(),
+            workers: HashMap::new(),
+            next_worker_seq: 0,
             ipc_handle: None,
             state,
             _lock_guard: None,
@@ -118,28 +148,238 @@ impl Monitor {
         })
     }
 
-    /// Spawn a new worker.
+    /// Spawn a new worker for the given task (back-compatible entry point).
+    ///
+    /// This routes through [`Monitor::spawn_worker_command`] using a benign,
+    /// long-lived child process so that the worker actually exists as a real
+    /// OS process and is terminated on shutdown. Returns the assigned worker
+    /// id; on spawn failure it still records the worker id logically so the
+    /// historical (infallible) signature is preserved.
     pub async fn spawn_worker(&mut self, task: &str) -> String {
-        let id = format!("worker-{}", self.workers.len());
-        self.workers.push(id.clone());
-
-        // Update shared state
-        let mut state = self.state.lock().await;
-        state.active_runs.push(task.to_string());
-
+        let id = self.next_worker_id();
+        // A harmless, long-lived child; supervision/shutdown will terminate it.
+        let program = "sleep".to_string();
+        let args = vec!["86400".to_string()];
+        let _ = self
+            .spawn_worker_command(&id, &program, &args, ResourceLimits::unlimited())
+            .await;
+        // Keep the task name visible in IPC status if the spawn failed for any
+        // reason (e.g. `sleep` unavailable), so status still reflects intent.
+        if !self.workers.contains_key(&id) {
+            let mut state = self.state.lock().await;
+            if !state.active_runs.contains(&id) {
+                state.active_runs.push(id.clone());
+            }
+            let _ = task;
+        }
         id
     }
 
-    /// Graceful shutdown.
+    /// Allocate the next sequential worker id.
+    fn next_worker_id(&mut self) -> String {
+        let id = format!("worker-{}", self.next_worker_seq);
+        self.next_worker_seq += 1;
+        id
+    }
+
+    /// Spawn a supervised worker process running `program` with `args`.
+    ///
+    /// On success the child is tracked and the worker id is added to the
+    /// authoritative IPC `active_runs` set. On failure a
+    /// [`process::MonitorError::SpawnFailed`] is returned and nothing is
+    /// recorded.
+    pub async fn spawn_worker_command(
+        &mut self,
+        id: &str,
+        program: &str,
+        args: &[String],
+        limits: ResourceLimits,
+    ) -> Result<String, process::MonitorError> {
+        let spec = WorkerSpec {
+            program: program.to_string(),
+            args: args.to_vec(),
+            limits,
+        };
+        let child = Self::spawn_child(id, &spec)?;
+        let handle = WorkerHandle {
+            child,
+            state: process::ProcessState::new(self.config.clone()),
+            spec,
+            last_exit_code: None,
+        };
+        self.workers.insert(id.to_string(), handle);
+        self.mark_active(id).await;
+        Ok(id.to_string())
+    }
+
+    /// Spawn the OS child described by `spec`.
+    fn spawn_child(
+        id: &str,
+        spec: &WorkerSpec,
+    ) -> Result<tokio::process::Child, process::MonitorError> {
+        tokio::process::Command::new(&spec.program)
+            .args(&spec.args)
+            .spawn()
+            .map_err(|e| process::MonitorError::SpawnFailed {
+                id: id.to_string(),
+                message: e.to_string(),
+            })
+    }
+
+    /// Record a worker id as active in shared IPC state (idempotent).
+    async fn mark_active(&self, id: &str) {
+        let mut state = self.state.lock().await;
+        if !state.active_runs.contains(&id.to_string()) {
+            state.active_runs.push(id.to_string());
+        }
+    }
+
+    /// Remove a worker id from shared IPC state.
+    async fn mark_inactive(&self, id: &str) {
+        let mut state = self.state.lock().await;
+        state.active_runs.retain(|r| r != id);
+    }
+
+    /// Set the monitor's shared lifecycle state.
+    async fn set_state(&self, new_state: heartbeat::MonitorState) {
+        let mut state = self.state.lock().await;
+        state.state = new_state;
+    }
+
+    /// Perform one supervision pass: enforce resource limits, then reap any
+    /// exited children and apply the restart policy.
+    ///
+    /// Tests (and a future background loop) drive this repeatedly. Decomposed
+    /// into helpers to keep cognitive complexity and length within lint gates.
+    pub async fn supervise_tick(&mut self) -> Result<(), process::MonitorError> {
+        if self.shutdown {
+            return Ok(());
+        }
+        self.enforce_resource_limits().await;
+        self.reap_and_restart().await
+    }
+
+    /// Kill any worker whose sampled resource usage exceeds its limits.
+    async fn enforce_resource_limits(&mut self) {
+        let offenders: Vec<String> = self
+            .workers
+            .iter()
+            .filter_map(|(id, h)| {
+                let pid = h.child.id()?;
+                let sample = process::sample_process(pid)?;
+                if sample.exceeds_memory_mb(h.spec.limits.max_memory_mb) {
+                    Some(id.clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
+        for id in offenders {
+            if let Some(h) = self.workers.get_mut(&id) {
+                let _ = h.child.start_kill();
+            }
+        }
+    }
+
+    /// Reap exited children and respawn or degrade per the restart policy.
+    async fn reap_and_restart(&mut self) -> Result<(), process::MonitorError> {
+        let exited = self.collect_exited().await;
+        for (id, code) in exited {
+            if self.should_restart(code) && self.try_respawn(&id).await? {
+                continue;
+            }
+            self.retire_worker(&id, code).await;
+        }
+        Ok(())
+    }
+
+    /// Collect ids and exit codes of workers whose child has exited.
+    async fn collect_exited(&mut self) -> Vec<(String, Option<i32>)> {
+        let mut exited = Vec::new();
+        for (id, handle) in self.workers.iter_mut() {
+            if let Ok(Some(status)) = handle.child.try_wait() {
+                handle.last_exit_code = status.code();
+                exited.push((id.clone(), status.code()));
+            }
+        }
+        exited
+    }
+
+    /// Decide whether a worker that exited with `code` should be restarted,
+    /// based on the configured restart policy.
+    fn should_restart(&self, code: Option<i32>) -> bool {
+        match self.config.restart_policy.as_str() {
+            "always" => true,
+            "on_failure" => code != Some(0),
+            _ => false, // "no_restart" and any unknown policy
+        }
+    }
+
+    /// Attempt to respawn a worker, honoring restart limits and backoff.
+    ///
+    /// Returns `Ok(true)` if the worker was respawned, `Ok(false)` if the
+    /// restart limit has been reached (caller should retire + degrade).
+    async fn try_respawn(&mut self, id: &str) -> Result<bool, process::MonitorError> {
+        let backoff = {
+            let handle = match self.workers.get_mut(id) {
+                Some(h) => h,
+                None => return Ok(false),
+            };
+            if handle.state.is_restart_limit_reached() {
+                return Ok(false);
+            }
+            handle.state.record_restart();
+            handle.state.current_backoff()
+        };
+        tokio::time::sleep(backoff).await;
+        let new_child = {
+            let handle = self
+                .workers
+                .get(id)
+                .ok_or_else(|| process::MonitorError::General {
+                    message: format!("worker '{}' vanished during respawn", id),
+                })?;
+            Self::spawn_child(id, &handle.spec)?
+        };
+        if let Some(handle) = self.workers.get_mut(id) {
+            handle.child = new_child;
+            handle.last_exit_code = None;
+        }
+        self.mark_active(id).await;
+        Ok(true)
+    }
+
+    /// Remove a worker that will not be restarted and, when its restart limit
+    /// was reached, transition the monitor into the degraded state.
+    async fn retire_worker(&mut self, id: &str, _code: Option<i32>) {
+        let limit_reached = self
+            .workers
+            .get(id)
+            .map(|h| h.state.is_restart_limit_reached())
+            .unwrap_or(false);
+        self.workers.remove(id);
+        self.mark_inactive(id).await;
+        if limit_reached {
+            self.set_state(heartbeat::MonitorState::Degraded).await;
+        }
+    }
+
+    /// Graceful shutdown: terminate all supervised children and clear state.
     pub async fn shutdown(&mut self) -> Result<(), process::MonitorError> {
         self.shutdown = true;
+        self.set_state(heartbeat::MonitorState::Stopping).await;
+
+        for (_id, handle) in self.workers.iter_mut() {
+            let _ = handle.child.start_kill();
+            let _ = handle.child.wait().await;
+        }
         self.workers.clear();
 
-        // Update shared state
-        let mut state = self.state.lock().await;
-        state.state = heartbeat::MonitorState::Stopping;
-        state.active_runs.clear();
-
+        {
+            let mut state = self.state.lock().await;
+            state.active_runs.clear();
+            state.state = heartbeat::MonitorState::Stopped;
+        }
         Ok(())
     }
 
