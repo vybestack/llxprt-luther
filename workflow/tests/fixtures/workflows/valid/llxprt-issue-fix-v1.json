@@ -100,6 +100,7 @@
         "required_changed_path_patterns": [
           "{required_changed_path_pattern}"
         ],
+        "change_detection_mode": "include_untracked",
         "stderr_file": "{artifact_dir}/implement-stderr.txt",
         "stdout_file": "{artifact_dir}/implement-stdout.txt",
         "success_on_diff": true,

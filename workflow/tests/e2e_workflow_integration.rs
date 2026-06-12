@@ -2138,6 +2138,30 @@ fn implement_step_allows_early_diff_completion_for_workflow_verification() {
     );
 }
 
+/// @plan:PLAN-20260408-LLXPRT-FIRST.P17
+/// @requirement:REQ-LF-EXEC-001
+#[test]
+fn implement_step_selects_explicit_change_detection_mode() {
+    let workflow_type = post_pr_workflow();
+    let implement = workflow_type
+        .steps
+        .iter()
+        .find(|step| step.step_id == "implement")
+        .expect("implement step exists");
+    let params = implement
+        .parameters
+        .as_ref()
+        .expect("implement parameters exist");
+
+    assert_eq!(
+        params
+            .get("change_detection_mode")
+            .and_then(serde_json::Value::as_str),
+        Some("include_untracked"),
+        "implement creates new files, so changed-path detection must explicitly include untracked entries rather than relying on an implicit default"
+    );
+}
+
 #[test]
 fn post_pr_params_have_no_unresolved_template_tokens() {
     let workflow_type = post_pr_workflow();
