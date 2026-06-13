@@ -270,6 +270,8 @@ stderr_file = "{artifact_dir}/implement-stderr.txt"
 prompt = """
 Do not use subagents. Do not ask questions. Read the current issue in {artifact_dir}/issue.md and the approved plan in {artifact_dir}/plan.md, then implement that plan.
 Make the smallest source/config/test changes needed to fix issue #{issue_number}. You MUST leave a non-empty git diff in {work_dir}; if no files are changed, this step is not complete. Do not modify package lockfiles, generated notice files, .luther files, or unrelated files.
+Apply edits directly to files with available file-writing/editing tools. Do not print unified diffs, replacement snippets, or patch text as a substitute for modifying files. A patch shown only in stdout is a failed implementation.
+After reading the issue and plan, inspect only the minimal source/test context needed, then make the first source/test edit before doing broader investigation. Sustained read-only analysis is forbidden; only actual file modifications count as implementation progress.
 The required source and test scope is whatever the approved plan identifies for this issue. If the plan and issue disagree, follow the issue text and update only files directly relevant to the current issue.
 Add or update focused tests and fixtures when practical. You are not finished unless git diff shows intentional changes related to issue #{issue_number}.
 Do not run full project verification commands for the target repository. The workflow runs configured checks after this step. You may run narrowly targeted tests/checks related to the files you changed.
