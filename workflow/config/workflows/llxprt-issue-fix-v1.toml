@@ -493,12 +493,12 @@ description = "Watch GitHub PR checks and classify current-head status"
 [steps.parameters]
 artifact_root = "{artifact_dir}"
 step_order_index = 3
-max_attempts = 72
-max_check_watch_attempts = 72
+max_attempts = 12
+max_check_watch_attempts = 12
 poll_interval_seconds = 300
 check_watch_interval_seconds = 300
-max_duration_seconds = 21600
-max_check_watch_duration_seconds = 21600
+max_duration_seconds = 3600
+max_check_watch_duration_seconds = 3600
 check_status_result_path = "{artifact_dir}/pr-followup/current/pr-check-status.json"
 
 # @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P17
