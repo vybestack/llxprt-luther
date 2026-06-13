@@ -268,7 +268,7 @@ min_runtime_before_success_seconds = 120
 stdout_file = "{artifact_dir}/implement-stdout.txt"
 stderr_file = "{artifact_dir}/implement-stderr.txt"
 prompt = """
-Do not use subagents. Do not ask questions. Read the current issue in {artifact_dir}/issue.md and the approved plan in {artifact_dir}/plan.md, then implement that plan.
+Do not ask questions. You may use subagents to inspect context or propose focused edits, but you are responsible for applying the final source/test changes directly. Read the current issue in {artifact_dir}/issue.md and the approved plan in {artifact_dir}/plan.md, then implement that plan.
 Make the smallest source/config/test changes needed to fix issue #{issue_number}. You MUST leave a non-empty git diff in {work_dir}; if no files are changed, this step is not complete. Do not modify package lockfiles, generated notice files, .luther files, or unrelated files.
 Apply edits directly to files with available file-writing/editing tools. Do not print unified diffs, replacement snippets, or patch text as a substitute for modifying files. A patch shown only in stdout is a failed implementation.
 After reading the issue and plan, inspect only the minimal source/test context needed, then make the first source/test edit before doing broader investigation. Sustained read-only analysis is forbidden; only actual file modifications count as implementation progress.
@@ -369,7 +369,7 @@ idle_timeout_seconds = 180
 
 
 prompt = """
-Do not use subagents. Do not ask questions. Read the current issue in {artifact_dir}/issue.md, the approved plan in {artifact_dir}/plan.md, the verification report in {artifact_dir}/verify-report.json if present, and {artifact_dir}/implementation-evaluation.md if present.
+Do not ask questions. You may use subagents to inspect context or propose focused remediation, but you are responsible for applying the final source/test changes directly. Read the current issue in {artifact_dir}/issue.md, the approved plan in {artifact_dir}/plan.md, the verification report in {artifact_dir}/verify-report.json if present, and {artifact_dir}/implementation-evaluation.md if present.
 These artifact paths are intentionally outside the target repository. If file-reading tools cannot read an absolute artifact path, inspect it with shell commands such as cat, sed, or python3 instead; do not report an artifact-path access constraint while shell access works. Missing optional artifacts such as implementation-evaluation.md are not blockers.
 
 If implementation-evaluation.md exists, treat it as the primary remediation checklist and address every unresolved evaluator item before finishing. If verify-report.json contains failed checks, also fix only those failures caused by the current branch diff.
