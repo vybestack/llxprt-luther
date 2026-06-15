@@ -1,0 +1,19 @@
+{
+  "config_id": "daemon-config-a",
+  "workflow_type_id": "hello-world-v1",
+  "runtime": {
+    "timeout_seconds": 300,
+    "max_retries": 2
+  },
+  "repository": {
+    "workspace_strategy": "temp_clone",
+    "branch_template": "daemon-a-{run_id}",
+    "base_branch": "main"
+  },
+  "guards": {
+    "max_iterations": 3,
+    "max_file_changes": 10,
+    "max_tokens": 1000,
+    "max_cost": 1.00
+  }
+}

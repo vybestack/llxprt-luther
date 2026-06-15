@@ -174,22 +174,77 @@ cargo run -- run --config path/to/config.toml --workflow-type my-workflow
 
 ### `status`
 
-Check the status of workflow runs via heartbeat files:
+Single-shot aggregate status combining daemon heartbeats and the run registry:
 
 ```bash
 cargo run -- status
 cargo run -- status --json
 cargo run -- status --run-id <uuid>
+cargo run -- status --config <config-id>
 ```
 
-### `service`
+For a continuously refreshing view, use `monitor` (below).
 
-Run as a long-lived foreground process:
+### `service` (OS-supervised)
+
+Manage a Luther service under the platform supervisor (launchd/systemd). This is
+a subcommand tree, not an arg form:
 
 ```bash
-cargo run -- service --foreground
-cargo run -- service --socket-path /tmp/my.sock
+cargo run -- service run --foreground   # run supervised process in foreground
+cargo run -- service install            # install the OS service unit
+cargo run -- service start              # start the installed service
+cargo run -- service stop               # stop the supervisor process
+cargo run -- service status             # query OS service state
+cargo run -- service uninstall          # remove the OS service unit
 ```
+
+> The old `service --foreground` arg form has been removed; use `service run
+> --foreground`.
+
+### `daemon` (foreground)
+
+Run config-scoped daemons and inspect discovery/queue state:
+
+```bash
+cargo run -- daemon run --config <config>.toml   # foreground (--once for one pass)
+cargo run -- daemon start --config <config>.toml
+cargo run -- daemon stop --config <config-id>    # or --all
+cargo run -- daemon status                       # aggregate (--config / --json)
+cargo run -- daemon discover --json              # dry-run discovery
+cargo run -- daemon queue                        # queue + lease state
+```
+
+The config id is the file stem of the config file (e.g. `daemon-config-a.toml`
+=> `daemon-config-a`).
+
+### `runs`
+
+Inspect the persistent run registry:
+
+```bash
+cargo run -- runs list
+cargo run -- runs show <run-id>
+cargo run -- runs tail <run-id>
+cargo run -- runs ps
+```
+
+### `monitor`
+
+Continuous, read-only live status. Continuous by default; `--times N` bounds the
+number of snapshots (`--once` == `--times 1`); Ctrl-C exits cleanly:
+
+```bash
+cargo run -- monitor                  # refresh forever (every 2s)
+cargo run -- monitor --interval 5     # change refresh delay
+cargo run -- monitor --times 3        # exactly 3 snapshots, then exit
+cargo run -- monitor --once           # single snapshot
+cargo run -- monitor --config <id> --run <run-id> --issue <n>
+```
+
+See [`docs/guides/daemon-mode.md`](docs/guides/daemon-mode.md) for the full
+operator guide: multi-config usage, discovery/precedence, run visibility, JSON
+schemas, shutdown semantics, state directories, and known limitations.
 
 ## Supervision & Monitoring
 
@@ -262,7 +317,7 @@ These are known gaps — not bugs, just work not yet done:
 
 7. **stdout/stderr are overwritten each step.** Context variables `{stdout}` and `{stderr}` reflect only the most recent shell step. There's no `{step_id.stdout}` namespacing.
 
-8. **Service mode is foreground-only.** The `service` command runs in foreground with a sleep loop. Actual daemon mode, job queuing, and multi-workflow scheduling are not implemented.
+8. **Workspace cleanup is not automatic and `status` is single-shot.** Daemon mode, issue discovery/queueing, the persistent run registry, run inspection (`runs`), and the continuous `monitor` are implemented (see [`docs/guides/daemon-mode.md`](docs/guides/daemon-mode.md)). Remaining gaps: `cleanup_on_success`/`cleanup_on_failure` are declared but not yet implemented (a deletion guard exists so `.llxprt` and user state can never be removed), `timeout_seconds` is not enforced, and `status` is single-shot (use `monitor` for a continuous view).
 
 9. **No real git/repo operations.** The repo module has workspace and branch management types but doesn't execute real git commands. The git adapter is minimal.
 

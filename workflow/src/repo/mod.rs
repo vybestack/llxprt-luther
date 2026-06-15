@@ -3,7 +3,7 @@
 use serde::Deserialize;
 /// @plan:PLAN-20260404-INITIAL-RUNTIME.P09
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 /// Repository configuration for workspace and branch management.
@@ -180,9 +180,69 @@ impl<'a> BranchManager<'a> {
     }
 }
 
+/// Returns true when `path` references protected, user-owned workspace state
+/// that Luther must never delete.
+///
+/// This guards `.llxprt` directories (and anything nested beneath them),
+/// matching the deletion-exclusion intent of `push_path_is_excluded` in the PR
+/// remediation push path. Added for issue #53 as the shared predicate behind
+/// the single sanctioned destructive helper, `guarded_remove_dir_all`.
+pub fn is_protected_workspace_path(path: &Path) -> bool {
+    path.components().any(|component| {
+        component
+            .as_os_str()
+            .to_str()
+            .map(|name| name == ".llxprt")
+            .unwrap_or(false)
+    })
+}
+
+/// Recursively removes `path`, refusing to touch protected workspace state.
+///
+/// This is the **single sanctioned destructive helper** for workspace cleanup.
+/// Any future `cleanup_on_success`/`cleanup_on_failure` implementation MUST
+/// route deletions through this function so that `.llxprt` and other protected
+/// user-owned state can never be removed (issue #53).
+pub fn guarded_remove_dir_all(path: &Path) -> std::io::Result<()> {
+    if is_protected_workspace_path(path) {
+        tracing::debug!(
+            path = %path.display(),
+            "refusing to delete protected workspace path"
+        );
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!(
+                "refusing to delete protected workspace path: {}",
+                path.display()
+            ),
+        ));
+    }
+    std::fs::remove_dir_all(path)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn is_protected_workspace_path_accepts_legitimate_paths() {
+        assert!(!is_protected_workspace_path(Path::new("/tmp/run-001")));
+        assert!(!is_protected_workspace_path(Path::new(
+            "/tmp/run-001/src/main.rs"
+        )));
+        assert!(!is_protected_workspace_path(Path::new("workspace/llxprt")));
+    }
+
+    #[test]
+    fn is_protected_workspace_path_rejects_llxprt() {
+        assert!(is_protected_workspace_path(Path::new(".llxprt")));
+        assert!(is_protected_workspace_path(Path::new(
+            ".llxprt/settings.json"
+        )));
+        assert!(is_protected_workspace_path(Path::new(
+            "some/dir/.llxprt/file"
+        )));
+    }
 
     #[test]
     fn test_repository_config_from_toml() {

@@ -590,7 +590,7 @@ async fn handle_status_command(args: &luther_workflow::cli::StatusArgs) {
         // Persistent run registry section.
         // @plan:PLAN-20260404-INITIAL-RUNTIME.P05
         match &runs_result {
-            Ok(runs) => print_run_registry(runs),
+            Ok(runs) => print_run_registry(runs, args.run_id.as_deref()),
             Err(e) => {
                 eprintln!("Error: run registry unavailable: {e}");
                 println!();
@@ -689,11 +689,18 @@ fn run_metadata_to_json(md: &luther_workflow::persistence::RunMetadata) -> serde
 
 /// Print the persistent run registry section for human-readable status.
 /// @plan:PLAN-20260404-INITIAL-RUNTIME.P05
-fn print_run_registry(runs: &[luther_workflow::persistence::RunMetadata]) {
+fn print_run_registry(
+    runs: &[luther_workflow::persistence::RunMetadata],
+    queried_run_id: Option<&str>,
+) {
     println!();
     println!("Persistent Run Registry:");
     if runs.is_empty() {
-        println!("  No runs recorded.");
+        // Echo the queried run id so a `--run-id` miss is actionable (issue #53).
+        match queried_run_id {
+            Some(id) => println!("  No run found with id '{id}'."),
+            None => println!("  No runs recorded."),
+        }
         return;
     }
     for md in runs {

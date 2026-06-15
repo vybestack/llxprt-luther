@@ -153,3 +153,61 @@ fn monitor_sigint_exits_cleanly_without_mutation() {
         "monitor should exit cleanly on SIGINT, got {status:?}"
     );
 }
+
+/// `--times N` renders exactly N snapshots and then exits cleanly (issue #53).
+///
+/// In `--no-clear` mode each snapshot is prefixed with a separator line, so we
+/// count those to assert bounded termination. stdout is captured (not a TTY),
+/// so the separator path is taken regardless of `--no-clear`.
+#[cfg(unix)]
+#[test]
+fn monitor_times_renders_exactly_n_snapshots() {
+    use std::process::Command;
+
+    let output = Command::new(env!("CARGO_BIN_EXE_luther-workflow"))
+        .args(["monitor", "--no-clear", "--times", "3", "--interval", "1"])
+        .output()
+        .expect("run monitor --times 3");
+
+    assert!(
+        output.status.success(),
+        "monitor --times 3 should exit 0, got {:?}",
+        output.status
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let snapshots = stdout
+        .lines()
+        .filter(|line| line.contains("===== monitor snapshot @"))
+        .count();
+    assert_eq!(
+        snapshots, 3,
+        "monitor --times 3 should render exactly 3 snapshots, got {snapshots}"
+    );
+}
+
+/// `--once` is sugar for `--times 1`: exactly one snapshot, then exit (issue #53).
+#[cfg(unix)]
+#[test]
+fn monitor_once_renders_single_snapshot() {
+    use std::process::Command;
+
+    let output = Command::new(env!("CARGO_BIN_EXE_luther-workflow"))
+        .args(["monitor", "--no-clear", "--once"])
+        .output()
+        .expect("run monitor --once");
+
+    assert!(
+        output.status.success(),
+        "monitor --once should exit 0, got {:?}",
+        output.status
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let snapshots = stdout
+        .lines()
+        .filter(|line| line.contains("===== monitor snapshot @"))
+        .count();
+    assert_eq!(
+        snapshots, 1,
+        "monitor --once should render exactly 1 snapshot, got {snapshots}"
+    );
+}
