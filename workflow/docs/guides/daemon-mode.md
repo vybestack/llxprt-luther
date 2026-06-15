@@ -34,7 +34,7 @@ launchd/systemd that you install explicitly).
 
 The top-level command tree is:
 
-```
+```text
 luther-workflow run        # run a single workflow once
 luther-workflow status     # single-shot aggregate status (human / --json)
 luther-workflow service    # OS-supervised service lifecycle (install/start/...)
@@ -53,7 +53,7 @@ fixes or for testing a workflow config without starting a daemon.
 Manages a Luther service under the platform supervisor (launchd on macOS,
 systemd on Linux):
 
-```
+```text
 service run        # run the supervised process in the foreground
 service install    # install the OS service unit
 service start      # start the installed service
@@ -71,7 +71,7 @@ start` (or the platform's own controls).
 
 ### 2.3 `daemon <subcommand>` (foreground)
 
-```
+```text
 daemon start              # start the daemon for a config
 daemon run [--once]       # run the daemon in the foreground (--once: one pass)
 daemon stop [--config ID] # stop one daemon
@@ -90,7 +90,7 @@ so it reacts to a signal promptly rather than after the next full interval.
 
 ### 2.4 `runs <subcommand>` (persistent run registry)
 
-```
+```text
 runs list           # list known runs
 runs show <run-id>  # show a single run's details (errors include the run id)
 runs tail <run-id>  # tail a run's log
@@ -102,7 +102,7 @@ runs ps             # show active run processes
 `status` is a **single-shot** aggregate view that combines daemon heartbeats and
 the run registry:
 
-```
+```text
 status                       # human-readable aggregate
 status --json                # machine-readable aggregate
 status --config <config-id>  # scope to one daemon config
@@ -116,7 +116,7 @@ For a continuously refreshing view, use `monitor` (see below).
 `monitor` is a **continuous, read-only** live view. By default it refreshes
 forever until you press Ctrl-C.
 
-```
+```text
 monitor                       # continuous (refresh every 2s by default)
 monitor --interval <secs>     # change refresh delay
 monitor --times <N>           # render exactly N snapshots, then exit 0
@@ -292,11 +292,14 @@ and owned by the `llxprt` agent binary. **Luther never deletes them.**
 - The remediation push path excludes `.llxprt` / `.llxprt/…` / `LLXPRT.md` /
   generated-notice files (`push_path_is_excluded`).
 - A shared workspace-deletion guard (`is_protected_workspace_path` +
-  `guarded_remove_dir_all` in `repo/mod.rs`) refuses to delete any path with a
-  `.llxprt` component. This is the **single sanctioned destructive helper**;
-  any future workspace cleanup must route through it. A regression test
-  (`tests/workspace_protection_tests.rs`) proves a `.llxprt` directory is left
-  intact.
+  `tree_contains_protected_workspace_path` + `guarded_remove_dir_all` in
+  `repo/mod.rs`) refuses to delete any path with a `.llxprt` component **or any
+  directory tree that contains a nested `.llxprt` descendant** (the tree walk
+  does not follow symlinks). This is the **single sanctioned destructive
+  helper**; any future workspace cleanup must route through it. Regression tests
+  (`tests/workspace_protection_tests.rs`) prove a `.llxprt` directory is left
+  intact and that deleting a parent directory containing a nested `.llxprt` is
+  refused.
 
 ---
 

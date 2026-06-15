@@ -197,14 +197,71 @@ pub fn is_protected_workspace_path(path: &Path) -> bool {
     })
 }
 
+/// Returns true when the tree rooted at `path` contains a protected workspace
+/// path anywhere within it (the root itself or any descendant).
+///
+/// This walks the directory tree without following symlinks, so a symlink that
+/// happens to point at (or be named) `.llxprt` cannot be used to either trigger
+/// a false positive on unrelated state or hide a protected directory. Only the
+/// real on-disk directory structure beneath `path` is inspected.
+///
+/// Errors encountered while reading the tree (for example a removed entry or a
+/// permission error) are treated conservatively as "do not delete": if we
+/// cannot prove the tree is free of protected state, we refuse to delete it.
+pub fn tree_contains_protected_workspace_path(path: &Path) -> bool {
+    if is_protected_workspace_path(path) {
+        return true;
+    }
+
+    // Only directories can contain descendants. Use symlink_metadata so we do
+    // not follow a symlink out of the tree we were asked to inspect.
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        // If the path does not exist there is nothing protected beneath it.
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return false,
+        // Any other error means we cannot prove the tree is safe; refuse.
+        Err(_) => return true,
+    };
+
+    // A symlink (even one pointing at a directory) is not traversed; deleting
+    // the link itself does not delete its target's contents.
+    if !metadata.is_dir() {
+        return false;
+    }
+
+    let entries = match std::fs::read_dir(path) {
+        Ok(entries) => entries,
+        // Cannot enumerate the directory; refuse to delete to stay safe.
+        Err(_) => return true,
+    };
+
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            // Could not read an entry; refuse rather than risk missing one.
+            Err(_) => return true,
+        };
+        if tree_contains_protected_workspace_path(&entry.path()) {
+            return true;
+        }
+    }
+
+    false
+}
+
 /// Recursively removes `path`, refusing to touch protected workspace state.
 ///
 /// This is the **single sanctioned destructive helper** for workspace cleanup.
 /// Any future `cleanup_on_success`/`cleanup_on_failure` implementation MUST
 /// route deletions through this function so that `.llxprt` and other protected
 /// user-owned state can never be removed (issue #53).
+///
+/// The guard refuses deletion when the target path itself is protected **or**
+/// when any descendant of the target tree is protected. This prevents deleting
+/// a parent directory (e.g. `<run-dir>/.llxprt/...`) from silently destroying a
+/// nested `.llxprt` directory and bypassing the safety guarantee.
 pub fn guarded_remove_dir_all(path: &Path) -> std::io::Result<()> {
-    if is_protected_workspace_path(path) {
+    if tree_contains_protected_workspace_path(path) {
         tracing::debug!(
             path = %path.display(),
             "refusing to delete protected workspace path"
