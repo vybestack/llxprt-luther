@@ -32,6 +32,9 @@ pub enum Commands {
     /// Manage per-config daemon instances
     #[command(name = "daemon")]
     Daemon(DaemonArgs),
+    /// Inspect workflow runs (list/show/tail/ps)
+    #[command(name = "runs")]
+    Runs(RunsArgs),
 }
 
 /// Arguments for the run command.
@@ -81,6 +84,9 @@ pub struct StatusArgs {
     /// Run ID to check status for
     #[arg(short, long, value_name = "ID")]
     pub run_id: Option<String>,
+    /// Filter heartbeats and runs to a single config id (file stem)
+    #[arg(long, value_name = "ID")]
+    pub config: Option<String>,
 }
 
 /// Arguments for the service command.
@@ -290,6 +296,89 @@ pub struct DaemonStatusArgs {
     pub json: bool,
 }
 
+/// Arguments for the `runs` command family.
+///
+/// The `runs` family provides read-side visibility into workflow runs: listing,
+/// per-run drill-down, log tailing, and process liveness (issue #51).
+#[derive(Args, Debug)]
+pub struct RunsArgs {
+    /// Runs inspection subcommand
+    #[command(subcommand)]
+    pub command: RunsCommand,
+}
+
+/// Subcommands for `runs` visibility.
+#[derive(Subcommand, Debug)]
+pub enum RunsCommand {
+    /// List known workflow runs
+    #[command(name = "list")]
+    List(RunsListArgs),
+    /// Show detailed information for a single run
+    #[command(name = "show")]
+    Show(RunsShowArgs),
+    /// Tail the log for a run
+    #[command(name = "tail")]
+    Tail(RunsTailArgs),
+    /// Show workflow and child/agent processes
+    #[command(name = "ps")]
+    Ps(RunsPsArgs),
+}
+
+/// Arguments for `runs list`.
+#[derive(Args, Debug)]
+pub struct RunsListArgs {
+    /// Filter to a single config id (file stem)
+    #[arg(long, value_name = "ID")]
+    pub config: Option<String>,
+    /// Filter to a single run state (running/completed/failed/...)
+    #[arg(long, value_name = "STATE")]
+    pub state: Option<String>,
+    /// Output in JSON format
+    #[arg(long)]
+    pub json: bool,
+}
+
+/// Arguments for `runs show`.
+#[derive(Args, Debug)]
+pub struct RunsShowArgs {
+    /// The run id to show
+    #[arg(value_name = "RUN_ID")]
+    pub run_id: String,
+    /// Output in JSON format
+    #[arg(long)]
+    pub json: bool,
+}
+
+/// Arguments for `runs tail`.
+///
+/// Exactly one of positional `run_id` or `--current` must be supplied.
+#[derive(Args, Debug)]
+pub struct RunsTailArgs {
+    /// The run id whose log should be tailed
+    #[arg(value_name = "RUN_ID")]
+    pub run_id: Option<String>,
+    /// Tail the currently-active run resolved from heartbeats
+    #[arg(long, conflicts_with = "run_id")]
+    pub current: bool,
+    /// Number of trailing log lines to print
+    #[arg(long, value_name = "N", default_value_t = 80)]
+    pub lines: usize,
+    /// Output in JSON format
+    #[arg(long)]
+    pub json: bool,
+}
+
+/// Arguments for `runs ps`.
+#[derive(Args, Debug)]
+pub struct RunsPsArgs {
+    /// Filter to a single config id (file stem)
+    #[arg(long, value_name = "ID")]
+    pub config: Option<String>,
+    /// Output in JSON format
+    #[arg(long)]
+    pub json: bool,
+}
+
 /// Parse CLI arguments.
 /// @plan:PLAN-20260404-INITIAL-RUNTIME.P12
 pub fn parse_args() -> Cli {
@@ -347,9 +436,172 @@ mod tests {
         let args = StatusArgs {
             json: true,
             run_id: Some("run-123".to_string()),
+            config: None,
         };
         assert!(args.json);
         assert_eq!(args.run_id, Some("run-123".to_string()));
+        assert_eq!(args.config, None);
+    }
+
+    #[test]
+    fn status_config_filter_parses() {
+        // issue #51: status gains a --config filter
+        let cli = Cli::try_parse_from(["luther-workflow", "status", "--config", "llxprt-code"])
+            .expect("status --config should parse");
+        match cli.command {
+            Commands::Status(args) => {
+                assert_eq!(args.config.as_deref(), Some("llxprt-code"));
+            }
+            other => panic!("expected status, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn runs_list_parses_filters() {
+        // issue #51
+        let cli = Cli::try_parse_from([
+            "luther-workflow",
+            "runs",
+            "list",
+            "--config",
+            "llxprt-code",
+            "--state",
+            "running",
+            "--json",
+        ])
+        .expect("runs list should parse");
+        match cli.command {
+            Commands::Runs(RunsArgs {
+                command: RunsCommand::List(args),
+            }) => {
+                assert_eq!(args.config.as_deref(), Some("llxprt-code"));
+                assert_eq!(args.state.as_deref(), Some("running"));
+                assert!(args.json);
+            }
+            other => panic!("expected runs list, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn runs_list_bare_parses() {
+        // issue #51
+        let cli = Cli::try_parse_from(["luther-workflow", "runs", "list"])
+            .expect("runs list should parse");
+        match cli.command {
+            Commands::Runs(RunsArgs {
+                command: RunsCommand::List(args),
+            }) => {
+                assert_eq!(args.config, None);
+                assert_eq!(args.state, None);
+                assert!(!args.json);
+            }
+            other => panic!("expected runs list, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn runs_show_parses() {
+        // issue #51
+        let cli = Cli::try_parse_from(["luther-workflow", "runs", "show", "run-123", "--json"])
+            .expect("runs show should parse");
+        match cli.command {
+            Commands::Runs(RunsArgs {
+                command: RunsCommand::Show(args),
+            }) => {
+                assert_eq!(args.run_id, "run-123");
+                assert!(args.json);
+            }
+            other => panic!("expected runs show, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn runs_tail_parses_run_id_and_lines() {
+        // issue #51
+        let cli = Cli::try_parse_from([
+            "luther-workflow",
+            "runs",
+            "tail",
+            "run-123",
+            "--lines",
+            "100",
+        ])
+        .expect("runs tail should parse");
+        match cli.command {
+            Commands::Runs(RunsArgs {
+                command: RunsCommand::Tail(args),
+            }) => {
+                assert_eq!(args.run_id.as_deref(), Some("run-123"));
+                assert_eq!(args.lines, 100);
+                assert!(!args.current);
+            }
+            other => panic!("expected runs tail, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn runs_tail_default_lines_is_80() {
+        // issue #51
+        let cli = Cli::try_parse_from(["luther-workflow", "runs", "tail", "run-123"])
+            .expect("runs tail should parse");
+        match cli.command {
+            Commands::Runs(RunsArgs {
+                command: RunsCommand::Tail(args),
+            }) => {
+                assert_eq!(args.lines, 80);
+            }
+            other => panic!("expected runs tail, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn runs_tail_current_parses() {
+        // issue #51
+        let cli = Cli::try_parse_from(["luther-workflow", "runs", "tail", "--current"])
+            .expect("runs tail --current should parse");
+        match cli.command {
+            Commands::Runs(RunsArgs {
+                command: RunsCommand::Tail(args),
+            }) => {
+                assert!(args.current);
+                assert_eq!(args.run_id, None);
+            }
+            other => panic!("expected runs tail, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn runs_tail_run_id_and_current_conflict() {
+        // issue #51: positional run_id and --current are mutually exclusive
+        let result =
+            Cli::try_parse_from(["luther-workflow", "runs", "tail", "run-123", "--current"]);
+        assert!(
+            result.is_err(),
+            "runs tail with both run_id and --current should fail"
+        );
+    }
+
+    #[test]
+    fn runs_ps_parses() {
+        // issue #51
+        let cli = Cli::try_parse_from([
+            "luther-workflow",
+            "runs",
+            "ps",
+            "--config",
+            "llxprt-code",
+            "--json",
+        ])
+        .expect("runs ps should parse");
+        match cli.command {
+            Commands::Runs(RunsArgs {
+                command: RunsCommand::Ps(args),
+            }) => {
+                assert_eq!(args.config.as_deref(), Some("llxprt-code"));
+                assert!(args.json);
+            }
+            other => panic!("expected runs ps, got {other:?}"),
+        }
     }
 
     #[test]

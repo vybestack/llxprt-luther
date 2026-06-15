@@ -23,6 +23,9 @@ use luther_workflow::persistence::init_database;
 use luther_workflow::persistence::leases::{
     list_all_leases, list_leases_by_config, list_leases_by_status, IssueLease, LeaseStatus,
 };
+use luther_workflow::persistence::{
+    list_artifacts, load_events, RunMetadata, RunStatus, SqliteStore,
+};
 use luther_workflow::service::{Service, ServiceConfig};
 use luther_workflow::workflow::config_loader::{
     resolve_discovery_config, resolve_workflow, resolve_workflow_config, resolve_workflow_type,
@@ -53,6 +56,9 @@ async fn main() {
         }
         Commands::Daemon(args) => {
             handle_daemon_command(&args).await;
+        }
+        Commands::Runs(args) => {
+            handle_runs_command(&args).await;
         }
     }
 }
@@ -502,6 +508,14 @@ async fn handle_status_command(args: &luther_workflow::cli::StatusArgs) {
     // silently swallowed into an empty list.
     // @plan:PLAN-20260404-INITIAL-RUNTIME.P05
     let runs_result = read_run_registry(args.run_id.as_deref());
+
+    // 1c. Optional --config filter (issue #51): keep only heartbeats and runs
+    // whose config id matches. Daemon-level aggregation across configs already
+    // lives in `daemon status`; this filter scopes the workflow-run view.
+    let (heartbeats, runs_result) = match args.config.as_deref() {
+        Some(config_id) => filter_status_by_config(heartbeats, runs_result, config_id),
+        None => (heartbeats, runs_result),
+    };
 
     // 2. Display monitor state
     if args.json {
@@ -1460,6 +1474,612 @@ fn daemon_status_all(store: &DaemonStore, json: bool) {
             state.pid,
             daemon_display_status(state, alive),
             state.uptime_secs(now)
+        );
+    }
+}
+
+/// Resolve the config id for a heartbeat by looking up its run in the registry.
+///
+/// Returns `None` when the heartbeat has no run id or the run is not recorded.
+/// @plan:issue-51
+fn heartbeat_config_id(store: Option<&SqliteStore>, hb_run_id: Option<&str>) -> Option<String> {
+    let store = store?;
+    let run_id = hb_run_id?;
+    store.get_run(run_id).ok().flatten().map(|md| md.config_id)
+}
+
+/// Filter status heartbeats and run registry results by config id (issue #51).
+///
+/// The registry is opened once to resolve heartbeat -> config relationships; a
+/// registry error short-circuits the run filtering but still scopes heartbeats.
+/// @plan:issue-51
+fn filter_status_by_config(
+    heartbeats: std::collections::HashMap<String, luther_workflow::monitor::heartbeat::Heartbeat>,
+    runs_result: Result<Vec<RunMetadata>, String>,
+    config_id: &str,
+) -> (
+    std::collections::HashMap<String, luther_workflow::monitor::heartbeat::Heartbeat>,
+    Result<Vec<RunMetadata>, String>,
+) {
+    let store = open_runs_store().ok().flatten();
+    let filtered_hbs = heartbeats
+        .into_iter()
+        .filter(|(_, hb)| {
+            heartbeat_config_id(store.as_ref(), hb.run_id.as_deref()).as_deref() == Some(config_id)
+        })
+        .collect();
+    let filtered_runs = runs_result.map(|runs| {
+        runs.into_iter()
+            .filter(|md| md.config_id == config_id)
+            .collect()
+    });
+    (filtered_hbs, filtered_runs)
+}
+
+/// Open the persistent run registry store at the shared checkpoints.db.
+///
+/// Returns `Ok(None)` when the database file does not exist yet (treated as an
+/// empty registry), `Ok(Some(store))` when opened, and `Err` when the file is
+/// present but cannot be opened (surfaced distinctly from "no runs").
+/// @plan:issue-51
+fn open_runs_store() -> Result<Option<SqliteStore>, String> {
+    let db_path = luther_workflow::runtime_paths::get_data_dir().join("checkpoints.db");
+    if !db_path.exists() {
+        return Ok(None);
+    }
+    SqliteStore::open(&db_path)
+        .map(Some)
+        .map_err(|e| format!("failed to open run registry at {}: {e}", db_path.display()))
+}
+
+/// Dispatch the `runs` command family (issue #51).
+/// @plan:issue-51
+async fn handle_runs_command(args: &luther_workflow::cli::RunsArgs) {
+    use luther_workflow::cli::RunsCommand;
+    match &args.command {
+        RunsCommand::List(list_args) => handle_runs_list(list_args),
+        RunsCommand::Show(show_args) => handle_runs_show(show_args),
+        RunsCommand::Tail(tail_args) => handle_runs_tail(tail_args).await,
+        RunsCommand::Ps(ps_args) => handle_runs_ps(ps_args).await,
+    }
+}
+
+/// Load all runs from the registry, applying config/state filters (issue #51).
+/// @plan:issue-51
+fn load_filtered_runs(
+    config: Option<&str>,
+    state: Option<&str>,
+) -> Result<Vec<RunMetadata>, String> {
+    let Some(store) = open_runs_store()? else {
+        return Ok(Vec::new());
+    };
+    let mut runs = store
+        .list_runs()
+        .map_err(|e| format!("failed to list runs from registry: {e}"))?;
+    if let Some(config_id) = config {
+        runs.retain(|md| md.config_id == config_id);
+    }
+    if let Some(state_str) = state {
+        let wanted: RunStatus = state_str
+            .parse()
+            .map_err(|e| format!("invalid --state '{state_str}': {e}"))?;
+        runs.retain(|md| md.status == wanted);
+    }
+    Ok(runs)
+}
+
+/// Handle `runs list` (issue #51).
+/// @plan:issue-51
+fn handle_runs_list(args: &luther_workflow::cli::RunsListArgs) {
+    let runs = match load_filtered_runs(args.config.as_deref(), args.state.as_deref()) {
+        Ok(runs) => runs,
+        Err(e) => {
+            eprintln!("Error: {e}");
+            process::exit(1);
+        }
+    };
+    if args.json {
+        let runs_json: Vec<_> = runs.iter().map(run_metadata_to_json).collect();
+        let value = serde_json::json!({
+            "timestamp": chrono::Utc::now().to_rfc3339(),
+            "runs": runs_json,
+        });
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&value).unwrap_or_default()
+        );
+        return;
+    }
+    print_runs_table(&runs);
+}
+
+/// Render the human-readable `runs list` table (issue #51).
+/// @plan:issue-51
+fn print_runs_table(runs: &[RunMetadata]) {
+    if runs.is_empty() {
+        println!("No runs found.");
+        return;
+    }
+    println!(
+        "{:<20} {:<28} {:<7} {:<7} {:<11} {:<16} {:<25}",
+        "CONFIG", "RUN ID", "ISSUE", "PR", "STATE", "STEP", "UPDATED"
+    );
+    for md in runs {
+        let updated = md.updated_at.unwrap_or(md.created_at).to_rfc3339();
+        println!(
+            "{:<20} {:<28} {:<7} {:<7} {:<11} {:<16} {:<25}",
+            truncate_field(&md.config_id, 20),
+            truncate_field(&md.run_id, 28),
+            md.issue_number
+                .map_or_else(|| "-".to_string(), |n| n.to_string()),
+            md.pr_number
+                .map_or_else(|| "-".to_string(), |n| n.to_string()),
+            md.status.to_string(),
+            truncate_field(md.current_step.as_deref().unwrap_or("-"), 16),
+            updated,
+        );
+    }
+}
+
+/// Truncate a field for fixed-width table rendering.
+/// @plan:issue-51
+fn truncate_field(value: &str, width: usize) -> String {
+    if value.len() <= width {
+        value.to_string()
+    } else if width <= 1 {
+        value.chars().take(width).collect()
+    } else {
+        format!("{}…", &value[..width - 1])
+    }
+}
+
+/// Handle `runs show RUN_ID` (issue #51).
+/// @plan:issue-51
+fn handle_runs_show(args: &luther_workflow::cli::RunsShowArgs) {
+    let store = match open_runs_store() {
+        Ok(Some(store)) => store,
+        Ok(None) => {
+            eprintln!("Error: run '{}' not found (no run registry)", args.run_id);
+            process::exit(1);
+        }
+        Err(e) => {
+            eprintln!("Error: {e}");
+            process::exit(1);
+        }
+    };
+    let md = match store.get_run(&args.run_id) {
+        Ok(Some(md)) => md,
+        Ok(None) => {
+            eprintln!("Error: run '{}' not found", args.run_id);
+            process::exit(1);
+        }
+        Err(e) => {
+            eprintln!("Error: failed to read run '{}': {e}", args.run_id);
+            process::exit(1);
+        }
+    };
+    let events = load_events(store.conn(), &args.run_id).unwrap_or_default();
+    let artifacts = list_artifacts(&args.run_id).unwrap_or_default();
+    let log_path = run_log_path(&args.run_id);
+    let log_exists = log_path.exists();
+    if args.json {
+        print_runs_show_json(&md, &events, &artifacts, &log_path, log_exists);
+    } else {
+        print_runs_show_human(&md, &events, &artifacts, &log_path, log_exists);
+    }
+}
+
+/// Compute the conventional log path for a run.
+/// @plan:issue-51
+fn run_log_path(run_id: &str) -> std::path::PathBuf {
+    luther_workflow::runtime_paths::get_log_dir().join(format!("{run_id}.log"))
+}
+
+/// Render `runs show` as JSON (issue #51).
+/// @plan:issue-51
+fn print_runs_show_json(
+    md: &RunMetadata,
+    events: &[luther_workflow::persistence::EventRecord],
+    artifacts: &[luther_workflow::persistence::ArtifactRecord],
+    log_path: &std::path::Path,
+    log_exists: bool,
+) {
+    let mut value = run_metadata_to_json(md);
+    let obj = value
+        .as_object_mut()
+        .expect("run metadata json is an object");
+    obj.insert(
+        "events".to_string(),
+        serde_json::json!(events
+            .iter()
+            .map(|e| serde_json::json!({
+                "step_id": e.step_id,
+                "outcome": e.outcome,
+                "event_type": e.event_type,
+                "details": e.details,
+                "timestamp": e.timestamp.to_rfc3339(),
+            }))
+            .collect::<Vec<_>>()),
+    );
+    obj.insert(
+        "artifacts".to_string(),
+        serde_json::json!(artifacts
+            .iter()
+            .map(|a| serde_json::json!({
+                "artifact_path": a.artifact_path.display().to_string(),
+                "size_bytes": a.size_bytes,
+            }))
+            .collect::<Vec<_>>()),
+    );
+    obj.insert(
+        "log_path".to_string(),
+        serde_json::json!(log_path.display().to_string()),
+    );
+    obj.insert("log_exists".to_string(), serde_json::json!(log_exists));
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&value).unwrap_or_default()
+    );
+}
+
+/// Render the Run Info + Current State sections of `runs show` (issue #51).
+/// @plan:issue-51
+fn print_runs_show_info(md: &RunMetadata) {
+    println!("Run {}", md.run_id);
+    println!("================================");
+    println!("Run Info:");
+    println!("  Config: {}", md.config_id);
+    println!("  Workflow type: {}", md.workflow_type_id);
+    println!(
+        "  Repository: {}",
+        md.repository.as_deref().unwrap_or("(none)")
+    );
+    println!(
+        "  Issue: {}  PR: {}",
+        md.issue_number
+            .map_or_else(|| "(none)".to_string(), |n| n.to_string()),
+        md.pr_number
+            .map_or_else(|| "(none)".to_string(), |n| n.to_string())
+    );
+    println!("  Head SHA: {}", md.head_sha.as_deref().unwrap_or("(none)"));
+    println!("  Status: {}", md.status);
+    println!();
+    println!("Current State:");
+    println!(
+        "  Current step: {}",
+        md.current_step.as_deref().unwrap_or("(none)")
+    );
+    println!(
+        "  Previous: {} -> {}",
+        md.previous_step.as_deref().unwrap_or("(none)"),
+        md.previous_outcome.as_deref().unwrap_or("(none)")
+    );
+    println!("  Next step: {}", next_step_label(md));
+}
+
+/// Render the Paths + Processes sections of `runs show` (issue #51).
+/// @plan:issue-51
+fn print_runs_show_paths_and_procs(md: &RunMetadata, log_path: &std::path::Path, log_exists: bool) {
+    println!();
+    println!("Paths:");
+    println!(
+        "  Workspace: {}",
+        md.workspace_path.as_deref().unwrap_or("(none)")
+    );
+    println!(
+        "  Log: {} ({})",
+        log_path.display(),
+        if log_exists { "exists" } else { "missing" }
+    );
+    println!(
+        "  Artifact root: {}",
+        md.artifact_root.as_deref().unwrap_or("(none)")
+    );
+    println!();
+    println!("Processes:");
+    println!("  Workflow PID: {}", pid_liveness_label(md));
+    if md.child_pids.is_empty() {
+        println!("  Child PIDs: (none)");
+    } else {
+        let stale = md.are_child_pids_stale();
+        println!(
+            "  Child PIDs: {} (stale: {})",
+            md.child_pids
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(", "),
+            if stale.is_empty() {
+                "none".to_string()
+            } else {
+                stale
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            }
+        );
+    }
+}
+
+/// Render the Recent Events + Artifacts sections of `runs show` (issue #51).
+/// @plan:issue-51
+fn print_runs_show_events(
+    events: &[luther_workflow::persistence::EventRecord],
+    artifacts: &[luther_workflow::persistence::ArtifactRecord],
+) {
+    println!();
+    println!("Recent Events:");
+    if events.is_empty() {
+        println!("  (none)");
+    } else {
+        let start = events.len().saturating_sub(15);
+        for e in &events[start..] {
+            println!(
+                "  [{}] {} -> {} ({})",
+                e.timestamp.to_rfc3339(),
+                e.step_id,
+                e.outcome,
+                e.event_type
+            );
+        }
+    }
+    println!();
+    println!("Artifacts:");
+    if artifacts.is_empty() {
+        println!("  (none)");
+    } else {
+        for a in artifacts {
+            let size = a
+                .size_bytes
+                .map_or_else(|| "?".to_string(), |s| s.to_string());
+            println!("  {} ({} bytes)", a.artifact_path.display(), size);
+        }
+    }
+}
+
+/// Render `runs show` in human-readable form (issue #51).
+/// @plan:issue-51
+fn print_runs_show_human(
+    md: &RunMetadata,
+    events: &[luther_workflow::persistence::EventRecord],
+    artifacts: &[luther_workflow::persistence::ArtifactRecord],
+    log_path: &std::path::Path,
+    log_exists: bool,
+) {
+    print_runs_show_info(md);
+    print_runs_show_paths_and_procs(md, log_path, log_exists);
+    print_runs_show_events(events, artifacts);
+}
+
+/// Resolve the run id for `runs tail` from args or active heartbeats (issue #51).
+/// @plan:issue-51
+async fn resolve_tail_run_id(args: &luther_workflow::cli::RunsTailArgs) -> Result<String, String> {
+    if let Some(run_id) = &args.run_id {
+        return Ok(run_id.clone());
+    }
+    if !args.current {
+        return Err("provide a RUN_ID or use --current".to_string());
+    }
+    let heartbeats = read_all_heartbeats()
+        .await
+        .map_err(|e| format!("failed to read heartbeats: {e}"))?;
+    let active: Vec<String> = heartbeats
+        .values()
+        .filter(|hb| matches!(hb.state, MonitorState::Running | MonitorState::Starting))
+        .filter_map(|hb| hb.run_id.clone())
+        .collect();
+    match active.len() {
+        0 => Err("no active run found for --current".to_string()),
+        1 => Ok(active[0].clone()),
+        _ => Err("multiple active runs found; specify an explicit RUN_ID".to_string()),
+    }
+}
+
+/// Read the last `n` lines of a file.
+/// @plan:issue-51
+fn tail_lines(path: &std::path::Path, n: usize) -> std::io::Result<Vec<String>> {
+    let content = std::fs::read_to_string(path)?;
+    let lines: Vec<&str> = content.lines().collect();
+    let start = lines.len().saturating_sub(n);
+    Ok(lines[start..].iter().map(|s| s.to_string()).collect())
+}
+
+/// Handle `runs tail` (issue #51).
+/// @plan:issue-51
+async fn handle_runs_tail(args: &luther_workflow::cli::RunsTailArgs) {
+    let run_id = match resolve_tail_run_id(args).await {
+        Ok(id) => id,
+        Err(e) => {
+            eprintln!("Error: {e}");
+            process::exit(1);
+        }
+    };
+    let log_path = run_log_path(&run_id);
+    if !log_path.exists() {
+        let artifacts = list_artifacts(&run_id).unwrap_or_default();
+        if args.json {
+            let value = serde_json::json!({
+                "run_id": run_id,
+                "log_path": log_path.display().to_string(),
+                "log_exists": false,
+                "lines": [],
+                "artifacts": artifacts
+                    .iter()
+                    .map(|a| a.artifact_path.display().to_string())
+                    .collect::<Vec<_>>(),
+            });
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&value).unwrap_or_default()
+            );
+        } else {
+            println!("No log file at {}", log_path.display());
+            if !artifacts.is_empty() {
+                println!("Artifacts that may contain logs:");
+                for a in &artifacts {
+                    println!("  {}", a.artifact_path.display());
+                }
+            }
+        }
+        return;
+    }
+    let lines = tail_lines(&log_path, args.lines).unwrap_or_default();
+    if args.json {
+        let value = serde_json::json!({
+            "run_id": run_id,
+            "log_path": log_path.display().to_string(),
+            "log_exists": true,
+            "lines": lines,
+        });
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&value).unwrap_or_default()
+        );
+    } else {
+        for line in &lines {
+            println!("{line}");
+        }
+    }
+}
+
+/// Parse a monitor instance id (`monitor-<pid>`) into its PID component.
+/// @plan:issue-51
+fn instance_pid(instance_id: &str) -> Option<u32> {
+    instance_id
+        .strip_prefix("monitor-")
+        .and_then(|s| s.parse::<u32>().ok())
+}
+
+/// A single row of `runs ps` output describing a process's liveness.
+/// @plan:issue-51
+struct PsRow {
+    instance_id: String,
+    run_id: Option<String>,
+    config_id: Option<String>,
+    state: String,
+    active_workers: u32,
+    uptime_secs: i64,
+    pid: Option<u32>,
+    is_alive: bool,
+    is_stale: bool,
+    child_pids: Vec<u32>,
+    stale_child_pids: Vec<u32>,
+}
+
+/// Build the `runs ps` rows from heartbeats and the run registry (issue #51).
+/// @plan:issue-51
+async fn build_ps_rows(config: Option<&str>) -> Result<Vec<PsRow>, String> {
+    let heartbeats = read_all_heartbeats()
+        .await
+        .map_err(|e| format!("failed to read heartbeats: {e}"))?;
+    let store = open_runs_store()?;
+    let now = chrono::Utc::now().timestamp();
+    let mut rows = Vec::new();
+    for hb in heartbeats.values() {
+        let md = hb
+            .run_id
+            .as_deref()
+            .and_then(|rid| store.as_ref().and_then(|s| s.get_run(rid).ok().flatten()));
+        let config_id = md.as_ref().map(|m| m.config_id.clone());
+        if let Some(want) = config {
+            if config_id.as_deref() != Some(want) {
+                continue;
+            }
+        }
+        let pid = instance_pid(&hb.instance_id);
+        let is_alive = pid.is_some_and(luther_workflow::monitor::process::is_process_alive);
+        let is_stale = !is_alive || (now - hb.timestamp) > 60;
+        rows.push(PsRow {
+            instance_id: hb.instance_id.clone(),
+            run_id: hb.run_id.clone(),
+            config_id,
+            state: monitor_state_token(&hb.state).to_string(),
+            active_workers: hb.active_workers,
+            uptime_secs: hb.uptime_secs,
+            pid,
+            is_alive,
+            is_stale,
+            child_pids: md
+                .as_ref()
+                .map(|m| m.child_pids.clone())
+                .unwrap_or_default(),
+            stale_child_pids: md
+                .as_ref()
+                .map(RunMetadata::are_child_pids_stale)
+                .unwrap_or_default(),
+        });
+    }
+    Ok(rows)
+}
+
+/// Map a `MonitorState` to its stable lowercase token.
+/// @plan:issue-51
+fn monitor_state_token(state: &MonitorState) -> &'static str {
+    match state {
+        MonitorState::Starting => "starting",
+        MonitorState::Running => "running",
+        MonitorState::Degraded => "degraded",
+        MonitorState::Stopping => "stopping",
+        MonitorState::Stopped => "stopped",
+        MonitorState::Error => "error",
+    }
+}
+
+/// Convert a `runs ps` row to its stable JSON object (issue #51).
+/// @plan:issue-51
+fn ps_row_to_json(row: &PsRow) -> serde_json::Value {
+    serde_json::json!({
+        "instance_id": row.instance_id,
+        "run_id": row.run_id,
+        "config_id": row.config_id,
+        "state": row.state,
+        "active_workers": row.active_workers,
+        "uptime_secs": row.uptime_secs,
+        "pid": row.pid,
+        "is_alive": row.is_alive,
+        "is_stale": row.is_stale,
+        "child_pids": row.child_pids,
+        "stale_child_pids": row.stale_child_pids,
+    })
+}
+
+/// Handle `runs ps` (issue #51).
+/// @plan:issue-51
+async fn handle_runs_ps(args: &luther_workflow::cli::RunsPsArgs) {
+    let rows = match build_ps_rows(args.config.as_deref()).await {
+        Ok(rows) => rows,
+        Err(e) => {
+            eprintln!("Error: {e}");
+            process::exit(1);
+        }
+    };
+    if args.json {
+        let array: Vec<_> = rows.iter().map(ps_row_to_json).collect();
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!(array)).unwrap_or_default()
+        );
+        return;
+    }
+    if rows.is_empty() {
+        println!("No processes found.");
+        return;
+    }
+    println!(
+        "{:<18} {:<24} {:<10} {:>7} {:>9} {:>8} {:<5}",
+        "INSTANCE", "RUN ID", "STATE", "WORKERS", "UPTIME", "PID", "STALE"
+    );
+    for row in &rows {
+        println!(
+            "{:<18} {:<24} {:<10} {:>7} {:>8}s {:>8} {:<5}",
+            truncate_field(&row.instance_id, 18),
+            truncate_field(row.run_id.as_deref().unwrap_or("-"), 24),
+            row.state,
+            row.active_workers,
+            row.uptime_secs,
+            row.pid.map_or_else(|| "-".to_string(), |p| p.to_string()),
+            if row.is_stale { "yes" } else { "no" },
         );
     }
 }
