@@ -66,11 +66,14 @@ fn ensure_default_conn() -> Result<(), PersistenceError> {
                     run_id TEXT NOT NULL,
                     step_id TEXT NOT NULL,
                     outcome TEXT NOT NULL,
+                    event_type TEXT NOT NULL DEFAULT 'step_outcome',
+                    details TEXT,
                     timestamp TEXT NOT NULL
                 )",
                 [],
             )
             .map_err(|e| PersistenceError::Database(e.to_string()))?;
+            migrate_events_table(&conn);
             *conn_opt = Some(conn);
         }
         Ok(())
@@ -398,6 +401,29 @@ pub fn append_event_with_conn(
     outcome: &str,
     timestamp: DateTime<Utc>,
 ) -> Result<(), PersistenceError> {
+    append_typed_event_with_conn(
+        conn,
+        run_id,
+        step_id,
+        outcome,
+        EventType::StepOutcome,
+        None,
+        timestamp,
+    )
+}
+
+/// Append a typed event record using a specific connection.
+/// @plan:PLAN-20260404-INITIAL-RUNTIME.P08
+/// @requirement:REQ-EARS-PERSIST-002
+pub fn append_typed_event_with_conn(
+    conn: &Connection,
+    run_id: &str,
+    step_id: &str,
+    outcome: &str,
+    event_type: EventType,
+    details: Option<&str>,
+    timestamp: DateTime<Utc>,
+) -> Result<(), PersistenceError> {
     // Create the events table if it doesn't exist
     conn.execute(
         "CREATE TABLE IF NOT EXISTS events (
@@ -405,19 +431,42 @@ pub fn append_event_with_conn(
             run_id TEXT NOT NULL,
             step_id TEXT NOT NULL,
             outcome TEXT NOT NULL,
+            event_type TEXT NOT NULL DEFAULT 'step_outcome',
+            details TEXT,
             timestamp TEXT NOT NULL
         )",
         [],
     )?;
+    migrate_events_table(conn);
 
     // Insert the event
     conn.execute(
-        "INSERT INTO events (run_id, step_id, outcome, timestamp)
-         VALUES (?1, ?2, ?3, ?4)",
-        params![run_id, step_id, outcome, timestamp.to_rfc3339()],
+        "INSERT INTO events (run_id, step_id, outcome, event_type, details, timestamp)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![
+            run_id,
+            step_id,
+            outcome,
+            event_type.to_string(),
+            details,
+            timestamp.to_rfc3339()
+        ],
     )?;
 
     Ok(())
+}
+
+/// Idempotently add new columns to a pre-existing `events` table.
+/// Ignores "duplicate column" errors so it is safe to run repeatedly.
+/// @plan:PLAN-20260404-INITIAL-RUNTIME.P08
+pub fn migrate_events_table(conn: &Connection) {
+    let columns = [
+        "event_type TEXT NOT NULL DEFAULT 'step_outcome'",
+        "details TEXT",
+    ];
+    for col in columns {
+        let _ = conn.execute(&format!("ALTER TABLE events ADD COLUMN {}", col), []);
+    }
 }
 
 /// Append an event record for a step completion (backwards-compatible version).
@@ -448,32 +497,13 @@ pub fn append_event(
 /// @requirement:REQ-EARS-PERSIST-002
 pub fn load_events(conn: &Connection, run_id: &str) -> Result<Vec<EventRecord>, PersistenceError> {
     let mut stmt = conn.prepare(
-        "SELECT run_id, step_id, outcome, timestamp
+        "SELECT run_id, step_id, outcome, event_type, details, timestamp
          FROM events
          WHERE run_id = ?1
-         ORDER BY timestamp ASC",
+         ORDER BY id ASC",
     )?;
 
-    let rows = stmt.query_map(params![run_id], |row| {
-        let timestamp_str: String = row.get(3)?;
-        let timestamp = timestamp_str.parse().map_err(|_| {
-            rusqlite::Error::FromSqlConversionFailure(
-                3,
-                rusqlite::types::Type::Text,
-                Box::new(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "Invalid timestamp format",
-                )),
-            )
-        })?;
-
-        Ok(EventRecord {
-            run_id: row.get(0)?,
-            step_id: row.get(1)?,
-            outcome: row.get(2)?,
-            timestamp,
-        })
-    })?;
+    let rows = stmt.query_map(params![run_id], map_event_row)?;
 
     let mut events = Vec::new();
     for event in rows {
@@ -483,13 +513,155 @@ pub fn load_events(conn: &Connection, run_id: &str) -> Result<Vec<EventRecord>, 
     Ok(events)
 }
 
-/// Event record for step completion.
+/// Load events for a run filtered by event type, ordered by insertion.
+/// @plan:PLAN-20260404-INITIAL-RUNTIME.P08
+/// @requirement:REQ-EARS-PERSIST-002
+pub fn load_events_by_type(
+    conn: &Connection,
+    run_id: &str,
+    event_type: EventType,
+) -> Result<Vec<EventRecord>, PersistenceError> {
+    let mut stmt = conn.prepare(
+        "SELECT run_id, step_id, outcome, event_type, details, timestamp
+         FROM events
+         WHERE run_id = ?1 AND event_type = ?2
+         ORDER BY id ASC",
+    )?;
+
+    let rows = stmt.query_map(params![run_id, event_type.to_string()], map_event_row)?;
+
+    let mut events = Vec::new();
+    for event in rows {
+        events.push(event?);
+    }
+
+    Ok(events)
+}
+
+/// Load the most recent event for a run, if any.
+/// @plan:PLAN-20260404-INITIAL-RUNTIME.P08
+/// @requirement:REQ-EARS-PERSIST-002
+pub fn load_latest_event(
+    conn: &Connection,
+    run_id: &str,
+) -> Result<Option<EventRecord>, PersistenceError> {
+    let mut stmt = conn.prepare(
+        "SELECT run_id, step_id, outcome, event_type, details, timestamp
+         FROM events
+         WHERE run_id = ?1
+         ORDER BY id DESC
+         LIMIT 1",
+    )?;
+
+    let mut rows = stmt.query(params![run_id])?;
+    if let Some(row) = rows.next()? {
+        Ok(Some(map_event_row(row)?))
+    } else {
+        Ok(None)
+    }
+}
+
+/// Count events for a run of a given type.
+/// @plan:PLAN-20260404-INITIAL-RUNTIME.P08
+/// @requirement:REQ-EARS-PERSIST-002
+pub fn count_events_by_type(
+    conn: &Connection,
+    run_id: &str,
+    event_type: EventType,
+) -> Result<i64, PersistenceError> {
+    let count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM events WHERE run_id = ?1 AND event_type = ?2",
+        params![run_id, event_type.to_string()],
+        |row| row.get(0),
+    )?;
+    Ok(count)
+}
+
+/// Map a row from the `events` table into an `EventRecord`.
+/// @plan:PLAN-20260404-INITIAL-RUNTIME.P08
+fn map_event_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<EventRecord> {
+    let timestamp_str: String = row.get(5)?;
+    let timestamp = timestamp_str.parse().map_err(|_| {
+        rusqlite::Error::FromSqlConversionFailure(
+            5,
+            rusqlite::types::Type::Text,
+            Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "Invalid timestamp format",
+            )),
+        )
+    })?;
+
+    Ok(EventRecord {
+        run_id: row.get(0)?,
+        step_id: row.get(1)?,
+        outcome: row.get(2)?,
+        event_type: row.get(3)?,
+        details: row.get(4)?,
+        timestamp,
+    })
+}
+
+/// Typed lifecycle events recorded in the append-only event log.
+/// @plan:PLAN-20260404-INITIAL-RUNTIME.P08
+/// @requirement:REQ-EARS-PERSIST-002
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EventType {
+    StepStart,
+    StepOutcome,
+    ProcessSpawn,
+    ProcessExit,
+    AgentSpawn,
+    AgentExit,
+    Error,
+    TerminalState,
+}
+
+impl std::fmt::Display for EventType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            EventType::StepStart => "step_start",
+            EventType::StepOutcome => "step_outcome",
+            EventType::ProcessSpawn => "process_spawn",
+            EventType::ProcessExit => "process_exit",
+            EventType::AgentSpawn => "agent_spawn",
+            EventType::AgentExit => "agent_exit",
+            EventType::Error => "error",
+            EventType::TerminalState => "terminal_state",
+        };
+        write!(f, "{}", s)
+    }
+}
+
+impl std::str::FromStr for EventType {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "step_start" => Ok(EventType::StepStart),
+            "step_outcome" => Ok(EventType::StepOutcome),
+            "process_spawn" => Ok(EventType::ProcessSpawn),
+            "process_exit" => Ok(EventType::ProcessExit),
+            "agent_spawn" => Ok(EventType::AgentSpawn),
+            "agent_exit" => Ok(EventType::AgentExit),
+            "error" => Ok(EventType::Error),
+            "terminal_state" => Ok(EventType::TerminalState),
+            _ => Err(format!("Unknown event type: {}", s)),
+        }
+    }
+}
+
+/// Event record for step completion and lifecycle events.
 /// @plan:PLAN-20260404-INITIAL-RUNTIME.P08
 #[derive(Debug, Clone)]
 pub struct EventRecord {
     pub run_id: String,
     pub step_id: String,
     pub outcome: String,
+    /// Typed event classification (snake_case string).
+    pub event_type: String,
+    /// Optional free-form details (e.g. error message, PID).
+    pub details: Option<String>,
     pub timestamp: DateTime<Utc>,
 }
 
@@ -515,10 +687,13 @@ pub fn init_checkpoint_table(conn: &Connection) -> Result<(), rusqlite::Error> {
             run_id TEXT NOT NULL,
             step_id TEXT NOT NULL,
             outcome TEXT NOT NULL,
+            event_type TEXT NOT NULL DEFAULT 'step_outcome',
+            details TEXT,
             timestamp TEXT NOT NULL
         )",
         [],
     )?;
+    migrate_events_table(conn);
     Ok(())
 }
 

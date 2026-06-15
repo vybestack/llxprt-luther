@@ -12,17 +12,20 @@ pub use artifacts::{
     ArtifactRecord,
 };
 pub use checkpoint::{
-    append_event, append_event_with_conn, list_checkpoints, load_checkpoint,
-    load_checkpoint_with_conn, load_events, save_checkpoint, save_checkpoint_with_conn, Checkpoint,
-    EventRecord, PersistenceError, StateSnapshot,
+    append_event, append_event_with_conn, append_typed_event_with_conn, count_events_by_type,
+    list_checkpoints, load_checkpoint, load_checkpoint_with_conn, load_events, load_events_by_type,
+    load_latest_event, save_checkpoint, save_checkpoint_with_conn, Checkpoint, EventRecord,
+    EventType, PersistenceError, StateSnapshot,
 };
 pub use leases::{
     count_active_leases_for_config, create_lease, get_lease_for_issue, init_leases_table,
     list_all_leases, list_leases_by_config, list_leases_by_status, mark_stale_leases,
     touch_lease_heartbeat, try_claim, update_lease_status, IssueLease, LeaseStatus,
 };
-pub use run_metadata::{run_metadata_from_ref, RunMetadata, RunStatus};
-pub use sqlite::{SqliteStore, SqliteStoreRef};
+pub use run_metadata::{is_pid_stale, run_metadata_from_ref, RunMetadata, RunStatus};
+pub use sqlite::{
+    get_run_with_conn, list_runs_with_conn, persist_run_with_conn, SqliteStore, SqliteStoreRef,
+};
 pub use trace::{
     export_trace, load_trace, save_trace, SmokeTrace, TraceEvent, TraceOutcome, SCHEMA_VERSION,
 };

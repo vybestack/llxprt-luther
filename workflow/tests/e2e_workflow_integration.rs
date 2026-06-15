@@ -13,7 +13,9 @@ use luther_workflow::engine::executor::{
 use luther_workflow::engine::instance::WorkflowInstance;
 use luther_workflow::engine::runner::{EngineError, EngineRunner, RunOutcome};
 use luther_workflow::engine::transition::StepOutcome;
-use luther_workflow::persistence::SqliteStore;
+use luther_workflow::persistence::{
+    count_events_by_type, load_events, load_latest_event, EventType, SqliteStore,
+};
 use luther_workflow::workflow::config_loader::{resolve_workflow_config, resolve_workflow_type};
 
 // ============================================================================
@@ -878,6 +880,66 @@ fn test_run_completion_records_metadata() {
         metadata.status,
         luther_workflow::persistence::RunStatus::Completed,
         "Status should be Completed"
+    );
+
+    // The run registry must capture in-flight lifecycle data through the real
+    // engine path, not just the terminal status (issue #50).
+    // @plan:PLAN-20260404-INITIAL-RUNTIME.P05
+    assert!(
+        metadata.process_pid.is_some(),
+        "process_pid should be recorded for a daemon-launched run"
+    );
+    assert!(
+        metadata.current_step.is_some(),
+        "current_step should be recorded"
+    );
+    assert!(
+        metadata.previous_step.is_some(),
+        "previous_step should be recorded after at least one transition"
+    );
+    assert!(
+        metadata.previous_outcome.is_some(),
+        "previous_outcome should be recorded after at least one transition"
+    );
+
+    // The append-only event history must be queryable and well-ordered:
+    // each executed step emits a StepStart before its StepOutcome, and the
+    // run finishes with a single TerminalState event.
+    let conn = store.conn();
+    let events = load_events(conn, &run_id).expect("Failed to load events");
+    assert!(
+        !events.is_empty(),
+        "Event history should not be empty for a completed run"
+    );
+    assert_eq!(
+        events[0].event_type,
+        EventType::StepStart.to_string(),
+        "First recorded event should be a StepStart"
+    );
+
+    let starts =
+        count_events_by_type(conn, &run_id, EventType::StepStart).expect("Failed to count starts");
+    let outcomes = count_events_by_type(conn, &run_id, EventType::StepOutcome)
+        .expect("Failed to count outcomes");
+    assert!(
+        starts > 0 && starts == outcomes,
+        "Each StepStart ({starts}) should pair with a StepOutcome ({outcomes})"
+    );
+
+    let terminal_count = count_events_by_type(conn, &run_id, EventType::TerminalState)
+        .expect("Failed to count terminal events");
+    assert_eq!(
+        terminal_count, 1,
+        "A completed run should record exactly one TerminalState event"
+    );
+
+    let latest = load_latest_event(conn, &run_id)
+        .expect("Failed to load latest event")
+        .expect("There should be a latest event");
+    assert_eq!(
+        latest.event_type,
+        EventType::TerminalState.to_string(),
+        "The final event should be the TerminalState event"
     );
 
     // Clean up

@@ -13,6 +13,7 @@ pub mod runner;
 pub mod transition;
 
 // Re-export transition types for convenience
+pub use runner::{EngineRunner, RunContext, RunOutcome};
 pub use transition::{resolve_transition, resolve_transition_schema, StepOutcome};
 // Re-export TransitionDef from workflow schema for test compatibility
 pub use crate::workflow::schema::TransitionDef;
