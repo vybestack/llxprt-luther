@@ -314,13 +314,13 @@ pub struct MonitorArgs {
     #[arg(long, value_name = "RUN_ID")]
     pub run: Option<String>,
     /// Filter runs to a single GitHub issue number
-    #[arg(long, value_name = "NUMBER")]
+    #[arg(long, value_name = "NUMBER", value_parser = clap::value_parser!(i64).range(1..))]
     pub issue: Option<i64>,
     /// Refresh delay between snapshots, in seconds
-    #[arg(long, value_name = "SECONDS", default_value_t = 2)]
+    #[arg(long, value_name = "SECONDS", default_value_t = 2, value_parser = clap::value_parser!(u64).range(1..))]
     pub interval: u64,
     /// Render exactly N snapshots, then exit normally
-    #[arg(long, value_name = "N", conflicts_with = "once")]
+    #[arg(long, value_name = "N", conflicts_with = "once", value_parser = clap::value_parser!(u32).range(1..))]
     pub times: Option<u32>,
     /// Render a single snapshot and exit (equivalent to --times 1)
     #[arg(long, conflicts_with = "times")]

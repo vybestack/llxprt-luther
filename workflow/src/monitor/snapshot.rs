@@ -260,11 +260,17 @@ fn render_run_table(runs: &[RunMetadata], out: &mut String) -> std::fmt::Result 
             "{:<20} {:<28} {:<7} {:<7} {:<11} {:<16} {:<25}",
             truncate_field(&md.config_id, 20),
             truncate_field(&md.run_id, 28),
-            md.issue_number
-                .map_or_else(|| "-".to_string(), |n| n.to_string()),
-            md.pr_number
-                .map_or_else(|| "-".to_string(), |n| n.to_string()),
-            md.status.to_string(),
+            truncate_field(
+                &md.issue_number
+                    .map_or_else(|| "-".to_string(), |n| n.to_string()),
+                7
+            ),
+            truncate_field(
+                &md.pr_number
+                    .map_or_else(|| "-".to_string(), |n| n.to_string()),
+                7
+            ),
+            truncate_field(&md.status.to_string(), 11),
             truncate_field(md.current_step.as_deref().unwrap_or("-"), 16),
             updated,
         )?;
@@ -275,6 +281,7 @@ fn render_run_table(runs: &[RunMetadata], out: &mut String) -> std::fmt::Result 
 /// Render the selected/current run detail block.
 fn render_selected(selected: Option<&RunMetadata>, out: &mut String) -> std::fmt::Result {
     let Some(md) = selected else {
+        writeln!(out, "Selected run: (none)")?;
         return Ok(());
     };
     writeln!(out, "Selected run: {}", md.run_id)?;
@@ -549,6 +556,38 @@ mod tests {
         render_snapshot(&snapshot, 10, &mut out).unwrap();
         assert!(out.contains("(no daemons running)"));
         assert!(out.contains("No runs found."));
+        // The selected-run section is always rendered, even with no selection.
+        assert!(out.contains("Selected run: (none)"));
+    }
+
+    #[test]
+    fn render_selected_none_writes_empty_state() {
+        let mut out = String::new();
+        render_selected(None, &mut out).unwrap();
+        assert_eq!(
+            out,
+            "Selected run: (none)
+"
+        );
+    }
+
+    #[test]
+    fn render_run_table_truncates_overflowing_columns() {
+        let mut md = run_with_status("run-a", RunStatus::WaitingForChecks);
+        md.issue_number = Some(1_234_567_890);
+        md.pr_number = Some(9_876_543_210);
+        let mut out = String::new();
+        render_run_table(&[md], &mut out).unwrap();
+        let data_line = out
+            .lines()
+            .find(|l| l.contains("run-a"))
+            .expect("run data line present");
+        // STATE column is 11 wide; "waiting_for_checks" (18) must be truncated.
+        assert!(data_line.contains("waiting_fo…"));
+        assert!(!data_line.contains("waiting_for_checks"));
+        // ISSUE/PR columns are 7 wide; long numbers must be truncated.
+        assert!(data_line.contains("123456…"));
+        assert!(data_line.contains("987654…"));
     }
 
     #[test]

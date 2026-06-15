@@ -28,7 +28,8 @@ use luther_workflow::persistence::leases::{
     list_all_leases, list_leases_by_config, list_leases_by_status, IssueLease, LeaseStatus,
 };
 use luther_workflow::persistence::{
-    list_artifacts, load_events, EventRecord, RunMetadata, RunStatus, SqliteStore,
+    list_artifacts, load_events, load_recent_events, EventRecord, RunMetadata, RunStatus,
+    SqliteStore,
 };
 use luther_workflow::service::{Service, ServiceConfig};
 use luther_workflow::workflow::config_loader::{
@@ -1599,6 +1600,15 @@ async fn handle_monitor_command(args: &luther_workflow::cli::MonitorArgs) {
     let mut first = true;
 
     loop {
+        // Stop before rendering (and before sleeping) once the requested count
+        // is exhausted. This guarantees `--times 0` emits zero snapshots and
+        // that we never sleep after the final snapshot.
+        if let Some(left) = remaining.as_ref() {
+            if *left == 0 {
+                return;
+            }
+        }
+
         if !first {
             let tick = tokio::time::sleep(tokio::time::Duration::from_secs(args.interval));
             tokio::select! {
@@ -1615,9 +1625,6 @@ async fn handle_monitor_command(args: &luther_workflow::cli::MonitorArgs) {
 
         if let Some(left) = remaining.as_mut() {
             *left = left.saturating_sub(1);
-            if *left == 0 {
-                return;
-            }
         }
     }
 }
@@ -1646,11 +1653,20 @@ fn render_one_snapshot(filter: &MonitorFilter, tail: usize, clear: bool) {
 fn collect_snapshot(filter: &MonitorFilter, tail: usize) -> MonitorSnapshot {
     let now = chrono::Utc::now();
     let daemons = collect_daemon_summaries(filter, now.timestamp());
-    let all_runs = open_runs_store()
-        .ok()
-        .flatten()
-        .and_then(|store| store.list_runs().ok())
-        .unwrap_or_default();
+    let all_runs = match open_runs_store() {
+        Ok(Some(store)) => match store.list_runs() {
+            Ok(runs) => runs,
+            Err(e) => {
+                eprintln!("Warning: run registry unavailable: failed to list runs: {e}");
+                Vec::new()
+            }
+        },
+        Ok(None) => Vec::new(),
+        Err(e) => {
+            eprintln!("Warning: run registry unavailable: {e}");
+            Vec::new()
+        }
+    };
     let filtered = filter.apply(&all_runs);
     let counts = RunCounts::from_runs(&filtered.runs);
     let recent_events = collect_selected_events(filtered.selected.as_ref(), tail);
@@ -1695,7 +1711,7 @@ fn collect_selected_events(selected: Option<&RunMetadata>, tail: usize) -> Vec<E
     let Ok(Some(store)) = open_runs_store() else {
         return Vec::new();
     };
-    load_events(store.conn(), &md.run_id).unwrap_or_default()
+    load_recent_events(store.conn(), &md.run_id, tail).unwrap_or_default()
 }
 
 /// Handle `runs list` (issue #51).

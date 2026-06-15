@@ -391,13 +391,13 @@ fn monitor_once_renders_one_snapshot() {
     );
 }
 
-/// Test: `monitor --times 3 --no-clear --interval 0` emits 3 snapshots and
+/// Test: `monitor --times 3 --no-clear --interval 1` emits 3 snapshots and
 /// exits 0 (issue #52).
 /// @plan:issue-52
 #[test]
 fn monitor_times_renders_n_snapshots() {
     let mut cmd = luther_workflow_bin();
-    cmd.args(["monitor", "--times", "3", "--no-clear", "--interval", "0"]);
+    cmd.args(["monitor", "--times", "3", "--no-clear", "--interval", "1"]);
     let output = cmd.output().expect("Failed to execute monitor --times");
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
