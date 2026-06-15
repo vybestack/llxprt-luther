@@ -20,6 +20,14 @@ max_file_changes = 200
 max_tokens = 500000
 max_cost = 50.0
 
+[discovery]
+enabled = false
+include_labels = ["OK for Luther"]
+exclude_labels = ["Luther working"]
+issue_states = ["open"]
+max_concurrent_runs = 1
+poll_interval_secs = 300
+
 [variables]
 target_repo = "vybestack/llxprt-code"
 repository_owner = "vybestack"

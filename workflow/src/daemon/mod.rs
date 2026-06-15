@@ -21,6 +21,16 @@ use std::path::{Path, PathBuf};
 #[cfg(not(target_os = "linux"))]
 use std::process::Command;
 
+// Daemon discovery/queueing/leasing/launch submodules (issue #49).
+// @plan:PLAN-20260415-DAEMON-DISCOVERY.P04
+pub mod discovery;
+pub mod launcher;
+pub mod scheduler;
+
+pub use discovery::{discover, DiscoveryResult, SkipReason};
+pub use launcher::{claim_and_launch, LaunchOutcome};
+pub use scheduler::{run_once, RunSummary};
+
 /// Lifecycle status of a per-config daemon instance.
 ///
 /// Mirrors the `MonitorState` style in `monitor/heartbeat.rs` but is scoped to

@@ -32,6 +32,11 @@ pub struct WorkflowConfig {
     /// @requirement:REQ-LF-PROF-003
     #[serde(default)]
     pub variables: HashMap<String, String>,
+    /// Optional daemon issue-discovery rules for this workflow config.
+    /// @plan:PLAN-20260415-DAEMON-DISCOVERY.P01
+    /// @requirement:REQ-DAEMON-DISCOVERY-001
+    #[serde(default)]
+    pub discovery: Option<DiscoveryConfig>,
 }
 
 /// Bound runtime identity for a workflow run.
@@ -139,4 +144,49 @@ pub struct GuardLimits {
     pub max_file_changes: Option<u32>,
     pub max_tokens: Option<u64>,
     pub max_cost: Option<f64>,
+}
+
+/// Daemon issue-discovery rules describing how to find eligible issues for a
+/// repository and how the daemon should claim/launch work for them.
+///
+/// All fields are optional in the on-disk config; unset fields are filled by
+/// [`crate::workflow::config_loader::resolve_discovery_config`] from the
+/// config's `[variables]` table and built-in defaults so existing configs keep
+/// working without changes.
+/// @plan:PLAN-20260415-DAEMON-DISCOVERY.P01
+/// @requirement:REQ-DAEMON-DISCOVERY-001
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, Default, PartialEq, Eq)]
+pub struct DiscoveryConfig {
+    /// When false (default) the daemon keeps heartbeat-only behavior and does
+    /// not discover/launch work for this config.
+    #[serde(default)]
+    pub enabled: bool,
+    /// `owner/name` repository slug. Defaults from `variables.target_repo`.
+    #[serde(default)]
+    pub repo: Option<String>,
+    /// Labels an issue must have to be eligible. Defaults to
+    /// `[variables.ok_label]` when unset.
+    #[serde(default)]
+    pub include_labels: Vec<String>,
+    /// Labels that make an issue ineligible. Defaults to
+    /// `[variables.luther_label]` when unset.
+    #[serde(default)]
+    pub exclude_labels: Vec<String>,
+    /// Issue states to query. Defaults to `["open"]` when unset.
+    #[serde(default)]
+    pub issue_states: Vec<String>,
+    /// Required assignee filter. `Some("")` means unassigned (matching the
+    /// legacy `select_issue` behavior). Defaults from `variables.assignee`.
+    #[serde(default)]
+    pub assignee_filter: Option<String>,
+    /// Milestone ordering strategy: `"semver"` or `"none"`. Defaults to
+    /// `"semver"` when unset.
+    #[serde(default)]
+    pub milestone_order: Option<String>,
+    /// Maximum simultaneous active runs for this config. Defaults to 1.
+    #[serde(default)]
+    pub max_concurrent_runs: Option<u32>,
+    /// Discovery poll interval in seconds. Defaults to 300.
+    #[serde(default)]
+    pub poll_interval_secs: Option<u64>,
 }

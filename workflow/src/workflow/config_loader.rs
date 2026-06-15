@@ -4,7 +4,9 @@ use std::collections::HashSet;
 use std::path::Path;
 
 use crate::engine::executor::extract_tokens;
-use crate::workflow::schema::{StepDef, WorkflowConfig, WorkflowRunRef, WorkflowType};
+use crate::workflow::schema::{
+    DiscoveryConfig, StepDef, WorkflowConfig, WorkflowRunRef, WorkflowType,
+};
 use crate::workflow::validation::validate_workflow_graph;
 
 /// Error type for configuration loading and validation failures.
@@ -378,7 +380,107 @@ pub fn validate_workflow_config(config: &WorkflowConfig) -> Result<()> {
         });
     }
 
+    validate_discovery_config(config)?;
+
     Ok(())
+}
+
+/// Validate the resolved discovery rules for a workflow config.
+///
+/// Rejects configs where include/exclude label sets intersect (an issue could
+/// never be both required and forbidden) and configs where discovery is enabled
+/// but no repository can be resolved from `[discovery]` or `[variables]`.
+/// @plan:PLAN-20260415-DAEMON-DISCOVERY.P01
+/// @requirement:REQ-DAEMON-DISCOVERY-001
+fn validate_discovery_config(config: &WorkflowConfig) -> Result<()> {
+    let discovery = resolve_discovery_config(config);
+
+    let include: HashSet<&str> = discovery
+        .include_labels
+        .iter()
+        .map(String::as_str)
+        .collect();
+    for label in &discovery.exclude_labels {
+        if include.contains(label.as_str()) {
+            return Err(ConfigError {
+                message: format!(
+                    "discovery include_labels and exclude_labels both contain '{}'",
+                    label
+                ),
+                source_path: None,
+                kind: ConfigErrorKind::ValidationError,
+            });
+        }
+    }
+
+    if discovery.enabled && discovery.repo.as_deref().unwrap_or("").is_empty() {
+        return Err(ConfigError {
+            message:
+                "discovery.enabled is true but no repository could be resolved (set discovery.repo or variables.target_repo)"
+                    .to_string(),
+            source_path: None,
+            kind: ConfigErrorKind::ValidationError,
+        });
+    }
+
+    Ok(())
+}
+
+/// Resolve effective discovery rules for a config, filling unset fields from
+/// the config's `[variables]` table and built-in defaults.
+///
+/// This preserves parity with the legacy `select_issue` workflow step:
+/// `variables.target_repo` -> repo, `variables.ok_label` -> include label,
+/// `variables.luther_label` -> exclude label, `variables.assignee` ->
+/// assignee filter. Defaults: states `["open"]`, milestone order `"semver"`,
+/// `max_concurrent_runs = 1`, `poll_interval_secs = 300`.
+/// @plan:PLAN-20260415-DAEMON-DISCOVERY.P01
+/// @requirement:REQ-DAEMON-DISCOVERY-001
+#[must_use]
+pub fn resolve_discovery_config(config: &WorkflowConfig) -> DiscoveryConfig {
+    let raw = config.discovery.clone().unwrap_or_default();
+    let var = |key: &str| config.variables.get(key).cloned();
+
+    let repo = raw
+        .repo
+        .filter(|s| !s.is_empty())
+        .or_else(|| var("target_repo"));
+
+    let include_labels = if raw.include_labels.is_empty() {
+        var("ok_label").into_iter().collect()
+    } else {
+        raw.include_labels
+    };
+
+    let exclude_labels = if raw.exclude_labels.is_empty() {
+        var("luther_label").into_iter().collect()
+    } else {
+        raw.exclude_labels
+    };
+
+    let issue_states = if raw.issue_states.is_empty() {
+        vec!["open".to_string()]
+    } else {
+        raw.issue_states
+    };
+
+    let assignee_filter = raw.assignee_filter.or_else(|| var("assignee"));
+
+    let milestone_order = Some(raw.milestone_order.unwrap_or_else(|| "semver".to_string()));
+    let max_concurrent_runs = Some(raw.max_concurrent_runs.unwrap_or(1));
+    let poll_interval_secs = Some(raw.poll_interval_secs.unwrap_or(300));
+
+    DiscoveryConfig {
+        enabled: raw.enabled,
+        repo,
+        include_labels,
+        exclude_labels,
+        issue_states,
+        assignee_filter,
+        milestone_order,
+        max_concurrent_runs,
+        poll_interval_secs,
+    }
 }
 
 /// Validate that a workflow config matches its referenced workflow type.

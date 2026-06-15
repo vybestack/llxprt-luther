@@ -762,6 +762,7 @@ mod tests {
                 max_cost: Some(10.0),
             },
             variables: std::collections::HashMap::new(),
+            discovery: None,
         };
 
         let instance = WorkflowInstance::create(workflow_type, config);
@@ -820,6 +821,7 @@ mod tests {
                 max_cost: Some(10.0),
             },
             variables: std::collections::HashMap::new(),
+            discovery: None,
         };
         WorkflowInstance::create(workflow_type, config)
     }
