@@ -217,6 +217,24 @@ impl EngineRunner {
         registry: ExecutorRegistry,
         db_path: impl AsRef<Path>,
     ) -> Result<Self, EngineError> {
+        Self::with_db_path_and_context(instance, registry, db_path, RunContext::default())
+    }
+
+    /// Create a new engine runner with a custom database path and run context.
+    ///
+    /// The provided [`RunContext`] is attached *before* the initial run record
+    /// is persisted, so the first durable `Starting` row already includes path
+    /// and GitHub metadata. Use this instead of chaining
+    /// [`with_run_context`](Self::with_run_context) after `with_db_path` when the
+    /// context is known up front.
+    /// @plan:PLAN-20260404-INITIAL-RUNTIME.P05
+    /// @requirement:REQ-EARS-ENG-001
+    pub fn with_db_path_and_context(
+        instance: WorkflowInstance,
+        registry: ExecutorRegistry,
+        db_path: impl AsRef<Path>,
+        run_context: RunContext,
+    ) -> Result<Self, EngineError> {
         let max_retries = instance.config.runtime.max_retries;
         let max_loops = instance.config.guard_limits.max_iterations.unwrap_or(10);
 
@@ -282,13 +300,14 @@ impl EngineRunner {
             interrupted: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             registry,
             context,
-            run_context: RunContext::default(),
+            run_context,
             persist_registry: true,
         };
 
         // Persist an initial run record so in-flight runs are visible before
-        // they complete. Best-effort: a persistence failure must not block
-        // execution.
+        // they complete. The run context is already attached above, so the
+        // first durable `Starting` row includes path and GitHub metadata.
+        // Best-effort: a persistence failure must not block execution.
         // @plan:PLAN-20260404-INITIAL-RUNTIME.P05
         runner.persist_initial_run();
 
@@ -503,7 +522,10 @@ impl EngineRunner {
             {
                 let conn = self.conn.borrow();
                 save_checkpoint_with_conn(&conn, &checkpoint)?;
-                append_typed_event_with_conn(
+                // Best-effort event append, consistent with `record_event`: an
+                // event-persistence failure after a successful checkpoint save
+                // must not abort the run.
+                let _ = append_typed_event_with_conn(
                     &conn,
                     &self.instance.run_id,
                     &current_step_id,
@@ -511,7 +533,7 @@ impl EngineRunner {
                     EventType::StepOutcome,
                     None,
                     chrono::Utc::now(),
-                )?;
+                );
             }
 
             // Record the previous step + outcome and refresh next-step

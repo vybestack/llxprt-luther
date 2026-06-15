@@ -367,8 +367,11 @@ fn create_durable_runner(
     let run_context = build_run_context(&config, run_id);
     let instance = WorkflowInstance::create_with_run_id(workflow_type, config, run_id);
     let registry = ExecutorRegistry::with_defaults();
-    match EngineRunner::with_db_path(instance, registry, db_path) {
-        Ok(runner) => runner.with_run_context(run_context),
+    // Attach the run context up front so the initial persisted `Starting` row
+    // includes path and GitHub metadata, instead of chaining
+    // `with_run_context` after the initial record has already been written.
+    match EngineRunner::with_db_path_and_context(instance, registry, db_path, run_context) {
+        Ok(runner) => runner,
         Err(e) => {
             eprintln!("Error: Failed to create durable engine runner: {e}");
             process::exit(1);
@@ -494,18 +497,24 @@ async fn handle_status_command(args: &luther_workflow::cli::StatusArgs) {
     };
 
     // 1b. Read the persistent run registry so in-flight and historical runs are
-    // visible without parsing the whole log.
+    // visible without parsing the whole log. Registry open/query failures are
+    // surfaced distinctly from a legitimately empty registry rather than being
+    // silently swallowed into an empty list.
     // @plan:PLAN-20260404-INITIAL-RUNTIME.P05
-    let runs = read_run_registry(args.run_id.as_deref());
+    let runs_result = read_run_registry(args.run_id.as_deref());
 
     // 2. Display monitor state
     if args.json {
         // JSON output
-        let runs_json: Vec<_> = runs.iter().map(run_metadata_to_json).collect();
+        let (runs_json, registry_error): (Vec<_>, Option<String>) = match &runs_result {
+            Ok(runs) => (runs.iter().map(run_metadata_to_json).collect(), None),
+            Err(e) => (Vec::new(), Some(e.clone())),
+        };
         let status = serde_json::json!({
             "timestamp": chrono::Utc::now().to_rfc3339(),
             "heartbeats": heartbeats,
             "runs": runs_json,
+            "registry_error": registry_error,
         });
         println!("{}", serde_json::to_string_pretty(&status).unwrap());
     } else {
@@ -558,30 +567,43 @@ async fn handle_status_command(args: &luther_workflow::cli::StatusArgs) {
 
         // Persistent run registry section.
         // @plan:PLAN-20260404-INITIAL-RUNTIME.P05
-        print_run_registry(&runs);
+        match &runs_result {
+            Ok(runs) => print_run_registry(runs),
+            Err(e) => {
+                eprintln!("Error: run registry unavailable: {e}");
+                println!();
+                println!("Persistent Run Registry:");
+                println!("  Status: registry unavailable ({e})");
+            }
+        }
     }
 }
 
 /// Read run records from the persistent registry (checkpoints.db).
-/// When `run_id` is provided, returns just that run (if found).
+///
+/// When `run_id` is provided, returns just that run (if found). A missing
+/// database file is treated as a legitimately empty registry (`Ok(vec![])`),
+/// but failures to open the store or query it are propagated as `Err` so the
+/// caller can distinguish "no runs recorded" from "registry unavailable or
+/// corrupt" instead of silently collapsing both into an empty list.
 /// @plan:PLAN-20260404-INITIAL-RUNTIME.P05
-fn read_run_registry(run_id: Option<&str>) -> Vec<luther_workflow::persistence::RunMetadata> {
+fn read_run_registry(
+    run_id: Option<&str>,
+) -> Result<Vec<luther_workflow::persistence::RunMetadata>, String> {
     let db_path = luther_workflow::runtime_paths::get_data_dir().join("checkpoints.db");
     if !db_path.exists() {
-        return Vec::new();
+        return Ok(Vec::new());
     }
-    let store = match luther_workflow::persistence::SqliteStore::open(&db_path) {
-        Ok(s) => s,
-        Err(_) => return Vec::new(),
-    };
+    let store = luther_workflow::persistence::SqliteStore::open(&db_path)
+        .map_err(|e| format!("failed to open run registry at {}: {e}", db_path.display()))?;
     match run_id {
         Some(id) => store
             .get_run(id)
-            .ok()
-            .flatten()
-            .map(|r| vec![r])
-            .unwrap_or_default(),
-        None => store.list_runs().unwrap_or_default(),
+            .map(|maybe| maybe.map(|r| vec![r]).unwrap_or_default())
+            .map_err(|e| format!("failed to read run '{id}' from registry: {e}")),
+        None => store
+            .list_runs()
+            .map_err(|e| format!("failed to list runs from registry: {e}")),
     }
 }
 
