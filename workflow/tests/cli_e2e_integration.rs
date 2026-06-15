@@ -250,3 +250,116 @@ fn test_cli_dry_run_clean_workflow_exits_zero() {
         "clean dry-run should not report validation errors. stdout: {stdout}"
     );
 }
+
+/// Helper: assert a subcommand is recognized (not an unrecognized-subcommand
+/// clap error).
+/// @plan:issue-51
+fn assert_recognized(args: &[&str]) {
+    let mut cmd = luther_workflow_bin();
+    cmd.args(args);
+    let output = cmd.output().expect("Failed to execute command");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("unrecognized subcommand") && !stderr.contains("Unknown command"),
+        "command {args:?} should be recognized. stderr: {stderr}"
+    );
+}
+
+/// Test: each `runs` subcommand is recognized by the CLI (issue #51).
+/// @plan:issue-51
+#[test]
+fn test_runs_subcommands_recognized() {
+    assert_recognized(&["runs", "list"]);
+    assert_recognized(&["runs", "show", "nonexistent-run"]);
+    assert_recognized(&["runs", "tail", "nonexistent-run"]);
+    assert_recognized(&["runs", "ps"]);
+}
+
+/// Test: `runs list --json` emits valid JSON with a `runs` array (issue #51).
+/// @plan:issue-51
+#[test]
+fn test_runs_list_json_shape() {
+    let mut cmd = luther_workflow_bin();
+    cmd.args(["runs", "list", "--json"]);
+    let output = cmd.output().expect("Failed to execute runs list");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let value: serde_json::Value =
+        serde_json::from_str(&stdout).expect("runs list --json should emit valid JSON");
+    assert!(
+        value.get("runs").map(serde_json::Value::is_array) == Some(true),
+        "runs list --json should contain a runs array. stdout: {stdout}"
+    );
+}
+
+/// Test: `runs show <nonexistent>` exits non-zero with a not-found message
+/// (issue #51).
+/// @plan:issue-51
+#[test]
+fn test_runs_show_nonexistent_errors() {
+    let mut cmd = luther_workflow_bin();
+    cmd.args(["runs", "show", "definitely-not-a-real-run-id-51"]);
+    let output = cmd.output().expect("Failed to execute runs show");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !output.status.success(),
+        "runs show for a missing run should exit non-zero"
+    );
+    assert!(
+        stderr.contains("not found"),
+        "runs show should report not found. stderr: {stderr}"
+    );
+}
+
+/// Test: `runs tail <id>` for a run with no log file exits zero and names the
+/// missing path without panicking (issue #51).
+/// @plan:issue-51
+#[test]
+fn test_runs_tail_missing_log_is_graceful() {
+    let mut cmd = luther_workflow_bin();
+    cmd.args(["runs", "tail", "no-such-run-for-tail-51"]);
+    let output = cmd.output().expect("Failed to execute runs tail");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "runs tail with a missing log should exit zero"
+    );
+    assert!(
+        stdout.contains("No log file at"),
+        "runs tail should name the missing log path. stdout: {stdout}"
+    );
+}
+
+/// Test: `runs ps --json` emits a valid JSON array (issue #51).
+/// @plan:issue-51
+#[test]
+fn test_runs_ps_json_is_array() {
+    let mut cmd = luther_workflow_bin();
+    cmd.args(["runs", "ps", "--json"]);
+    let output = cmd.output().expect("Failed to execute runs ps");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let value: serde_json::Value =
+        serde_json::from_str(&stdout).expect("runs ps --json should emit valid JSON");
+    assert!(
+        value.is_array(),
+        "runs ps --json should be a JSON array. stdout: {stdout}"
+    );
+}
+
+/// Test: `status --config <id>` is recognized and runs without panicking
+/// (issue #51).
+/// @plan:issue-51
+#[test]
+fn test_status_config_filter_recognized() {
+    let mut cmd = luther_workflow_bin();
+    cmd.args(["status", "--config", "some-config", "--json"]);
+    let output = cmd.output().expect("Failed to execute status --config");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("unrecognized") && !stderr.contains("unexpected argument"),
+        "status --config should be recognized. stderr: {stderr}"
+    );
+    // JSON path should still emit a parseable object.
+    let _value: serde_json::Value =
+        serde_json::from_str(&stdout).expect("status --json should emit valid JSON");
+}
