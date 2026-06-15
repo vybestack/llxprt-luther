@@ -2,6 +2,8 @@
 pub mod adapters;
 /// @plan:PLAN-20260404-INITIAL-RUNTIME.P12
 pub mod cli;
+/// @plan:PLAN-20260404-INITIAL-RUNTIME.P09
+pub mod daemon;
 /// @plan:PLAN-20260404-INITIAL-RUNTIME.P03
 pub mod engine;
 /// @plan:PLAN-20260404-INITIAL-RUNTIME.P09

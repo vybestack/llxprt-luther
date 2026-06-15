@@ -9,6 +9,9 @@ use luther_workflow::adapters::llxprt::{
     run_preflight as run_llxprt_preflight, LlxprtError, SystemLlxprtCommandRunner,
 };
 use luther_workflow::cli::{parse_args, Commands};
+use luther_workflow::daemon::{
+    is_daemon_alive, stop_daemon, DaemonState, DaemonStatus, DaemonStore, StopOutcome,
+};
 use luther_workflow::engine::executor::ExecutorRegistry;
 use luther_workflow::engine::instance::WorkflowInstance;
 use luther_workflow::engine::runner::{EngineRunner, RunOutcome};
@@ -42,6 +45,9 @@ async fn main() {
         }
         Commands::Service(args) => {
             handle_service_command(&args).await;
+        }
+        Commands::Daemon(args) => {
+            handle_daemon_command(&args).await;
         }
     }
 }
@@ -640,4 +646,275 @@ fn report_service_error_json(err: &luther_workflow::service::ServiceManagerError
         "remediation": err.get_remediation_steps(),
     });
     println!("{payload}");
+}
+
+/// Derive the config id (file stem) from a `--config` path, mirroring
+/// `handle_run_command`.
+/// @plan:PLAN-20260404-INITIAL-RUNTIME.P09
+fn daemon_config_id(config: &std::path::Path) -> String {
+    config.file_stem().map_or_else(
+        || "default".to_string(),
+        |s| s.to_string_lossy().to_string(),
+    )
+}
+
+/// Dispatch the `daemon` command family.
+/// @plan:PLAN-20260404-INITIAL-RUNTIME.P09
+async fn handle_daemon_command(args: &luther_workflow::cli::DaemonArgs) {
+    use luther_workflow::cli::DaemonCommand;
+
+    let store = DaemonStore::production();
+    match &args.command {
+        DaemonCommand::Start(start) => {
+            println!("Starting daemon in foreground (Ctrl-C to stop)...");
+            handle_daemon_run(&store, &start.config, start.force).await;
+        }
+        DaemonCommand::Run(run) => {
+            handle_daemon_run(&store, &run.config, run.force).await;
+        }
+        DaemonCommand::Stop(stop) => handle_daemon_stop(&store, stop),
+        DaemonCommand::Status(status) => handle_daemon_status(&store, status),
+    }
+}
+
+/// Acquire the per-config singleton lock, honoring `--force` recovery.
+///
+/// Returns the held guard on success, or `None` after printing a clear error
+/// when another live daemon owns the lock.
+/// @plan:PLAN-20260404-INITIAL-RUNTIME.P09
+fn acquire_daemon_lock(
+    store: &DaemonStore,
+    config_id: &str,
+    force: bool,
+) -> Option<luther_workflow::monitor::SingletonGuard> {
+    use luther_workflow::monitor::{acquire_singleton_lock, process::MonitorError};
+
+    let lock_path = store.lock_path(config_id).to_string_lossy().to_string();
+    match acquire_singleton_lock(&lock_path) {
+        Ok(guard) => Some(guard),
+        Err(MonitorError::LockHeld { pid }) => {
+            if force {
+                let _ = std::fs::remove_file(&lock_path);
+                match acquire_singleton_lock(&lock_path) {
+                    Ok(guard) => Some(guard),
+                    Err(e) => {
+                        eprintln!("Error: failed to replace daemon lock for '{config_id}': {e}");
+                        None
+                    }
+                }
+            } else {
+                eprintln!(
+                    "Error: daemon already running (config={config_id}, pid={pid}). \
+                     Use --force to replace it."
+                );
+                None
+            }
+        }
+        Err(e) => {
+            eprintln!("Error: failed to acquire daemon lock for '{config_id}': {e}");
+            None
+        }
+    }
+}
+
+/// Run a foreground daemon for the given config with clean Ctrl-C handling.
+/// @plan:PLAN-20260404-INITIAL-RUNTIME.P09
+async fn handle_daemon_run(store: &DaemonStore, config: &std::path::Path, force: bool) {
+    let config_id = daemon_config_id(config);
+
+    let _guard = match acquire_daemon_lock(store, &config_id, force) {
+        Some(guard) => guard,
+        None => process::exit(1),
+    };
+
+    let mut state = DaemonState::new(&config_id);
+    if let Err(e) = store.write(&state) {
+        eprintln!("Error: failed to persist daemon state: {e}");
+        process::exit(1);
+    }
+    state.set_status(DaemonStatus::Running);
+    let _ = store.write(&state);
+
+    println!("Daemon running (config={config_id}, pid={}).", state.pid);
+
+    let shutdown = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    install_interrupt_handlers(shutdown.clone());
+
+    run_daemon_heartbeat_loop(store, &mut state, &shutdown).await;
+
+    state.set_status(DaemonStatus::Stopping);
+    let _ = store.write(&state);
+    state.set_status(DaemonStatus::Stopped);
+    let _ = store.write(&state);
+    println!("Daemon stopped (config={config_id}).");
+}
+
+/// Refresh the heartbeat until the shutdown flag is set.
+///
+/// Uses a short tick so Ctrl-C is responsive while only writing the heartbeat
+/// roughly every 30 seconds.
+/// @plan:PLAN-20260404-INITIAL-RUNTIME.P09
+async fn run_daemon_heartbeat_loop(
+    store: &DaemonStore,
+    state: &mut DaemonState,
+    shutdown: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+) {
+    use std::sync::atomic::Ordering;
+
+    let mut ticks: u32 = 0;
+    while !shutdown.load(Ordering::SeqCst) {
+        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+        ticks += 1;
+        if ticks >= 150 {
+            ticks = 0;
+            state.touch_heartbeat();
+            let _ = store.write(state);
+        }
+    }
+}
+
+/// Handle `daemon stop` for a single config or `--all`.
+/// @plan:PLAN-20260404-INITIAL-RUNTIME.P09
+fn handle_daemon_stop(store: &DaemonStore, args: &luther_workflow::cli::DaemonStopArgs) {
+    if args.all {
+        stop_all_daemons(store);
+        return;
+    }
+    let Some(config) = &args.config else {
+        eprintln!("Error: daemon stop requires --config <PATH> or --all.");
+        process::exit(1);
+    };
+    let config_id = daemon_config_id(config);
+    report_stop_outcome(&config_id, stop_daemon(store, &config_id));
+}
+
+/// Print a human-readable summary for a single stop outcome.
+/// @plan:PLAN-20260404-INITIAL-RUNTIME.P09
+fn report_stop_outcome(config_id: &str, outcome: StopOutcome) {
+    match outcome {
+        StopOutcome::Stopped => println!("Stopped daemon (config={config_id})."),
+        StopOutcome::AlreadyStopped => {
+            println!("Daemon already stopped (config={config_id}).");
+        }
+        StopOutcome::NotFound => println!("No daemon found (config={config_id})."),
+    }
+}
+
+/// Stop every known daemon instance, continuing past individual failures.
+/// @plan:PLAN-20260404-INITIAL-RUNTIME.P09
+fn stop_all_daemons(store: &DaemonStore) {
+    let states = store.read_all();
+    if states.is_empty() {
+        println!("No daemons found.");
+        return;
+    }
+    let mut stopped = 0u32;
+    let mut already = 0u32;
+    for state in &states {
+        match stop_daemon(store, &state.config_id) {
+            StopOutcome::Stopped => stopped += 1,
+            StopOutcome::AlreadyStopped | StopOutcome::NotFound => already += 1,
+        }
+    }
+    println!("{stopped} stopped, {already} already stopped.");
+}
+
+/// Handle `daemon status` for a single config or the aggregate view.
+/// @plan:PLAN-20260404-INITIAL-RUNTIME.P09
+fn handle_daemon_status(store: &DaemonStore, args: &luther_workflow::cli::DaemonStatusArgs) {
+    match &args.config {
+        Some(config) => {
+            let config_id = daemon_config_id(config);
+            daemon_status_single(store, &config_id, args.json);
+        }
+        None => daemon_status_all(store, args.json),
+    }
+}
+
+/// Build a JSON value describing one daemon state, including liveness.
+/// @plan:PLAN-20260404-INITIAL-RUNTIME.P09
+fn daemon_state_json(state: &DaemonState) -> serde_json::Value {
+    let now = chrono::Utc::now().timestamp();
+    serde_json::json!({
+        "config_id": state.config_id,
+        "pid": state.pid,
+        "status": state.status.to_string(),
+        "start_timestamp": state.start_timestamp,
+        "heartbeat_timestamp": state.heartbeat_timestamp,
+        "uptime_secs": state.uptime_secs(now),
+        "alive": is_daemon_alive(state.pid),
+    })
+}
+
+/// Render detailed status for a single config.
+/// @plan:PLAN-20260404-INITIAL-RUNTIME.P09
+fn daemon_status_single(store: &DaemonStore, config_id: &str, json: bool) {
+    let Some(state) = store.read(config_id) else {
+        if json {
+            println!(
+                "{}",
+                serde_json::json!({ "config_id": config_id, "found": false })
+            );
+        } else {
+            println!("No daemon found (config={config_id}).");
+        }
+        return;
+    };
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&daemon_state_json(&state)).unwrap_or_default()
+        );
+        return;
+    }
+    let now = chrono::Utc::now().timestamp();
+    let alive = is_daemon_alive(state.pid);
+    println!("Daemon status (config={config_id})");
+    println!("  PID: {}", state.pid);
+    println!("  Status: {}", daemon_display_status(&state, alive));
+    println!("  Uptime: {}s", state.uptime_secs(now));
+    println!("  Last heartbeat: {}", state.heartbeat_timestamp);
+}
+
+/// Compute the displayed status token, marking running-but-dead as `stale`.
+/// @plan:PLAN-20260404-INITIAL-RUNTIME.P09
+fn daemon_display_status(state: &DaemonState, alive: bool) -> String {
+    if state.status == DaemonStatus::Running && !alive {
+        "stale".to_string()
+    } else {
+        state.status.to_string()
+    }
+}
+
+/// Render the aggregate status across all known daemons.
+/// @plan:PLAN-20260404-INITIAL-RUNTIME.P09
+fn daemon_status_all(store: &DaemonStore, json: bool) {
+    let states = store.read_all();
+    if json {
+        let array: Vec<serde_json::Value> = states.iter().map(daemon_state_json).collect();
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!(array)).unwrap_or_default()
+        );
+        return;
+    }
+    if states.is_empty() {
+        println!("No daemons found.");
+        return;
+    }
+    println!(
+        "{:<24} {:>8}  {:<10} {:>10}",
+        "CONFIG", "PID", "STATUS", "UPTIME"
+    );
+    let now = chrono::Utc::now().timestamp();
+    for state in &states {
+        let alive = is_daemon_alive(state.pid);
+        println!(
+            "{:<24} {:>8}  {:<10} {:>9}s",
+            state.config_id,
+            state.pid,
+            daemon_display_status(state, alive),
+            state.uptime_secs(now)
+        );
+    }
 }

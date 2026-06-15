@@ -66,6 +66,22 @@ pub fn get_artifacts_root() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(".luther-workflow/artifacts"))
 }
 
+/// Get the root directory for per-config daemon state.
+///
+/// Each daemon instance persists its state under
+/// `<data_dir>/daemons/<config_id>/` so other CLI commands can build an
+/// aggregate view across configs (issue #48).
+///
+/// # Returns
+/// PathBuf to the daemons root directory
+///
+/// @plan:PLAN-20260404-INITIAL-RUNTIME.P10
+pub fn get_daemons_root() -> PathBuf {
+    project_dirs()
+        .map(|d| d.data_dir().join("daemons"))
+        .unwrap_or_else(|| PathBuf::from(".luther-workflow/daemons"))
+}
+
 /// Get the log directory for service stdout/stderr and diagnostics.
 ///
 /// Installed services and service error messages share this single log
@@ -130,6 +146,21 @@ mod tests {
         assert!(
             path.to_string_lossy().contains("artifacts")
                 || path.to_string_lossy().contains(".luther")
+        );
+    }
+
+    #[test]
+    fn get_daemons_root_returns_valid_path() {
+        let path = get_daemons_root();
+        assert!(!path.as_os_str().is_empty());
+        let path_str = path.to_string_lossy();
+        assert!(
+            path_str.contains("luther") || path_str.contains(".luther"),
+            "daemons root should reference luther: {path_str}"
+        );
+        assert!(
+            path_str.contains("daemons"),
+            "daemons root should reference daemons: {path_str}"
         );
     }
 
