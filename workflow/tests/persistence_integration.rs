@@ -85,6 +85,7 @@ fn test_workflow_config() -> WorkflowConfig {
             max_cost: Some(10.0),
         },
         variables: std::collections::HashMap::new(),
+        discovery: None,
     }
 }
 

@@ -3,4 +3,5 @@
 /// @plan:PLAN-20260404-INITIAL-RUNTIME.P10
 pub mod git;
 pub mod github;
+pub mod github_issues;
 pub mod llxprt;

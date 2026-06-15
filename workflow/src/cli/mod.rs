@@ -187,6 +187,47 @@ pub enum DaemonCommand {
     /// Show daemon status (single config or aggregate)
     #[command(name = "status")]
     Status(DaemonStatusArgs),
+    /// Dry-run discovery of eligible issues for a config
+    #[command(name = "discover")]
+    Discover(DaemonDiscoverArgs),
+    /// List the issue-lease queue (pending/claimed/running/...)
+    #[command(name = "queue")]
+    Queue(DaemonQueueArgs),
+}
+
+/// Arguments for `daemon discover` (dry-run issue discovery).
+/// @plan:PLAN-20260415-DAEMON-DISCOVERY.P05
+/// @requirement:REQ-DAEMON-DISCOVERY-004
+#[derive(Args, Debug)]
+pub struct DaemonDiscoverArgs {
+    /// Path to config file (config id is its file stem)
+    #[arg(short, long, value_name = "PATH")]
+    pub config: PathBuf,
+    /// Directory containing workflows/ and workflow-configs/ subdirectories
+    #[arg(long, value_name = "DIR")]
+    pub config_dir: Option<PathBuf>,
+    /// Output in JSON format
+    #[arg(long)]
+    pub json: bool,
+}
+
+/// Arguments for `daemon queue` (issue-lease queue listing).
+/// @plan:PLAN-20260415-DAEMON-DISCOVERY.P05
+/// @requirement:REQ-DAEMON-DISCOVERY-002
+#[derive(Args, Debug)]
+pub struct DaemonQueueArgs {
+    /// Optional path to config file to filter the queue by config id
+    #[arg(short, long, value_name = "PATH")]
+    pub config: Option<PathBuf>,
+    /// Directory containing workflows/ and workflow-configs/ subdirectories
+    #[arg(long, value_name = "DIR")]
+    pub config_dir: Option<PathBuf>,
+    /// Filter to a single lease status (pending/claimed/running/...)
+    #[arg(long, value_name = "STATUS")]
+    pub status: Option<String>,
+    /// Output in JSON format
+    #[arg(long)]
+    pub json: bool,
 }
 
 /// Arguments for `daemon start`.
@@ -217,6 +258,9 @@ pub struct DaemonRunArgs {
     /// Replace an existing daemon for this config (explicit recovery)
     #[arg(long)]
     pub force: bool,
+    /// Run a single discovery/launch pass instead of looping (cron/testing)
+    #[arg(long)]
+    pub once: bool,
 }
 
 /// Arguments for `daemon stop`.
@@ -493,6 +537,78 @@ mod tests {
                 assert_eq!(status.config, None);
             }
             other => panic!("expected daemon status, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn daemon_discover_parses_config_and_json() {
+        // @plan:PLAN-20260415-DAEMON-DISCOVERY.P05
+        let cli = Cli::try_parse_from([
+            "luther-workflow",
+            "daemon",
+            "discover",
+            "--config",
+            "llxprt-code.toml",
+            "--config-dir",
+            "/tmp/cfg",
+            "--json",
+        ])
+        .expect("daemon discover should parse");
+        match cli.command {
+            Commands::Daemon(DaemonArgs {
+                command: DaemonCommand::Discover(args),
+            }) => {
+                assert!(args.json);
+                assert_eq!(args.config, PathBuf::from("llxprt-code.toml"));
+                assert_eq!(args.config_dir, Some(PathBuf::from("/tmp/cfg")));
+            }
+            other => panic!("expected daemon discover, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn daemon_queue_parses_optional_filters() {
+        // @plan:PLAN-20260415-DAEMON-DISCOVERY.P05
+        let cli = Cli::try_parse_from([
+            "luther-workflow",
+            "daemon",
+            "queue",
+            "--status",
+            "running",
+            "--json",
+        ])
+        .expect("daemon queue should parse");
+        match cli.command {
+            Commands::Daemon(DaemonArgs {
+                command: DaemonCommand::Queue(args),
+            }) => {
+                assert!(args.json);
+                assert_eq!(args.config, None);
+                assert_eq!(args.status.as_deref(), Some("running"));
+            }
+            other => panic!("expected daemon queue, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn daemon_run_parses_once_flag() {
+        // @plan:PLAN-20260415-DAEMON-DISCOVERY.P06
+        let cli = Cli::try_parse_from([
+            "luther-workflow",
+            "daemon",
+            "run",
+            "--config",
+            "llxprt-code.toml",
+            "--once",
+        ])
+        .expect("daemon run --once should parse");
+        match cli.command {
+            Commands::Daemon(DaemonArgs {
+                command: DaemonCommand::Run(run),
+            }) => {
+                assert!(run.once);
+            }
+            other => panic!("expected daemon run, got {other:?}"),
         }
     }
 }

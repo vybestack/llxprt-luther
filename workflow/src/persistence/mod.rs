@@ -2,6 +2,7 @@
 /// Persistence module - durable storage for run metadata and state.
 pub mod artifacts;
 pub mod checkpoint;
+pub mod leases;
 pub mod run_metadata;
 pub mod sqlite;
 pub mod trace;
@@ -14,6 +15,11 @@ pub use checkpoint::{
     append_event, append_event_with_conn, list_checkpoints, load_checkpoint,
     load_checkpoint_with_conn, load_events, save_checkpoint, save_checkpoint_with_conn, Checkpoint,
     EventRecord, PersistenceError, StateSnapshot,
+};
+pub use leases::{
+    count_active_leases_for_config, create_lease, get_lease_for_issue, init_leases_table,
+    list_all_leases, list_leases_by_config, list_leases_by_status, mark_stale_leases,
+    touch_lease_heartbeat, try_claim, update_lease_status, IssueLease, LeaseStatus,
 };
 pub use run_metadata::{run_metadata_from_ref, RunMetadata, RunStatus};
 pub use sqlite::{SqliteStore, SqliteStoreRef};
@@ -41,6 +47,12 @@ pub fn init_database(db_path: &Path) -> Result<(), checkpoint::PersistenceError>
     // Initialize checkpoint table
     checkpoint::init_checkpoint_table(&conn).map_err(|e| {
         checkpoint::PersistenceError::Database(format!("Failed to initialize schema: {}", e))
+    })?;
+
+    // Initialize issue-lease table (daemon discovery/claiming).
+    // @plan:PLAN-20260415-DAEMON-DISCOVERY.P02
+    leases::init_leases_table(&conn).map_err(|e| {
+        checkpoint::PersistenceError::Database(format!("Failed to initialize leases schema: {}", e))
     })?;
 
     Ok(())

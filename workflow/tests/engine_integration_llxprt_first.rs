@@ -127,6 +127,7 @@ fn make_config_with_vars(
             max_cost: Some(10.0),
         },
         variables,
+        discovery: None,
     }
 }
 

@@ -221,6 +221,10 @@ fn assert_configs_equivalent(
         toml_config.variables, json_config.variables,
         "variables should match for {fixture_id}"
     );
+    assert_eq!(
+        toml_config.discovery, json_config.discovery,
+        "discovery should match for {fixture_id}"
+    );
 }
 
 /// Test: TOML and JSON fixtures produce equivalent `WorkflowConfig` structs.

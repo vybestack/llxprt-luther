@@ -5,10 +5,12 @@ use std::process;
 use tracing_subscriber::{fmt, EnvFilter};
 
 use luther_workflow::adapters::github::{run_preflight, GithubError, SystemGithubCommandRunner};
+use luther_workflow::adapters::github_issues::SystemGithubIssueQuery;
 use luther_workflow::adapters::llxprt::{
     run_preflight as run_llxprt_preflight, LlxprtError, SystemLlxprtCommandRunner,
 };
 use luther_workflow::cli::{parse_args, Commands};
+use luther_workflow::daemon::discovery::{discover, DiscoveryResult};
 use luther_workflow::daemon::{
     is_daemon_alive, stop_daemon, DaemonState, DaemonStatus, DaemonStore, StopOutcome,
 };
@@ -18,9 +20,12 @@ use luther_workflow::engine::runner::{EngineRunner, RunOutcome};
 use luther_workflow::monitor::heartbeat::read_all_heartbeats;
 use luther_workflow::monitor::heartbeat::MonitorState;
 use luther_workflow::persistence::init_database;
+use luther_workflow::persistence::leases::{
+    list_all_leases, list_leases_by_config, list_leases_by_status, IssueLease, LeaseStatus,
+};
 use luther_workflow::service::{Service, ServiceConfig};
 use luther_workflow::workflow::config_loader::{
-    resolve_workflow, resolve_workflow_config, resolve_workflow_type,
+    resolve_discovery_config, resolve_workflow, resolve_workflow_config, resolve_workflow_type,
     validate_artifact_dependencies, validate_workflow_tokens,
 };
 use luther_workflow::workflow::schema::{WorkflowConfig, WorkflowType};
@@ -369,6 +374,47 @@ fn create_durable_runner(
         }
     }
 }
+/// Production [`WorkflowLauncher`] that builds and executes the durable engine
+/// runner for a claimed issue, applying `repo`/`issue` overrides to the config.
+/// @plan:PLAN-20260415-DAEMON-DISCOVERY.P06
+struct DaemonWorkflowLauncher {
+    config_id: String,
+}
+
+impl DaemonWorkflowLauncher {
+    fn new(config_id: String) -> Self {
+        Self { config_id }
+    }
+}
+
+impl luther_workflow::daemon::launcher::WorkflowLauncher for DaemonWorkflowLauncher {
+    fn launch(
+        &self,
+        request: &luther_workflow::daemon::launcher::LaunchRequest,
+    ) -> Result<bool, String> {
+        let config_root = std::path::PathBuf::from("config");
+        let mut config = resolve_workflow_config(&self.config_id, &config_root)
+            .map_err(|e| format!("resolve config '{}': {e}", self.config_id))?;
+        let workflow_type = resolve_workflow_type(&config.workflow_type_id, &config_root)
+            .map_err(|e| format!("resolve workflow type: {e}"))?;
+        let overrides = TargetProfileOverrides {
+            repo: Some(request.repo.clone()),
+            issue: Some(request.issue_number.to_string()),
+            work_dir: None,
+            artifact_dir: None,
+        };
+        apply_target_profile_overrides(&mut config, &overrides)
+            .map_err(|e| format!("apply overrides: {e}"))?;
+        let db_path = luther_workflow::runtime_paths::get_data_dir().join("checkpoints.db");
+        let mut runner = create_durable_runner(workflow_type, config, &request.run_id, &db_path);
+        match runner.run() {
+            Ok(RunOutcome::Success) => Ok(true),
+            Ok(_) => Ok(false),
+            Err(e) => Err(format!("run error: {e}")),
+        }
+    }
+}
+
 fn install_interrupt_handlers(interrupted: std::sync::Arc<std::sync::atomic::AtomicBool>) {
     let sigint_flag = interrupted.clone();
     tokio::spawn(async move {
@@ -667,13 +713,220 @@ async fn handle_daemon_command(args: &luther_workflow::cli::DaemonArgs) {
     match &args.command {
         DaemonCommand::Start(start) => {
             println!("Starting daemon in foreground (Ctrl-C to stop)...");
-            handle_daemon_run(&store, &start.config, start.force).await;
+            handle_daemon_run(&store, &start.config, start.force, &start.config_dir, false).await;
         }
         DaemonCommand::Run(run) => {
-            handle_daemon_run(&store, &run.config, run.force).await;
+            handle_daemon_run(&store, &run.config, run.force, &run.config_dir, run.once).await;
         }
         DaemonCommand::Stop(stop) => handle_daemon_stop(&store, stop),
         DaemonCommand::Status(status) => handle_daemon_status(&store, status),
+        DaemonCommand::Discover(discover_args) => handle_daemon_discover_command(discover_args),
+        DaemonCommand::Queue(queue_args) => handle_daemon_queue_command(queue_args),
+    }
+}
+
+/// Resolve the discovery config for a `--config` path under `--config-dir`.
+/// @plan:PLAN-20260415-DAEMON-DISCOVERY.P05
+fn resolve_discovery_for(
+    config: &std::path::Path,
+    config_dir: &Option<std::path::PathBuf>,
+) -> luther_workflow::workflow::schema::DiscoveryConfig {
+    let config_root = config_dir
+        .clone()
+        .unwrap_or_else(|| std::path::PathBuf::from("config"));
+    let config_id = daemon_config_id(config);
+    let cfg = match resolve_workflow_config(&config_id, &config_root) {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            eprintln!("Error: Failed to resolve config '{config_id}': {e}");
+            process::exit(1);
+        }
+    };
+    resolve_discovery_config(&cfg)
+}
+
+/// Open the shared checkpoints database (creating schema if needed).
+/// @plan:PLAN-20260415-DAEMON-DISCOVERY.P05
+fn open_daemon_db() -> rusqlite::Connection {
+    let db_path = luther_workflow::runtime_paths::get_data_dir().join("checkpoints.db");
+    if let Err(e) = init_database(&db_path) {
+        eprintln!("Error: Failed to initialize database: {e}");
+        process::exit(1);
+    }
+    match rusqlite::Connection::open(&db_path) {
+        Ok(conn) => conn,
+        Err(e) => {
+            eprintln!("Error: Failed to open database: {e}");
+            process::exit(1);
+        }
+    }
+}
+
+/// Handle `daemon discover`: dry-run issue discovery for a config.
+/// @plan:PLAN-20260415-DAEMON-DISCOVERY.P05
+/// @requirement:REQ-DAEMON-DISCOVERY-004
+fn handle_daemon_discover_command(args: &luther_workflow::cli::DaemonDiscoverArgs) {
+    let discovery = resolve_discovery_for(&args.config, &args.config_dir);
+    let config_id = daemon_config_id(&args.config);
+    let conn = open_daemon_db();
+    let active =
+        luther_workflow::persistence::leases::count_active_leases_for_config(&conn, &config_id)
+            .unwrap_or(0);
+    let query = SystemGithubIssueQuery::new(SystemGithubCommandRunner);
+    let result = match discover(&discovery, &query, &conn, active) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("Error: discovery failed: {e}");
+            process::exit(1);
+        }
+    };
+    if args.json {
+        print_discovery_json(&result);
+    } else {
+        print_discovery_text(&result);
+    }
+}
+
+/// Print discovery results as JSON.
+/// @plan:PLAN-20260415-DAEMON-DISCOVERY.P05
+fn print_discovery_json(result: &DiscoveryResult) {
+    let eligible: Vec<serde_json::Value> = result
+        .eligible
+        .iter()
+        .map(|i| {
+            serde_json::json!({
+                "number": i.number,
+                "title": i.title,
+                "labels": i.labels,
+            })
+        })
+        .collect();
+    let skipped: Vec<serde_json::Value> = result
+        .skipped
+        .iter()
+        .map(|(i, reason)| {
+            serde_json::json!({
+                "number": i.number,
+                "title": i.title,
+                "reason": reason.code(),
+                "detail": reason.to_string(),
+            })
+        })
+        .collect();
+    let payload = serde_json::json!({ "eligible": eligible, "skipped": skipped });
+    println!("{}", serde_json::to_string_pretty(&payload).unwrap());
+}
+
+/// Print discovery results in human-readable form.
+/// @plan:PLAN-20260415-DAEMON-DISCOVERY.P05
+fn print_discovery_text(result: &DiscoveryResult) {
+    println!("Eligible issues ({}):", result.eligible.len());
+    for issue in &result.eligible {
+        println!(
+            "  #{} {} [{}]",
+            issue.number,
+            issue.title,
+            issue.labels.join(", ")
+        );
+    }
+    println!("Skipped issues ({}):", result.skipped.len());
+    for (issue, reason) in &result.skipped {
+        println!("  #{} {} — {}", issue.number, issue.title, reason);
+    }
+}
+
+/// Handle `daemon queue`: list issue leases grouped by status.
+/// @plan:PLAN-20260415-DAEMON-DISCOVERY.P05
+/// @requirement:REQ-DAEMON-DISCOVERY-002
+fn handle_daemon_queue_command(args: &luther_workflow::cli::DaemonQueueArgs) {
+    let conn = open_daemon_db();
+    let leases = collect_queue_leases(&conn, args);
+    if args.json {
+        print_queue_json(&leases);
+    } else {
+        print_queue_text(&leases);
+    }
+}
+
+/// Collect leases for the queue command honoring `--config` and `--status`.
+/// @plan:PLAN-20260415-DAEMON-DISCOVERY.P05
+fn collect_queue_leases(
+    conn: &rusqlite::Connection,
+    args: &luther_workflow::cli::DaemonQueueArgs,
+) -> Vec<IssueLease> {
+    let base = if let Some(config) = &args.config {
+        let config_id = daemon_config_id(config);
+        list_leases_by_config(conn, &config_id).unwrap_or_default()
+    } else if let Some(status) = &args.status {
+        match status.parse::<LeaseStatus>() {
+            Ok(s) => return list_leases_by_status(conn, s).unwrap_or_default(),
+            Err(e) => {
+                eprintln!("Error: invalid --status: {e}");
+                process::exit(1);
+            }
+        }
+    } else {
+        list_all_leases(conn).unwrap_or_default()
+    };
+    if let Some(status) = &args.status {
+        match status.parse::<LeaseStatus>() {
+            Ok(s) => base.into_iter().filter(|l| l.status == s).collect(),
+            Err(e) => {
+                eprintln!("Error: invalid --status: {e}");
+                process::exit(1);
+            }
+        }
+    } else {
+        base
+    }
+}
+
+/// Print the lease queue as JSON.
+/// @plan:PLAN-20260415-DAEMON-DISCOVERY.P05
+fn print_queue_json(leases: &[IssueLease]) {
+    let items: Vec<serde_json::Value> = leases
+        .iter()
+        .map(|l| {
+            serde_json::json!({
+                "issue_repo": l.issue_repo,
+                "issue_number": l.issue_number,
+                "config_id": l.config_id,
+                "run_id": l.run_id,
+                "status": l.status.to_string(),
+            })
+        })
+        .collect();
+    println!("{}", serde_json::to_string_pretty(&items).unwrap());
+}
+
+/// Print the lease queue grouped by status.
+/// @plan:PLAN-20260415-DAEMON-DISCOVERY.P05
+fn print_queue_text(leases: &[IssueLease]) {
+    if leases.is_empty() {
+        println!("Queue is empty.");
+        return;
+    }
+    for status in [
+        LeaseStatus::Pending,
+        LeaseStatus::Claimed,
+        LeaseStatus::Running,
+        LeaseStatus::Completed,
+        LeaseStatus::Failed,
+        LeaseStatus::Abandoned,
+        LeaseStatus::Stale,
+    ] {
+        let group: Vec<&IssueLease> = leases.iter().filter(|l| l.status == status).collect();
+        if group.is_empty() {
+            continue;
+        }
+        println!("{} ({}):", status, group.len());
+        for lease in group {
+            let run = lease.run_id.as_deref().unwrap_or("-");
+            println!(
+                "  {}#{} config={} run={}",
+                lease.issue_repo, lease.issue_number, lease.config_id, run
+            );
+        }
     }
 }
 
@@ -718,8 +971,19 @@ fn acquire_daemon_lock(
 }
 
 /// Run a foreground daemon for the given config with clean Ctrl-C handling.
+///
+/// When the resolved `[discovery]` config is enabled, the daemon drives the
+/// discovery/launch scheduler (still writing heartbeats); otherwise it keeps
+/// the original heartbeat-only behavior. `once` performs a single pass.
 /// @plan:PLAN-20260404-INITIAL-RUNTIME.P09
-async fn handle_daemon_run(store: &DaemonStore, config: &std::path::Path, force: bool) {
+/// @plan:PLAN-20260415-DAEMON-DISCOVERY.P06
+async fn handle_daemon_run(
+    store: &DaemonStore,
+    config: &std::path::Path,
+    force: bool,
+    config_dir: &Option<std::path::PathBuf>,
+    once: bool,
+) {
     let config_id = daemon_config_id(config);
 
     let _guard = match acquire_daemon_lock(store, &config_id, force) {
@@ -740,13 +1004,91 @@ async fn handle_daemon_run(store: &DaemonStore, config: &std::path::Path, force:
     let shutdown = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     install_interrupt_handlers(shutdown.clone());
 
-    run_daemon_heartbeat_loop(store, &mut state, &shutdown).await;
+    let discovery = resolve_discovery_for(config, config_dir);
+    if discovery.enabled {
+        run_daemon_discovery_loop(store, &mut state, &shutdown, &discovery, &config_id, once).await;
+    } else {
+        run_daemon_heartbeat_loop(store, &mut state, &shutdown).await;
+    }
 
     state.set_status(DaemonStatus::Stopping);
     let _ = store.write(&state);
     state.set_status(DaemonStatus::Stopped);
     let _ = store.write(&state);
     println!("Daemon stopped (config={config_id}).");
+}
+
+/// Drive the discovery/launch scheduler, writing heartbeats between passes.
+///
+/// Runs in a blocking task because the scheduler and SQLite access are
+/// synchronous; the heartbeat is refreshed on the async side between passes.
+/// @plan:PLAN-20260415-DAEMON-DISCOVERY.P06
+async fn run_daemon_discovery_loop(
+    store: &DaemonStore,
+    state: &mut DaemonState,
+    shutdown: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    discovery: &luther_workflow::workflow::schema::DiscoveryConfig,
+    config_id: &str,
+    once: bool,
+) {
+    use std::sync::atomic::Ordering;
+
+    let conn = open_daemon_db();
+    let query = SystemGithubIssueQuery::new(SystemGithubCommandRunner);
+    let launcher = DaemonWorkflowLauncher::new(config_id.to_string());
+    let stale_timeout = discovery
+        .poll_interval_secs
+        .unwrap_or(300)
+        .saturating_mul(4);
+
+    if let Ok(recovered) =
+        luther_workflow::persistence::leases::mark_stale_leases(&conn, stale_timeout)
+    {
+        if recovered > 0 {
+            println!("recovered {recovered} stale lease(s) on startup");
+        }
+    }
+
+    let poll = discovery.poll_interval_secs.unwrap_or(300);
+    loop {
+        if shutdown.load(Ordering::SeqCst) {
+            break;
+        }
+        match luther_workflow::daemon::scheduler::run_once(
+            discovery, &query, &conn, &launcher, config_id,
+        ) {
+            Ok(summary) if summary.launched > 0 || summary.failed > 0 => {
+                println!(
+                    "scheduler pass: {} launched, {} failed, {} skipped",
+                    summary.launched, summary.failed, summary.skipped
+                );
+            }
+            Ok(_) => {}
+            Err(e) => eprintln!("scheduler error: {e}"),
+        }
+        state.touch_heartbeat();
+        let _ = store.write(state);
+        if once {
+            break;
+        }
+        sleep_secs_with_shutdown(poll, shutdown).await;
+    }
+}
+
+/// Async sleep up to `secs` that wakes early when shutdown is requested.
+/// @plan:PLAN-20260415-DAEMON-DISCOVERY.P06
+async fn sleep_secs_with_shutdown(
+    secs: u64,
+    shutdown: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+) {
+    use std::sync::atomic::Ordering;
+    let ticks = secs.saturating_mul(5);
+    for _ in 0..ticks {
+        if shutdown.load(Ordering::SeqCst) {
+            return;
+        }
+        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+    }
 }
 
 /// Refresh the heartbeat until the shutdown flag is set.

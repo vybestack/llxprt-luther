@@ -139,6 +139,7 @@ fn hello_world_config() -> WorkflowConfig {
             max_cost: Some(1.0),
         },
         variables: std::collections::HashMap::new(),
+        discovery: None,
     }
 }
 
