@@ -656,7 +656,11 @@ fn next_step_label(md: &luther_workflow::persistence::RunMetadata) -> String {
 fn run_metadata_to_json(md: &luther_workflow::persistence::RunMetadata) -> serde_json::Value {
     serde_json::json!({
         "run_id": md.run_id,
+        "config_id": md.config_id,
+        "workflow_type_id": md.workflow_type_id,
         "status": md.status.to_string(),
+        "created_at": md.created_at.to_rfc3339(),
+        "updated_at": md.updated_at.unwrap_or(md.created_at).to_rfc3339(),
         "current_step": md.current_step,
         "previous_step": md.previous_step,
         "previous_outcome": md.previous_outcome,
@@ -1624,12 +1628,13 @@ fn print_runs_table(runs: &[RunMetadata]) {
 /// Truncate a field for fixed-width table rendering.
 /// @plan:issue-51
 fn truncate_field(value: &str, width: usize) -> String {
-    if value.len() <= width {
+    if value.chars().count() <= width {
         value.to_string()
     } else if width <= 1 {
         value.chars().take(width).collect()
     } else {
-        format!("{}…", &value[..width - 1])
+        let prefix: String = value.chars().take(width - 1).collect();
+        format!("{prefix}…")
     }
 }
 
@@ -1660,7 +1665,7 @@ fn handle_runs_show(args: &luther_workflow::cli::RunsShowArgs) {
     };
     let events = load_events(store.conn(), &args.run_id).unwrap_or_default();
     let artifacts = list_artifacts(&args.run_id).unwrap_or_default();
-    let log_path = run_log_path(&args.run_id);
+    let log_path = effective_log_path(&md, &args.run_id);
     let log_exists = log_path.exists();
     if args.json {
         print_runs_show_json(&md, &events, &artifacts, &log_path, log_exists);
@@ -1673,6 +1678,15 @@ fn handle_runs_show(args: &luther_workflow::cli::RunsShowArgs) {
 /// @plan:issue-51
 fn run_log_path(run_id: &str) -> std::path::PathBuf {
     luther_workflow::runtime_paths::get_log_dir().join(format!("{run_id}.log"))
+}
+
+/// Resolve the effective log path for a run, preferring the persisted
+/// `RunMetadata.log_path` and falling back to the conventional path.
+/// @plan:issue-51
+fn effective_log_path(md: &RunMetadata, run_id: &str) -> std::path::PathBuf {
+    md.log_path
+        .as_deref()
+        .map_or_else(|| run_log_path(run_id), std::path::PathBuf::from)
 }
 
 /// Render `runs show` as JSON (issue #51).
@@ -1866,7 +1880,12 @@ async fn resolve_tail_run_id(args: &luther_workflow::cli::RunsTailArgs) -> Resul
         .map_err(|e| format!("failed to read heartbeats: {e}"))?;
     let active: Vec<String> = heartbeats
         .values()
-        .filter(|hb| matches!(hb.state, MonitorState::Running | MonitorState::Starting))
+        .filter(|hb| {
+            matches!(
+                hb.state,
+                MonitorState::Running | MonitorState::Starting | MonitorState::Degraded
+            )
+        })
         .filter_map(|hb| hb.run_id.clone())
         .collect();
     match active.len() {
@@ -1876,13 +1895,26 @@ async fn resolve_tail_run_id(args: &luther_workflow::cli::RunsTailArgs) -> Resul
     }
 }
 
-/// Read the last `n` lines of a file.
+/// Read the last `n` lines of a file using a bounded buffer.
 /// @plan:issue-51
 fn tail_lines(path: &std::path::Path, n: usize) -> std::io::Result<Vec<String>> {
-    let content = std::fs::read_to_string(path)?;
-    let lines: Vec<&str> = content.lines().collect();
-    let start = lines.len().saturating_sub(n);
-    Ok(lines[start..].iter().map(|s| s.to_string()).collect())
+    use std::collections::VecDeque;
+    use std::io::BufRead;
+
+    if n == 0 {
+        return Ok(Vec::new());
+    }
+    let file = std::fs::File::open(path)?;
+    let reader = std::io::BufReader::new(file);
+    let mut tail: VecDeque<String> = VecDeque::with_capacity(n);
+    for line in reader.lines() {
+        let line = line?;
+        if tail.len() == n {
+            tail.pop_front();
+        }
+        tail.push_back(line);
+    }
+    Ok(tail.into_iter().collect())
 }
 
 /// Handle `runs tail` (issue #51).
@@ -1895,7 +1927,13 @@ async fn handle_runs_tail(args: &luther_workflow::cli::RunsTailArgs) {
             process::exit(1);
         }
     };
-    let log_path = run_log_path(&run_id);
+    let log_path = match open_runs_store() {
+        Ok(Some(store)) => match store.get_run(&run_id) {
+            Ok(Some(md)) => effective_log_path(&md, &run_id),
+            _ => run_log_path(&run_id),
+        },
+        _ => run_log_path(&run_id),
+    };
     if !log_path.exists() {
         let artifacts = list_artifacts(&run_id).unwrap_or_default();
         if args.json {
@@ -1924,7 +1962,13 @@ async fn handle_runs_tail(args: &luther_workflow::cli::RunsTailArgs) {
         }
         return;
     }
-    let lines = tail_lines(&log_path, args.lines).unwrap_or_default();
+    let lines = match tail_lines(&log_path, args.lines) {
+        Ok(lines) => lines,
+        Err(e) => {
+            eprintln!("Error: failed to read log file {}: {e}", log_path.display());
+            process::exit(1);
+        }
+    };
     if args.json {
         let value = serde_json::json!({
             "run_id": run_id,
@@ -2067,12 +2111,12 @@ async fn handle_runs_ps(args: &luther_workflow::cli::RunsPsArgs) {
         return;
     }
     println!(
-        "{:<18} {:<24} {:<10} {:>7} {:>9} {:>8} {:<5}",
-        "INSTANCE", "RUN ID", "STATE", "WORKERS", "UPTIME", "PID", "STALE"
+        "{:<18} {:<24} {:<10} {:>7} {:>9} {:>8} {:<5} {:<20}",
+        "INSTANCE", "RUN ID", "STATE", "WORKERS", "UPTIME", "PID", "STALE", "CHILD PIDS"
     );
     for row in &rows {
         println!(
-            "{:<18} {:<24} {:<10} {:>7} {:>8}s {:>8} {:<5}",
+            "{:<18} {:<24} {:<10} {:>7} {:>8}s {:>8} {:<5} {:<20}",
             truncate_field(&row.instance_id, 18),
             truncate_field(row.run_id.as_deref().unwrap_or("-"), 24),
             row.state,
@@ -2080,6 +2124,26 @@ async fn handle_runs_ps(args: &luther_workflow::cli::RunsPsArgs) {
             row.uptime_secs,
             row.pid.map_or_else(|| "-".to_string(), |p| p.to_string()),
             if row.is_stale { "yes" } else { "no" },
+            format_child_pids(&row.child_pids, &row.stale_child_pids),
         );
     }
+}
+
+/// Render child PIDs for the `runs ps` table, marking stale entries.
+/// @plan:issue-51
+fn format_child_pids(child_pids: &[u32], stale_child_pids: &[u32]) -> String {
+    if child_pids.is_empty() {
+        return "-".to_string();
+    }
+    child_pids
+        .iter()
+        .map(|pid| {
+            if stale_child_pids.contains(pid) {
+                format!("{pid} (stale)")
+            } else {
+                pid.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }

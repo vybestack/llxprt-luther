@@ -124,13 +124,17 @@ fn runs_show_lists_artifacts() {
     // Isolate the artifacts root to a tempdir so the test does not pollute the
     // workspace's default `./artifacts` directory.
     let tmp = tempfile::tempdir().expect("tempdir");
+    let old_value = std::env::var("LUTHER_ARTIFACTS_ROOT").ok();
     std::env::set_var("LUTHER_ARTIFACTS_ROOT", tmp.path());
 
     let run_id = format!("artifact-run-{}", std::process::id());
     write_artifact(&run_id, "summary.md", b"# done\n").expect("write artifact");
 
     let artifacts = list_artifacts(&run_id).expect("list artifacts");
-    std::env::remove_var("LUTHER_ARTIFACTS_ROOT");
+    match old_value {
+        Some(val) => std::env::set_var("LUTHER_ARTIFACTS_ROOT", val),
+        None => std::env::remove_var("LUTHER_ARTIFACTS_ROOT"),
+    }
 
     assert!(
         artifacts
