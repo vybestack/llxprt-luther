@@ -364,14 +364,59 @@ fn create_durable_runner(
     run_id: &str,
     db_path: &std::path::Path,
 ) -> EngineRunner {
+    let run_context = build_run_context(&config, run_id);
     let instance = WorkflowInstance::create_with_run_id(workflow_type, config, run_id);
     let registry = ExecutorRegistry::with_defaults();
     match EngineRunner::with_db_path(instance, registry, db_path) {
-        Ok(runner) => runner,
+        Ok(runner) => runner.with_run_context(run_context),
         Err(e) => {
             eprintln!("Error: Failed to create durable engine runner: {e}");
             process::exit(1);
         }
+    }
+}
+
+/// Build a [`RunContext`] from a workflow config and run id, populating run
+/// paths (log/artifact/workspace) and GitHub references when available.
+/// @plan:PLAN-20260404-INITIAL-RUNTIME.P05
+fn build_run_context(
+    config: &luther_workflow::workflow::schema::WorkflowConfig,
+    run_id: &str,
+) -> luther_workflow::engine::RunContext {
+    let vars = &config.variables;
+    let repository = vars.get("target_repo").cloned();
+    let issue_number = vars
+        .get("primary_issue_number")
+        .or_else(|| vars.get("issue_number"))
+        .and_then(|s| s.parse::<i64>().ok());
+    let workspace_path = vars.get("work_dir").cloned().or_else(|| {
+        Some(
+            luther_workflow::runtime_paths::get_run_dir(run_id)
+                .to_string_lossy()
+                .to_string(),
+        )
+    });
+    let log_path = Some(
+        luther_workflow::runtime_paths::get_log_dir()
+            .join(format!("{run_id}.log"))
+            .to_string_lossy()
+            .to_string(),
+    );
+    let artifact_root = vars.get("artifact_dir").cloned().or_else(|| {
+        Some(
+            luther_workflow::runtime_paths::get_artifacts_root()
+                .to_string_lossy()
+                .to_string(),
+        )
+    });
+    luther_workflow::engine::RunContext {
+        log_path,
+        artifact_root,
+        workspace_path,
+        repository,
+        issue_number,
+        pr_number: None,
+        head_sha: None,
     }
 }
 /// Production [`WorkflowLauncher`] that builds and executes the durable engine
@@ -448,12 +493,19 @@ async fn handle_status_command(args: &luther_workflow::cli::StatusArgs) {
         }
     };
 
+    // 1b. Read the persistent run registry so in-flight and historical runs are
+    // visible without parsing the whole log.
+    // @plan:PLAN-20260404-INITIAL-RUNTIME.P05
+    let runs = read_run_registry(args.run_id.as_deref());
+
     // 2. Display monitor state
     if args.json {
         // JSON output
+        let runs_json: Vec<_> = runs.iter().map(run_metadata_to_json).collect();
         let status = serde_json::json!({
             "timestamp": chrono::Utc::now().to_rfc3339(),
             "heartbeats": heartbeats,
+            "runs": runs_json,
         });
         println!("{}", serde_json::to_string_pretty(&status).unwrap());
     } else {
@@ -503,6 +555,135 @@ async fn handle_status_command(args: &luther_workflow::cli::StatusArgs) {
                 println!("No heartbeat found for run '{run_id}'");
             }
         }
+
+        // Persistent run registry section.
+        // @plan:PLAN-20260404-INITIAL-RUNTIME.P05
+        print_run_registry(&runs);
+    }
+}
+
+/// Read run records from the persistent registry (checkpoints.db).
+/// When `run_id` is provided, returns just that run (if found).
+/// @plan:PLAN-20260404-INITIAL-RUNTIME.P05
+fn read_run_registry(run_id: Option<&str>) -> Vec<luther_workflow::persistence::RunMetadata> {
+    let db_path = luther_workflow::runtime_paths::get_data_dir().join("checkpoints.db");
+    if !db_path.exists() {
+        return Vec::new();
+    }
+    let store = match luther_workflow::persistence::SqliteStore::open(&db_path) {
+        Ok(s) => s,
+        Err(_) => return Vec::new(),
+    };
+    match run_id {
+        Some(id) => store
+            .get_run(id)
+            .ok()
+            .flatten()
+            .map(|r| vec![r])
+            .unwrap_or_default(),
+        None => store.list_runs().unwrap_or_default(),
+    }
+}
+
+/// Render a single run's PID liveness as a human-readable string.
+/// @plan:PLAN-20260404-INITIAL-RUNTIME.P05
+fn pid_liveness_label(md: &luther_workflow::persistence::RunMetadata) -> String {
+    match md.process_pid {
+        Some(pid) => {
+            let state = if md.is_process_stale() {
+                "stale"
+            } else {
+                "alive"
+            };
+            format!("{pid} ({state})")
+        }
+        None => "unknown".to_string(),
+    }
+}
+
+/// Describe the next-step candidates for status output.
+/// @plan:PLAN-20260404-INITIAL-RUNTIME.P05
+fn next_step_label(md: &luther_workflow::persistence::RunMetadata) -> String {
+    if md.next_step_candidates.is_empty() {
+        if md.status.is_terminal() {
+            "none (run is terminal)".to_string()
+        } else {
+            "unknown until current step completes".to_string()
+        }
+    } else {
+        md.next_step_candidates.join(", ")
+    }
+}
+
+/// Convert a run record into a JSON object for `--json` status output.
+/// @plan:PLAN-20260404-INITIAL-RUNTIME.P05
+fn run_metadata_to_json(md: &luther_workflow::persistence::RunMetadata) -> serde_json::Value {
+    serde_json::json!({
+        "run_id": md.run_id,
+        "status": md.status.to_string(),
+        "current_step": md.current_step,
+        "previous_step": md.previous_step,
+        "previous_outcome": md.previous_outcome,
+        "next_step_candidates": md.next_step_candidates,
+        "log_path": md.log_path,
+        "artifact_root": md.artifact_root,
+        "workspace_path": md.workspace_path,
+        "repository": md.repository,
+        "issue_number": md.issue_number,
+        "pr_number": md.pr_number,
+        "head_sha": md.head_sha,
+        "process_pid": md.process_pid,
+        "process_stale": md.is_process_stale(),
+        "child_pids": md.child_pids,
+        "stale_child_pids": md.are_child_pids_stale(),
+    })
+}
+
+/// Print the persistent run registry section for human-readable status.
+/// @plan:PLAN-20260404-INITIAL-RUNTIME.P05
+fn print_run_registry(runs: &[luther_workflow::persistence::RunMetadata]) {
+    println!();
+    println!("Persistent Run Registry:");
+    if runs.is_empty() {
+        println!("  No runs recorded.");
+        return;
+    }
+    for md in runs {
+        println!("  Run ID: {}", md.run_id);
+        println!("    Status: {}", md.status);
+        println!(
+            "    Current step: {}",
+            md.current_step.as_deref().unwrap_or("(none)")
+        );
+        println!(
+            "    Previous: {} -> {}",
+            md.previous_step.as_deref().unwrap_or("(none)"),
+            md.previous_outcome.as_deref().unwrap_or("(none)")
+        );
+        println!("    Next step: {}", next_step_label(md));
+        println!("    Log: {}", md.log_path.as_deref().unwrap_or("(none)"));
+        println!(
+            "    Artifacts: {}",
+            md.artifact_root.as_deref().unwrap_or("(none)")
+        );
+        println!(
+            "    Workspace: {}",
+            md.workspace_path.as_deref().unwrap_or("(none)")
+        );
+        println!(
+            "    Repo: {}  Issue: {}  PR: {}",
+            md.repository.as_deref().unwrap_or("(none)"),
+            md.issue_number
+                .map_or_else(|| "(none)".to_string(), |n| n.to_string()),
+            md.pr_number
+                .map_or_else(|| "(none)".to_string(), |n| n.to_string())
+        );
+        println!(
+            "    Head SHA: {}",
+            md.head_sha.as_deref().unwrap_or("(none)")
+        );
+        println!("    Process PID: {}", pid_liveness_label(md));
+        println!();
     }
 }
 

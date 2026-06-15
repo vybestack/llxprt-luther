@@ -9,23 +9,38 @@ use crate::workflow::schema::WorkflowRunRef;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RunStatus {
     Initialized,
+    Queued,
+    Starting,
     Running,
+    WaitingForChecks,
+    Remediating,
+    Blocked,
     Paused,
     Completed,
     Failed,
     Abandoned,
+    Merged,
+    Cancelled,
 }
 
 impl std::fmt::Display for RunStatus {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            RunStatus::Initialized => write!(f, "initialized"),
-            RunStatus::Running => write!(f, "running"),
-            RunStatus::Paused => write!(f, "paused"),
-            RunStatus::Completed => write!(f, "completed"),
-            RunStatus::Failed => write!(f, "failed"),
-            RunStatus::Abandoned => write!(f, "abandoned"),
-        }
+        let s = match self {
+            RunStatus::Initialized => "initialized",
+            RunStatus::Queued => "queued",
+            RunStatus::Starting => "starting",
+            RunStatus::Running => "running",
+            RunStatus::WaitingForChecks => "waiting_for_checks",
+            RunStatus::Remediating => "remediating",
+            RunStatus::Blocked => "blocked",
+            RunStatus::Paused => "paused",
+            RunStatus::Completed => "completed",
+            RunStatus::Failed => "failed",
+            RunStatus::Abandoned => "abandoned",
+            RunStatus::Merged => "merged",
+            RunStatus::Cancelled => "cancelled",
+        };
+        write!(f, "{}", s)
     }
 }
 
@@ -35,13 +50,35 @@ impl std::str::FromStr for RunStatus {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "initialized" => Ok(RunStatus::Initialized),
+            "queued" => Ok(RunStatus::Queued),
+            "starting" => Ok(RunStatus::Starting),
             "running" => Ok(RunStatus::Running),
+            "waiting_for_checks" => Ok(RunStatus::WaitingForChecks),
+            "remediating" => Ok(RunStatus::Remediating),
+            "blocked" => Ok(RunStatus::Blocked),
             "paused" => Ok(RunStatus::Paused),
             "completed" => Ok(RunStatus::Completed),
             "failed" => Ok(RunStatus::Failed),
             "abandoned" => Ok(RunStatus::Abandoned),
+            "merged" => Ok(RunStatus::Merged),
+            "cancelled" => Ok(RunStatus::Cancelled),
             _ => Err(format!("Unknown run status: {}", s)),
         }
+    }
+}
+
+impl RunStatus {
+    /// Returns true when the status represents a terminal run state.
+    /// @plan:PLAN-20260404-INITIAL-RUNTIME.P05
+    pub fn is_terminal(&self) -> bool {
+        matches!(
+            self,
+            RunStatus::Completed
+                | RunStatus::Failed
+                | RunStatus::Abandoned
+                | RunStatus::Merged
+                | RunStatus::Cancelled
+        )
     }
 }
 
@@ -65,6 +102,30 @@ pub struct RunMetadata {
     pub updated_at: Option<DateTime<Utc>>,
     /// Current step/state of the workflow (optional).
     pub current_step: Option<String>,
+    /// The previous step that ran (optional).
+    pub previous_step: Option<String>,
+    /// The outcome of the previous step (optional).
+    pub previous_outcome: Option<String>,
+    /// Candidate next steps when determinable (JSON array TEXT).
+    pub next_step_candidates: Vec<String>,
+    /// Path to the run log file (optional).
+    pub log_path: Option<String>,
+    /// Root directory for run artifacts (optional).
+    pub artifact_root: Option<String>,
+    /// Workspace path for the run (optional).
+    pub workspace_path: Option<String>,
+    /// GitHub repository reference (optional).
+    pub repository: Option<String>,
+    /// GitHub issue number (optional).
+    pub issue_number: Option<i64>,
+    /// GitHub PR number (optional).
+    pub pr_number: Option<i64>,
+    /// Head SHA of the PR/branch (optional).
+    pub head_sha: Option<String>,
+    /// PID of the workflow process (optional).
+    pub process_pid: Option<u32>,
+    /// PIDs of child/agent processes (JSON array TEXT).
+    pub child_pids: Vec<u32>,
 }
 
 impl RunMetadata {
@@ -85,6 +146,18 @@ impl RunMetadata {
             created_at: now,
             updated_at: None,
             current_step: None,
+            previous_step: None,
+            previous_outcome: None,
+            next_step_candidates: Vec::new(),
+            log_path: None,
+            artifact_root: None,
+            workspace_path: None,
+            repository: None,
+            issue_number: None,
+            pr_number: None,
+            head_sha: None,
+            process_pid: None,
+            child_pids: Vec::new(),
         }
     }
 
@@ -111,6 +184,89 @@ impl RunMetadata {
         self.current_step = Some(step.into());
         self.updated_at = Some(Utc::now());
     }
+
+    /// Record the previous step and its outcome.
+    /// @plan:PLAN-20260404-INITIAL-RUNTIME.P05
+    pub fn set_previous_step_and_outcome(
+        &mut self,
+        step: impl Into<String>,
+        outcome: impl Into<String>,
+    ) {
+        self.previous_step = Some(step.into());
+        self.previous_outcome = Some(outcome.into());
+        self.updated_at = Some(Utc::now());
+    }
+
+    /// Record the candidate next steps.
+    /// @plan:PLAN-20260404-INITIAL-RUNTIME.P05
+    pub fn set_next_step_candidates(&mut self, candidates: Vec<String>) {
+        self.next_step_candidates = candidates;
+        self.updated_at = Some(Utc::now());
+    }
+
+    /// Add a child/agent process PID.
+    /// @plan:PLAN-20260404-INITIAL-RUNTIME.P05
+    pub fn add_child_pid(&mut self, pid: u32) {
+        if !self.child_pids.contains(&pid) {
+            self.child_pids.push(pid);
+        }
+        self.updated_at = Some(Utc::now());
+    }
+
+    /// Clear all recorded child PIDs.
+    /// @plan:PLAN-20260404-INITIAL-RUNTIME.P05
+    pub fn clear_child_pids(&mut self) {
+        self.child_pids.clear();
+        self.updated_at = Some(Utc::now());
+    }
+
+    /// Whether the workflow process PID is stale (no longer alive).
+    /// Returns false when no PID is recorded.
+    /// @plan:PLAN-20260404-INITIAL-RUNTIME.P05
+    pub fn is_process_stale(&self) -> bool {
+        match self.process_pid {
+            Some(pid) => is_pid_stale(pid),
+            None => false,
+        }
+    }
+
+    /// Returns the list of child PIDs that are stale (no longer alive).
+    /// @plan:PLAN-20260404-INITIAL-RUNTIME.P05
+    pub fn are_child_pids_stale(&self) -> Vec<u32> {
+        self.child_pids
+            .iter()
+            .copied()
+            .filter(|pid| is_pid_stale(*pid))
+            .collect()
+    }
+}
+
+/// Determine whether a PID is stale (the process is no longer alive).
+/// Portable across Linux and macOS via `kill(pid, 0)`.
+/// @plan:PLAN-20260404-INITIAL-RUNTIME.P05
+pub fn is_pid_stale(pid: u32) -> bool {
+    !is_pid_alive(pid)
+}
+
+/// Portable liveness check for a PID using `kill(pid, 0)` on unix.
+/// @plan:PLAN-20260404-INITIAL-RUNTIME.P05
+#[cfg(unix)]
+#[allow(unsafe_code)]
+fn is_pid_alive(pid: u32) -> bool {
+    // SAFETY: kill with signal 0 performs error checking without sending a signal.
+    let ret = unsafe { libc::kill(pid as libc::pid_t, 0) };
+    if ret == 0 {
+        return true;
+    }
+    // EPERM means the process exists but we lack permission to signal it.
+    std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+/// Fallback liveness check on non-unix platforms (assume alive).
+/// @plan:PLAN-20260404-INITIAL-RUNTIME.P05
+#[cfg(not(unix))]
+fn is_pid_alive(_pid: u32) -> bool {
+    true
 }
 
 /// Create run metadata from a WorkflowRunRef.
@@ -121,6 +277,32 @@ pub fn run_metadata_from_ref(run_ref: &WorkflowRunRef) -> RunMetadata {
         &run_ref.workflow_type_id,
         &run_ref.config_id,
     )
+}
+
+/// Serialize a list of strings to a JSON array string.
+/// @plan:PLAN-20260404-INITIAL-RUNTIME.P05
+pub fn serialize_string_list(list: &[String]) -> String {
+    serde_json::to_string(list).unwrap_or_else(|_| "[]".to_string())
+}
+
+/// Deserialize a JSON array string into a list of strings.
+/// @plan:PLAN-20260404-INITIAL-RUNTIME.P05
+pub fn deserialize_string_list(raw: Option<String>) -> Vec<String> {
+    raw.and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+/// Serialize a list of PIDs to a JSON array string.
+/// @plan:PLAN-20260404-INITIAL-RUNTIME.P05
+pub fn serialize_pid_list(list: &[u32]) -> String {
+    serde_json::to_string(list).unwrap_or_else(|_| "[]".to_string())
+}
+
+/// Deserialize a JSON array string into a list of PIDs.
+/// @plan:PLAN-20260404-INITIAL-RUNTIME.P05
+pub fn deserialize_pid_list(raw: Option<String>) -> Vec<u32> {
+    raw.and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
 }
 
 /// Initialize the runs table for run metadata storage.
@@ -135,9 +317,133 @@ pub fn init_runs_table(conn: &rusqlite::Connection) -> Result<(), rusqlite::Erro
             status TEXT NOT NULL,
             created_at TEXT NOT NULL,
             updated_at TEXT,
-            current_step TEXT
+            current_step TEXT,
+            previous_step TEXT,
+            previous_outcome TEXT,
+            next_step_candidates TEXT,
+            log_path TEXT,
+            artifact_root TEXT,
+            workspace_path TEXT,
+            repository TEXT,
+            issue_number INTEGER,
+            pr_number INTEGER,
+            head_sha TEXT,
+            process_pid INTEGER,
+            child_pids TEXT
         )",
         [],
     )?;
+    migrate_runs_table(conn);
     Ok(())
+}
+
+/// Idempotently add new columns to a pre-existing `runs` table.
+/// Ignores "duplicate column" errors so it is safe to run repeatedly.
+/// @plan:PLAN-20260404-INITIAL-RUNTIME.P05
+pub fn migrate_runs_table(conn: &rusqlite::Connection) {
+    let columns = [
+        "previous_step TEXT",
+        "previous_outcome TEXT",
+        "next_step_candidates TEXT",
+        "log_path TEXT",
+        "artifact_root TEXT",
+        "workspace_path TEXT",
+        "repository TEXT",
+        "issue_number INTEGER",
+        "pr_number INTEGER",
+        "head_sha TEXT",
+        "process_pid INTEGER",
+        "child_pids TEXT",
+    ];
+    for col in columns {
+        // Ignore errors (e.g. duplicate column) so the migration is idempotent.
+        let _ = conn.execute(&format!("ALTER TABLE runs ADD COLUMN {}", col), []);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::str::FromStr;
+
+    #[test]
+    fn all_statuses_round_trip() {
+        let statuses = [
+            RunStatus::Initialized,
+            RunStatus::Queued,
+            RunStatus::Starting,
+            RunStatus::Running,
+            RunStatus::WaitingForChecks,
+            RunStatus::Remediating,
+            RunStatus::Blocked,
+            RunStatus::Paused,
+            RunStatus::Completed,
+            RunStatus::Failed,
+            RunStatus::Abandoned,
+            RunStatus::Merged,
+            RunStatus::Cancelled,
+        ];
+        for status in statuses {
+            let s = status.to_string();
+            let parsed = RunStatus::from_str(&s).expect("should parse");
+            assert_eq!(parsed, status);
+        }
+    }
+
+    #[test]
+    fn terminal_classification() {
+        assert!(RunStatus::Completed.is_terminal());
+        assert!(RunStatus::Failed.is_terminal());
+        assert!(RunStatus::Abandoned.is_terminal());
+        assert!(RunStatus::Merged.is_terminal());
+        assert!(RunStatus::Cancelled.is_terminal());
+        assert!(!RunStatus::Running.is_terminal());
+        assert!(!RunStatus::Starting.is_terminal());
+        assert!(!RunStatus::WaitingForChecks.is_terminal());
+    }
+
+    #[test]
+    fn pid_staleness_for_current_process() {
+        let pid = std::process::id();
+        assert!(!is_pid_stale(pid), "current process must not be stale");
+    }
+
+    #[test]
+    fn pid_staleness_for_dead_process() {
+        // PID 0 is not a normal user process; treat as stale on unix.
+        // Use a very large unlikely PID instead for portability.
+        let dead_pid = 4_000_000_000u32;
+        assert!(is_pid_stale(dead_pid), "unlikely PID should be stale");
+    }
+
+    #[test]
+    fn child_pid_helpers() {
+        let mut md = RunMetadata::new("r", "wf", "cfg");
+        md.add_child_pid(std::process::id());
+        md.add_child_pid(4_000_000_000);
+        md.add_child_pid(std::process::id()); // duplicate ignored
+        assert_eq!(md.child_pids.len(), 2);
+        let stale = md.are_child_pids_stale();
+        assert_eq!(stale, vec![4_000_000_000u32]);
+        md.clear_child_pids();
+        assert!(md.child_pids.is_empty());
+    }
+
+    #[test]
+    fn string_list_round_trip() {
+        let list = vec!["a".to_string(), "b".to_string()];
+        let raw = serialize_string_list(&list);
+        let back = deserialize_string_list(Some(raw));
+        assert_eq!(back, list);
+        assert!(deserialize_string_list(None).is_empty());
+    }
+
+    #[test]
+    fn pid_list_round_trip() {
+        let list = vec![1u32, 2u32, 3u32];
+        let raw = serialize_pid_list(&list);
+        let back = deserialize_pid_list(Some(raw));
+        assert_eq!(back, list);
+        assert!(deserialize_pid_list(None).is_empty());
+    }
 }

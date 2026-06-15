@@ -327,10 +327,21 @@ pub fn sample_process(_pid: u32) -> Option<ResourceSample> {
 }
 
 /// Check if a process with the given PID is alive.
+///
+/// Uses a portable `kill(pid, 0)` probe on unix so it works on macOS as well
+/// as Linux (the `/proc` filesystem does not exist on macOS, so a `/proc`-based
+/// check would incorrectly report every PID as dead there).
 #[cfg(unix)]
+#[allow(unsafe_code)]
 pub fn is_process_alive(pid: u32) -> bool {
-    // On Unix, check if /proc/PID exists
-    Path::new(&format!("/proc/{}", pid)).exists()
+    // SAFETY: kill with signal 0 performs error checking without sending a
+    // signal; it does not modify any process state.
+    let ret = unsafe { libc::kill(pid as libc::pid_t, 0) };
+    if ret == 0 {
+        return true;
+    }
+    // EPERM means the process exists but we lack permission to signal it.
+    std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
 #[cfg(not(unix))]

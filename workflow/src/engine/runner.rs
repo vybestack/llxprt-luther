@@ -11,10 +11,25 @@ use crate::engine::executor::{ExecutorRegistry, StepContext};
 use crate::engine::instance::WorkflowInstance;
 use crate::engine::transition::{resolve_transition_schema, StepOutcome};
 use crate::persistence::{
-    append_event_with_conn, load_checkpoint_with_conn, save_checkpoint_with_conn, Checkpoint,
-    PersistenceError, RunMetadata, RunStatus, SqliteStoreRef, StateSnapshot,
+    append_typed_event_with_conn, load_checkpoint_with_conn, persist_run_with_conn,
+    save_checkpoint_with_conn, Checkpoint, EventType, PersistenceError, RunMetadata, RunStatus,
+    StateSnapshot,
 };
 use crate::workflow::schema::TransitionDef;
+
+/// Contextual metadata for a run: paths and GitHub references.
+/// Used to populate the persistent run registry beyond the core identifiers.
+/// @plan:PLAN-20260404-INITIAL-RUNTIME.P05
+#[derive(Debug, Clone, Default)]
+pub struct RunContext {
+    pub log_path: Option<String>,
+    pub artifact_root: Option<String>,
+    pub workspace_path: Option<String>,
+    pub repository: Option<String>,
+    pub issue_number: Option<i64>,
+    pub pr_number: Option<i64>,
+    pub head_sha: Option<String>,
+}
 
 /// Errors that can occur during workflow execution.
 /// @plan:PLAN-20260404-INITIAL-RUNTIME.P08
@@ -124,6 +139,10 @@ pub struct EngineRunner {
     registry: ExecutorRegistry,
     /// Step execution context for variable storage and interpolation.
     context: StepContext,
+    /// Contextual run metadata (paths, GitHub refs) for the run registry.
+    run_context: RunContext,
+    /// Whether to persist run-registry metadata (only when a real DB path is set).
+    persist_registry: bool,
 }
 
 impl EngineRunner {
@@ -184,6 +203,8 @@ impl EngineRunner {
             interrupted: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             registry,
             context,
+            run_context: RunContext::default(),
+            persist_registry: false,
         })
     }
 
@@ -251,7 +272,7 @@ impl EngineRunner {
             context.set_work_dir(path);
         }
 
-        Ok(Self {
+        let mut runner = Self {
             instance,
             retry_count,
             edge_loop_counts,
@@ -261,7 +282,129 @@ impl EngineRunner {
             interrupted: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             registry,
             context,
-        })
+            run_context: RunContext::default(),
+            persist_registry: true,
+        };
+
+        // Persist an initial run record so in-flight runs are visible before
+        // they complete. Best-effort: a persistence failure must not block
+        // execution.
+        // @plan:PLAN-20260404-INITIAL-RUNTIME.P05
+        runner.persist_initial_run();
+
+        Ok(runner)
+    }
+
+    /// Attach contextual run metadata (paths, GitHub refs) and persist it.
+    /// @plan:PLAN-20260404-INITIAL-RUNTIME.P05
+    pub fn with_run_context(mut self, ctx: RunContext) -> Self {
+        self.run_context = ctx;
+        if self.persist_registry {
+            let mut metadata = self.build_metadata(RunStatus::Starting);
+            metadata.current_step = self.first_step_id();
+            self.persist_metadata(&metadata);
+        }
+        self
+    }
+
+    /// Determine the first step id of the workflow, if any.
+    /// @plan:PLAN-20260404-INITIAL-RUNTIME.P05
+    fn first_step_id(&self) -> Option<String> {
+        self.instance
+            .workflow_type
+            .steps
+            .first()
+            .map(|s| s.step_id.clone())
+    }
+
+    /// Build a `RunMetadata` from the current instance + run context.
+    /// @plan:PLAN-20260404-INITIAL-RUNTIME.P05
+    fn build_metadata(&self, status: RunStatus) -> RunMetadata {
+        let mut metadata = RunMetadata::new(
+            &self.instance.run_id,
+            &self.instance.workflow_type.workflow_type_id,
+            &self.instance.config.config_id,
+        );
+        metadata.status = status;
+        metadata.process_pid = Some(std::process::id());
+        metadata.log_path = self.run_context.log_path.clone();
+        metadata.artifact_root = self.run_context.artifact_root.clone();
+        metadata.workspace_path = self.run_context.workspace_path.clone();
+        metadata.repository = self.run_context.repository.clone();
+        metadata.issue_number = self.run_context.issue_number;
+        metadata.pr_number = self.run_context.pr_number;
+        metadata.head_sha = self.run_context.head_sha.clone();
+        metadata
+    }
+
+    /// Persist the initial run record (status Starting) at construction time.
+    /// @plan:PLAN-20260404-INITIAL-RUNTIME.P05
+    fn persist_initial_run(&mut self) {
+        if !self.persist_registry {
+            return;
+        }
+        let mut metadata = self.build_metadata(RunStatus::Starting);
+        metadata.current_step = self.first_step_id();
+        self.persist_metadata(&metadata);
+    }
+
+    /// Best-effort persist of a run metadata record to the registry.
+    /// @plan:PLAN-20260404-INITIAL-RUNTIME.P05
+    fn persist_metadata(&self, metadata: &RunMetadata) {
+        let conn = self.conn.borrow();
+        let _ = persist_run_with_conn(&conn, metadata);
+    }
+
+    /// Load the current run metadata from the registry, if present.
+    /// @plan:PLAN-20260404-INITIAL-RUNTIME.P05
+    fn load_metadata(&self) -> Option<RunMetadata> {
+        let conn = self.conn.borrow();
+        crate::persistence::get_run_with_conn(&conn, &self.instance.run_id)
+            .ok()
+            .flatten()
+    }
+
+    /// Record a typed lifecycle event (best-effort).
+    /// @plan:PLAN-20260404-INITIAL-RUNTIME.P05
+    fn record_event(
+        &self,
+        event_type: EventType,
+        step_id: &str,
+        outcome: &str,
+        details: Option<&str>,
+    ) {
+        let conn = self.conn.borrow();
+        let _ = append_typed_event_with_conn(
+            &conn,
+            &self.instance.run_id,
+            step_id,
+            outcome,
+            event_type,
+            details,
+            chrono::Utc::now(),
+        );
+    }
+
+    /// Compute candidate next steps for the given step across all outcomes.
+    /// @plan:PLAN-20260404-INITIAL-RUNTIME.P05
+    fn compute_next_step_candidates(&self, step_id: &str) -> Vec<String> {
+        let transitions = &self.instance.workflow_type.transitions;
+        let outcomes = [
+            StepOutcome::Success,
+            StepOutcome::Fixable,
+            StepOutcome::Fatal,
+            StepOutcome::Retryable,
+            StepOutcome::Abandon,
+        ];
+        let mut candidates = Vec::new();
+        for outcome in outcomes {
+            if let Some(next) = resolve_transition_schema(step_id, &outcome, transitions) {
+                if !candidates.contains(&next) {
+                    candidates.push(next);
+                }
+            }
+        }
+        candidates
     }
 
     /// Execute the workflow instance.
@@ -283,6 +426,15 @@ impl EngineRunner {
         }
         drop(conn);
 
+        // Flip the run record to Running now that execution has begun.
+        // @plan:PLAN-20260404-INITIAL-RUNTIME.P05
+        if self.persist_registry {
+            if let Some(mut md) = self.load_metadata() {
+                md.mark_started();
+                self.persist_metadata(&md);
+            }
+        }
+
         let mut current_step_id = self.instance.current_state.clone();
 
         loop {
@@ -301,10 +453,36 @@ impl EngineRunner {
             // Set current step on context for namespaced storage
             self.context.set_current_step_id(&current_step_id);
 
+            // Update the run registry with the current step and emit StepStart.
+            // @plan:PLAN-20260404-INITIAL-RUNTIME.P05
+            if self.persist_registry {
+                if let Some(mut md) = self.load_metadata() {
+                    md.set_current_step(&current_step_id);
+                    md.set_next_step_candidates(
+                        self.compute_next_step_candidates(&current_step_id),
+                    );
+                    self.persist_metadata(&md);
+                }
+                self.record_event(EventType::StepStart, &current_step_id, "started", None);
+            }
+
             eprintln!("[engine] Executing step: {}", current_step_id);
 
             // Execute the current step
-            let outcome = self.execute_step(&current_step_id)?;
+            let outcome = match self.execute_step(&current_step_id) {
+                Ok(o) => o,
+                Err(e) => {
+                    if self.persist_registry {
+                        self.record_event(
+                            EventType::Error,
+                            &current_step_id,
+                            "error",
+                            Some(&e.to_string()),
+                        );
+                    }
+                    return Err(e);
+                }
+            };
 
             eprintln!("[engine] Step '{}' outcome: {}", current_step_id, outcome);
             if outcome != StepOutcome::Success {
@@ -322,16 +500,32 @@ impl EngineRunner {
 
             // Persist checkpoint and event
             let checkpoint = self.create_checkpoint(&current_step_id, "completed");
-            let conn = self.conn.borrow();
-            save_checkpoint_with_conn(&conn, &checkpoint)?;
-            append_event_with_conn(
-                &conn,
-                &self.instance.run_id,
-                &current_step_id,
-                &outcome.to_string(),
-                chrono::Utc::now(),
-            )?;
-            drop(conn);
+            {
+                let conn = self.conn.borrow();
+                save_checkpoint_with_conn(&conn, &checkpoint)?;
+                append_typed_event_with_conn(
+                    &conn,
+                    &self.instance.run_id,
+                    &current_step_id,
+                    &outcome.to_string(),
+                    EventType::StepOutcome,
+                    None,
+                    chrono::Utc::now(),
+                )?;
+            }
+
+            // Record the previous step + outcome and refresh next-step
+            // candidates in the run registry.
+            // @plan:PLAN-20260404-INITIAL-RUNTIME.P05
+            if self.persist_registry {
+                if let Some(mut md) = self.load_metadata() {
+                    md.set_previous_step_and_outcome(&current_step_id, outcome.to_string());
+                    md.set_next_step_candidates(
+                        self.compute_next_step_candidates(&current_step_id),
+                    );
+                    self.persist_metadata(&md);
+                }
+            }
 
             // Check for Abandon outcome (early return - terminal)
             // @plan:PLAN-20260408-LLXPRT-FIRST.P15
@@ -614,9 +808,6 @@ impl EngineRunner {
         outcome: &RunOutcome,
         final_step_id: &str,
     ) -> Result<(), EngineError> {
-        // Get issue_number from context if available
-        let _issue_number = self.context.get("issue_number").map(|s| s.to_string());
-
         // Determine RunStatus based on outcome
         let status = match outcome {
             RunOutcome::Success => RunStatus::Completed,
@@ -625,21 +816,31 @@ impl EngineRunner {
             RunOutcome::Interrupted { .. } => RunStatus::Paused,
         };
 
-        // Create run metadata
-        let mut metadata = RunMetadata::new(
-            &self.instance.run_id,
-            &self.instance.workflow_type.workflow_type_id,
-            &self.instance.config.config_id,
-        );
-        metadata.status = status;
+        // Update the existing run record (created at start) rather than
+        // creating a fresh one. Fall back to a new record if none exists
+        // (e.g. the in-memory ::new() path that does not persist at start).
+        // @plan:PLAN-20260404-INITIAL-RUNTIME.P05
+        let mut metadata = self
+            .load_metadata()
+            .unwrap_or_else(|| self.build_metadata(status.clone()));
+        metadata.status = status.clone();
         metadata.set_current_step(final_step_id);
 
-        // Persist to the runner's connection
-        let conn = self.conn.borrow();
-        let store = SqliteStoreRef { conn: &conn };
-        store.persist_run(&metadata).map_err(|e| {
-            EngineError::PersistenceError(format!("Failed to record run completion: {}", e))
-        })?;
+        {
+            let conn = self.conn.borrow();
+            persist_run_with_conn(&conn, &metadata).map_err(|e| {
+                EngineError::PersistenceError(format!("Failed to record run completion: {}", e))
+            })?;
+        }
+
+        // Emit a terminal-state event describing the final status.
+        // @plan:PLAN-20260404-INITIAL-RUNTIME.P05
+        self.record_event(
+            EventType::TerminalState,
+            final_step_id,
+            &status.to_string(),
+            None,
+        );
 
         Ok(())
     }
