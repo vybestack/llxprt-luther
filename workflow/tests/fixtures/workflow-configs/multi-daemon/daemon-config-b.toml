@@ -1,0 +1,21 @@
+# Multi-daemon fixture B (issue #53)
+# Used by status_multi_config_integration.rs to exercise aggregate status
+# across two independent daemon configs. config_id == file stem.
+
+config_id = "daemon-config-b"
+workflow_type_id = "hello-world-v1"
+
+[runtime]
+timeout_seconds = 300
+max_retries = 2
+
+[repository]
+workspace_strategy = "temp_clone"
+branch_template = "daemon-b-{run_id}"
+base_branch = "main"
+
+[guards]
+max_iterations = 3
+max_file_changes = 10
+max_tokens = 1000
+max_cost = 1.00
