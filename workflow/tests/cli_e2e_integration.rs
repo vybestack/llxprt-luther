@@ -363,3 +363,69 @@ fn test_status_config_filter_recognized() {
     let _value: serde_json::Value =
         serde_json::from_str(&stdout).expect("status --json should emit valid JSON");
 }
+
+/// Test: the `monitor` subcommand is recognized (issue #52).
+/// @plan:issue-52
+#[test]
+fn monitor_command_is_recognized() {
+    assert_recognized(&["monitor", "--once", "--no-clear"]);
+}
+
+/// Test: `monitor --once --no-clear` renders exactly one snapshot and exits 0
+/// (issue #52).
+/// @plan:issue-52
+#[test]
+fn monitor_once_renders_one_snapshot() {
+    let mut cmd = luther_workflow_bin();
+    cmd.args(["monitor", "--once", "--no-clear"]);
+    let output = cmd.output().expect("Failed to execute monitor --once");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "monitor --once should exit zero. stdout: {stdout}"
+    );
+    let snapshots = stdout.matches("monitor snapshot").count();
+    assert_eq!(
+        snapshots, 1,
+        "monitor --once should emit exactly one snapshot. stdout: {stdout}"
+    );
+}
+
+/// Test: `monitor --times 3 --no-clear --interval 1` emits 3 snapshots and
+/// exits 0 (issue #52).
+/// @plan:issue-52
+#[test]
+fn monitor_times_renders_n_snapshots() {
+    let mut cmd = luther_workflow_bin();
+    cmd.args(["monitor", "--times", "3", "--no-clear", "--interval", "1"]);
+    let output = cmd.output().expect("Failed to execute monitor --times");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "monitor --times should exit zero. stdout: {stdout}"
+    );
+    let snapshots = stdout.matches("monitor snapshot").count();
+    assert_eq!(
+        snapshots, 3,
+        "monitor --times 3 should emit three snapshots. stdout: {stdout}"
+    );
+}
+
+/// Test: `monitor --once --run NOPE` is graceful (exits 0, no panic) when the
+/// run does not exist (issue #52).
+/// @plan:issue-52
+#[test]
+fn monitor_run_nonexistent_is_graceful() {
+    let mut cmd = luther_workflow_bin();
+    cmd.args(["monitor", "--once", "--no-clear", "--run", "NOPE-NOT-A-RUN"]);
+    let output = cmd.output().expect("Failed to execute monitor --run");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "monitor with a missing run should exit zero. stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("No runs found."),
+        "monitor with an unmatched run should report no runs. stdout: {stdout}"
+    );
+}

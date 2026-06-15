@@ -19,12 +19,17 @@ use luther_workflow::engine::instance::WorkflowInstance;
 use luther_workflow::engine::runner::{EngineRunner, RunOutcome};
 use luther_workflow::monitor::heartbeat::read_all_heartbeats;
 use luther_workflow::monitor::heartbeat::MonitorState;
+use luther_workflow::monitor::snapshot::{
+    render_snapshot, resolve_snapshot_count, separator_line, DaemonSummary, MonitorFilter,
+    MonitorSnapshot, RunCounts, CLEAR_SCREEN,
+};
 use luther_workflow::persistence::init_database;
 use luther_workflow::persistence::leases::{
     list_all_leases, list_leases_by_config, list_leases_by_status, IssueLease, LeaseStatus,
 };
 use luther_workflow::persistence::{
-    list_artifacts, load_events, RunMetadata, RunStatus, SqliteStore,
+    list_artifacts, load_events, load_recent_events, EventRecord, RunMetadata, RunStatus,
+    SqliteStore,
 };
 use luther_workflow::service::{Service, ServiceConfig};
 use luther_workflow::workflow::config_loader::{
@@ -59,6 +64,9 @@ async fn main() {
         }
         Commands::Runs(args) => {
             handle_runs_command(&args).await;
+        }
+        Commands::Monitor(args) => {
+            handle_monitor_command(&args).await;
         }
     }
 }
@@ -1570,6 +1578,140 @@ fn load_filtered_runs(
         runs.retain(|md| md.status == wanted);
     }
     Ok(runs)
+}
+
+/// Handle the `monitor` command (issue #52).
+///
+/// Continuous, plain-CLI watch view. This is the thin I/O + loop + signal
+/// shell; all modeling/filtering/rendering lives in the pure `monitor::snapshot`
+/// module. Strictly read-only: it never stops daemons or cancels runs.
+/// @plan:issue-52
+async fn handle_monitor_command(args: &luther_workflow::cli::MonitorArgs) {
+    use std::io::IsTerminal;
+
+    let count = resolve_snapshot_count(args.once, args.times);
+    let filter = MonitorFilter {
+        config: args.config.clone(),
+        run: args.run.clone(),
+        issue: args.issue,
+    };
+    let clear = !args.no_clear && std::io::stdout().is_terminal();
+    let mut remaining = count;
+    let mut first = true;
+
+    loop {
+        // Stop before rendering (and before sleeping) once the requested count
+        // is exhausted. This guarantees `--times 0` emits zero snapshots and
+        // that we never sleep after the final snapshot.
+        if let Some(left) = remaining.as_ref() {
+            if *left == 0 {
+                return;
+            }
+        }
+
+        if !first {
+            let tick = tokio::time::sleep(tokio::time::Duration::from_secs(args.interval));
+            tokio::select! {
+                _ = tick => {}
+                _ = tokio::signal::ctrl_c() => {
+                    eprintln!("Monitor stopped");
+                    return;
+                }
+            }
+        }
+        first = false;
+
+        render_one_snapshot(&filter, args.tail, clear);
+
+        if let Some(left) = remaining.as_mut() {
+            *left = left.saturating_sub(1);
+        }
+    }
+}
+
+/// Collect, render and print exactly one monitor snapshot.
+/// @plan:issue-52
+fn render_one_snapshot(filter: &MonitorFilter, tail: usize, clear: bool) {
+    let snapshot = collect_snapshot(filter, tail);
+    let mut body = String::new();
+    if render_snapshot(&snapshot, tail, &mut body).is_err() {
+        eprintln!("Error rendering monitor snapshot");
+        return;
+    }
+    if clear {
+        print!("{CLEAR_SCREEN}");
+    } else {
+        println!("{}", separator_line(&snapshot.generated_at));
+    }
+    print!("{body}");
+    use std::io::Write;
+    let _ = std::io::stdout().flush();
+}
+
+/// Collect a single snapshot from global state (thin I/O shell).
+/// @plan:issue-52
+fn collect_snapshot(filter: &MonitorFilter, tail: usize) -> MonitorSnapshot {
+    let now = chrono::Utc::now();
+    let daemons = collect_daemon_summaries(filter, now.timestamp());
+    let all_runs = match open_runs_store() {
+        Ok(Some(store)) => match store.list_runs() {
+            Ok(runs) => runs,
+            Err(e) => {
+                eprintln!("Warning: run registry unavailable: failed to list runs: {e}");
+                Vec::new()
+            }
+        },
+        Ok(None) => Vec::new(),
+        Err(e) => {
+            eprintln!("Warning: run registry unavailable: {e}");
+            Vec::new()
+        }
+    };
+    let filtered = filter.apply(&all_runs);
+    let counts = RunCounts::from_runs(&filtered.runs);
+    let recent_events = collect_selected_events(filtered.selected.as_ref(), tail);
+    MonitorSnapshot {
+        generated_at: now.to_rfc3339(),
+        daemons,
+        counts,
+        runs: filtered.runs,
+        selected: filtered.selected,
+        recent_events,
+    }
+}
+
+/// Collect daemon summaries, honoring the `--config` filter.
+/// @plan:issue-52
+fn collect_daemon_summaries(filter: &MonitorFilter, now: i64) -> Vec<DaemonSummary> {
+    DaemonStore::production()
+        .read_all()
+        .iter()
+        .filter(|state| {
+            filter
+                .config
+                .as_ref()
+                .is_none_or(|cfg| &state.config_id == cfg)
+        })
+        .map(|state| {
+            let alive = is_daemon_alive(state.pid);
+            DaemonSummary::from_state(state, alive, now)
+        })
+        .collect()
+}
+
+/// Load recent events for the selected run (empty when none / tail == 0).
+/// @plan:issue-52
+fn collect_selected_events(selected: Option<&RunMetadata>, tail: usize) -> Vec<EventRecord> {
+    if tail == 0 {
+        return Vec::new();
+    }
+    let Some(md) = selected else {
+        return Vec::new();
+    };
+    let Ok(Some(store)) = open_runs_store() else {
+        return Vec::new();
+    };
+    load_recent_events(store.conn(), &md.run_id, tail).unwrap_or_default()
 }
 
 /// Handle `runs list` (issue #51).

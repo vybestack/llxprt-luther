@@ -513,6 +513,44 @@ pub fn load_events(conn: &Connection, run_id: &str) -> Result<Vec<EventRecord>, 
     Ok(events)
 }
 
+/// Load the most recent `limit` events for a run, ordered chronologically.
+///
+/// Pushes the tail bound down to the database (`ORDER BY id DESC LIMIT ?`) so
+/// continuous monitoring does not repeatedly scan and allocate the full event
+/// history. The selected rows are reversed before returning so callers receive
+/// them in ascending (chronological) order, matching [`load_events`].
+/// @plan:issue-52
+/// @requirement:REQ-EARS-PERSIST-002
+pub fn load_recent_events(
+    conn: &Connection,
+    run_id: &str,
+    limit: usize,
+) -> Result<Vec<EventRecord>, PersistenceError> {
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+
+    let mut stmt = conn.prepare(
+        "SELECT run_id, step_id, outcome, event_type, details, timestamp
+         FROM events
+         WHERE run_id = ?1
+         ORDER BY id DESC
+         LIMIT ?2",
+    )?;
+
+    let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+    let rows = stmt.query_map(params![run_id, limit], map_event_row)?;
+
+    let mut events = Vec::new();
+    for event in rows {
+        events.push(event?);
+    }
+    // Rows came back newest-first; restore chronological order for display.
+    events.reverse();
+
+    Ok(events)
+}
+
 /// Load events for a run filtered by event type, ordered by insertion.
 /// @plan:PLAN-20260404-INITIAL-RUNTIME.P08
 /// @requirement:REQ-EARS-PERSIST-002
@@ -799,5 +837,33 @@ mod tests {
         assert_eq!(events[0].step_id, "step-a");
         assert_eq!(events[0].outcome, "success");
         assert_eq!(events[1].step_id, "step-b");
+    }
+
+    #[test]
+    fn load_recent_events_bounds_and_orders_chronologically() {
+        // @plan:issue-52
+        let conn = Connection::open_in_memory().expect("Failed to open in-memory database");
+
+        let timestamp = Utc::now();
+        for step in ["step-a", "step-b", "step-c", "step-d"] {
+            append_event_with_conn(&conn, "run-123", step, "success", timestamp)
+                .expect("Failed to append event");
+        }
+
+        // Tail of 2 returns the two most recent events in chronological order.
+        let recent = load_recent_events(&conn, "run-123", 2).expect("Failed to load recent events");
+        assert_eq!(recent.len(), 2);
+        assert_eq!(recent[0].step_id, "step-c");
+        assert_eq!(recent[1].step_id, "step-d");
+
+        // A limit larger than the number of stored events returns all of them.
+        let all = load_recent_events(&conn, "run-123", 10).expect("Failed to load recent events");
+        assert_eq!(all.len(), 4);
+        assert_eq!(all[0].step_id, "step-a");
+        assert_eq!(all[3].step_id, "step-d");
+
+        // A zero limit yields an empty result without touching the database.
+        let none = load_recent_events(&conn, "run-123", 0).expect("Failed to load recent events");
+        assert!(none.is_empty());
     }
 }

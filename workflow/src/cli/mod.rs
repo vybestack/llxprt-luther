@@ -35,6 +35,9 @@ pub enum Commands {
     /// Inspect workflow runs (list/show/tail/ps)
     #[command(name = "runs")]
     Runs(RunsArgs),
+    /// Continuously monitor daemon and run status (plain CLI, non-TUI)
+    #[command(name = "monitor")]
+    Monitor(MonitorArgs),
 }
 
 /// Arguments for the run command.
@@ -294,6 +297,40 @@ pub struct DaemonStatusArgs {
     /// Output in JSON format
     #[arg(long)]
     pub json: bool,
+}
+
+/// Arguments for the `monitor` command (issue #52).
+///
+/// A continuous, plain-CLI (non-TUI) watch view that repaints a combined
+/// snapshot of daemon health, run counts, a run table, the selected-run detail
+/// and recent log lines. Strictly read-only: it never stops daemons or cancels
+/// runs.
+#[derive(Args, Debug)]
+pub struct MonitorArgs {
+    /// Filter to a single config id (file stem)
+    #[arg(long, value_name = "ID")]
+    pub config: Option<String>,
+    /// Focus on a specific run id (also marks it as the selected run)
+    #[arg(long, value_name = "RUN_ID")]
+    pub run: Option<String>,
+    /// Filter runs to a single GitHub issue number
+    #[arg(long, value_name = "NUMBER", value_parser = clap::value_parser!(i64).range(1..))]
+    pub issue: Option<i64>,
+    /// Refresh delay between snapshots, in seconds
+    #[arg(long, value_name = "SECONDS", default_value_t = 2, value_parser = clap::value_parser!(u64).range(1..))]
+    pub interval: u64,
+    /// Render exactly N snapshots, then exit normally
+    #[arg(long, value_name = "N", conflicts_with = "once", value_parser = clap::value_parser!(u32).range(1..))]
+    pub times: Option<u32>,
+    /// Render a single snapshot and exit (equivalent to --times 1)
+    #[arg(long, conflicts_with = "times")]
+    pub once: bool,
+    /// Append snapshots instead of clearing/repainting the terminal
+    #[arg(long)]
+    pub no_clear: bool,
+    /// Number of recent log lines to show for the selected run
+    #[arg(long, value_name = "N", default_value_t = 10)]
+    pub tail: usize,
 }
 
 /// Arguments for the `runs` command family.
@@ -861,6 +898,87 @@ mod tests {
                 assert!(run.once);
             }
             other => panic!("expected daemon run, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn monitor_defaults_parse() {
+        // @plan:issue-52
+        let cli =
+            Cli::try_parse_from(["luther-workflow", "monitor"]).expect("bare monitor should parse");
+        match cli.command {
+            Commands::Monitor(args) => {
+                assert_eq!(args.interval, 2);
+                assert_eq!(args.tail, 10);
+                assert!(!args.no_clear);
+                assert!(!args.once);
+                assert_eq!(args.times, None);
+                assert_eq!(args.config, None);
+                assert_eq!(args.run, None);
+                assert_eq!(args.issue, None);
+            }
+            other => panic!("expected monitor, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn monitor_once_parses() {
+        // @plan:issue-52
+        let cli = Cli::try_parse_from(["luther-workflow", "monitor", "--once"])
+            .expect("monitor --once should parse");
+        match cli.command {
+            Commands::Monitor(args) => assert!(args.once),
+            other => panic!("expected monitor, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn monitor_times_parses() {
+        // @plan:issue-52
+        let cli = Cli::try_parse_from(["luther-workflow", "monitor", "--times", "5"])
+            .expect("monitor --times should parse");
+        match cli.command {
+            Commands::Monitor(args) => assert_eq!(args.times, Some(5)),
+            other => panic!("expected monitor, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn monitor_once_and_times_conflict() {
+        // @plan:issue-52
+        let result = Cli::try_parse_from(["luther-workflow", "monitor", "--once", "--times", "2"]);
+        assert!(result.is_err(), "--once and --times must conflict");
+    }
+
+    #[test]
+    fn monitor_filters_parse() {
+        // @plan:issue-52
+        let cli = Cli::try_parse_from([
+            "luther-workflow",
+            "monitor",
+            "--config",
+            "llxprt-code",
+            "--run",
+            "RUN",
+            "--issue",
+            "1801",
+            "--interval",
+            "5",
+            "--no-clear",
+            "--tail",
+            "3",
+        ])
+        .expect("monitor with filters should parse");
+        match cli.command {
+            Commands::Monitor(args) => {
+                assert_eq!(args.config.as_deref(), Some("llxprt-code"));
+                assert_eq!(args.run.as_deref(), Some("RUN"));
+                assert_eq!(args.issue, Some(1801));
+                assert_eq!(args.interval, 5);
+                assert!(args.no_clear);
+                assert_eq!(args.tail, 3);
+            }
+            other => panic!("expected monitor, got {other:?}"),
         }
     }
 }

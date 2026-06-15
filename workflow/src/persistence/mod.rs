@@ -14,8 +14,8 @@ pub use artifacts::{
 pub use checkpoint::{
     append_event, append_event_with_conn, append_typed_event_with_conn, count_events_by_type,
     list_checkpoints, load_checkpoint, load_checkpoint_with_conn, load_events, load_events_by_type,
-    load_latest_event, save_checkpoint, save_checkpoint_with_conn, Checkpoint, EventRecord,
-    EventType, PersistenceError, StateSnapshot,
+    load_latest_event, load_recent_events, save_checkpoint, save_checkpoint_with_conn, Checkpoint,
+    EventRecord, EventType, PersistenceError, StateSnapshot,
 };
 pub use leases::{
     count_active_leases_for_config, create_lease, get_lease_for_issue, init_leases_table,
