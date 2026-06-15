@@ -29,6 +29,9 @@ pub enum Commands {
     /// Run as a service/daemon
     #[command(name = "service")]
     Service(ServiceArgs),
+    /// Manage per-config daemon instances
+    #[command(name = "daemon")]
+    Daemon(DaemonArgs),
 }
 
 /// Arguments for the run command.
@@ -146,6 +149,98 @@ pub struct ServiceInstallArgs {
 /// @plan:PLAN-20260404-INITIAL-RUNTIME.P12
 #[derive(Args, Debug)]
 pub struct ServiceStatusArgs {
+    /// Output in JSON format
+    #[arg(long)]
+    pub json: bool,
+}
+
+/// Arguments for the daemon command.
+///
+/// The `daemon` family supervises one foreground daemon instance per workflow
+/// config while allowing aggregate views across configs (issue #48).
+/// @plan:PLAN-20260404-INITIAL-RUNTIME.P09
+/// @requirement:REQ-EARS-SVC-001
+#[derive(Args, Debug)]
+pub struct DaemonArgs {
+    /// Daemon lifecycle subcommand
+    #[command(subcommand)]
+    pub command: DaemonCommand,
+}
+
+/// Daemon lifecycle subcommands.
+///
+/// `start` and `run` both execute in the foreground (no self-daemonization,
+/// REQ-EARS-SVC-001); `stop` and `status` operate on persisted per-config
+/// state so multiple configs can be supervised and aggregated.
+/// @plan:PLAN-20260404-INITIAL-RUNTIME.P09
+#[derive(Subcommand, Debug)]
+pub enum DaemonCommand {
+    /// Start a foreground daemon for a config
+    #[command(name = "start")]
+    Start(DaemonStartArgs),
+    /// Run a foreground daemon for a config
+    #[command(name = "run")]
+    Run(DaemonRunArgs),
+    /// Stop a running daemon (single config or all)
+    #[command(name = "stop")]
+    Stop(DaemonStopArgs),
+    /// Show daemon status (single config or aggregate)
+    #[command(name = "status")]
+    Status(DaemonStatusArgs),
+}
+
+/// Arguments for `daemon start`.
+/// @plan:PLAN-20260404-INITIAL-RUNTIME.P09
+#[derive(Args, Debug)]
+pub struct DaemonStartArgs {
+    /// Path to config file (config id is its file stem)
+    #[arg(short, long, value_name = "PATH")]
+    pub config: PathBuf,
+    /// Directory containing workflows/ and workflow-configs/ subdirectories
+    #[arg(long, value_name = "DIR")]
+    pub config_dir: Option<PathBuf>,
+    /// Replace an existing daemon for this config (explicit recovery)
+    #[arg(long)]
+    pub force: bool,
+}
+
+/// Arguments for `daemon run`.
+/// @plan:PLAN-20260404-INITIAL-RUNTIME.P09
+#[derive(Args, Debug)]
+pub struct DaemonRunArgs {
+    /// Path to config file (config id is its file stem)
+    #[arg(short, long, value_name = "PATH")]
+    pub config: PathBuf,
+    /// Directory containing workflows/ and workflow-configs/ subdirectories
+    #[arg(long, value_name = "DIR")]
+    pub config_dir: Option<PathBuf>,
+    /// Replace an existing daemon for this config (explicit recovery)
+    #[arg(long)]
+    pub force: bool,
+}
+
+/// Arguments for `daemon stop`.
+///
+/// Exactly one of `--config` or `--all` must be supplied; they are mutually
+/// exclusive.
+/// @plan:PLAN-20260404-INITIAL-RUNTIME.P09
+#[derive(Args, Debug)]
+pub struct DaemonStopArgs {
+    /// Path to config file to stop (config id is its file stem)
+    #[arg(short, long, value_name = "PATH", conflicts_with = "all")]
+    pub config: Option<PathBuf>,
+    /// Stop all known daemon instances
+    #[arg(long)]
+    pub all: bool,
+}
+
+/// Arguments for `daemon status`.
+/// @plan:PLAN-20260404-INITIAL-RUNTIME.P09
+#[derive(Args, Debug)]
+pub struct DaemonStatusArgs {
+    /// Path to config file to inspect (config id is its file stem)
+    #[arg(short, long, value_name = "PATH")]
+    pub config: Option<PathBuf>,
     /// Output in JSON format
     #[arg(long)]
     pub json: bool,
@@ -292,6 +387,112 @@ mod tests {
                 },
                 other => panic!("expected service command, got {other:?}"),
             }
+        }
+    }
+
+    #[test]
+    fn daemon_run_requires_config() {
+        // @plan:PLAN-20260404-INITIAL-RUNTIME.P09
+        let result = Cli::try_parse_from(["luther-workflow", "daemon", "run"]);
+        assert!(result.is_err(), "daemon run without --config should fail");
+    }
+
+    #[test]
+    fn daemon_run_parses_config_and_force() {
+        // @plan:PLAN-20260404-INITIAL-RUNTIME.P09
+        let cli = Cli::try_parse_from([
+            "luther-workflow",
+            "daemon",
+            "run",
+            "--config",
+            "config/workflow-configs/llxprt-code.toml",
+            "--force",
+        ])
+        .expect("daemon run should parse");
+        match cli.command {
+            Commands::Daemon(DaemonArgs {
+                command: DaemonCommand::Run(run),
+            }) => {
+                assert!(run.force);
+                assert_eq!(
+                    run.config,
+                    PathBuf::from("config/workflow-configs/llxprt-code.toml")
+                );
+            }
+            other => panic!("expected daemon run, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn daemon_start_parses_config_dir() {
+        // @plan:PLAN-20260404-INITIAL-RUNTIME.P09
+        let cli = Cli::try_parse_from([
+            "luther-workflow",
+            "daemon",
+            "start",
+            "--config",
+            "llxprt-code.toml",
+            "--config-dir",
+            "/tmp/cfg",
+        ])
+        .expect("daemon start should parse");
+        match cli.command {
+            Commands::Daemon(DaemonArgs {
+                command: DaemonCommand::Start(start),
+            }) => {
+                assert!(!start.force);
+                assert_eq!(start.config_dir, Some(PathBuf::from("/tmp/cfg")));
+            }
+            other => panic!("expected daemon start, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn daemon_stop_config_and_all_conflict() {
+        // @plan:PLAN-20260404-INITIAL-RUNTIME.P09
+        let result = Cli::try_parse_from([
+            "luther-workflow",
+            "daemon",
+            "stop",
+            "--config",
+            "llxprt-code.toml",
+            "--all",
+        ]);
+        assert!(
+            result.is_err(),
+            "daemon stop with both --config and --all should fail"
+        );
+    }
+
+    #[test]
+    fn daemon_stop_all_parses() {
+        // @plan:PLAN-20260404-INITIAL-RUNTIME.P09
+        let cli = Cli::try_parse_from(["luther-workflow", "daemon", "stop", "--all"])
+            .expect("daemon stop --all should parse");
+        match cli.command {
+            Commands::Daemon(DaemonArgs {
+                command: DaemonCommand::Stop(stop),
+            }) => {
+                assert!(stop.all);
+                assert_eq!(stop.config, None);
+            }
+            other => panic!("expected daemon stop, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn daemon_status_json_parses() {
+        // @plan:PLAN-20260404-INITIAL-RUNTIME.P09
+        let cli = Cli::try_parse_from(["luther-workflow", "daemon", "status", "--json"])
+            .expect("daemon status should parse");
+        match cli.command {
+            Commands::Daemon(DaemonArgs {
+                command: DaemonCommand::Status(status),
+            }) => {
+                assert!(status.json);
+                assert_eq!(status.config, None);
+            }
+            other => panic!("expected daemon status, got {other:?}"),
         }
     }
 }

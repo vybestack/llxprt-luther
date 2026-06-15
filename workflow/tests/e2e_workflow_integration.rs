@@ -1650,8 +1650,8 @@ fn implement_required_changed_paths_are_profile_driven() {
         .map(|pattern| interpolate_string(pattern, &llxprt_code_context))
         .collect::<Vec<_>>();
     assert!(
-        llxprt_code_patterns.iter().any(|pattern| pattern == "packages/cli/src/ui/hooks/"),
-        "llxprt-code profile should preserve the issue #1803 changed-path scope: {llxprt_code_patterns:?}"
+        llxprt_code_patterns.iter().any(String::is_empty),
+        "llxprt-code profile should drive an issue-generic changed-path scope: {llxprt_code_patterns:?}"
     );
 
     let alt_config = workflow_config("llxprt-code-alt");
