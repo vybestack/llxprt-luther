@@ -256,7 +256,7 @@ description = "Invoke llxprt to implement the plan"
 
 [steps.parameters]
 profile = "{profile_implementing}"
-timeout_seconds = 900
+timeout_seconds = 3600
 success_on_diff = true
 success_on_existing_diff = true
 change_detection_mode = "include_untracked"
@@ -358,14 +358,14 @@ description = "Invoke llxprt to remediate verification or evaluator feedback"
 
 [steps.parameters]
 profile = "{profile_remediating}"
-timeout_seconds = 900
+timeout_seconds = 3600
 stdout_file = "{artifact_dir}/remediate-stdout.txt"
 stderr_file = "{artifact_dir}/remediate-stderr.txt"
 outcome_on_stdout = { REMEDIATION_COMPLETE = "success", REMEDIATION_SYSTEM_ERROR = "fatal" }
 success_on_diff = true
 min_runtime_before_success_seconds = 30
-max_runtime_after_required_diff_seconds = 30
-idle_timeout_seconds = 180
+max_runtime_after_required_diff_seconds = 600
+idle_timeout_seconds = 3600
 
 
 prompt = """
@@ -495,8 +495,8 @@ description = "Watch GitHub PR checks and classify current-head status"
 [steps.parameters]
 artifact_root = "{artifact_dir}"
 step_order_index = 3
-max_attempts = 12
-max_check_watch_attempts = 12
+max_attempts = 13
+max_check_watch_attempts = 13
 poll_interval_seconds = 300
 check_watch_interval_seconds = 300
 max_duration_seconds = 3600
@@ -600,7 +600,7 @@ pr_number = "{pr_number}"
 artifact_root = "{artifact_dir}"
 step_order_index = 9
 profile = "{profile_remediating}"
-timeout_seconds = 900
+timeout_seconds = 3600
 remediation_plan_path = "{artifact_dir}/pr-followup/current/pr-remediation-plan.json"
 remediation_prompt_path = "{artifact_dir}/pr-followup/current/pr-remediation-prompt.md"
 remediation_result_path = "{artifact_dir}/pr-followup/current/pr-remediation-result.json"
@@ -645,10 +645,11 @@ repository_name = "{repository_name}"
 pr_number = "{pr_number}"
 
 post_pr_test_commands = [
-  { id = "core-typecheck", argv = ["npm", "run", "typecheck", "--workspace", "@vybestack/llxprt-code-core"] },
-  { id = "core-focused-tests", argv = ["npm", "run", "test", "--workspace", "@vybestack/llxprt-code-core", "--", "DirectMessageProcessor", "StreamProcessor", "geminiChat.hook-control", "hookAggregator"] },
-  { id = "core-format", argv = ["npx", "prettier", "--check", "packages/core/src/core/DirectMessageProcessor.ts", "packages/core/src/core/StreamProcessor.ts", "packages/core/src/core/toolSelectionHook.allowedFunctionNames.test.ts", "packages/core/src/core/geminiChat.hook-control.test.ts", "packages/core/src/hooks/hookAggregator.test.ts"] },
+  { id = "agents-typecheck", argv = ["npm", "run", "typecheck", "--workspace", "@vybestack/llxprt-code-agents"] },
+  { id = "agents-tests", argv = ["npm", "run", "test", "--workspace", "@vybestack/llxprt-code-agents"] },
+  { id = "agents-format", argv = ["npx", "prettier", "--check", "packages/agents/src/core/coreToolScheduler.ts"] },
 ]
+
 
 # @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P17
 # @requirement:REQ-PRFU-001,REQ-PRFU-015,REQ-PRFU-017,REQ-PRFU-018,REQ-PRFU-020A,REQ-PRFU-026
@@ -801,20 +802,20 @@ max_iterations = 50
 from = "run_tests"
 to = "remediate"
 condition = "fixable"
-max_iterations = 3
+max_iterations = 5
 
 # Remediation loop: remediate → run_tests when changes are ready; otherwise re-check deterministically
 [[transitions]]
 from = "remediate"
 to = "run_tests"
 condition = "success"
-max_iterations = 2
+max_iterations = 5
 
 [[transitions]]
 from = "remediate"
 to = "run_tests"
 condition = "fixable"
-max_iterations = 2
+max_iterations = 5
 
 
 
@@ -833,7 +834,7 @@ condition = "success"
 from = "evaluate_impl"
 to = "remediate"
 condition = "fixable"
-max_iterations = 2
+max_iterations = 5
 
 # Post-test success flow
 [[transitions]]

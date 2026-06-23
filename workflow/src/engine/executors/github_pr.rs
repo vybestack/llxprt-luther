@@ -340,9 +340,27 @@ fn watch_pr_checks(
         .and_then(Value::as_str)
         .unwrap_or_default()
         .to_string();
-    let max_attempts = u64_param(params, "max_attempts", 12);
-    let interval_seconds = u64_param(params, "poll_interval_seconds", 300);
-    let max_duration_seconds = u64_param(params, "max_duration_seconds", 3600);
+    let interval_seconds = u64_param(
+        params,
+        "check_watch_interval_seconds",
+        u64_param(params, "poll_interval_seconds", 300),
+    );
+    let max_duration_seconds = u64_param(
+        params,
+        "max_check_watch_duration_seconds",
+        u64_param(params, "max_duration_seconds", 3600),
+    );
+    let configured_max_attempts = u64_param(
+        params,
+        "max_check_watch_attempts",
+        u64_param(params, "max_attempts", 12),
+    );
+    let duration_capped_attempts = if interval_seconds == 0 {
+        configured_max_attempts
+    } else {
+        (max_duration_seconds / interval_seconds).saturating_add(1)
+    };
+    let max_attempts = configured_max_attempts.min(duration_capped_attempts).max(1);
     let mut observations = Vec::new();
     let mut final_classification = CheckClassification::empty(OverallState::Unknown);
 
@@ -467,7 +485,9 @@ fn read_or_capture_pr_identity(
         )),
     };
     let canonical_pr_path = store.canonical_path(&binding, "pr");
-    match read_json_without_store_validation(&canonical_pr_path) {
+    match read_json_without_store_validation(&canonical_pr_path)
+        .or_else(|_| find_pr_identity_artifact(context, store, &canonical_pr_path))
+    {
         Ok(value) => Ok(value),
         Err(_) => {
             let argv = vec![
@@ -1543,6 +1563,58 @@ fn require_u64(value: &Value, field: &str) -> Result<u64, EngineError> {
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P06
 /// @requirement:REQ-PRFU-001,REQ-PRFU-004
 /// @pseudocode lines 6,16
+
+fn find_pr_identity_artifact(
+    context: &StepContext,
+    _store: &PrFollowupArtifactStore,
+    requested_path: &std::path::Path,
+) -> Result<Value, EngineError> {
+    let current_root = requested_path
+        .ancestors()
+        .nth(4)
+        .ok_or_else(|| github_pr_error("invalid pr-followup artifact path"))?;
+    if !current_root.exists() {
+        return Err(github_pr_error("PR identity artifact not found"));
+    }
+
+    let mut matches = Vec::new();
+    collect_pr_identity_artifacts(current_root, context.run_id(), &mut matches)?;
+    matches.sort_by(|left, right| left.0.cmp(&right.0));
+    match matches.len() {
+        0 => Err(github_pr_error("PR identity artifact not found")),
+        1 => Ok(matches.remove(0).1),
+        _ => Err(github_pr_error(format!(
+            "multiple PR identity artifacts found for run {}; provide repository_owner, repository_name, and pr_number parameters",
+            context.run_id()
+        ))),
+    }
+}
+
+fn collect_pr_identity_artifacts(
+    dir: &std::path::Path,
+    expected_run_id: &str,
+    matches: &mut Vec<(PathBuf, Value)>,
+) -> Result<(), EngineError> {
+    for entry in fs::read_dir(dir)
+        .map_err(|err| github_pr_error(format!("read pr artifact directory: {err}")))?
+    {
+        let entry = entry
+            .map_err(|err| github_pr_error(format!("read pr artifact directory entry: {err}")))?;
+        let path = entry.path();
+        if path.is_dir() {
+            collect_pr_identity_artifacts(&path, expected_run_id, matches)?;
+        } else if path.file_name().and_then(|name| name.to_str()) == Some("pr.json") {
+            let value = read_json_without_store_validation(&path)?;
+            if value.get("run_id").and_then(Value::as_str) == Some(expected_run_id)
+                && binding_from_artifact(&value).is_ok()
+            {
+                matches.push((path, value));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn read_json_without_store_validation(path: &std::path::Path) -> Result<Value, EngineError> {
     let content = std::fs::read_to_string(path)
         .map_err(|err| github_pr_error(format!("read {}: {err}", path.display())))?;

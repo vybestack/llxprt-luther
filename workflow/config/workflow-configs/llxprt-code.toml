@@ -63,7 +63,7 @@ else
   exit $status
 fi
 """
-typecheck_command = "npm run typecheck 2>&1"
+typecheck_command = "npm run build && npm run typecheck 2>&1"
 build_command = "npm run build 2>&1"
 test_command = "npm run test --workspace @vybestack/llxprt-code 2>&1"
 format_command = """

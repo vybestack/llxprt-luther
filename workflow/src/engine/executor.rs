@@ -157,6 +157,53 @@ impl StepContext {
             self.work_dir.to_string_lossy().to_string(),
         );
     }
+
+    /// Export resumable context values for checkpoint persistence.
+    #[must_use]
+    pub fn snapshot_values(&self) -> HashMap<String, serde_json::Value> {
+        let mut snapshot = HashMap::new();
+        snapshot.insert(
+            "variables".to_string(),
+            serde_json::to_value(&self.variables).unwrap_or(serde_json::Value::Null),
+        );
+        snapshot.insert(
+            "namespaced_vars".to_string(),
+            serde_json::to_value(&self.namespaced_vars).unwrap_or(serde_json::Value::Null),
+        );
+        snapshot.insert(
+            "step_order".to_string(),
+            serde_json::to_value(&self.step_order).unwrap_or(serde_json::Value::Null),
+        );
+        snapshot
+    }
+
+    /// Restore context values loaded from a checkpoint.
+    pub fn restore_snapshot_values(&mut self, snapshot: &HashMap<String, serde_json::Value>) {
+        if let Some(value) = snapshot.get("variables") {
+            if let Ok(variables) = serde_json::from_value::<HashMap<String, String>>(value.clone())
+            {
+                self.variables = variables;
+            }
+        }
+        if let Some(value) = snapshot.get("namespaced_vars") {
+            if let Ok(namespaced_vars) =
+                serde_json::from_value::<HashMap<String, HashMap<String, String>>>(value.clone())
+            {
+                self.namespaced_vars = namespaced_vars;
+            }
+        }
+        if let Some(value) = snapshot.get("step_order") {
+            if let Ok(step_order) = serde_json::from_value::<Vec<String>>(value.clone()) {
+                self.step_order = step_order;
+            }
+        }
+        self.variables
+            .insert("run_id".to_string(), self.run_id.clone());
+        self.variables.insert(
+            "work_dir".to_string(),
+            self.work_dir.to_string_lossy().to_string(),
+        );
+    }
 }
 
 /// Interpolate `{key}` and `{step_id.key}` template tokens in a template string.

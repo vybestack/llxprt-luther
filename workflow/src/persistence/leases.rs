@@ -158,9 +158,9 @@ pub fn create_lease(conn: &Connection, lease: &IssueLease) -> SqliteResult<()> {
 
 /// Atomically claim an issue, returning the new lease when the claim is won.
 ///
-/// Uses `INSERT ... ON CONFLICT(issue_repo, issue_number) DO NOTHING` so a
-/// second concurrent claim of the same issue gets `Ok(None)`. This is the core
-/// primitive that prevents two daemons (or restarts) launching the same issue.
+/// Active leases (`claimed`/`running`) block duplicate work. Terminal leases are
+/// reusable so a failed or completed daemon attempt does not permanently hide an
+/// otherwise eligible issue from later scheduler passes.
 /// @plan:PLAN-20260415-DAEMON-DISCOVERY.P02
 /// @requirement:REQ-DAEMON-DISCOVERY-002,REQ-DAEMON-DISCOVERY-005
 pub fn try_claim(
@@ -202,10 +202,38 @@ pub fn try_claim(
             lease.heartbeat_at.to_rfc3339(),
         ],
     )?;
-    if inserted == 0 {
-        Ok(None)
-    } else {
+    if inserted == 1 {
+        return Ok(Some(lease));
+    }
+
+    let reclaimed = conn.execute(
+        "UPDATE issue_leases
+            SET lease_id = ?1,
+                config_id = ?2,
+                run_id = NULL,
+                status = ?3,
+                claimed_at = ?4,
+                updated_at = ?5,
+                heartbeat_at = ?6
+          WHERE issue_repo = ?7
+            AND issue_number = ?8
+            AND status NOT IN ('claimed', 'running')",
+        params![
+            lease.lease_id,
+            lease.config_id,
+            lease.status.to_string(),
+            lease.claimed_at.to_rfc3339(),
+            lease.updated_at.to_rfc3339(),
+            lease.heartbeat_at.to_rfc3339(),
+            lease.issue_repo,
+            lease.issue_number as i64,
+        ],
+    )?;
+
+    if reclaimed == 1 {
         Ok(Some(lease))
+    } else {
+        Ok(None)
     }
 }
 
@@ -377,6 +405,22 @@ mod tests {
         let second = try_claim(&c, "o/r", 1, "cfg-b").unwrap();
         assert!(first.is_some());
         assert!(second.is_none(), "duplicate claim must be rejected");
+    }
+
+    #[test]
+    fn try_claim_reclaims_terminal_lease() {
+        let c = conn();
+        let first = try_claim(&c, "o/r", 8, "cfg-a").unwrap().unwrap();
+        update_lease_status(&c, &first.lease_id, LeaseStatus::Failed, Some("run-old")).unwrap();
+
+        let second = try_claim(&c, "o/r", 8, "cfg-b").unwrap().unwrap();
+        assert_ne!(second.lease_id, first.lease_id);
+
+        let fetched = get_lease_for_issue(&c, "o/r", 8).unwrap().unwrap();
+        assert_eq!(fetched.lease_id, second.lease_id);
+        assert_eq!(fetched.config_id, "cfg-b");
+        assert_eq!(fetched.status, LeaseStatus::Claimed);
+        assert!(fetched.run_id.is_none());
     }
 
     #[test]

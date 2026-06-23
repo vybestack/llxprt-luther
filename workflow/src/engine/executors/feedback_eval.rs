@@ -6,7 +6,7 @@
 
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::thread;
@@ -1198,7 +1198,61 @@ fn read_or_build_binding(
         let value = read_json_file(&pr_path)?;
         return binding_from_value(&value);
     }
+    if let Some(value) = find_pr_identity_artifact(context, &pr_path)? {
+        return binding_from_value(&value);
+    }
     Ok(fallback)
+}
+
+fn find_pr_identity_artifact(
+    context: &StepContext,
+    requested_path: &Path,
+) -> Result<Option<Value>, EngineError> {
+    let current_root = requested_path
+        .ancestors()
+        .nth(4)
+        .ok_or_else(|| feedback_eval_error("invalid pr-followup artifact path"))?;
+    if !current_root.exists() {
+        return Ok(None);
+    }
+
+    let mut matches = Vec::new();
+    collect_pr_identity_artifacts(current_root, context.run_id(), &mut matches)?;
+    matches.sort_by(|left, right| left.0.cmp(&right.0));
+    match matches.len() {
+        0 => Ok(None),
+        1 => Ok(Some(matches.remove(0).1)),
+        _ => Err(feedback_eval_error(format!(
+            "multiple PR identity artifacts found for run {}; provide repository_owner, repository_name, and pr_number parameters",
+            context.run_id()
+        ))),
+    }
+}
+
+fn collect_pr_identity_artifacts(
+    dir: &Path,
+    expected_run_id: &str,
+    matches: &mut Vec<(PathBuf, Value)>,
+) -> Result<(), EngineError> {
+    for entry in std::fs::read_dir(dir)
+        .map_err(|err| feedback_eval_error(format!("read pr artifact directory: {err}")))?
+    {
+        let entry = entry.map_err(|err| {
+            feedback_eval_error(format!("read pr artifact directory entry: {err}"))
+        })?;
+        let path = entry.path();
+        if path.is_dir() {
+            collect_pr_identity_artifacts(&path, expected_run_id, matches)?;
+        } else if path.file_name().and_then(|name| name.to_str()) == Some("pr.json") {
+            let value = read_json_file(&path)?;
+            if value.get("run_id").and_then(Value::as_str) == Some(expected_run_id)
+                && binding_from_value(&value).is_ok()
+            {
+                matches.push((path, value));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn artifact_root(context: &StepContext, params: &Value) -> Result<PathBuf, EngineError> {

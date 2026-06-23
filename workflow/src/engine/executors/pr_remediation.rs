@@ -1348,14 +1348,19 @@ fn render_remediation_prompt(
             )
         })
         .unwrap_or_default();
+    let plan_sequence = plan
+        .get("artifact_sequence")
+        .map(Value::to_string)
+        .unwrap_or_else(|| "null".to_string());
     format!(
-        "PR follow-up remediation for {}/{}, PR #{} at head {}.\n\nRead {}. Fix only pr-remediation-plan.json.must_fix. Do not fix pr-remediation-plan.json.mark_invalid, out_of_scope feedback, or pr-remediation-plan.json.needs_user_judgment. Write {}. Use only canonical statuses fixed | changed | already_satisfied | not_reproduced | not_fixed | skipped | failed. Include structured evidence for every result item. Required result schema: every result item must include input_head_sha set to {} and output_head_sha set to the current PR head after remediation; fixed or changed results must include evidence.current_head_sha equal to the current PR head; already_satisfied or not_reproduced results must include evidence.current_head_sha equal to {}. already_satisfied results must also include evidence.commands with at least one command object whose status is passed and whose argv array is non-empty. Free-form-only completion is not acceptable; pr-remediation-result.json is required. Write only the requested canonical current pr-remediation-result.json path; do not create, copy, or modify any pr-followup/history files or artifact metadata fields.{}",
+        "PR follow-up remediation for {}/{}, PR #{} at head {}.\n\nRead {}. Fix only pr-remediation-plan.json.must_fix. Do not fix pr-remediation-plan.json.mark_invalid, out_of_scope feedback, or pr-remediation-plan.json.needs_user_judgment. Write {}. Use only canonical statuses fixed | changed | already_satisfied | not_reproduced | not_fixed | skipped | failed. Include exactly one results[] item for each pr-remediation-plan.json.must_fix item and do not include result rows for mark_invalid, out_of_scope, or needs_user_judgment items. Required top-level field: plan_artifact_sequence must equal {}. Required result schema: every result item must copy source_type, source_id, stable_marker_key, and body_hash from its matching must_fix plan item; every result item must include input_head_sha set to {} and output_head_sha set to the current PR head after remediation; fixed or changed results must include evidence.current_head_sha equal to the current PR head; already_satisfied or not_reproduced results must include evidence.current_head_sha equal to {}. already_satisfied results must also include evidence.commands with at least one command object whose status is passed and whose argv array is non-empty. Free-form-only completion is not acceptable; pr-remediation-result.json is required. Write only the requested canonical current pr-remediation-result.json path; do not create, copy, or modify any pr-followup/history files or artifact metadata fields.{}",
         binding.repository_owner,
         binding.repository_name,
         binding.pr_number,
         binding.head_sha,
         plan_path,
         result_path.display(),
+        plan_sequence,
         binding.head_sha,
         binding.head_sha,
         validation_feedback
@@ -1893,7 +1898,7 @@ fn validate_remediation_result(
     let step_order = u64_param(params, "step_order_index", 9);
 
     let validation = evaluate_remediation_result(&binding, &plan, &result);
-    let payload = remediation_result_payload(&binding, &result, &validation, clock);
+    let payload = remediation_result_payload(&binding, &plan, &result, &validation, clock);
     let failure = if validation.outcome == StepOutcome::Fatal {
         Some((
             validation.state.as_str(),
@@ -1952,6 +1957,7 @@ fn evaluate_remediation_result(
 ) -> RemediationResultValidation {
     let mut errors = Vec::new();
     let plan_items = plan_items_by_key(plan);
+    let ignored_result_items = ignored_result_items_by_key(plan);
     let input_head_sha = string_field(result, "input_head_sha", "");
     let output_head_sha = string_field(result, "output_head_sha", "");
     let no_change_after_remediation = output_head_sha == input_head_sha;
@@ -1978,7 +1984,10 @@ fn evaluate_remediation_result(
             binding.head_sha, input_head_sha
         ));
     }
-    if result.get("plan_artifact_sequence") != plan.get("artifact_sequence") {
+    let result_plan_sequence = result
+        .get("plan_artifact_sequence")
+        .filter(|value| !value.is_null());
+    if result_plan_sequence.is_some() && result_plan_sequence != plan.get("artifact_sequence") {
         errors.push("plan_artifact_sequence mismatch".to_string());
     }
 
@@ -1993,6 +2002,7 @@ fn evaluate_remediation_result(
 
     let mut unsuccessful_statuses = Vec::new();
     let mut successful_count = 0usize;
+    let mut counted_results = 0usize;
     let mut result_counts: BTreeMap<String, usize> = BTreeMap::new();
     for item in &results {
         let source_type = string_field(item, "source_type", "");
@@ -2000,6 +2010,10 @@ fn evaluate_remediation_result(
         let status = string_field(item, "status", "");
         let key = format!("{source_type}:{source_id}");
         let plan_item = plan_items.get(&key);
+        if plan_item.is_none() && ignored_result_items.contains_key(&key) {
+            continue;
+        }
+        counted_results += 1;
         *result_counts.entry(key.clone()).or_default() += 1;
         if plan_item.is_none() {
             errors.push(format!(
@@ -2052,7 +2066,7 @@ fn evaluate_remediation_result(
         };
     }
 
-    if !unsuccessful_statuses.is_empty() || successful_count != results.len() {
+    if !unsuccessful_statuses.is_empty() || successful_count != counted_results {
         remediation_attempt_index += 1;
         let exhausted = remediation_attempt_index >= max_remediation_attempts;
         return RemediationResultValidation {
@@ -2095,6 +2109,23 @@ fn plan_items_by_key(plan: &Value) -> std::collections::BTreeMap<String, Value> 
     let mut items = std::collections::BTreeMap::new();
     for item in plan
         .get("must_fix")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let source_type = string_field(item, "source_type", "");
+        let source_id = string_field(item, "source_id", "");
+        if !source_type.is_empty() && !source_id.is_empty() {
+            items.insert(format!("{source_type}:{source_id}"), item.clone());
+        }
+    }
+    items
+}
+
+fn ignored_result_items_by_key(plan: &Value) -> std::collections::BTreeMap<String, Value> {
+    let mut items = std::collections::BTreeMap::new();
+    for item in plan
+        .get("mark_invalid")
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
@@ -2252,6 +2283,7 @@ fn validate_deterministic_evidence(
 
 fn remediation_result_payload(
     binding: &PrFollowupBinding,
+    plan: &Value,
     result: &Value,
     validation: &RemediationResultValidation,
     clock: &dyn ClockSleeper,
@@ -2284,7 +2316,9 @@ fn remediation_result_payload(
             .unwrap_or_else(|| json!({})),
         plan_artifact_sequence: result
             .get("plan_artifact_sequence")
+            .filter(|value| !value.is_null())
             .cloned()
+            .or_else(|| plan.get("artifact_sequence").cloned())
             .unwrap_or(Value::Null),
         unsuccessful_statuses: validation.unsuccessful_statuses.clone(),
         no_change_after_remediation: validation.no_change_after_remediation,

@@ -442,6 +442,8 @@ impl EngineRunner {
             self.instance.transition_to(&checkpoint.step_id);
             self.retry_count = checkpoint.state_snapshot.retry_count;
             self.edge_loop_counts = checkpoint.state_snapshot.edge_loop_counts.clone();
+            self.context
+                .restore_snapshot_values(&checkpoint.state_snapshot.context);
         }
         drop(conn);
 
@@ -499,6 +501,11 @@ impl EngineRunner {
                             Some(&e.to_string()),
                         );
                     }
+                    let run_outcome = RunOutcome::Failure {
+                        step_id: current_step_id.clone(),
+                        reason: e.to_string(),
+                    };
+                    let _ = self.record_run_completion(&run_outcome, &current_step_id);
                     return Err(e);
                 }
             };
@@ -761,6 +768,8 @@ impl EngineRunner {
             self.instance.transition_to(&cp.step_id);
             self.retry_count = cp.state_snapshot.retry_count;
             self.edge_loop_counts = cp.state_snapshot.edge_loop_counts.clone();
+            self.context
+                .restore_snapshot_values(&cp.state_snapshot.context);
             Ok(true)
         } else {
             Ok(false)
@@ -774,7 +783,7 @@ impl EngineRunner {
             retry_count: self.retry_count,
             loop_count: self.loop_count(),
             edge_loop_counts: self.edge_loop_counts.clone(),
-            context: std::collections::HashMap::new(),
+            context: self.context.snapshot_values(),
             status: status.to_string(),
         };
         Checkpoint::with_snapshot(&self.instance.run_id, step_id, snapshot)
@@ -946,6 +955,87 @@ mod tests {
         let _interrupted = RunOutcome::Interrupted {
             step_id: "s3".to_string(),
         };
+    }
+
+    #[test]
+    fn step_executor_error_persists_failed_run() {
+        use crate::engine::executor::{ExecutorRegistry, StepContext, StepExecutor};
+        use crate::persistence::sqlite::get_run_with_conn;
+        use crate::workflow::schema::{
+            GuardLimits, RepoConfig, RuntimeConfig, StepDef, WorkflowConfig, WorkflowType,
+        };
+
+        struct FailingExecutor;
+
+        impl StepExecutor for FailingExecutor {
+            fn execute(
+                &self,
+                _context: &mut StepContext,
+                _params: &serde_json::Value,
+            ) -> Result<StepOutcome, EngineError> {
+                Err(EngineError::StepExecutionError {
+                    step_id: "fail".to_string(),
+                    message: "boom".to_string(),
+                })
+            }
+        }
+
+        let workflow_type = WorkflowType {
+            workflow_type_id: "error-test".to_string(),
+            steps: vec![StepDef {
+                step_id: "fail".to_string(),
+                step_type: "failing".to_string(),
+                description: None,
+                parameters: None,
+                produces: None,
+                consumes: None,
+                terminal: None,
+            }],
+            transitions: vec![],
+            guards: Default::default(),
+        };
+        let config = WorkflowConfig {
+            config_id: "error-config".to_string(),
+            workflow_type_id: "error-test".to_string(),
+            runtime: RuntimeConfig {
+                timeout_seconds: 3600,
+                max_retries: 3,
+                parallel_steps: None,
+                log_level: None,
+            },
+            repo: RepoConfig {
+                workspace_strategy: "temp".to_string(),
+                branch_template: "test-{run_id}".to_string(),
+                base_branch: Some("main".to_string()),
+                workspace_root: None,
+            },
+            guard_limits: GuardLimits {
+                max_iterations: Some(3),
+                max_file_changes: Some(50),
+                max_tokens: Some(10000),
+                max_cost: Some(10.0),
+            },
+            variables: std::collections::HashMap::new(),
+            discovery: None,
+        };
+        let instance = WorkflowInstance::create(workflow_type, config);
+        let run_id = instance.run_id.clone();
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let db_path = temp_dir.path().join("checkpoints.db");
+        let mut registry = ExecutorRegistry::new();
+        registry.register("failing", Box::new(FailingExecutor));
+        let mut runner = EngineRunner::with_db_path(instance, registry, &db_path)
+            .expect("runner should initialize");
+
+        let err = runner.run().expect_err("executor error should propagate");
+        assert!(err.to_string().contains("boom"));
+
+        let conn = rusqlite::Connection::open(&db_path).expect("open db");
+        let metadata = get_run_with_conn(&conn, &run_id)
+            .expect("query run")
+            .expect("run metadata exists");
+        assert_eq!(metadata.status, RunStatus::Failed);
+        assert_eq!(metadata.current_step.as_deref(), Some("fail"));
     }
 
     #[test]
