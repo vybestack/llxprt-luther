@@ -185,3 +185,64 @@ The remediation validation/local-test/push loop is therefore artifact-backed: re
 - Workflow configuration: `config/workflows/llxprt-issue-fix-v1.toml` and generated/fixture workflow TOML/JSON under `tests/fixtures/workflows/`.
 - Tests: `tests/github_pr_followup_executor_tests.rs`, `tests/pr_followup_workflow_integration.rs`, `tests/e2e_workflow_integration.rs`, `tests/workflow_shell_safety_tests.rs`, `tests/pr_followup_marker_audit_tests.rs`, and GitHub API contract tests/fixtures.
 - Planning contracts: `project-plans/coderabbit/implementation-plan.md`, `project-plans/coderabbit/engineupdates/REQUIREMENTS.md`, `project-plans/coderabbit/analysis/artifact-schema-contract.md`, and `project-plans/coderabbit/analysis/github-api-contract.md`.
+
+## Recoverable external-wait state and operator continuation
+
+@plan:PLAN-20260623-LUTHER-CONTINUATION
+
+A PR-check pending timeout is a *recoverable* condition: CI was still running when
+the watch window closed, and the checks may later go green. Such timeouts are no
+longer mapped to an irreversible terminal failure.
+
+- `watch_pr_checks` maps the typed check classification as `Passed -> success`,
+  `Failed -> fixable`, genuine `Unknown`/`Fatal` -> `fatal`, and
+  `PendingTimeout -> wait` (`StepOutcome::Wait`). The workflow intentionally
+  defines no `wait` transition for `watch_pr_checks`, so a wait outcome **pauses**
+  the run at `watch_pr_checks` with a resumable checkpoint
+  (`StateSnapshot.status = "waiting"`) and records the non-terminal
+  `RunStatus::WaitingForChecks` instead of routing the timeout to
+  `post_pr_failure_terminal`. The `pr-check-status` artifact still records
+  `overall_state = pending_timeout`.
+- The engine surfaces this as `RunOutcome::WaitingExternal { step_id, reason }`;
+  the process exits 0 with a hint to resume.
+
+Operators continue a paused or failed run from the CLI without editing SQLite:
+
+- `luther-workflow runs checkpoints RUN_ID [--json]` — list every per-step
+  checkpoint with step id, status, timestamp, loop count, retry count, and a
+  brief context summary.
+- `luther-workflow runs resume RUN_ID [--force]` — resume the newest resumable
+  checkpoint (`waiting`/`interrupted`/`ready_to_resume`); for a terminal `Failed`
+  run, the checkpoint immediately before the recorded terminal step.
+- `luther-workflow runs retry RUN_ID --from-failed-step [--force]` — re-run the
+  failed external-wait step (the `watch_pr_checks` pending-timeout case) using the
+  prior checkpoint context.
+- `luther-workflow runs rewind RUN_ID (--to-step STEP | --to-checkpoint ID) [--force]`
+  — set the resume point to a selected earlier checkpoint by step id or by
+  `step_id@timestamp` identity.
+
+Continuation is validated before any state changes (run id exists, checkpoint
+exists, workflow type/config still resolve and match, issue/PR identity is
+recoverable, workspace is present, and the selected step is in the safe-to-rerun
+whitelist — `watch_pr_checks`, `collect_ci_failures`,
+`collect_coderabbit_feedback`, `capture_pr_identity`, `post_pr_iteration_guard`).
+Implementation/remediation steps are rejected unless `--force`. Failed validation
+refuses the operation with per-check diagnostics rather than corrupting state.
+
+Continuation preserves history (the event log is append-only and the terminal
+checkpoint row is retained with its older timestamp) and writes auditable
+artifacts under the run's artifact root: `continuation-request.json`,
+`continuation-validation.json`, `checkpoint-selection.json`, and
+`resume-result.json` / `retry-result.json`. A successful continuation reopens the
+run to `RunStatus::Running` and appends a continuation event so monitor and
+`runs show` reflect the resumed state.
+
+- Engine/persistence implementation files: `src/engine/continuation.rs`,
+  `src/engine/transition.rs` (`StepOutcome::Wait`), `src/engine/runner.rs`
+  (`RunOutcome::WaitingExternal`), `src/persistence/checkpoint.rs`
+  (`set_resume_point`/`get_checkpoint_for_step`/`load_checkpoint_before_step`),
+  `src/persistence/run_metadata.rs` (`RunStatus::is_resumable`/`reopen`), and the
+  `runs` subcommands in `src/cli/mod.rs` + `src/main.rs`.
+- Tests: `tests/continuation_integration.rs`, `tests/engine_resume_integration.rs`,
+  and the recoverable-wait assertions in `tests/github_pr_followup_executor_tests.rs`
+  and `tests/pr_followup_replay_e2e_tests.rs`.

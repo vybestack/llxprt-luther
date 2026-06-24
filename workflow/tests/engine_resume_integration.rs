@@ -6,13 +6,42 @@
 /// from persisted checkpoints.
 use std::collections::HashMap;
 
-use luther_workflow::engine::executor::{ExecutorRegistry, NoOpExecutor};
+use luther_workflow::engine::executor::{
+    ExecutorRegistry, NoOpExecutor, StepContext, StepExecutor,
+};
 use luther_workflow::engine::instance::WorkflowInstance;
-use luther_workflow::engine::runner::{EngineRunner, RunOutcome};
-use luther_workflow::persistence::{load_checkpoint, save_checkpoint, Checkpoint, StateSnapshot};
+use luther_workflow::engine::runner::{EngineError, EngineRunner, RunOutcome};
+use luther_workflow::engine::transition::StepOutcome;
+use luther_workflow::persistence::{
+    get_run_with_conn, load_checkpoint, load_checkpoint_with_conn, save_checkpoint, Checkpoint,
+    RunStatus, StateSnapshot, CHECKPOINT_STATUS_WAITING,
+};
 use luther_workflow::workflow::schema::{
     GuardLimits, RepoConfig, RuntimeConfig, WorkflowConfig, WorkflowType,
 };
+
+/// Executor that returns a fixed outcome for the `test` step type. Used to
+/// drive the recoverable external-wait path without real PR checks.
+/// @plan:PLAN-20260623-LUTHER-CONTINUATION
+struct FixedOutcomeExecutor(StepOutcome);
+
+impl StepExecutor for FixedOutcomeExecutor {
+    fn execute(
+        &self,
+        _context: &mut StepContext,
+        _params: &serde_json::Value,
+    ) -> Result<StepOutcome, EngineError> {
+        Ok(self.0)
+    }
+}
+
+/// Registry whose `test` step type yields the supplied outcome.
+/// @plan:PLAN-20260623-LUTHER-CONTINUATION
+fn fixed_registry(outcome: StepOutcome) -> ExecutorRegistry {
+    let mut registry = ExecutorRegistry::new();
+    registry.register("test", Box::new(FixedOutcomeExecutor(outcome)));
+    registry
+}
 
 /// Helper to create a registry with `NoOpExecutor` for test steps.
 fn test_registry() -> ExecutorRegistry {
@@ -319,4 +348,94 @@ fn test_resume_preserves_loop_and_retry_counters() {
     // The runner should have the ability to restore these counters
     // This verifies the API supports counter restoration
     let _ = runner.run();
+}
+
+/// Test: a step returning `Wait` with no matching `wait` edge pauses the run.
+/// GIVEN: step_a yields `StepOutcome::Wait` and the workflow has no `wait` edge
+/// WHEN: the engine runs
+/// THEN: it returns `WaitingExternal` at step_a, persists a `waiting`
+///       checkpoint there, and records the non-terminal `WaitingForChecks`
+///       status (the run stays active and resumable).
+/// @plan:PLAN-20260623-LUTHER-CONTINUATION
+#[test]
+fn wait_outcome_pauses_run_as_waiting_external() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let db_path = temp.path().join("checkpoints.db");
+    let instance = WorkflowInstance::create(test_workflow_type(), test_workflow_config());
+    let run_id = instance.run_id.clone();
+
+    let mut runner = EngineRunner::with_db_path_and_context(
+        instance,
+        fixed_registry(StepOutcome::Wait),
+        &db_path,
+        Default::default(),
+    )
+    .expect("runner");
+    let outcome = runner.run().expect("run");
+    drop(runner);
+
+    assert!(
+        matches!(&outcome, RunOutcome::WaitingExternal { step_id, .. } if step_id == "step_a"),
+        "Wait with no matching edge should pause at step_a, got {outcome:?}"
+    );
+
+    let conn = rusqlite::Connection::open(&db_path).expect("open db");
+    let md = get_run_with_conn(&conn, &run_id)
+        .expect("query run")
+        .expect("run row");
+    assert_eq!(md.status, RunStatus::WaitingForChecks);
+    assert!(
+        !md.status.is_terminal(),
+        "waiting status must be non-terminal"
+    );
+    let cp = load_checkpoint_with_conn(&conn, &run_id)
+        .expect("query checkpoint")
+        .expect("checkpoint row");
+    assert_eq!(cp.step_id, "step_a");
+    assert_eq!(cp.state_snapshot.status, CHECKPOINT_STATUS_WAITING);
+}
+
+/// Test: resuming a `WaitingForChecks` run re-enters the wait step and, once it
+/// succeeds (external condition resolved), advances to the next step without
+/// re-running earlier steps.
+/// @plan:PLAN-20260623-LUTHER-CONTINUATION
+#[test]
+fn resume_waiting_run_advances_when_wait_step_succeeds() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let db_path = temp.path().join("checkpoints.db");
+    let instance = WorkflowInstance::create(test_workflow_type(), test_workflow_config());
+    let run_id = instance.run_id.clone();
+
+    // First pass: step_a waits, run pauses at step_a.
+    let mut runner = EngineRunner::with_db_path_and_context(
+        instance,
+        fixed_registry(StepOutcome::Wait),
+        &db_path,
+        Default::default(),
+    )
+    .expect("runner");
+    let first = runner.run().expect("first run");
+    drop(runner);
+    assert!(matches!(first, RunOutcome::WaitingExternal { .. }));
+
+    // Second pass: the external condition resolved; step now succeeds and the
+    // run drives to completion.
+    let resumed =
+        WorkflowInstance::create_with_run_id(test_workflow_type(), test_workflow_config(), &run_id);
+    let mut runner2 = EngineRunner::with_db_path_and_context(
+        resumed,
+        fixed_registry(StepOutcome::Success),
+        &db_path,
+        Default::default(),
+    )
+    .expect("runner");
+    let second = runner2.run().expect("second run");
+    drop(runner2);
+    assert_eq!(second, RunOutcome::Success);
+
+    let conn = rusqlite::Connection::open(&db_path).expect("open db");
+    let md = get_run_with_conn(&conn, &run_id)
+        .expect("query run")
+        .expect("run row");
+    assert_eq!(md.status, RunStatus::Completed);
 }

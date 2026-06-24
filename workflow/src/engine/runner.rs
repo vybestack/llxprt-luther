@@ -13,7 +13,7 @@ use crate::engine::transition::{resolve_transition_schema, StepOutcome};
 use crate::persistence::{
     append_typed_event_with_conn, load_checkpoint_with_conn, persist_run_with_conn,
     save_checkpoint_with_conn, Checkpoint, EventType, PersistenceError, RunMetadata, RunStatus,
-    StateSnapshot,
+    StateSnapshot, CHECKPOINT_STATUS_WAITING,
 };
 use crate::workflow::schema::TransitionDef;
 
@@ -102,6 +102,11 @@ pub enum RunOutcome {
     Abandoned { step_id: String, reason: String },
     /// Run was interrupted and can be resumed.
     Interrupted { step_id: String },
+    /// Run paused on a recoverable external wait condition (e.g. PR checks
+    /// still pending when the watch window closed). The run is non-terminal
+    /// and can be resumed once the external state changes.
+    /// @plan:PLAN-20260623-LUTHER-CONTINUATION
+    WaitingExternal { step_id: String, reason: String },
 }
 
 /// The workflow execution engine.
@@ -597,6 +602,15 @@ impl EngineRunner {
                     self.instance.transition_to(&current_step_id);
                 }
                 None => {
+                    // Recoverable external wait with no `wait` transition: pause
+                    // at the current step with a resumable checkpoint instead of
+                    // routing to a terminal failure sink.
+                    // @plan:PLAN-20260623-LUTHER-CONTINUATION
+                    if outcome == StepOutcome::Wait {
+                        let run_outcome = self.pause_for_external_wait(&current_step_id)?;
+                        return Ok(run_outcome);
+                    }
+
                     // No transition found - determine outcome based on step outcome
                     // @plan:PLAN-20260408-LLXPRT-FIRST.P15
                     // @requirement:REQ-LF-FAIL-001
@@ -620,6 +634,24 @@ impl EngineRunner {
                 }
             }
         }
+    }
+
+    /// Persist a resumable `waiting` checkpoint at the current step and return
+    /// a non-advancing `WaitingExternal` outcome. The resume point is the wait
+    /// step itself, so a later resume re-enters it and refreshes external state.
+    /// @plan:PLAN-20260623-LUTHER-CONTINUATION
+    fn pause_for_external_wait(&self, step_id: &str) -> Result<RunOutcome, EngineError> {
+        let checkpoint = self.create_checkpoint(step_id, CHECKPOINT_STATUS_WAITING);
+        {
+            let conn = self.conn.borrow();
+            save_checkpoint_with_conn(&conn, &checkpoint)?;
+        }
+        let run_outcome = RunOutcome::WaitingExternal {
+            step_id: step_id.to_string(),
+            reason: "External condition still pending at watch limit".to_string(),
+        };
+        let _ = self.record_run_completion(&run_outcome, step_id);
+        Ok(run_outcome)
     }
 
     /// Find the transition definition matching the given from step and outcome.
@@ -836,6 +868,10 @@ impl EngineRunner {
             RunOutcome::Failure { .. } => RunStatus::Failed,
             RunOutcome::Abandoned { .. } => RunStatus::Abandoned,
             RunOutcome::Interrupted { .. } => RunStatus::Paused,
+            // A recoverable external wait maps to a non-terminal status so the
+            // run stays visible/active and can be resumed.
+            // @plan:PLAN-20260623-LUTHER-CONTINUATION
+            RunOutcome::WaitingExternal { .. } => RunStatus::WaitingForChecks,
         };
 
         // Update the existing run record (created at start) rather than

@@ -31,6 +31,32 @@ impl From<rusqlite::Error> for PersistenceError {
     }
 }
 
+/// Checkpoint status recorded when a step pauses on a recoverable external
+/// wait condition (e.g. PR checks still pending when the watch window closed).
+/// @plan:PLAN-20260623-LUTHER-CONTINUATION
+pub const CHECKPOINT_STATUS_WAITING: &str = "waiting";
+
+/// Checkpoint status recorded when a run is interrupted mid-step.
+/// @plan:PLAN-20260623-LUTHER-CONTINUATION
+pub const CHECKPOINT_STATUS_INTERRUPTED: &str = "interrupted";
+
+/// Checkpoint status stamped by operator continuation when a previous
+/// checkpoint is selected as the resume point.
+/// @plan:PLAN-20260623-LUTHER-CONTINUATION
+pub const CHECKPOINT_STATUS_READY_TO_RESUME: &str = "ready_to_resume";
+
+/// Returns true when the checkpoint status string denotes a resumable state
+/// (waiting on external conditions, interrupted, or explicitly re-armed).
+/// @plan:PLAN-20260623-LUTHER-CONTINUATION
+pub fn is_resumable_checkpoint_status(status: &str) -> bool {
+    matches!(
+        status,
+        CHECKPOINT_STATUS_WAITING
+            | CHECKPOINT_STATUS_INTERRUPTED
+            | CHECKPOINT_STATUS_READY_TO_RESUME
+    )
+}
+
 // Thread-local storage for default database connection (for backwards compatibility)
 thread_local! {
     static DEFAULT_CONN: RefCell<Option<Connection>> = const { RefCell::new(None) };
@@ -389,6 +415,65 @@ pub fn list_checkpoints(
     }
 
     Ok(checkpoints)
+}
+
+/// Load the single checkpoint recorded for a specific step of a run, if any.
+/// @plan:PLAN-20260623-LUTHER-CONTINUATION
+pub fn get_checkpoint_for_step(
+    conn: &Connection,
+    run_id: &str,
+    step_id: &str,
+) -> Result<Option<Checkpoint>, PersistenceError> {
+    Ok(list_checkpoints(conn, run_id)?
+        .into_iter()
+        .find(|cp| cp.step_id == step_id))
+}
+
+/// Load the checkpoint recorded immediately before the given step (by
+/// timestamp order), if one exists. Used to rewind to the known-good state
+/// captured just prior to a step that later terminaled.
+/// @plan:PLAN-20260623-LUTHER-CONTINUATION
+pub fn load_checkpoint_before_step(
+    conn: &Connection,
+    run_id: &str,
+    step_id: &str,
+) -> Result<Option<Checkpoint>, PersistenceError> {
+    let checkpoints = list_checkpoints(conn, run_id)?;
+    let target_idx = checkpoints.iter().position(|cp| cp.step_id == step_id);
+    match target_idx {
+        Some(idx) if idx > 0 => Ok(Some(checkpoints[idx - 1].clone())),
+        _ => Ok(None),
+    }
+}
+
+/// Re-stamp a selected checkpoint as the resume point so the standard
+/// newest-first resume loader (`load_checkpoint_with_conn`) naturally selects
+/// it. History is preserved: only the timestamp and status of the targeted
+/// step row are updated; the append-only event log is untouched.
+/// @plan:PLAN-20260623-LUTHER-CONTINUATION
+pub fn set_resume_point(
+    conn: &Connection,
+    run_id: &str,
+    step_id: &str,
+) -> Result<DateTime<Utc>, PersistenceError> {
+    let now = Utc::now();
+    let updated = conn.execute(
+        "UPDATE checkpoints
+         SET status = ?3, timestamp = ?4
+         WHERE run_id = ?1 AND step_id = ?2",
+        params![
+            run_id,
+            step_id,
+            CHECKPOINT_STATUS_READY_TO_RESUME,
+            now.to_rfc3339(),
+        ],
+    )?;
+    if updated == 0 {
+        return Err(PersistenceError::NotFound(format!(
+            "no checkpoint for run {run_id} step {step_id}"
+        )));
+    }
+    Ok(now)
 }
 
 /// Append an event record for a step completion using a specific connection.
@@ -865,5 +950,106 @@ mod tests {
         // A zero limit yields an empty result without touching the database.
         let none = load_recent_events(&conn, "run-123", 0).expect("Failed to load recent events");
         assert!(none.is_empty());
+    }
+
+    /// Persist a checkpoint with an explicit step and status for resume tests.
+    /// @plan:PLAN-20260623-LUTHER-CONTINUATION
+    fn seed_checkpoint(conn: &Connection, run_id: &str, step_id: &str, status: &str) {
+        let snapshot = StateSnapshot {
+            status: status.to_string(),
+            ..Default::default()
+        };
+        let checkpoint = Checkpoint::with_snapshot(run_id, step_id, snapshot);
+        save_checkpoint_with_conn(conn, &checkpoint).expect("seed checkpoint");
+        // Ensure later checkpoints sort after earlier ones despite fast clocks.
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+
+    #[test]
+    fn resumable_status_classification() {
+        // @plan:PLAN-20260623-LUTHER-CONTINUATION
+        assert!(is_resumable_checkpoint_status(CHECKPOINT_STATUS_WAITING));
+        assert!(is_resumable_checkpoint_status(
+            CHECKPOINT_STATUS_INTERRUPTED
+        ));
+        assert!(is_resumable_checkpoint_status(
+            CHECKPOINT_STATUS_READY_TO_RESUME
+        ));
+        assert!(!is_resumable_checkpoint_status("completed"));
+    }
+
+    #[test]
+    fn get_checkpoint_for_step_finds_specific_step() {
+        // @plan:PLAN-20260623-LUTHER-CONTINUATION
+        let conn = Connection::open_in_memory().expect("open db");
+        seed_checkpoint(&conn, "run-x", "step-a", "completed");
+        seed_checkpoint(&conn, "run-x", "step-b", "waiting");
+
+        let found = get_checkpoint_for_step(&conn, "run-x", "step-b")
+            .expect("query")
+            .expect("checkpoint present");
+        assert_eq!(found.step_id, "step-b");
+        assert_eq!(found.state_snapshot.status, "waiting");
+
+        let missing = get_checkpoint_for_step(&conn, "run-x", "nope").expect("query");
+        assert!(missing.is_none());
+    }
+
+    #[test]
+    fn load_checkpoint_before_step_returns_prior() {
+        // @plan:PLAN-20260623-LUTHER-CONTINUATION
+        let conn = Connection::open_in_memory().expect("open db");
+        seed_checkpoint(&conn, "run-y", "good_pre_watch", "completed");
+        seed_checkpoint(&conn, "run-y", "watch_pr_checks", "completed");
+        seed_checkpoint(&conn, "run-y", "post_pr_failure_terminal", "completed");
+
+        let before = load_checkpoint_before_step(&conn, "run-y", "post_pr_failure_terminal")
+            .expect("query")
+            .expect("prior checkpoint");
+        assert_eq!(before.step_id, "watch_pr_checks");
+
+        // No checkpoint precedes the first step.
+        let none = load_checkpoint_before_step(&conn, "run-y", "good_pre_watch").expect("query");
+        assert!(none.is_none());
+    }
+
+    #[test]
+    fn set_resume_point_rearms_selected_checkpoint() {
+        // @plan:PLAN-20260623-LUTHER-CONTINUATION
+        let conn = Connection::open_in_memory().expect("open db");
+        seed_checkpoint(&conn, "run-z", "watch_pr_checks", "completed");
+        seed_checkpoint(&conn, "run-z", "post_pr_failure_terminal", "completed");
+
+        // Before re-stamping, the newest checkpoint is the terminal step.
+        let newest = load_checkpoint_with_conn(&conn, "run-z")
+            .expect("load")
+            .expect("checkpoint");
+        assert_eq!(newest.step_id, "post_pr_failure_terminal");
+
+        set_resume_point(&conn, "run-z", "watch_pr_checks").expect("set resume point");
+
+        // After re-stamping, the resume loader selects the re-armed checkpoint.
+        let resumed = load_checkpoint_with_conn(&conn, "run-z")
+            .expect("load")
+            .expect("checkpoint");
+        assert_eq!(resumed.step_id, "watch_pr_checks");
+        assert_eq!(
+            resumed.state_snapshot.status,
+            CHECKPOINT_STATUS_READY_TO_RESUME
+        );
+
+        // The terminal checkpoint row is preserved (history not erased).
+        let all = list_checkpoints(&conn, "run-z").expect("list");
+        assert_eq!(all.len(), 2);
+        assert!(all.iter().any(|c| c.step_id == "post_pr_failure_terminal"));
+    }
+
+    #[test]
+    fn set_resume_point_missing_checkpoint_errors() {
+        // @plan:PLAN-20260623-LUTHER-CONTINUATION
+        let conn = Connection::open_in_memory().expect("open db");
+        init_checkpoint_table(&conn).expect("init checkpoint table");
+        let err = set_resume_point(&conn, "run-missing", "nope").unwrap_err();
+        assert!(matches!(err, PersistenceError::NotFound(_)));
     }
 }
