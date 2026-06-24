@@ -24,6 +24,7 @@ use crate::persistence::{
     is_resumable_checkpoint_status, list_checkpoints, load_checkpoint_before_step,
     persist_run_with_conn, set_resume_point, Checkpoint, EventType, PersistenceError, RunMetadata,
 };
+use crate::workflow::target_profile::TargetProfileOverrides;
 
 /// Steps that are safe to re-run because they are external-wait or otherwise
 /// idempotent. Continuation onto any other step requires `--force`.
@@ -46,6 +47,33 @@ const TERMINAL_STEP: &str = "post_pr_failure_terminal";
 /// @plan:PLAN-20260623-LUTHER-CONTINUATION
 pub fn is_safe_rerun_step(step_id: &str) -> bool {
     SAFE_RERUN_STEPS.contains(&step_id)
+}
+
+/// Reconstruct the effective runtime overrides from a persisted run row so a
+/// continuation resumes against the original run's target/workspace/artifacts
+/// rather than the static config defaults.
+///
+/// Only fields the run actually recorded produce `Some(..)`, mirroring how the
+/// initial run inserts only the overrides that were provided; untouched fields
+/// keep the static config defaults.
+/// @plan:PLAN-20260623-LUTHER-CONTINUATION
+#[must_use]
+pub fn continuation_overrides(md: &RunMetadata) -> TargetProfileOverrides {
+    TargetProfileOverrides {
+        repo: md.repository.clone(),
+        // GitHub issues and PRs share a single number space, so a PR-only run
+        // can safely reuse its pr_number as the issue anchor. Preserving it via
+        // `or(pr_number)` keeps a PR-only continuation (which
+        // `check_identity_recoverable` accepts) from silently falling back to
+        // the static config/default issue during reconstruction.
+        // @plan:PLAN-20260623-LUTHER-CONTINUATION
+        issue: md
+            .issue_number
+            .or(md.pr_number)
+            .map(|anchor| anchor.to_string()),
+        work_dir: md.workspace_path.as_ref().map(PathBuf::from),
+        artifact_dir: md.artifact_root.as_ref().map(PathBuf::from),
+    }
 }
 
 /// Where to rewind a run's resume point.
@@ -204,11 +232,35 @@ fn check_workflow_resolvable(metadata: &RunMetadata) -> SafetyCheck {
     }
 }
 
+/// Refuse to reopen terminal non-failed runs (Completed/Merged/Abandoned/
+/// Cancelled). `Failed` is the single intentional terminal exception, encoded in
+/// `RunStatus::is_resumable`. This refusal is NOT bypassable by `--force`, which
+/// only relaxes the safe-step whitelist.
+/// @plan:PLAN-20260623-LUTHER-CONTINUATION
+fn check_resumable_status(metadata: &RunMetadata) -> SafetyCheck {
+    if metadata.status.is_resumable() {
+        pass(
+            "resumable_status",
+            format!("run status {} is resumable", metadata.status),
+        )
+    } else {
+        fail(
+            "resumable_status",
+            format!(
+                "run status {} is not resumable; terminal states other than failed cannot be continued",
+                metadata.status
+            ),
+        )
+    }
+}
+
+/// A continuation must always have a repository plus an issue or PR anchor before
+/// executor dispatch; a repo-only or anchor-less row cannot safely target work.
+/// @plan:PLAN-20260623-LUTHER-CONTINUATION
 fn check_identity_recoverable(metadata: &RunMetadata) -> SafetyCheck {
-    if metadata.repository.is_some()
-        || metadata.issue_number.is_some()
-        || metadata.pr_number.is_some()
-    {
+    let has_repo = metadata.repository.is_some();
+    let has_anchor = metadata.issue_number.is_some() || metadata.pr_number.is_some();
+    if has_repo && has_anchor {
         pass(
             "identity_recoverable",
             format!(
@@ -219,7 +271,10 @@ fn check_identity_recoverable(metadata: &RunMetadata) -> SafetyCheck {
     } else {
         fail(
             "identity_recoverable",
-            "no repository/issue/pr identity recorded for this run",
+            format!(
+                "continuation requires a repository plus an issue or PR anchor; got repository={:?} issue={:?} pr={:?}",
+                metadata.repository, metadata.issue_number, metadata.pr_number
+            ),
         )
     }
 }
@@ -274,6 +329,7 @@ pub fn validate_continuation(
         return Ok(ContinuationValidation::from_checks(checks));
     };
     checks.push(check_workflow_resolvable(&metadata));
+    checks.push(check_resumable_status(&metadata));
     checks.push(check_identity_recoverable(&metadata));
     checks.push(check_workspace(&metadata));
     let selection = select_checkpoint(conn, request, &metadata);
@@ -867,5 +923,189 @@ mod tests {
             }),
             "retry-result.json"
         );
+    }
+
+    /// Continuation kinds that should be rejected uniformly when a run is in a
+    /// non-resumable terminal state, regardless of `--force`.
+    fn resumable_kinds() -> Vec<ContinuationKind> {
+        vec![
+            ContinuationKind::Resume,
+            ContinuationKind::Retry {
+                from_failed_step: false,
+            },
+            ContinuationKind::Retry {
+                from_failed_step: true,
+            },
+            ContinuationKind::Rewind {
+                target: RewindTarget::ToStep("watch_pr_checks".to_string()),
+            },
+        ]
+    }
+
+    /// Seed a run in `status` with a whitelisted, resumable `watch_pr_checks`
+    /// checkpoint, then assert every continuation kind is rejected with a
+    /// `resumable_status` failure, even with `force = true`.
+    fn assert_non_resumable_rejected(status: RunStatus) {
+        let conn = test_conn();
+        seed_run(&conn, "term", status.clone(), "watch_pr_checks");
+        seed_checkpoint(&conn, "term", "watch_pr_checks", CHECKPOINT_STATUS_WAITING);
+        for kind in resumable_kinds() {
+            for force in [false, true] {
+                let req = request("term", kind.clone(), force);
+                let validation = validate_continuation(&conn, &req).expect("validate");
+                assert!(
+                    !validation.ok,
+                    "status {status:?} kind {kind:?} force={force} must be rejected"
+                );
+                assert!(
+                    validation
+                        .failure_reasons()
+                        .iter()
+                        .any(|r| r.contains("resumable_status")),
+                    "expected resumable_status failure for {status:?} (got {:?})",
+                    validation.failure_reasons()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn validation_rejects_completed_run() {
+        // @plan:PLAN-20260623-LUTHER-CONTINUATION
+        assert_non_resumable_rejected(RunStatus::Completed);
+    }
+
+    #[test]
+    fn validation_rejects_merged_run() {
+        // @plan:PLAN-20260623-LUTHER-CONTINUATION
+        assert_non_resumable_rejected(RunStatus::Merged);
+    }
+
+    #[test]
+    fn validation_rejects_abandoned_run() {
+        // @plan:PLAN-20260623-LUTHER-CONTINUATION
+        assert_non_resumable_rejected(RunStatus::Abandoned);
+    }
+
+    #[test]
+    fn validation_rejects_cancelled_run() {
+        // @plan:PLAN-20260623-LUTHER-CONTINUATION
+        assert_non_resumable_rejected(RunStatus::Cancelled);
+    }
+
+    #[test]
+    fn validation_accepts_resumable_statuses() {
+        // @plan:PLAN-20260623-LUTHER-CONTINUATION
+        for status in [
+            RunStatus::Failed,
+            RunStatus::WaitingForChecks,
+            RunStatus::Paused,
+            RunStatus::Blocked,
+        ] {
+            let conn = test_conn();
+            seed_run(&conn, "ok", status.clone(), "watch_pr_checks");
+            seed_checkpoint(&conn, "ok", "watch_pr_checks", CHECKPOINT_STATUS_WAITING);
+            let req = request("ok", ContinuationKind::Resume, false);
+            let validation = validate_continuation(&conn, &req).expect("validate");
+            assert!(
+                validation.ok,
+                "status {status:?} should be resumable; reasons: {:?}",
+                validation.failure_reasons()
+            );
+        }
+    }
+
+    #[test]
+    fn validation_rejects_repo_only_identity() {
+        // @plan:PLAN-20260623-LUTHER-CONTINUATION
+        let conn = test_conn();
+        let mut md = RunMetadata::new("anchorless", "wf", "cfg");
+        md.status = RunStatus::Failed;
+        md.current_step = Some("watch_pr_checks".to_string());
+        md.repository = Some("vybestack/llxprt-code".to_string());
+        // Neither issue_number nor pr_number recorded.
+        persist_run_with_conn(&conn, &md).expect("persist run");
+        seed_checkpoint(
+            &conn,
+            "anchorless",
+            "watch_pr_checks",
+            CHECKPOINT_STATUS_WAITING,
+        );
+        let req = request("anchorless", ContinuationKind::Resume, false);
+        let validation = validate_continuation(&conn, &req).expect("validate");
+        assert!(!validation.ok);
+        assert!(validation
+            .failure_reasons()
+            .iter()
+            .any(|r| r.contains("identity_recoverable")));
+    }
+
+    #[test]
+    fn continuation_overrides_maps_recorded_identity() {
+        // @plan:PLAN-20260623-LUTHER-CONTINUATION
+        let mut md = RunMetadata::new("r", "wf", "cfg");
+        md.repository = Some("vybestack/llxprt-luther".to_string());
+        md.issue_number = Some(65);
+        md.workspace_path = Some("/tmp/luther-workspaces/llxprt-luther".to_string());
+        md.artifact_root = Some("/tmp/luther-artifacts/llxprt-luther".to_string());
+
+        let overrides = continuation_overrides(&md);
+
+        assert_eq!(overrides.repo.as_deref(), Some("vybestack/llxprt-luther"));
+        assert_eq!(overrides.issue.as_deref(), Some("65"));
+        assert_eq!(
+            overrides.work_dir,
+            Some(PathBuf::from("/tmp/luther-workspaces/llxprt-luther"))
+        );
+        assert_eq!(
+            overrides.artifact_dir,
+            Some(PathBuf::from("/tmp/luther-artifacts/llxprt-luther"))
+        );
+    }
+
+    #[test]
+    fn continuation_overrides_omits_unrecorded_fields() {
+        // @plan:PLAN-20260623-LUTHER-CONTINUATION
+        let md = RunMetadata::new("r", "wf", "cfg");
+        let overrides = continuation_overrides(&md);
+        assert!(
+            overrides.is_empty(),
+            "a run with no recorded identity must not emit overrides"
+        );
+    }
+
+    #[test]
+    fn continuation_overrides_falls_back_to_pr_anchor() {
+        // A PR-only continuation (no issue_number, only pr_number) is accepted by
+        // check_identity_recoverable, so the rebuilt overrides must preserve the
+        // PR anchor instead of silently dropping to the default issue.
+        // @plan:PLAN-20260623-LUTHER-CONTINUATION
+        let mut md = RunMetadata::new("r", "wf", "cfg");
+        md.repository = Some("vybestack/llxprt-luther".to_string());
+        md.issue_number = None;
+        md.pr_number = Some(66);
+
+        let overrides = continuation_overrides(&md);
+
+        assert_eq!(overrides.repo.as_deref(), Some("vybestack/llxprt-luther"));
+        assert_eq!(
+            overrides.issue.as_deref(),
+            Some("66"),
+            "a PR-only run must reuse pr_number as the issue anchor"
+        );
+    }
+
+    #[test]
+    fn continuation_overrides_prefers_issue_over_pr_anchor() {
+        // When both anchors are recorded, the issue number wins so a run that
+        // recorded an explicit issue keeps targeting it.
+        // @plan:PLAN-20260623-LUTHER-CONTINUATION
+        let mut md = RunMetadata::new("r", "wf", "cfg");
+        md.issue_number = Some(65);
+        md.pr_number = Some(66);
+
+        let overrides = continuation_overrides(&md);
+
+        assert_eq!(overrides.issue.as_deref(), Some("65"));
     }
 }

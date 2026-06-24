@@ -19,8 +19,8 @@ pub use transition::{resolve_transition, resolve_transition_schema, StepOutcome}
 // Re-export continuation operator API.
 // @plan:PLAN-20260623-LUTHER-CONTINUATION
 pub use continuation::{
-    commit_continuation, prepare_continuation, ContinuationKind, ContinuationRequest,
-    ContinuationValidation, RewindTarget,
+    commit_continuation, continuation_overrides, prepare_continuation, ContinuationKind,
+    ContinuationRequest, ContinuationValidation, RewindTarget,
 };
 // Re-export TransitionDef from workflow schema for test compatibility
 pub use crate::workflow::schema::TransitionDef;

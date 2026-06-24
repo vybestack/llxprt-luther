@@ -362,9 +362,21 @@ impl EngineRunner {
     }
 
     /// Persist the initial run record (status Starting) at construction time.
+    ///
+    /// Non-destructive when a row already exists: a reopened/in-flight run (e.g.
+    /// reconstructed for operator continuation) already represents this run with
+    /// its own status, `created_at`, current step, and history. Overwriting it
+    /// with a fresh `Starting` record would reset `created_at`, clear history,
+    /// and reset `current_step` to the first step, so we skip persistence when a
+    /// row is present and only write the fresh `Starting` row on first
+    /// construction.
     /// @plan:PLAN-20260404-INITIAL-RUNTIME.P05
+    /// @plan:PLAN-20260623-LUTHER-CONTINUATION
     fn persist_initial_run(&mut self) {
         if !self.persist_registry {
+            return;
+        }
+        if self.load_metadata().is_some() {
             return;
         }
         let mut metadata = self.build_metadata(RunStatus::Starting);
@@ -419,6 +431,7 @@ impl EngineRunner {
             StepOutcome::Fatal,
             StepOutcome::Retryable,
             StepOutcome::Abandon,
+            StepOutcome::Wait,
         ];
         let mut candidates = Vec::new();
         for outcome in outcomes {
