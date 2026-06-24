@@ -914,6 +914,21 @@ fn assert_failure_terminal(run: &TailRun) {
     }
 }
 
+/// Assert the run paused on a recoverable external wait at the given step
+/// instead of routing to a terminal failure sink.
+/// @plan:PLAN-20260623-LUTHER-CONTINUATION
+fn assert_waiting_external_at(run: &TailRun, expected_step: &str) {
+    match &run.outcome {
+        RunOutcome::WaitingExternal { step_id, .. } => {
+            assert_eq!(
+                step_id, expected_step,
+                "external wait must pause at the wait step"
+            );
+        }
+        other => panic!("expected RunOutcome::WaitingExternal, got {other:?}"),
+    }
+}
+
 fn assert_no_abandon(run: &TailRun) {
     assert!(
         !matches!(run.outcome, RunOutcome::Abandoned { .. }),
@@ -1077,17 +1092,19 @@ fn replay_failed_ci_is_fixed_and_loops_to_success() {
 }
 
 // ============================================================================
-// Scenario 3: Pending checks time out to terminal failure.
+// Scenario 3: Pending checks time out to a recoverable external wait.
 // ============================================================================
 
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P18
+/// @plan:PLAN-20260623-LUTHER-CONTINUATION
 /// @requirement:REQ-PRFU-020,REQ-PRFU-024
 #[test]
-fn replay_pending_checks_time_out_to_terminal_failure() {
+fn replay_pending_checks_time_out_to_recoverable_wait() {
     let temp = tempfile::tempdir().expect("tempdir");
     let scenario = ScenarioFixtures {
         // Always pending: the watcher exhausts max_attempts and classifies
-        // pending_timeout, which collect_ci_failures routes to terminal.
+        // pending_timeout. That is a recoverable external wait, so the run
+        // pauses at watch_pr_checks instead of routing to the terminal sink.
         check_observations: vec![CheckObservation::pending()],
         review_thread_pages: vec![empty_review_threads()],
         review_comment_pages: vec![json!([])],
@@ -1097,7 +1114,7 @@ fn replay_pending_checks_time_out_to_terminal_failure() {
     };
     let run = run_tail(&scenario, &temp);
 
-    assert_failure_terminal(&run);
+    assert_waiting_external_at(&run, "watch_pr_checks");
     assert_check_status_consistent(&run, "pending_timeout");
 }
 

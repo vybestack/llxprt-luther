@@ -385,9 +385,13 @@ fn watch_pr_checks(
     Ok(match final_classification.overall_state {
         OverallState::Passed => StepOutcome::Success,
         OverallState::Failed => StepOutcome::Fixable,
-        OverallState::Unknown | OverallState::Fatal | OverallState::PendingTimeout => {
-            StepOutcome::Fatal
-        }
+        // CI still running when the watch window closed is an inherently
+        // recoverable condition: pause on a resumable wait state instead of
+        // routing to the terminal failure sink. The persisted check-status
+        // artifact still records overall_state = pending_timeout.
+        // @plan:PLAN-20260623-LUTHER-CONTINUATION
+        OverallState::PendingTimeout => StepOutcome::Wait,
+        OverallState::Unknown | OverallState::Fatal => StepOutcome::Fatal,
     })
 }
 

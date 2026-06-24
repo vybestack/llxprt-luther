@@ -871,6 +871,13 @@ from = "post_pr_iteration_guard"
 to = "post_pr_failure_terminal"
 condition = "fatal"
 
+# watch_pr_checks routing.
+# Note: there is intentionally no `wait` transition here. When PR checks are
+# still pending at the watch limit, watch_pr_checks now yields the recoverable
+# `wait` outcome (PLAN-20260623-LUTHER-CONTINUATION). With no matching `wait`
+# edge, the engine pauses at watch_pr_checks with a resumable checkpoint
+# (RunStatus::WaitingForChecks) instead of routing the pending timeout to
+# post_pr_failure_terminal. Operators resume/retry via `luther-workflow runs`.
 [[transitions]]
 from = "watch_pr_checks"
 to = "collect_ci_failures"

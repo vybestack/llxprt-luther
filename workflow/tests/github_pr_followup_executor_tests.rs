@@ -1850,8 +1850,8 @@ fn pr_checks_default_watch_budget_is_twelve_observations_without_real_sleep() {
 
     assert_expected_outcome(
         outcome,
-        StepOutcome::Fatal,
-        "pr_checks watcher must record exactly 12 observations, 11 sleeps, no t=60 observation, and timeout rather than success",
+        StepOutcome::Wait,
+        "pr_checks watcher must record exactly 12 observations, 11 sleeps, no t=60 observation, and pause on a recoverable wait rather than success",
     );
     assert_eq!(
         observations.len(),
@@ -1907,7 +1907,7 @@ fn pr_checks_non_fail_fast_continues_after_early_failure_while_pending_remains()
 
     assert_expected_outcome(
         outcome,
-        StepOutcome::Fatal,
+        StepOutcome::Wait,
         "pr_checks watcher must continue after early failure while another current-head check remains pending",
     );
     assert_eq!(
@@ -2018,10 +2018,11 @@ fn pr_checks_page2_data_affects_status_and_stale_head_checks_cannot_create_succe
 }
 
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P06
+/// @plan:PLAN-20260623-LUTHER-CONTINUATION
 /// @requirement:REQ-PRFU-004,REQ-PRFU-005,REQ-PRFU-006
 /// @pseudocode lines 19-33
 #[test]
-fn check_classification_pending_timeout_with_failed_checks_is_fatal_and_preserves_failures() {
+fn check_classification_pending_timeout_with_failed_checks_waits_and_preserves_failures() {
     let temp = tempfile::tempdir().expect("tempdir");
     let runner = ScriptedGithubRunner::new(
         serde_json::json!([
@@ -2038,8 +2039,8 @@ fn check_classification_pending_timeout_with_failed_checks_is_fatal_and_preserve
 
     assert_eq!(
         outcome,
-        StepOutcome::Fatal,
-        "pending_timeout must never enter remediation even with concrete failures"
+        StepOutcome::Wait,
+        "pending_timeout is a recoverable external wait, not a terminal failure"
     );
     assert_eq!(
         artifact

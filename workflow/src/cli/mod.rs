@@ -359,6 +359,22 @@ pub enum RunsCommand {
     /// Show workflow and child/agent processes
     #[command(name = "ps")]
     Ps(RunsPsArgs),
+    /// List checkpoints for a run
+    /// @plan:PLAN-20260623-LUTHER-CONTINUATION
+    #[command(name = "checkpoints")]
+    Checkpoints(RunsCheckpointsArgs),
+    /// Resume a run from its latest resumable checkpoint
+    /// @plan:PLAN-20260623-LUTHER-CONTINUATION
+    #[command(name = "resume")]
+    Resume(RunsResumeArgs),
+    /// Retry a failed run, optionally from the failed external-wait step
+    /// @plan:PLAN-20260623-LUTHER-CONTINUATION
+    #[command(name = "retry")]
+    Retry(RunsRetryArgs),
+    /// Rewind a run's resume point to an earlier checkpoint
+    /// @plan:PLAN-20260623-LUTHER-CONTINUATION
+    #[command(name = "rewind")]
+    Rewind(RunsRewindArgs),
 }
 
 /// Arguments for `runs list`.
@@ -411,6 +427,75 @@ pub struct RunsPsArgs {
     /// Filter to a single config id (file stem)
     #[arg(long, value_name = "ID")]
     pub config: Option<String>,
+    /// Output in JSON format
+    #[arg(long)]
+    pub json: bool,
+}
+
+/// Arguments for `runs checkpoints`.
+/// @plan:PLAN-20260623-LUTHER-CONTINUATION
+#[derive(Args, Debug)]
+pub struct RunsCheckpointsArgs {
+    /// The run id whose checkpoints should be listed
+    #[arg(value_name = "RUN_ID")]
+    pub run_id: String,
+    /// Output in JSON format
+    #[arg(long)]
+    pub json: bool,
+}
+
+/// Arguments for `runs resume`.
+/// @plan:PLAN-20260623-LUTHER-CONTINUATION
+#[derive(Args, Debug)]
+pub struct RunsResumeArgs {
+    /// The run id to resume
+    #[arg(value_name = "RUN_ID")]
+    pub run_id: String,
+    /// Permit resuming from a non-whitelisted (e.g. implementation) step
+    #[arg(long)]
+    pub force: bool,
+    /// Output in JSON format
+    #[arg(long)]
+    pub json: bool,
+}
+
+/// Arguments for `runs retry`.
+/// @plan:PLAN-20260623-LUTHER-CONTINUATION
+#[derive(Args, Debug)]
+pub struct RunsRetryArgs {
+    /// The run id to retry
+    #[arg(value_name = "RUN_ID")]
+    pub run_id: String,
+    /// Retry from the failed external-wait step using its prior context
+    #[arg(long)]
+    pub from_failed_step: bool,
+    /// Permit retrying a non-whitelisted (e.g. implementation) step
+    #[arg(long)]
+    pub force: bool,
+    /// Output in JSON format
+    #[arg(long)]
+    pub json: bool,
+}
+
+/// Arguments for `runs rewind`.
+///
+/// Exactly one of `--to-step` or `--to-checkpoint` must be supplied; clap
+/// enforces mutual exclusion and that at least one target is present.
+/// @plan:PLAN-20260623-LUTHER-CONTINUATION
+#[derive(Args, Debug)]
+pub struct RunsRewindArgs {
+    /// The run id to rewind
+    #[arg(value_name = "RUN_ID")]
+    pub run_id: String,
+    /// Rewind to the checkpoint for this step id
+    #[arg(long, value_name = "STEP", required_unless_present = "to_checkpoint")]
+    pub to_step: Option<String>,
+    /// Rewind to a checkpoint by identity (step_id@timestamp)
+    #[arg(long, value_name = "ID", conflicts_with = "to_step")]
+    pub to_checkpoint: Option<String>,
+    /// Permit rewinding to a non-whitelisted (e.g. implementation) step
+    #[arg(long)]
+    pub force: bool,
     /// Output in JSON format
     #[arg(long)]
     pub json: bool,
@@ -639,6 +724,144 @@ mod tests {
             }
             other => panic!("expected runs ps, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn runs_checkpoints_parses() {
+        // @plan:PLAN-20260623-LUTHER-CONTINUATION
+        let cli = Cli::try_parse_from([
+            "luther-workflow",
+            "runs",
+            "checkpoints",
+            "run-123",
+            "--json",
+        ])
+        .expect("runs checkpoints should parse");
+        match cli.command {
+            Commands::Runs(RunsArgs {
+                command: RunsCommand::Checkpoints(args),
+            }) => {
+                assert_eq!(args.run_id, "run-123");
+                assert!(args.json);
+            }
+            other => panic!("expected runs checkpoints, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn runs_resume_parses_with_force() {
+        // @plan:PLAN-20260623-LUTHER-CONTINUATION
+        let cli = Cli::try_parse_from(["luther-workflow", "runs", "resume", "run-123", "--force"])
+            .expect("runs resume should parse");
+        match cli.command {
+            Commands::Runs(RunsArgs {
+                command: RunsCommand::Resume(args),
+            }) => {
+                assert_eq!(args.run_id, "run-123");
+                assert!(args.force);
+                assert!(!args.json);
+            }
+            other => panic!("expected runs resume, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn runs_retry_parses_from_failed_step() {
+        // @plan:PLAN-20260623-LUTHER-CONTINUATION
+        let cli = Cli::try_parse_from([
+            "luther-workflow",
+            "runs",
+            "retry",
+            "run-123",
+            "--from-failed-step",
+        ])
+        .expect("runs retry should parse");
+        match cli.command {
+            Commands::Runs(RunsArgs {
+                command: RunsCommand::Retry(args),
+            }) => {
+                assert_eq!(args.run_id, "run-123");
+                assert!(args.from_failed_step);
+                assert!(!args.force);
+            }
+            other => panic!("expected runs retry, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn runs_rewind_parses_to_step() {
+        // @plan:PLAN-20260623-LUTHER-CONTINUATION
+        let cli = Cli::try_parse_from([
+            "luther-workflow",
+            "runs",
+            "rewind",
+            "run-123",
+            "--to-step",
+            "post_pr_iteration_guard",
+        ])
+        .expect("runs rewind --to-step should parse");
+        match cli.command {
+            Commands::Runs(RunsArgs {
+                command: RunsCommand::Rewind(args),
+            }) => {
+                assert_eq!(args.run_id, "run-123");
+                assert_eq!(args.to_step.as_deref(), Some("post_pr_iteration_guard"));
+                assert!(args.to_checkpoint.is_none());
+            }
+            other => panic!("expected runs rewind, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn runs_rewind_to_checkpoint_parses() {
+        // @plan:PLAN-20260623-LUTHER-CONTINUATION
+        let cli = Cli::try_parse_from([
+            "luther-workflow",
+            "runs",
+            "rewind",
+            "run-123",
+            "--to-checkpoint",
+            "watch_pr_checks@2026-06-23T00:00:00Z",
+        ])
+        .expect("runs rewind --to-checkpoint should parse");
+        match cli.command {
+            Commands::Runs(RunsArgs {
+                command: RunsCommand::Rewind(args),
+            }) => {
+                assert_eq!(
+                    args.to_checkpoint.as_deref(),
+                    Some("watch_pr_checks@2026-06-23T00:00:00Z")
+                );
+                assert!(args.to_step.is_none());
+            }
+            other => panic!("expected runs rewind, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn runs_rewind_requires_a_target() {
+        // @plan:PLAN-20260623-LUTHER-CONTINUATION
+        let result = Cli::try_parse_from(["luther-workflow", "runs", "rewind", "run-123"]);
+        assert!(result.is_err(), "runs rewind without a target should fail");
+    }
+
+    #[test]
+    fn runs_rewind_rejects_both_targets() {
+        // @plan:PLAN-20260623-LUTHER-CONTINUATION
+        let result = Cli::try_parse_from([
+            "luther-workflow",
+            "runs",
+            "rewind",
+            "run-123",
+            "--to-step",
+            "watch_pr_checks",
+            "--to-checkpoint",
+            "watch_pr_checks@2026-06-23T00:00:00Z",
+        ]);
+        assert!(
+            result.is_err(),
+            "runs rewind with both targets should fail (mutually exclusive)"
+        );
     }
 
     #[test]

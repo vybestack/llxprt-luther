@@ -56,6 +56,14 @@ pub enum TraceOutcome {
         /// Step where the run was interrupted.
         step_id: String,
     },
+    /// Run paused on a recoverable external wait condition.
+    /// @plan:PLAN-20260623-LUTHER-CONTINUATION
+    WaitingExternal {
+        /// Step where the run paused awaiting external state.
+        step_id: String,
+        /// Human-readable wait reason.
+        reason: String,
+    },
 }
 
 impl From<&RunOutcome> for TraceOutcome {
@@ -72,6 +80,10 @@ impl From<&RunOutcome> for TraceOutcome {
             },
             RunOutcome::Interrupted { step_id } => TraceOutcome::Interrupted {
                 step_id: step_id.clone(),
+            },
+            RunOutcome::WaitingExternal { step_id, reason } => TraceOutcome::WaitingExternal {
+                step_id: step_id.clone(),
+                reason: reason.clone(),
             },
         }
     }
@@ -94,6 +106,10 @@ impl TraceOutcome {
             (TraceOutcome::Interrupted { step_id }, RunOutcome::Interrupted { step_id: s }) => {
                 step_id == s
             }
+            (
+                TraceOutcome::WaitingExternal { step_id, .. },
+                RunOutcome::WaitingExternal { step_id: s, .. },
+            ) => step_id == s,
             _ => false,
         }
     }

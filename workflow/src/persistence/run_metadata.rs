@@ -80,6 +80,23 @@ impl RunStatus {
                 | RunStatus::Cancelled
         )
     }
+
+    /// Returns true when the run can be reopened/continued by an operator.
+    ///
+    /// Non-terminal waiting/paused/blocked runs are always resumable. A
+    /// terminal `Failed` run is resumable only via explicit operator
+    /// continuation (resume/retry/rewind); other terminal states
+    /// (Completed/Merged/Abandoned/Cancelled) are not.
+    /// @plan:PLAN-20260623-LUTHER-CONTINUATION
+    pub fn is_resumable(&self) -> bool {
+        matches!(
+            self,
+            RunStatus::WaitingForChecks
+                | RunStatus::Paused
+                | RunStatus::Blocked
+                | RunStatus::Failed
+        )
+    }
 }
 
 /// Metadata for a workflow run persisted to storage.
@@ -176,6 +193,18 @@ impl RunMetadata {
     /// Mark the run as failed.
     pub fn mark_failed(&mut self) {
         self.status = RunStatus::Failed;
+        self.updated_at = Some(Utc::now());
+    }
+
+    /// Reopen a (possibly terminal) run for operator continuation.
+    ///
+    /// Flips the status back to `Running` and refreshes `updated_at` and the
+    /// owning process PID so monitor/`runs show` reflect the reopen. Prior
+    /// history (events, previous step/outcome) is intentionally preserved.
+    /// @plan:PLAN-20260623-LUTHER-CONTINUATION
+    pub fn reopen(&mut self) {
+        self.status = RunStatus::Running;
+        self.process_pid = Some(std::process::id());
         self.updated_at = Some(Utc::now());
     }
 
@@ -400,6 +429,37 @@ mod tests {
         assert!(!RunStatus::Running.is_terminal());
         assert!(!RunStatus::Starting.is_terminal());
         assert!(!RunStatus::WaitingForChecks.is_terminal());
+    }
+
+    #[test]
+    fn resumable_classification() {
+        // @plan:PLAN-20260623-LUTHER-CONTINUATION
+        assert!(RunStatus::WaitingForChecks.is_resumable());
+        assert!(RunStatus::Paused.is_resumable());
+        assert!(RunStatus::Blocked.is_resumable());
+        // Terminal Failed is resumable only via explicit continuation.
+        assert!(RunStatus::Failed.is_resumable());
+        // Other terminal states are not resumable.
+        assert!(!RunStatus::Completed.is_resumable());
+        assert!(!RunStatus::Merged.is_resumable());
+        assert!(!RunStatus::Abandoned.is_resumable());
+        assert!(!RunStatus::Cancelled.is_resumable());
+    }
+
+    #[test]
+    fn reopen_flips_failed_run_to_running() {
+        // @plan:PLAN-20260623-LUTHER-CONTINUATION
+        let mut md = RunMetadata::new("r", "wf", "cfg");
+        md.mark_failed();
+        md.set_previous_step_and_outcome("watch_pr_checks", "wait");
+        assert_eq!(md.status, RunStatus::Failed);
+
+        md.reopen();
+        assert_eq!(md.status, RunStatus::Running);
+        assert_eq!(md.process_pid, Some(std::process::id()));
+        // History preserved.
+        assert_eq!(md.previous_step.as_deref(), Some("watch_pr_checks"));
+        assert_eq!(md.previous_outcome.as_deref(), Some("wait"));
     }
 
     #[test]

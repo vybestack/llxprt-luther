@@ -32,16 +32,47 @@ pub enum StepOutcome {
     /// @plan:PLAN-20260404-INITIAL-RUNTIME.P06
     /// @requirement:REQ-EARS-ROUTE-003
     Abandon,
+    /// Step is waiting on a recoverable external condition (e.g. PR checks
+    /// still pending when the watch window closed). The engine should pause
+    /// at the current step with a resumable checkpoint rather than route to a
+    /// terminal failure sink.
+    /// @plan:PLAN-20260623-LUTHER-CONTINUATION
+    Wait,
 }
 
 impl std::fmt::Display for StepOutcome {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_condition_str())
+    }
+}
+
+impl StepOutcome {
+    /// The canonical condition string used to match transitions.
+    /// @plan:PLAN-20260623-LUTHER-CONTINUATION
+    pub fn as_condition_str(&self) -> &'static str {
         match self {
-            StepOutcome::Success => write!(f, "success"),
-            StepOutcome::Retryable => write!(f, "retryable"),
-            StepOutcome::Fatal => write!(f, "fatal"),
-            StepOutcome::Fixable => write!(f, "fixable"),
-            StepOutcome::Abandon => write!(f, "abandon"),
+            StepOutcome::Success => "success",
+            StepOutcome::Retryable => "retryable",
+            StepOutcome::Fatal => "fatal",
+            StepOutcome::Fixable => "fixable",
+            StepOutcome::Abandon => "abandon",
+            StepOutcome::Wait => "wait",
+        }
+    }
+}
+
+impl std::str::FromStr for StepOutcome {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "success" => Ok(StepOutcome::Success),
+            "retryable" => Ok(StepOutcome::Retryable),
+            "fatal" => Ok(StepOutcome::Fatal),
+            "fixable" => Ok(StepOutcome::Fixable),
+            "abandon" => Ok(StepOutcome::Abandon),
+            "wait" => Ok(StepOutcome::Wait),
+            other => Err(format!("unknown step outcome: {other}")),
         }
     }
 }
@@ -105,13 +136,7 @@ pub fn resolve_transition(
     transitions: &[TransitionDef],
 ) -> Option<String> {
     // Convert outcome to condition string for matching
-    let outcome_str = match outcome {
-        StepOutcome::Success => "success",
-        StepOutcome::Retryable => "retryable",
-        StepOutcome::Fatal => "fatal",
-        StepOutcome::Fixable => "fixable",
-        StepOutcome::Abandon => "abandon",
-    };
+    let outcome_str = outcome.as_condition_str();
 
     // Look for a transition from the current step with matching condition
     for t in transitions {
@@ -142,13 +167,7 @@ pub fn resolve_transition_schema(
     transitions: &[crate::workflow::schema::TransitionDef],
 ) -> Option<String> {
     // Convert outcome to condition string for matching
-    let outcome_str = match outcome {
-        StepOutcome::Success => "success",
-        StepOutcome::Retryable => "retryable",
-        StepOutcome::Fatal => "fatal",
-        StepOutcome::Fixable => "fixable",
-        StepOutcome::Abandon => "abandon",
-    };
+    let outcome_str = outcome.as_condition_str();
 
     // Look for a transition from the current step with matching condition
     for t in transitions {
@@ -213,5 +232,47 @@ mod tests {
         assert_eq!(StepOutcome::Fatal.to_string(), "fatal");
         assert_eq!(StepOutcome::Fixable.to_string(), "fixable");
         assert_eq!(StepOutcome::Abandon.to_string(), "abandon");
+        assert_eq!(StepOutcome::Wait.to_string(), "wait");
+    }
+
+    #[test]
+    fn step_outcome_wait_round_trips_through_str() {
+        // @plan:PLAN-20260623-LUTHER-CONTINUATION
+        let parsed: StepOutcome = "wait".parse().expect("wait parses");
+        assert_eq!(parsed, StepOutcome::Wait);
+        assert_eq!(parsed.as_condition_str(), "wait");
+    }
+
+    #[test]
+    fn step_outcome_from_str_rejects_unknown() {
+        // @plan:PLAN-20260623-LUTHER-CONTINUATION
+        let err = "nonsense".parse::<StepOutcome>().unwrap_err();
+        assert!(err.contains("nonsense"));
+    }
+
+    #[test]
+    fn resolve_transition_matches_wait_condition() {
+        // @plan:PLAN-20260623-LUTHER-CONTINUATION
+        let transitions = vec![TransitionDef {
+            from: "watch".to_string(),
+            to: "paused".to_string(),
+            condition: Some("wait".to_string()),
+            max_iterations: None,
+        }];
+        let next = resolve_transition("watch", &StepOutcome::Wait, &transitions);
+        assert_eq!(next, Some("paused".to_string()));
+    }
+
+    #[test]
+    fn resolve_transition_wait_without_edge_returns_none() {
+        // @plan:PLAN-20260623-LUTHER-CONTINUATION
+        let transitions = vec![TransitionDef {
+            from: "watch".to_string(),
+            to: "collect".to_string(),
+            condition: Some("fatal".to_string()),
+            max_iterations: None,
+        }];
+        let next = resolve_transition("watch", &StepOutcome::Wait, &transitions);
+        assert_eq!(next, None);
     }
 }
