@@ -1619,10 +1619,24 @@ fn reconstruct_runner(
     db_path: &std::path::Path,
 ) -> Result<EngineRunner, String> {
     let config_root = std::path::PathBuf::from("config");
-    let config = resolve_workflow_config(&md.config_id, &config_root)
+    let mut config = resolve_workflow_config(&md.config_id, &config_root)
         .map_err(|e| format!("resolve config '{}': {e}", md.config_id))?;
+    // Re-apply the original run's effective runtime overrides so the resumed
+    // interpolation context (target_repo, issue_number, work_dir, artifact_dir)
+    // matches the original target/workspace/artifacts rather than static config
+    // defaults. @plan:PLAN-20260623-LUTHER-CONTINUATION
+    let overrides = luther_workflow::engine::continuation::continuation_overrides(md);
+    apply_target_profile_overrides(&mut config, &overrides)
+        .map_err(|e| format!("apply continuation overrides: {e}"))?;
     let workflow_type = resolve_workflow_type(&md.workflow_type_id, &config_root)
         .map_err(|e| format!("resolve workflow type '{}': {e}", md.workflow_type_id))?;
+    // Fail fast with diagnostics rather than resuming against an invalid profile,
+    // but only when the workflow actually uses a target profile (mirrors the
+    // initial-run gate). @plan:PLAN-20260623-LUTHER-CONTINUATION
+    if target_profile_validation_required(&workflow_type.workflow_type_id, &config, &overrides) {
+        validate_target_profile(&config)
+            .map_err(|e| format!("invalid continuation profile: {e}"))?;
+    }
     let run_context = run_context_from_metadata(md, run_id);
     let instance = WorkflowInstance::create_with_run_id(workflow_type, config, run_id);
     let registry = ExecutorRegistry::with_defaults();
