@@ -1687,6 +1687,20 @@ fn commit_and_execute(
         .as_ref()
         .map(|c| c.step_id.clone())
         .unwrap_or_default();
+    // Reconstruct the runner first: it applies and validates the continuation /
+    // target-profile overrides (continuation_overrides, apply_target_profile_overrides,
+    // resolve_workflow_type, and validate_target_profile when required). Running
+    // this before commit_continuation ensures a profile/continuation failure
+    // cannot mutate run state and leave a refused continuation reopened and stuck
+    // in 'Running'. @plan:PLAN-20260623-LUTHER-CONTINUATION
+    let db_path = luther_workflow::runtime_paths::get_data_dir().join("checkpoints.db");
+    let mut runner = match reconstruct_runner(md, &request.run_id, &db_path) {
+        Ok(runner) => runner,
+        Err(e) => {
+            eprintln!("Error: {e}");
+            process::exit(1);
+        }
+    };
     if let Err(e) = luther_workflow::engine::commit_continuation(store.conn(), request, &step) {
         eprintln!("Error: failed to reopen run '{}': {e}", request.run_id);
         process::exit(1);
@@ -1696,14 +1710,6 @@ fn commit_and_execute(
         request.run_id,
         request.kind.verb()
     );
-    let db_path = luther_workflow::runtime_paths::get_data_dir().join("checkpoints.db");
-    let mut runner = match reconstruct_runner(md, &request.run_id, &db_path) {
-        Ok(runner) => runner,
-        Err(e) => {
-            eprintln!("Error: {e}");
-            process::exit(1);
-        }
-    };
     install_interrupt_handlers(runner.interrupt_handle());
     let outcome = runner.run();
     write_continuation_result(&plan.artifact_dir, &request.kind, &step, &outcome);

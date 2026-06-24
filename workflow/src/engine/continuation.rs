@@ -61,7 +61,16 @@ pub fn is_safe_rerun_step(step_id: &str) -> bool {
 pub fn continuation_overrides(md: &RunMetadata) -> TargetProfileOverrides {
     TargetProfileOverrides {
         repo: md.repository.clone(),
-        issue: md.issue_number.map(|issue| issue.to_string()),
+        // GitHub issues and PRs share a single number space, so a PR-only run
+        // can safely reuse its pr_number as the issue anchor. Preserving it via
+        // `or(pr_number)` keeps a PR-only continuation (which
+        // `check_identity_recoverable` accepts) from silently falling back to
+        // the static config/default issue during reconstruction.
+        // @plan:PLAN-20260623-LUTHER-CONTINUATION
+        issue: md
+            .issue_number
+            .or(md.pr_number)
+            .map(|anchor| anchor.to_string()),
         work_dir: md.workspace_path.as_ref().map(PathBuf::from),
         artifact_dir: md.artifact_root.as_ref().map(PathBuf::from),
     }
@@ -1063,5 +1072,40 @@ mod tests {
             overrides.is_empty(),
             "a run with no recorded identity must not emit overrides"
         );
+    }
+
+    #[test]
+    fn continuation_overrides_falls_back_to_pr_anchor() {
+        // A PR-only continuation (no issue_number, only pr_number) is accepted by
+        // check_identity_recoverable, so the rebuilt overrides must preserve the
+        // PR anchor instead of silently dropping to the default issue.
+        // @plan:PLAN-20260623-LUTHER-CONTINUATION
+        let mut md = RunMetadata::new("r", "wf", "cfg");
+        md.repository = Some("vybestack/llxprt-luther".to_string());
+        md.issue_number = None;
+        md.pr_number = Some(66);
+
+        let overrides = continuation_overrides(&md);
+
+        assert_eq!(overrides.repo.as_deref(), Some("vybestack/llxprt-luther"));
+        assert_eq!(
+            overrides.issue.as_deref(),
+            Some("66"),
+            "a PR-only run must reuse pr_number as the issue anchor"
+        );
+    }
+
+    #[test]
+    fn continuation_overrides_prefers_issue_over_pr_anchor() {
+        // When both anchors are recorded, the issue number wins so a run that
+        // recorded an explicit issue keeps targeting it.
+        // @plan:PLAN-20260623-LUTHER-CONTINUATION
+        let mut md = RunMetadata::new("r", "wf", "cfg");
+        md.issue_number = Some(65);
+        md.pr_number = Some(66);
+
+        let overrides = continuation_overrides(&md);
+
+        assert_eq!(overrides.issue.as_deref(), Some("65"));
     }
 }
