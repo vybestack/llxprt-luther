@@ -475,7 +475,8 @@ impl FeedbackEvaluationAdapter for ReplayFeedbackAdapter {
             "head_sha": request.head_sha,
             "decision": decision,
             "reason": "scripted deterministic replay decision",
-            "recommended_action": "scripted_action"
+            "recommended_action": "scripted_action",
+            "response_text": "Luther recorded this scripted replay decision on the review thread."
         });
         Ok(response.to_string())
     }
@@ -527,6 +528,7 @@ impl PrFollowupLlxprtCommandRunner for ReplayLlxprtRunner {
                     "output_head_sha": NEXT_HEAD_SHA,
                     "status": "fixed",
                     "action": "scripted remediation",
+                    "response_text": "Luther fixed this item and posted the remediation evidence on the original review thread.",
                     "evidence": { "kind": "current_repository_test", "current_head_sha": NEXT_HEAD_SHA },
                     "evidence_paths": ["src/lib.rs"]
                 });
