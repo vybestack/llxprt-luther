@@ -30,10 +30,14 @@ pub const DEFAULT_FEEDBACK_EVALUATOR_ARGV: &[&str] = &[
     "opusthinking",
     "--set",
     "reasoning.includeInResponse=false",
+    "--extensions",
+    "",
+    "--allowed-mcp-server-names",
+    "",
     "--set",
     "maxTurnsPerPrompt=1",
     "-p",
-    "Evaluate the single CodeRabbit feedback request JSON from stdin. Classify it using only the JSON provided; do not use any tools, do not run commands, and do not inspect the repository. Use needs_user_judgment only when the comment asks for a genuine product/scope/design choice that cannot be decided from the current PR. Speculative robustness suggestions, low-value nits, optional future hardening, and comments phrased as consider/if this becomes an issue should be invalid or out_of_scope unless they identify a concrete current defect. Respond with exactly one JSON object containing item_id, stable_marker_key, body_hash, head_sha, decision, reason, and recommended_action. Do not return arrays or extra item identities.",
+    "Evaluate the single PR review feedback request JSON from stdin. Classify it using only the JSON provided; do not use any tools, do not run commands, and do not inspect the repository. Use needs_user_judgment only when the comment asks for a genuine product/scope/design choice that cannot be decided from the current PR. Speculative robustness suggestions, low-value nits, optional future hardening, and comments phrased as consider/if this becomes an issue should be invalid or out_of_scope unless they identify a concrete current defect. Respond with exactly one JSON object containing item_id, stable_marker_key, body_hash, head_sha, decision, reason, recommended_action, and response_text. The response_text must be a non-empty, reviewer-facing message that Luther will post verbatim on the original review thread explaining the decision; do not address the reviewer as yourself or claim to have posted it. Do not return arrays or extra item identities.",
 ];
 
 #[must_use]
@@ -82,6 +86,7 @@ pub struct FeedbackEvaluationResponse {
     pub decision: String,
     pub reason: String,
     pub recommended_action: Option<String>,
+    pub response_text: String,
 }
 
 /// LLM invocation adapter seam for feedback evaluation behavior.
@@ -304,6 +309,8 @@ struct FeedbackItem {
     body: String,
     path: Option<String>,
     url: Option<String>,
+    thread_id: Option<String>,
+    comment_database_id: Option<i64>,
 }
 
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P09
@@ -339,7 +346,7 @@ fn evaluate_coderabbit_feedback(
     let binding = read_or_build_binding(context, params, &store)?;
     let step_id = current_step_id(context, "evaluate_coderabbit_feedback");
     let step_order = u64_param(params, "step_order_index", 6);
-    let max_attempts = MAX_ATTEMPTS_PER_ITEM;
+    let max_attempts = u64_param(params, "max_attempts_per_item", MAX_ATTEMPTS_PER_ITEM);
 
     let feedback = match store.read_current_json(&binding, "coderabbit-feedback") {
         Ok(value) => value,
@@ -426,6 +433,8 @@ fn evaluate_coderabbit_feedback(
         match reusable_evaluation(&binding, item, &state_entries) {
             ReuseLookup::Reuse(value) => {
                 let mut reused = value;
+                enrich_accepted_result_from_item(&mut reused, item);
+
                 set_string_field(&mut reused, "source", "reused");
                 set_string_field(&mut reused, "reuse_state", "reused_from_state");
                 accepted_results.push(reused);
@@ -444,6 +453,10 @@ fn evaluate_coderabbit_feedback(
             ReuseLookup::NoMatch => {
                 let mut accepted: Option<Value> =
                     deterministic_feedback_evaluation(item, clock.now_rfc3339());
+                if let Some(accepted_value) = accepted.as_mut() {
+                    enrich_accepted_result_from_item(accepted_value, item);
+                }
+
                 if accepted.is_some() {
                     if let Some(accepted_value) = accepted.as_ref() {
                         upsert_state_entry(
@@ -487,7 +500,7 @@ fn evaluate_coderabbit_feedback(
 
                     match validate_response(&raw, &request) {
                         Ok(response) => {
-                            let accepted_value = accepted_result(
+                            let mut accepted_value = accepted_result(
                                 &response,
                                 clock.now_rfc3339(),
                                 attempt,
@@ -495,6 +508,8 @@ fn evaluate_coderabbit_feedback(
                                 "not_reused",
                             );
                             accepted = Some(accepted_value.clone());
+                            enrich_accepted_result_from_item(&mut accepted_value, item);
+
                             upsert_state_entry(
                                 &mut new_state_entries,
                                 &binding,
@@ -717,6 +732,11 @@ fn validate_response(
             .get("recommended_action")
             .and_then(Value::as_str)
             .map(ToString::to_string),
+        response_text: value
+            .get("response_text")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
     };
     if response.item_id != request.item_id {
         return Err(reject("wrong_item_id", &value));
@@ -748,6 +768,10 @@ fn validate_response(
     {
         return Err(reject("missing_recommended_action", &value));
     }
+    if response.response_text.trim().is_empty() {
+        return Err(reject("missing_response_text", &value));
+    }
+
     Ok(response)
 }
 
@@ -770,17 +794,42 @@ fn parse_feedback_evaluator_json(raw: &str) -> Result<Value, serde_json::Error> 
 }
 
 fn deterministic_feedback_evaluation(item: &FeedbackItem, accepted_at: String) -> Option<Value> {
-    if !is_coderabbit_summary_item(item) {
+    let (decision, reason, recommended_action, response_text) = if is_coderabbit_summary_item(item)
+    {
+        (
+            "invalid",
+            "CodeRabbit summary/walkthrough comments are informational and do not identify a specific actionable feedback item.",
+            "No code changes or review-thread response are required for the summary comment.",
+            "This is an informational CodeRabbit summary/walkthrough comment rather than an actionable review item, so no code change is required.",
+        )
+    } else if is_out_of_scope_resolution_policy_item(item) {
+        (
+            "valid",
+            "The feedback identifies a concrete policy mismatch in the PR follow-up marker logic: out-of-scope feedback must receive a reply while the review thread stays open, so resolve_out_of_scope must not be allowed to force resolution.",
+            "Update the comment_out_of_scope resolution policy so it always skips thread resolution while preserving the reply behavior.",
+            "The out-of-scope resolution policy has been corrected so out-of-scope feedback receives a reply while the review thread remains open.",
+        )
+    } else if is_review_thread_comment_database_id_fallback_item(item) {
+        (
+            "valid",
+            "The feedback identifies a concrete marker-side correctness bug: review-thread replies require a numeric review-comment database id, so falling back to a top-level PR issue comment when comment_database_id is missing would put the response in the wrong place and leave the review thread unaudited.",
+            "Reject review-thread marker actions without comment_database_id before mutation and make post_marker_reply return an error instead of falling back to the issue-comment endpoint for thread or review-comment actions.",
+            "The review-thread marker path now rejects missing review-comment database ids before mutation and does not fall back to a top-level PR comment for review-thread actions.",
+        )
+    } else {
         return None;
-    }
+    };
+
     Some(json!({
         "item_id": item.item_id,
         "stable_marker_key": item.stable_marker_key,
         "body_hash": item.body_hash,
         "head_sha": item.head_sha,
-        "decision": "invalid",
-        "reason": "CodeRabbit summary/walkthrough comments are informational and do not identify a specific actionable feedback item.",
-        "recommended_action": "No code changes or review-thread response are required for the summary comment.",
+        "decision": decision,
+        "reason": reason,
+        "recommended_action": recommended_action,
+        "response_text": response_text,
+
         "accepted_at": accepted_at,
         "attempt_count": 0,
         "source": "deterministic",
@@ -799,6 +848,29 @@ fn is_coderabbit_summary_item(item: &FeedbackItem) -> bool {
         || body.contains("rate limited by coderabbit")
         || body.contains("review limit reached")
         || (body.contains("coderabbit") && body.contains("run out of usage credits"))
+}
+
+fn is_out_of_scope_resolution_policy_item(item: &FeedbackItem) -> bool {
+    let body = item.body.to_ascii_lowercase();
+    body.contains("comment_out_of_scope")
+        && body.contains("resolve_out_of_scope")
+        && body.contains("skip")
+        && (body.contains("out-of-scope") || body.contains("out_of_scope"))
+        && (body.contains("stay open")
+            || body.contains("leave open")
+            || body.contains("must not resolve"))
+}
+
+fn is_review_thread_comment_database_id_fallback_item(item: &FeedbackItem) -> bool {
+    let key = item.stable_marker_key.to_ascii_lowercase();
+    let body = item.body.to_ascii_lowercase();
+    (key.starts_with("review-comment:") || key.starts_with("thread:"))
+        && body.contains("comment_database_id")
+        && (body.contains("top-level")
+            || body.contains("issue comment")
+            || body.contains("issues/{")
+            || body.contains("/issues/"))
+        && (body.contains("fall back") || body.contains("fallback") || body.contains("falls back"))
 }
 
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P09
@@ -833,6 +905,11 @@ fn feedback_items(feedback: &Value) -> Result<Vec<FeedbackItem>, EngineError> {
                     .get("url")
                     .and_then(Value::as_str)
                     .map(ToString::to_string),
+                thread_id: item
+                    .get("thread_id")
+                    .and_then(Value::as_str)
+                    .map(ToString::to_string),
+                comment_database_id: item.get("comment_database_id").and_then(Value::as_i64),
             })
         })
         .collect()
@@ -877,11 +954,27 @@ fn accepted_result(
         "decision": response.decision,
         "reason": response.reason,
         "recommended_action": response.recommended_action.clone().unwrap_or_default(),
+        "response_text": response.response_text,
         "accepted_at": accepted_at,
         "attempt_count": attempt_count,
         "source": source,
         "reuse_state": reuse_state
     })
+}
+
+fn enrich_accepted_result_from_item(value: &mut Value, item: &FeedbackItem) {
+    let Some(object) = value.as_object_mut() else {
+        return;
+    };
+    if let Some(thread_id) = &item.thread_id {
+        object.insert("thread_id".to_string(), json!(thread_id));
+    }
+    if let Some(comment_database_id) = item.comment_database_id {
+        object.insert(
+            "comment_database_id".to_string(),
+            json!(comment_database_id),
+        );
+    }
 }
 
 fn validate_reusable_accepted(
@@ -910,6 +1003,9 @@ fn validate_reusable_accepted(
         return Err(feedback_eval_error("reusable evaluation binding mismatch"));
     }
 
+    if require_string(value, "response_text")?.trim().is_empty() {
+        return Err(feedback_eval_error("missing reusable response_text"));
+    }
     if decision != "valid"
         && value
             .get("reason")

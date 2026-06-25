@@ -26,6 +26,16 @@ const DEFAULT_OBSERVATION_INTERVAL_SECONDS: u64 = 300;
 const MARKER_NAMESPACE: &str = "luther-pr-followup";
 const MARKER_ARTIFACT_FAMILY: &str = "pr-feedback-marker-report";
 const PENDING_MARKER_ACTIONS_FAMILY: &str = "pending-feedback-marker-actions";
+/// Sentinel identity that, when present in the configured identity set, makes
+/// the feedback collector accept review threads from any reviewer (not only
+/// CodeRabbit). Selected via the `include_all_reviewers` step param.
+/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P15
+/// @requirement:REQ-PRFU-024
+const ALL_REVIEWERS_SENTINEL: &str = "*";
+/// Real GraphQL mutation used to resolve a PR review thread.
+/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P15
+/// @requirement:REQ-PRFU-016
+const RESOLVE_REVIEW_THREAD_MUTATION: &str = "mutation resolveReviewThread($threadId:ID!){ resolveReviewThread(input:{threadId:$threadId}) { thread { id isResolved } } }";
 
 /// Remote marker discovery record for feedback marker idempotency.
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P08
@@ -189,6 +199,7 @@ struct FeedbackItem {
     stable_marker_key: String,
     thread_id: Option<String>,
     comment_id: Option<String>,
+    comment_database_id: Option<i64>,
     review_id: Option<String>,
     author_login: String,
     path: Option<String>,
@@ -243,7 +254,9 @@ struct PendingMarkerAction {
     remediation_output_head: String,
     body_hash: String,
     reason: String,
+    response_text: Option<String>,
     thread_id: Option<String>,
+    comment_database_id: Option<i64>,
     resolution_required: bool,
     status: String,
 }
@@ -264,6 +277,7 @@ struct MarkerActionOutcome {
     partial: Option<Value>,
     retryable: Option<Value>,
     failed: Option<Value>,
+    audit: Value,
     updated_action: Value,
 }
 
@@ -538,6 +552,7 @@ fn normalize_graphql_threads(
                 stable_marker_key: format!("thread:{}", string_field(&thread, "id")),
                 thread_id: opt_string(&thread, "id"),
                 comment_id: opt_string(&comment, "id"),
+                comment_database_id: comment.get("databaseId").and_then(Value::as_i64),
                 review_id: None,
                 author_login: author.to_string(),
                 path: opt_string(&comment, "path").or_else(|| opt_string(&thread, "path")),
@@ -603,6 +618,7 @@ fn normalize_rest_review_comment(
                 .and_then(Value::as_u64)
                 .map(|id| id.to_string())
         }),
+        comment_database_id: comment.get("id").and_then(Value::as_i64),
         review_id: comment
             .get("pull_request_review_id")
             .and_then(Value::as_u64)
@@ -675,6 +691,7 @@ fn normalize_issue_comment(
                 .and_then(Value::as_u64)
                 .map(|id| id.to_string())
         }),
+        comment_database_id: None,
         review_id: None,
         author_login: author.to_string(),
         path: None,
@@ -816,6 +833,7 @@ query($owner: String!, $name: String!, $number: Int!, $page: String) {
           comments(first: 100) {
             nodes {
               id
+              databaseId
               body
               author { login }
               url
@@ -824,6 +842,7 @@ query($owner: String!, $name: String!, $number: Int!, $page: String) {
               originalLine
               createdAt
               updatedAt
+              commit { oid }
             }
           }
         }
@@ -1184,14 +1203,40 @@ fn mark_coderabbit_feedback(
         params,
         clock,
     );
+    let thread_identifiers = collect_thread_identifiers_by_action_key(&store, &binding, runner)?;
     let pending_actions = pending_artifact
         .get("pending_actions")
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default()
         .into_iter()
+        .map(|value| backfill_thread_identifiers(value, &thread_identifiers))
         .filter_map(|value| pending_marker_action_from_value(value).ok())
         .collect::<Vec<_>>();
+    if let Some(violations) = validate_marker_actions_before_mutation(&pending_actions) {
+        let report = json!({
+            "schema_version": PR_FOLLOWUP_SCHEMA_VERSION,
+            "marker_state": "fatal",
+            "validation_state": "invalid",
+            "validation_violations": violations,
+            "github_side_effects_performed": false,
+            "generated_at": clock.now_rfc3339()
+        });
+        store.write_json_artifact(
+            &binding,
+            MARKER_ARTIFACT_FAMILY,
+            &step_id,
+            step_order,
+            &report,
+            Some((
+                "fatal",
+                "marker_actions_failed_pre_mutation_validation",
+                json!({ "validation_violations": report["validation_violations"].clone() }),
+            )),
+            clock,
+        )?;
+        return Ok(StepOutcome::Fatal);
+    }
     let local_completed = read_local_marker_completions(&store, &binding);
     let remote_comments = discover_marker_remote_comments(runner, &binding).unwrap_or_default();
     let mut remote_completed = BTreeSet::new();
@@ -1366,6 +1411,173 @@ fn feedback_items_by_identity(feedback: &Value) -> BTreeMap<String, Value> {
         .collect()
 }
 
+/// Index collected review-thread identifiers (thread id + numeric comment id)
+/// by the most specific stable item identity available. Item-level keys avoid
+/// collisions when several comments share the same GraphQL review thread marker.
+/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P15
+/// @requirement:REQ-PRFU-015,REQ-PRFU-016
+fn collect_thread_identifiers_by_action_key(
+    store: &PrFollowupArtifactStore,
+    binding: &PrFollowupBinding,
+    runner: &dyn GithubPrCommandRunner,
+) -> Result<BTreeMap<String, (Option<String>, Option<i64>)>, EngineError> {
+    let mut identifiers = BTreeMap::new();
+    let Ok(feedback) = store.read_current_json(binding, "coderabbit-feedback") else {
+        return Ok(identifiers);
+    };
+    let items = feedback
+        .get("items")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let needs_graph_thread_ids = items.iter().any(|item| {
+        item.get("thread_id").and_then(Value::as_str).is_none()
+            && item
+                .get("comment_database_id")
+                .and_then(Value::as_i64)
+                .is_some()
+    });
+    let graph_thread_ids = if needs_graph_thread_ids {
+        review_thread_ids_by_comment_database_id(runner, binding)?
+    } else {
+        BTreeMap::new()
+    };
+    let mut stable_marker_key_counts: BTreeMap<String, usize> = BTreeMap::new();
+    for item in &items {
+        if let Some(stable_marker_key) = item.get("stable_marker_key").and_then(Value::as_str) {
+            *stable_marker_key_counts
+                .entry(stable_marker_key.to_string())
+                .or_default() += 1;
+        }
+    }
+    for item in &items {
+        let comment_database_id = item.get("comment_database_id").and_then(Value::as_i64);
+        let thread_id = item
+            .get("thread_id")
+            .and_then(Value::as_str)
+            .map(ToString::to_string)
+            .or_else(|| comment_database_id.and_then(|id| graph_thread_ids.get(&id).cloned()));
+        if thread_id.is_none() && comment_database_id.is_none() {
+            continue;
+        }
+        let key = thread_identifier_action_key(item, &stable_marker_key_counts);
+        if !key.is_empty() {
+            identifiers.insert(key, (thread_id, comment_database_id));
+        }
+    }
+    Ok(identifiers)
+}
+
+fn review_thread_ids_by_comment_database_id(
+    runner: &dyn GithubPrCommandRunner,
+    binding: &PrFollowupBinding,
+) -> Result<BTreeMap<i64, String>, EngineError> {
+    let mut identifiers = BTreeMap::new();
+    let graph = query_review_threads(runner, binding)?;
+    if is_permission_or_schema_error(&graph) {
+        return Ok(identifiers);
+    }
+    for thread in graph
+        .pointer("/data/repository/pullRequest/reviewThreads/nodes")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default()
+    {
+        let thread_id = string_field(&thread, "id");
+        if thread_id.is_empty() {
+            continue;
+        }
+        for comment in thread
+            .pointer("/comments/nodes")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default()
+        {
+            if let Some(database_id) = comment.get("databaseId").and_then(Value::as_i64) {
+                identifiers.insert(database_id, thread_id.clone());
+            }
+        }
+    }
+    Ok(identifiers)
+}
+
+/// Fill in missing `thread_id`/`comment_database_id` on a pending marker action
+/// from the collected review-thread index, without overwriting present values.
+/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P15
+/// @requirement:REQ-PRFU-015,REQ-PRFU-016
+fn backfill_thread_identifiers(
+    mut value: Value,
+    identifiers: &BTreeMap<String, (Option<String>, Option<i64>)>,
+) -> Value {
+    let key = pending_action_thread_identifier_key(&value);
+    if key.is_empty() {
+        return value;
+    }
+    let Some((thread_id, comment_database_id)) = identifiers.get(&key) else {
+        return value;
+    };
+    if let Some(object) = value.as_object_mut() {
+        if object.get("thread_id").and_then(Value::as_str).is_none() {
+            if let Some(thread_id) = thread_id {
+                object.insert("thread_id".to_string(), json!(thread_id));
+            }
+        }
+        if object
+            .get("comment_database_id")
+            .and_then(Value::as_i64)
+            .is_none()
+        {
+            if let Some(comment_database_id) = comment_database_id {
+                object.insert(
+                    "comment_database_id".to_string(),
+                    json!(comment_database_id),
+                );
+            }
+        }
+    }
+    value
+}
+
+fn thread_identifier_action_key(
+    item: &Value,
+    stable_marker_key_counts: &BTreeMap<String, usize>,
+) -> String {
+    let item_id = string_field(item, "item_id");
+    if !item_id.is_empty() {
+        return format!("item_id:{item_id}");
+    }
+    let body_hash = string_field(item, "body_hash");
+    if !body_hash.is_empty() {
+        return format!("body_hash:{body_hash}");
+    }
+    let stable_marker_key = string_field(item, "stable_marker_key");
+    if stable_marker_key_counts
+        .get(&stable_marker_key)
+        .copied()
+        .unwrap_or_default()
+        == 1
+    {
+        return format!("stable_marker_key:{stable_marker_key}");
+    }
+    String::new()
+}
+
+fn pending_action_thread_identifier_key(value: &Value) -> String {
+    let item_id = string_field(value, "item_id");
+    if !item_id.is_empty() {
+        return format!("item_id:{item_id}");
+    }
+    let body_hash = string_field(value, "body_hash");
+    if !body_hash.is_empty() {
+        return format!("body_hash:{body_hash}");
+    }
+    let stable_marker_key = string_field(value, "stable_marker_key");
+    if !stable_marker_key.is_empty() {
+        return format!("stable_marker_key:{stable_marker_key}");
+    }
+    String::new()
+}
+
 fn evaluation_identity_key(value: &Value) -> String {
     format!(
         "{}:{}:{}",
@@ -1433,9 +1645,16 @@ fn current_evaluation_marker_action(
         .get("reason")
         .and_then(Value::as_str)
         .unwrap_or(decision);
+    let response_text = evaluation
+        .get("response_text")
+        .and_then(Value::as_str)
+        .filter(|text| !text.trim().is_empty());
     let thread_id = feedback_item
         .and_then(|item| item.get("thread_id"))
         .and_then(Value::as_str);
+    let comment_database_id = feedback_item
+        .and_then(|item| item.get("comment_database_id"))
+        .and_then(Value::as_i64);
     let idempotency_key = format!(
         "{}:{}:{}:{}:{}:{}:{}:{}",
         binding.run_id,
@@ -1456,7 +1675,8 @@ fn current_evaluation_marker_action(
             "stable_marker_key": stable_marker_key,
             "body_hash": body_hash,
             "source_head_sha": source_head_sha,
-            "thread_id": thread_id
+            "thread_id": thread_id,
+            "comment_database_id": comment_database_id
         },
         "stable_marker_key": stable_marker_key,
         "source_head_sha": source_head_sha,
@@ -1470,6 +1690,9 @@ fn current_evaluation_marker_action(
         "resolution_required": false,
         "status": "pending",
         "reason": reason,
+        "response_text": response_text,
+        "thread_id": thread_id,
+        "comment_database_id": comment_database_id,
         "evidence": evaluation,
         "derived_from_current_artifacts": true,
         "derived_at": clock.now_rfc3339()
@@ -1501,6 +1724,11 @@ fn pending_marker_action_from_value(value: Value) -> Result<PendingMarkerAction,
         .and_then(Value::as_str)
         .unwrap_or("recorded marker action")
         .to_string();
+    let response_text = value
+        .get("response_text")
+        .and_then(Value::as_str)
+        .filter(|text| !text.trim().is_empty())
+        .map(ToString::to_string);
     let thread_id = value
         .get("thread_id")
         .and_then(Value::as_str)
@@ -1517,15 +1745,28 @@ fn pending_marker_action_from_value(value: Value) -> Result<PendingMarkerAction,
                 .and_then(Value::as_str)
                 .map(ToString::to_string)
         });
-    let resolution_required = value
-        .get("resolution_required")
-        .and_then(Value::as_bool)
-        .unwrap_or(action_kind == "comment_fixed" || action_kind == "comment_invalid");
+    let comment_database_id = value
+        .get("comment_database_id")
+        .and_then(Value::as_i64)
+        .or_else(|| {
+            value
+                .pointer("/evidence/comment_database_id")
+                .and_then(Value::as_i64)
+        })
+        .or_else(|| {
+            value
+                .pointer("/original_feedback_identity/comment_database_id")
+                .and_then(Value::as_i64)
+        });
     let status = value
         .get("status")
         .and_then(Value::as_str)
         .unwrap_or("pending")
         .to_string();
+    let resolution_required = value
+        .get("resolution_required")
+        .and_then(Value::as_bool)
+        .unwrap_or_else(|| unified_status_requires_resolution(&action_kind, &value));
     Ok(PendingMarkerAction {
         value,
         action_kind,
@@ -1535,10 +1776,95 @@ fn pending_marker_action_from_value(value: Value) -> Result<PendingMarkerAction,
         remediation_output_head,
         body_hash,
         reason,
+        response_text,
         thread_id,
+        comment_database_id,
         resolution_required,
         status,
     })
+}
+
+/// Derive whether Luther must resolve the review thread from the unified
+/// per-item status implied by the marker action and its remediation result.
+/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P15
+/// @requirement:REQ-PRFU-015,REQ-PRFU-026
+fn unified_status_requires_resolution(action_kind: &str, value: &Value) -> bool {
+    let remediation_status = value
+        .get("remediation_result_status")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    matches!(action_kind, "comment_fixed")
+        && matches!(
+            remediation_status,
+            "" | "fixed" | "changed" | "already_satisfied" | "not_reproduced"
+        )
+}
+
+/// Post the agent-authored reply on the original review thread when a numeric
+/// review comment id is available. Only issue-comment marker actions may post a
+/// top-level PR comment.
+/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P15
+/// @requirement:REQ-PRFU-015,REQ-PRFU-016
+fn post_marker_reply(
+    binding: &PrFollowupBinding,
+    runner: &dyn GithubPrCommandRunner,
+    action: &PendingMarkerAction,
+    comment_key: &str,
+    body: &str,
+    body_path: &Path,
+) -> Result<Value, EngineError> {
+    let (endpoint, in_thread_reply) = match action.comment_database_id {
+        Some(comment_database_id) => (
+            format!(
+                "/repos/{}/{}/pulls/{}/comments/{}/replies",
+                binding.repository_owner,
+                binding.repository_name,
+                binding.pr_number,
+                comment_database_id
+            ),
+            true,
+        ),
+        None if !marker_action_requires_review_thread_reply(action) => (
+            format!(
+                "/repos/{}/{}/issues/{}/comments",
+                binding.repository_owner, binding.repository_name, binding.pr_number
+            ),
+            false,
+        ),
+        None => {
+            return Err(github_feedback_error(format!(
+                "review-thread marker action {} missing comment_database_id",
+                action
+                    .value
+                    .get("action_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or(&action.stable_marker_key)
+            )));
+        }
+    };
+    let response = runner.run_github_command(&[
+        "gh".to_string(),
+        "api".to_string(),
+        endpoint,
+        "--method".to_string(),
+        "POST".to_string(),
+        "--field".to_string(),
+        format!("body=@{}", body_path.display()),
+    ])?;
+    let parsed: Value =
+        serde_json::from_str(&response).unwrap_or_else(|_| json!({ "raw_response": response }));
+    Ok(json!({
+        "idempotency_key": comment_key,
+        "comment_id": parsed.get("id").cloned().unwrap_or(Value::Null),
+        "comment_url": parsed.get("html_url").cloned().unwrap_or(Value::Null),
+        "in_thread_reply": in_thread_reply,
+        "in_reply_to_id": parsed.get("in_reply_to_id").cloned().unwrap_or(Value::Null),
+        "body_hash": stable_hash(body),
+        "body_path": body_path.display().to_string(),
+        "action_id": action.value.get("action_id").cloned().unwrap_or(Value::Null),
+        "warnings": if in_thread_reply { json!([]) } else { json!(["no_comment_database_id_posted_top_level_comment"]) },
+        "source": "posted"
+    }))
 }
 
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P15
@@ -1573,7 +1899,85 @@ fn discover_marker_remote_comments(
     runner: &dyn GithubPrCommandRunner,
     binding: &PrFollowupBinding,
 ) -> Result<Vec<Value>, EngineError> {
-    query_issue_comments(runner, binding)
+    let mut comments = query_issue_comments(runner, binding)?;
+    // Also scan in-thread review (pull) comments so previously posted in-thread
+    // reply markers are detected for idempotency on retry/resume.
+    comments.extend(query_pull_review_comments(runner, binding).unwrap_or_default());
+    Ok(comments)
+}
+
+/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P15
+/// @requirement:REQ-PRFU-016,REQ-PRFU-017
+fn query_pull_review_comments(
+    runner: &dyn GithubPrCommandRunner,
+    binding: &PrFollowupBinding,
+) -> Result<Vec<Value>, EngineError> {
+    query_paginated_array(
+        runner,
+        &format!(
+            "/repos/{}/{}/pulls/{}/comments?per_page=100&page=",
+            binding.repository_owner, binding.repository_name, binding.pr_number
+        ),
+    )
+}
+
+/// Deterministically validate every pending marker action before issuing any
+/// GitHub side effect. Returns `Some(violations)` when at least one action is
+/// malformed so the caller can stop before mutating GitHub; `None` when all
+/// actions are safe to execute.
+/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P15
+/// @requirement:REQ-PRFU-015,REQ-PRFU-016,REQ-PRFU-026
+fn validate_marker_actions_before_mutation(actions: &[PendingMarkerAction]) -> Option<Vec<Value>> {
+    let mut violations = Vec::new();
+    let mut seen_item_ids = BTreeSet::new();
+    for action in actions {
+        if action.action_kind == "skip_needs_user_judgment" {
+            continue;
+        }
+        if !action.item_id.is_empty() && !seen_item_ids.insert(action.item_id.clone()) {
+            violations.push(json!({
+                "item_id": action.item_id,
+                "stable_marker_key": action.stable_marker_key,
+                "violation": "duplicate_result_for_item"
+            }));
+        }
+        let response_text_present = action
+            .response_text
+            .as_deref()
+            .map(str::trim)
+            .is_some_and(|text| !text.is_empty());
+        if !response_text_present {
+            violations.push(json!({
+                "item_id": action.item_id,
+                "stable_marker_key": action.stable_marker_key,
+                "action_kind": action.action_kind,
+                "violation": "missing_response_text"
+            }));
+        }
+        if action.resolution_required && action.thread_id.is_none() {
+            violations.push(json!({
+                "item_id": action.item_id,
+                "stable_marker_key": action.stable_marker_key,
+                "action_kind": action.action_kind,
+                "violation": "resolution_required_without_thread_id"
+            }));
+        }
+        if marker_action_requires_review_thread_reply(action)
+            && action.comment_database_id.is_none()
+        {
+            violations.push(json!({
+                "item_id": action.item_id,
+                "stable_marker_key": action.stable_marker_key,
+                "action_kind": action.action_kind,
+                "violation": "review_thread_reply_without_comment_database_id"
+            }));
+        }
+    }
+    if violations.is_empty() {
+        None
+    } else {
+        Some(violations)
+    }
 }
 
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P15
@@ -1581,6 +1985,18 @@ fn discover_marker_remote_comments(
 /// @pseudocode lines 43-49
 #[allow(clippy::too_many_arguments)]
 // Pre-existing marker action workflow; split in a dedicated refactor stage.
+fn marker_action_requires_review_thread_reply(action: &PendingMarkerAction) -> bool {
+    matches!(
+        action.action_kind.as_str(),
+        "comment_fixed"
+            | "comment_invalid"
+            | "comment_out_of_scope"
+            | "comment_needs_user_judgment"
+    ) && (action.thread_id.is_some()
+        || action.stable_marker_key.starts_with("review-comment:")
+        || action.stable_marker_key.starts_with("thread:"))
+}
+
 #[allow(clippy::too_many_lines)]
 fn process_marker_action(
     binding: &PrFollowupBinding,
@@ -1627,29 +2043,14 @@ fn process_marker_action(
         let body_path = write_marker_comment_body_file(
             store, binding, step_id, step_order, &action, &body, clock,
         )?;
-        let response = runner.run_github_command(&[
-            "gh".to_string(),
-            "api".to_string(),
-            format!(
-                "/repos/{}/{}/issues/{}/comments",
-                binding.repository_owner, binding.repository_name, binding.pr_number
-            ),
-            "--method".to_string(),
-            "POST".to_string(),
-            "--field".to_string(),
-            format!("body=@{}", body_path.display()),
-        ])?;
-        let parsed: Value =
-            serde_json::from_str(&response).unwrap_or_else(|_| json!({ "raw_response": response }));
-        posted_comment = Some(json!({
-            "idempotency_key": comment_key,
-            "comment_id": parsed.get("id").cloned().unwrap_or(Value::Null),
-            "comment_url": parsed.get("html_url").cloned().unwrap_or(Value::Null),
-            "body_hash": stable_hash(&body),
-            "body_path": body_path.display().to_string(),
-            "action_id": action.value.get("action_id").cloned().unwrap_or(Value::Null),
-            "source": "posted"
-        }));
+        posted_comment = Some(post_marker_reply(
+            binding,
+            runner,
+            &action,
+            &comment_key,
+            &body,
+            &body_path,
+        )?);
     } else {
         skipped.push(json!({
             "idempotency_key": comment_key,
@@ -1661,6 +2062,10 @@ fn process_marker_action(
 
     let resolution_policy = resolution_policy(&action, params);
     let mut resolved_thread = None;
+    let mut resolve_attempted = false;
+    let mut resolve_succeeded = false;
+    let mut resolve_error: Option<String> = None;
+    let mut final_thread_resolved_state: Option<bool> = None;
     if resolution_policy == "skip" {
         skipped.push(json!({
             "idempotency_key": resolution_key,
@@ -1696,27 +2101,50 @@ fn process_marker_action(
         }));
     } else {
         let thread_id = action.thread_id.clone().unwrap_or_default();
+        resolve_attempted = true;
         let response = runner.run_github_command(&[
             "gh".to_string(),
             "api".to_string(),
             "graphql".to_string(),
             "-f".to_string(),
-            "query=resolve_review_thread_mutation".to_string(),
+            format!("query={RESOLVE_REVIEW_THREAD_MUTATION}"),
             "-f".to_string(),
-            format!("thread_id={thread_id}"),
+            format!("threadId={thread_id}"),
         ]);
         match response {
             Ok(output) => {
                 let parsed: Value = serde_json::from_str(&output)
                     .unwrap_or_else(|_| json!({ "raw_response": output }));
-                resolved_thread = Some(json!({
+                final_thread_resolved_state = parsed
+                    .pointer("/data/resolveReviewThread/thread/isResolved")
+                    .and_then(Value::as_bool);
+                resolve_succeeded =
+                    parsed.get("errors").is_none() && final_thread_resolved_state == Some(true);
+                let resolution_record = json!({
                     "idempotency_key": resolution_key,
                     "thread_id": thread_id,
                     "response": parsed,
+                    "final_thread_resolved_state": final_thread_resolved_state,
                     "action_id": action.value.get("action_id").cloned().unwrap_or(Value::Null)
-                }));
+                });
+                if resolve_succeeded {
+                    resolved_thread = Some(resolution_record);
+                } else {
+                    let error = "resolution_failed_after_comment".to_string();
+                    resolve_error = Some(error.clone());
+                    partial = Some(json!({
+                        "idempotency_key": resolution_key,
+                        "action_id": action.value.get("action_id").cloned().unwrap_or(Value::Null),
+                        "reason": "resolution_failed_after_comment",
+                        "error": error,
+                        "partial_state": "comment_posted_resolution_pending",
+                        "resolve_response": resolution_record
+                    }));
+                    retryable = partial.clone();
+                }
             }
             Err(err) => {
+                resolve_error = Some(err.to_string());
                 partial = Some(json!({
                     "idempotency_key": resolution_key,
                     "action_id": action.value.get("action_id").cloned().unwrap_or(Value::Null),
@@ -1765,6 +2193,18 @@ fn process_marker_action(
         );
         object.insert("updated_at".to_string(), json!(clock.now_rfc3339()));
     }
+    let audit = marker_action_audit(
+        &action,
+        status,
+        &comment_key,
+        posted_comment.as_ref(),
+        &ResolveAudit {
+            resolve_attempted,
+            resolve_succeeded,
+            resolve_error: resolve_error.as_deref(),
+            final_thread_resolved_state,
+        },
+    );
     Ok(MarkerActionOutcome {
         action,
         status: status.to_string(),
@@ -1776,15 +2216,63 @@ fn process_marker_action(
         partial,
         retryable,
         failed,
+        audit,
         updated_action,
     })
 }
 
+/// Build the per-item idempotent audit record linking the feedback item,
+/// review thread, reply, and resolve result.
+/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P15
+/// @requirement:REQ-PRFU-016,REQ-PRFU-026
+/// Resolve-side audit fields grouped to keep the audit builder within argument
+/// limits.
+/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P15
+/// @requirement:REQ-PRFU-016,REQ-PRFU-026
+struct ResolveAudit<'a> {
+    resolve_attempted: bool,
+    resolve_succeeded: bool,
+    resolve_error: Option<&'a str>,
+    final_thread_resolved_state: Option<bool>,
+}
+
+fn marker_action_audit(
+    action: &PendingMarkerAction,
+    status: &str,
+    comment_key: &str,
+    posted_comment: Option<&Value>,
+    resolve: &ResolveAudit,
+) -> Value {
+    json!({
+        "item_id": action.item_id,
+        "stable_marker_key": action.stable_marker_key,
+        "review_thread_id": action.thread_id,
+        "comment_database_id": action.comment_database_id,
+        "action_kind": action.action_kind,
+        "status": status,
+        "idempotency_key": comment_key,
+        "reply_comment_id": posted_comment
+            .and_then(|comment| comment.get("comment_id").cloned())
+            .unwrap_or(Value::Null),
+        "reply_comment_url": posted_comment
+            .and_then(|comment| comment.get("comment_url").cloned())
+            .unwrap_or(Value::Null),
+        "in_thread_reply": posted_comment
+            .and_then(|comment| comment.get("in_thread_reply").and_then(Value::as_bool))
+            .unwrap_or(false),
+        "resolve_attempted": resolve.resolve_attempted,
+        "resolve_succeeded": resolve.resolve_succeeded,
+        "resolve_error": resolve.resolve_error,
+        "final_thread_resolved_state": resolve.final_thread_resolved_state
+    })
+}
+
+/// Fallback visible reply body used only when the agent supplied no
+/// `response_text` for the item.
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P15
 /// @requirement:REQ-PRFU-015,REQ-PRFU-016,REQ-PRFU-017
-/// @pseudocode lines 43-45
-fn render_marker_comment_body(binding: &PrFollowupBinding, action: &PendingMarkerAction) -> String {
-    let visible = match action.action_kind.as_str() {
+fn render_default_marker_visible(action: &PendingMarkerAction) -> String {
+    match action.action_kind.as_str() {
         "comment_fixed" => format!(
             "Luther follow-up: fixed CodeRabbit feedback `{}`. Evidence: {}.",
             action.stable_marker_key,
@@ -1805,7 +2293,20 @@ fn render_marker_comment_body(binding: &PrFollowupBinding, action: &PendingMarke
             action.stable_marker_key,
             sanitize_visible_text(&action.reason)
         ),
-    };
+    }
+}
+
+/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P15
+/// @requirement:REQ-PRFU-015,REQ-PRFU-016,REQ-PRFU-017
+/// @pseudocode lines 43-45
+fn render_marker_comment_body(binding: &PrFollowupBinding, action: &PendingMarkerAction) -> String {
+    let visible = action
+        .response_text
+        .as_deref()
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map(sanitize_visible_text)
+        .unwrap_or_else(|| render_default_marker_visible(action));
     let marker = format!(
         "<!-- {MARKER_NAMESPACE} marker_key={} source_head={} remediation_output_head={} body={} action={} run_id={} -->",
         action.stable_marker_key,
@@ -1861,6 +2362,18 @@ fn skipped_needs_user_judgment_outcome(
             json!("needs_user_judgment_comments_disabled"),
         );
     }
+    let audit = marker_action_audit(
+        &action,
+        "failed",
+        &comment_key,
+        None,
+        &ResolveAudit {
+            resolve_attempted: false,
+            resolve_succeeded: false,
+            resolve_error: None,
+            final_thread_resolved_state: None,
+        },
+    );
     MarkerActionOutcome {
         action,
         status: "failed".to_string(),
@@ -1872,6 +2385,7 @@ fn skipped_needs_user_judgment_outcome(
         partial: partial.clone(),
         retryable: None,
         failed: None,
+        audit,
         updated_action,
     }
 }
@@ -1919,6 +2433,18 @@ fn validate_marker_action_evidence(
         );
         object.insert("updated_at".to_string(), json!(clock.now_rfc3339()));
     }
+    let audit = marker_action_audit(
+        &action,
+        "failed",
+        &comment_key,
+        None,
+        &ResolveAudit {
+            resolve_attempted: false,
+            resolve_succeeded: false,
+            resolve_error: None,
+            final_thread_resolved_state: None,
+        },
+    );
     Ok(Some(MarkerActionOutcome {
         action,
         status: "failed".to_string(),
@@ -1930,6 +2456,7 @@ fn validate_marker_action_evidence(
         partial: None,
         retryable: None,
         failed: Some(failed),
+        audit,
         updated_action,
     }))
 }
@@ -2026,30 +2553,25 @@ fn write_marker_comment_body_file(
 /// @requirement:REQ-PRFU-015,REQ-PRFU-026
 /// @pseudocode lines 46-49
 fn resolution_policy(action: &PendingMarkerAction, params: &Value) -> &'static str {
+    // needs_user_judgment is always left open for a human to decide.
     if action.action_kind == "comment_needs_user_judgment" {
         return "skip";
     }
-    if action.action_kind == "comment_fixed"
-        && !params
-            .get("resolve_fixed")
-            .and_then(Value::as_bool)
-            .unwrap_or(false)
-    {
+    // Legacy explicit overrides remain honored for fixed feedback only.
+    if action.action_kind == "comment_fixed" {
+        if let Some(resolve_fixed) = params.get("resolve_fixed").and_then(Value::as_bool) {
+            return if resolve_fixed { "required" } else { "skip" };
+        }
+    }
+    if action.action_kind == "comment_out_of_scope" {
         return "skip";
     }
-
-    if action.action_kind == "comment_out_of_scope"
-        && !params
-            .get("resolve_out_of_scope")
-            .and_then(Value::as_bool)
-            .unwrap_or(false)
-    {
-        return "skip";
-    }
+    // Default policy: resolve fixed/changed/already_satisfied/not_reproduced
+    // (carried via resolution_required); leave discounted items open.
     if action.resolution_required {
         "required"
     } else {
-        "optional"
+        "skip"
     }
 }
 
@@ -2169,7 +2691,8 @@ fn marker_report_payload(
             "status": outcome.status,
             "comment_idempotency_key": outcome.comment_key,
             "resolution_idempotency_key": outcome.resolution_key
-        })).collect::<Vec<_>>()
+        })).collect::<Vec<_>>(),
+        "action_audit": outcomes.iter().map(|outcome| outcome.audit.clone()).collect::<Vec<_>>()
     })
 }
 
@@ -2375,6 +2898,7 @@ fn item_json(item: &FeedbackItem) -> Value {
         "stable_marker_key": item.stable_marker_key,
         "thread_id": item.thread_id,
         "comment_id": item.comment_id,
+        "comment_database_id": item.comment_database_id,
         "review_id": item.review_id,
         "author_login": item.author_login,
         "author_association": null,
@@ -2525,14 +3049,28 @@ fn configured_identities(params: &Value) -> BTreeSet<String> {
             identities.insert(identity.to_ascii_lowercase());
         }
     }
+    // When include_all_reviewers is set, add the wildcard sentinel so any
+    // reviewer's threads flow through the same deterministic mechanism.
+    // @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P15
+    // @requirement:REQ-PRFU-024
+    if params
+        .get("include_all_reviewers")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        identities.insert(ALL_REVIEWERS_SENTINEL.to_string());
+    }
     identities
 }
 
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P08
-/// @requirement:REQ-PRFU-008
+/// @requirement:REQ-PRFU-008,REQ-PRFU-024
 /// @pseudocode lines 10
 fn is_coderabbit(author: &str, identities: &BTreeSet<String>) -> bool {
-    identities.contains(&author.to_ascii_lowercase())
+    if author.is_empty() {
+        return false;
+    }
+    identities.contains(ALL_REVIEWERS_SENTINEL) || identities.contains(&author.to_ascii_lowercase())
 }
 
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P08
