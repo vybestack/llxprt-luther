@@ -1203,7 +1203,7 @@ fn mark_coderabbit_feedback(
         params,
         clock,
     );
-    let thread_identifiers = collect_thread_identifiers_by_marker_key(&store, &binding);
+    let thread_identifiers = collect_thread_identifiers_by_action_key(&store, &binding);
     let pending_actions = pending_artifact
         .get("pending_actions")
         .and_then(Value::as_array)
@@ -1412,11 +1412,11 @@ fn feedback_items_by_identity(feedback: &Value) -> BTreeMap<String, Value> {
 }
 
 /// Index collected review-thread identifiers (thread id + numeric comment id)
-/// by `stable_marker_key` so Luther can deterministically reply in-thread and
-/// resolve even for items whose decision artifacts carry only the marker key.
+/// by the most specific stable item identity available. Item-level keys avoid
+/// collisions when several comments share the same GraphQL review thread marker.
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P15
 /// @requirement:REQ-PRFU-015,REQ-PRFU-016
-fn collect_thread_identifiers_by_marker_key(
+fn collect_thread_identifiers_by_action_key(
     store: &PrFollowupArtifactStore,
     binding: &PrFollowupBinding,
 ) -> BTreeMap<String, (Option<String>, Option<i64>)> {
@@ -1424,22 +1424,31 @@ fn collect_thread_identifiers_by_marker_key(
     let Ok(feedback) = store.read_current_json(binding, "coderabbit-feedback") else {
         return identifiers;
     };
-    for item in feedback
+    let items = feedback
         .get("items")
         .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-    {
-        let Some(key) = item.get("stable_marker_key").and_then(Value::as_str) else {
-            continue;
-        };
+        .cloned()
+        .unwrap_or_default();
+    let mut stable_marker_key_counts: BTreeMap<String, usize> = BTreeMap::new();
+    for item in &items {
+        if let Some(stable_marker_key) = item.get("stable_marker_key").and_then(Value::as_str) {
+            *stable_marker_key_counts
+                .entry(stable_marker_key.to_string())
+                .or_default() += 1;
+        }
+    }
+    for item in &items {
         let thread_id = item
             .get("thread_id")
             .and_then(Value::as_str)
             .map(ToString::to_string);
         let comment_database_id = item.get("comment_database_id").and_then(Value::as_i64);
-        if thread_id.is_some() || comment_database_id.is_some() {
-            identifiers.insert(key.to_string(), (thread_id, comment_database_id));
+        if thread_id.is_none() && comment_database_id.is_none() {
+            continue;
+        }
+        let key = thread_identifier_action_key(item, &stable_marker_key_counts);
+        if !key.is_empty() {
+            identifiers.insert(key, (thread_id, comment_database_id));
         }
     }
     identifiers
@@ -1453,13 +1462,10 @@ fn backfill_thread_identifiers(
     mut value: Value,
     identifiers: &BTreeMap<String, (Option<String>, Option<i64>)>,
 ) -> Value {
-    let Some(key) = value
-        .get("stable_marker_key")
-        .and_then(Value::as_str)
-        .map(ToString::to_string)
-    else {
+    let key = pending_action_thread_identifier_key(&value);
+    if key.is_empty() {
         return value;
-    };
+    }
     let Some((thread_id, comment_database_id)) = identifiers.get(&key) else {
         return value;
     };
@@ -1483,6 +1489,46 @@ fn backfill_thread_identifiers(
         }
     }
     value
+}
+
+fn thread_identifier_action_key(
+    item: &Value,
+    stable_marker_key_counts: &BTreeMap<String, usize>,
+) -> String {
+    let item_id = string_field(item, "item_id");
+    if !item_id.is_empty() {
+        return format!("item_id:{item_id}");
+    }
+    let body_hash = string_field(item, "body_hash");
+    if !body_hash.is_empty() {
+        return format!("body_hash:{body_hash}");
+    }
+    let stable_marker_key = string_field(item, "stable_marker_key");
+    if stable_marker_key_counts
+        .get(&stable_marker_key)
+        .copied()
+        .unwrap_or_default()
+        == 1
+    {
+        return format!("stable_marker_key:{stable_marker_key}");
+    }
+    String::new()
+}
+
+fn pending_action_thread_identifier_key(value: &Value) -> String {
+    let item_id = string_field(value, "item_id");
+    if !item_id.is_empty() {
+        return format!("item_id:{item_id}");
+    }
+    let body_hash = string_field(value, "body_hash");
+    if !body_hash.is_empty() {
+        return format!("body_hash:{body_hash}");
+    }
+    let stable_marker_key = string_field(value, "stable_marker_key");
+    if !stable_marker_key.is_empty() {
+        return format!("stable_marker_key:{stable_marker_key}");
+    }
+    String::new()
 }
 
 fn evaluation_identity_key(value: &Value) -> String {
@@ -1708,8 +1754,8 @@ fn unified_status_requires_resolution(action_kind: &str, value: &Value) -> bool 
 }
 
 /// Post the agent-authored reply on the original review thread when a numeric
-/// review comment id is available; otherwise fall back to a top-level PR
-/// (issues) comment and record `in_thread_reply=false`.
+/// review comment id is available. Only issue-comment marker actions may post a
+/// top-level PR comment.
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P15
 /// @requirement:REQ-PRFU-015,REQ-PRFU-016
 fn post_marker_reply(
@@ -1731,13 +1777,23 @@ fn post_marker_reply(
             ),
             true,
         ),
-        None => (
+        None if !marker_action_requires_review_thread_reply(action) => (
             format!(
                 "/repos/{}/{}/issues/{}/comments",
                 binding.repository_owner, binding.repository_name, binding.pr_number
             ),
             false,
         ),
+        None => {
+            return Err(github_feedback_error(format!(
+                "review-thread marker action {} missing comment_database_id",
+                action
+                    .value
+                    .get("action_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or(&action.stable_marker_key)
+            )));
+        }
     };
     let response = runner.run_github_command(&[
         "gh".to_string(),
@@ -1859,6 +1915,16 @@ fn validate_marker_actions_before_mutation(actions: &[PendingMarkerAction]) -> O
                 "violation": "resolution_required_without_thread_id"
             }));
         }
+        if marker_action_requires_review_thread_reply(action)
+            && action.comment_database_id.is_none()
+        {
+            violations.push(json!({
+                "item_id": action.item_id,
+                "stable_marker_key": action.stable_marker_key,
+                "action_kind": action.action_kind,
+                "violation": "review_thread_reply_without_comment_database_id"
+            }));
+        }
     }
     if violations.is_empty() {
         None
@@ -1872,6 +1938,18 @@ fn validate_marker_actions_before_mutation(actions: &[PendingMarkerAction]) -> O
 /// @pseudocode lines 43-49
 #[allow(clippy::too_many_arguments)]
 // Pre-existing marker action workflow; split in a dedicated refactor stage.
+fn marker_action_requires_review_thread_reply(action: &PendingMarkerAction) -> bool {
+    matches!(
+        action.action_kind.as_str(),
+        "comment_fixed"
+            | "comment_invalid"
+            | "comment_out_of_scope"
+            | "comment_needs_user_judgment"
+    ) && (action.thread_id.is_some()
+        || action.stable_marker_key.starts_with("review-comment:")
+        || action.stable_marker_key.starts_with("thread:"))
+}
+
 #[allow(clippy::too_many_lines)]
 fn process_marker_action(
     binding: &PrFollowupBinding,
@@ -1990,17 +2068,33 @@ fn process_marker_action(
             Ok(output) => {
                 let parsed: Value = serde_json::from_str(&output)
                     .unwrap_or_else(|_| json!({ "raw_response": output }));
-                resolve_succeeded = true;
                 final_thread_resolved_state = parsed
                     .pointer("/data/resolveReviewThread/thread/isResolved")
                     .and_then(Value::as_bool);
-                resolved_thread = Some(json!({
+                resolve_succeeded =
+                    parsed.get("errors").is_none() && final_thread_resolved_state == Some(true);
+                let resolution_record = json!({
                     "idempotency_key": resolution_key,
                     "thread_id": thread_id,
                     "response": parsed,
                     "final_thread_resolved_state": final_thread_resolved_state,
                     "action_id": action.value.get("action_id").cloned().unwrap_or(Value::Null)
-                }));
+                });
+                if resolve_succeeded {
+                    resolved_thread = Some(resolution_record);
+                } else {
+                    let error = "resolution_failed_after_comment".to_string();
+                    resolve_error = Some(error.clone());
+                    partial = Some(json!({
+                        "idempotency_key": resolution_key,
+                        "action_id": action.value.get("action_id").cloned().unwrap_or(Value::Null),
+                        "reason": "resolution_failed_after_comment",
+                        "error": error,
+                        "partial_state": "comment_posted_resolution_pending",
+                        "resolve_response": resolution_record
+                    }));
+                    retryable = partial.clone();
+                }
             }
             Err(err) => {
                 resolve_error = Some(err.to_string());
@@ -2416,22 +2510,14 @@ fn resolution_policy(action: &PendingMarkerAction, params: &Value) -> &'static s
     if action.action_kind == "comment_needs_user_judgment" {
         return "skip";
     }
-    // Legacy explicit overrides remain honored for backward compatibility.
+    // Legacy explicit overrides remain honored for fixed feedback only.
     if action.action_kind == "comment_fixed" {
         if let Some(resolve_fixed) = params.get("resolve_fixed").and_then(Value::as_bool) {
             return if resolve_fixed { "required" } else { "skip" };
         }
     }
     if action.action_kind == "comment_out_of_scope" {
-        if let Some(resolve_out_of_scope) =
-            params.get("resolve_out_of_scope").and_then(Value::as_bool)
-        {
-            return if resolve_out_of_scope {
-                "required"
-            } else {
-                "skip"
-            };
-        }
+        return "skip";
     }
     // Default policy: resolve fixed/changed/already_satisfied/not_reproduced
     // (carried via resolution_required); leave discounted items open.

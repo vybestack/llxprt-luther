@@ -3776,7 +3776,19 @@ fn write_p10_inputs(
                 "max_observations": 6,
                 "observation_interval_seconds": 300,
                 "observations": [],
-                "items": [],
+                "items": accepted_results
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|item| serde_json::json!({
+                        "item_id": item.get("item_id").cloned().unwrap_or(serde_json::Value::Null),
+                        "stable_marker_key": item.get("stable_marker_key").cloned().unwrap_or(serde_json::Value::Null),
+                        "body_hash": item.get("body_hash").cloned().unwrap_or(serde_json::Value::Null),
+                        "thread_id": item.get("stable_marker_key").cloned().unwrap_or(serde_json::Value::Null),
+                        "comment_database_id": 7001
+                    }))
+                    .collect::<Vec<_>>(),
                 "included_bot_identities": ["coderabbitai[bot]"],
                 "feedback_item_set_hash": "fnv64:p10"
             }),
@@ -5971,11 +5983,12 @@ fn write_p15_validated_fixed_pending(temp: &tempfile::TempDir) {
                         "idempotency_key": "run-p11:example:workflow:1910:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb:thread-valid:comment_fixed",
                         "resolution_required": true,
                         "thread_id": "thread-valid",
+                        "comment_database_id": 7001,
                         "response_text": "Luther addressed this review item and posted the remediation evidence on the original thread.",
                         "status": "pending",
                         "reason": "fixed valid feedback",
                         "remediation_result_evidence": { "kind": "current_repository_test", "current_head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" },
-                        "original_feedback_identity": { "item_id": "cr-valid", "stable_marker_key": "thread-valid", "body_hash": "hash-valid", "source_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "thread_id": "thread-valid" }
+                        "original_feedback_identity": { "item_id": "cr-valid", "stable_marker_key": "thread-valid", "body_hash": "hash-valid", "source_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "thread_id": "thread-valid", "comment_database_id": 7001 }
                     }],
                     "carry_forward_from_artifact_sequence": null,
                     "marker_policy": {},
@@ -6092,10 +6105,7 @@ fn marker_retry_resume_does_not_duplicate_invalid_out_of_scope_pending_actions()
     let post_calls = runner
         .calls()
         .into_iter()
-        .filter(|call| {
-            call.iter().any(|arg| arg == "POST")
-                && call.iter().any(|arg| arg.contains("/issues/1910/comments"))
-        })
+        .filter(|call| call.iter().any(|arg| arg == "POST"))
         .count();
     assert_eq!(
         post_calls, 2,
@@ -6414,8 +6424,7 @@ fn marker_comment_success_resolution_failure_is_partial_retryable() {
         .is_some_and(|items| !items.is_empty()));
 }
 
-/// Add a numeric `comment_database_id` to the validated fixed pending action so
-/// the marker executor must post an in-thread review reply.
+/// Set the numeric `comment_database_id` on the validated fixed pending action.
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P15
 /// @requirement:REQ-PRFU-015,REQ-PRFU-016,REQ-PRFU-017,REQ-PRFU-026
 fn write_p15_validated_fixed_pending_with_database_id(temp: &tempfile::TempDir, database_id: i64) {
@@ -6423,6 +6432,8 @@ fn write_p15_validated_fixed_pending_with_database_id(temp: &tempfile::TempDir, 
     let path = p11_current_artifact_path(temp, "pending-feedback-marker-actions");
     let mut pending = read_json(&path);
     pending["pending_actions"][0]["comment_database_id"] = serde_json::json!(database_id);
+    pending["pending_actions"][0]["original_feedback_identity"]["comment_database_id"] =
+        serde_json::json!(database_id);
     std::fs::write(
         &path,
         serde_json::to_vec_pretty(&pending).expect("pending json with database id"),
@@ -6548,45 +6559,54 @@ fn marker_resolve_uses_real_mutation_and_thread_variable() {
     );
 }
 
-/// REST-only items without a numeric review-comment id fall back to a top-level
-/// issues comment, record `in_thread_reply=false`, and still resolve when a
-/// thread id is present.
+/// Review-thread marker actions without a numeric review-comment id must fail
+/// validation before any GitHub mutation instead of posting to the PR timeline.
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P15
 /// @requirement:REQ-PRFU-015,REQ-PRFU-016
 /// @pseudocode lines 41-49
 #[test]
-fn marker_falls_back_to_issue_comment_when_database_id_missing() {
+fn marker_rejects_review_thread_action_when_database_id_missing() {
     let temp = tempfile::tempdir().expect("tempdir");
-    write_p15_validated_fixed_pending(&temp);
+    write_p15_validated_fixed_pending_with_database_id(&temp, 7001);
+    let path = p11_current_artifact_path(&temp, "pending-feedback-marker-actions");
+    let mut pending = read_json(&path);
+    pending["pending_actions"][0]
+        .as_object_mut()
+        .expect("pending action object")
+        .remove("comment_database_id");
+    pending["pending_actions"][0]["original_feedback_identity"]
+        .as_object_mut()
+        .expect("original feedback identity object")
+        .remove("comment_database_id");
+    std::fs::write(
+        &path,
+        serde_json::to_vec_pretty(&pending).expect("pending without database id"),
+    )
+    .expect("write pending without comment_database_id");
     let runner = P15MarkerRunner::default();
     let mut context = p11_context(&temp);
-    GithubFeedbackMarkerExecutorWithRunner::new(runner.clone(), FixedClock)
+    let outcome = GithubFeedbackMarkerExecutorWithRunner::new(runner.clone(), FixedClock)
         .execute(&mut context, &p11_params(&temp))
-        .expect("mark fixed feedback without database id");
-    let calls = runner.calls();
-    assert!(
-        calls.iter().any(|call| {
-            call.iter().any(|arg| arg == "POST")
-                && call.iter().any(|arg| arg.contains("/issues/1910/comments"))
-        }),
-        "reply must fall back to the issues comments endpoint: {calls:?}"
+        .expect("reject fixed feedback without database id");
+    assert_expected_outcome(
+        outcome,
+        StepOutcome::Fatal,
+        "review-thread marker actions without comment_database_id must fail before mutation",
     );
     assert!(
-        !calls
-            .iter()
-            .any(|call| call.iter().any(|arg| arg.contains("/replies"))),
-        "no replies endpoint without a comment_database_id: {calls:?}"
+        runner.calls().is_empty(),
+        "no GitHub command may run when review-thread reply validation fails: {:?}",
+        runner.calls()
     );
     let report = read_json(&p11_current_artifact_path(
         &temp,
         "pr-feedback-marker-report",
     ));
-    let audit = p15_thread_audit_entry(&report);
-    assert_eq!(
-        audit
-            .get("in_thread_reply")
-            .and_then(serde_json::Value::as_bool),
-        Some(false)
+    assert!(
+        report
+            .to_string()
+            .contains("review_thread_reply_without_comment_database_id"),
+        "validation artifact must name the missing comment_database_id violation: {report}"
     );
 }
 

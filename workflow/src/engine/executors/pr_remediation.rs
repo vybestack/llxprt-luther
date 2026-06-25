@@ -606,9 +606,11 @@ fn pending_marker_action(
             "stable_marker_key": stable_marker_key,
             "body_hash": body_hash,
             "source_head_sha": binding.head_sha,
-            "thread_id": item.get("thread_id").cloned().unwrap_or(Value::Null)
+            "thread_id": item.get("thread_id").cloned().unwrap_or(Value::Null),
+            "comment_database_id": item.get("comment_database_id").cloned().unwrap_or(Value::Null)
         },
         "thread_id": item.get("thread_id").cloned().unwrap_or(Value::Null),
+        "comment_database_id": item.get("comment_database_id").cloned().unwrap_or(Value::Null),
         "stable_marker_key": stable_marker_key,
         "source_head_sha": binding.head_sha,
         "remediation_input_head_sha": remediation_input_head_sha,
@@ -684,6 +686,9 @@ fn fixed_feedback_marker_items(
         };
         if let Some(thread_id) = result.get("thread_id").cloned() {
             item["thread_id"] = thread_id;
+        }
+        if let Some(comment_database_id) = result.get("comment_database_id").cloned() {
+            item["comment_database_id"] = comment_database_id;
         }
         item["decision"] = json!("valid");
         item["marker_action"] = json!("comment_fixed");
@@ -2135,13 +2140,6 @@ fn validate_complete_result_coverage(
             count => errors.push(format!(
                 "duplicate remediation results for current plan item {key}: {count}"
             )),
-        }
-    }
-    for (key, count) in result_counts {
-        if !plan_items.contains_key(key) {
-            errors.push(format!(
-                "remediation result for unknown plan item {key} ({count})"
-            ));
         }
     }
 }

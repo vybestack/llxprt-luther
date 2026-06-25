@@ -384,7 +384,7 @@ impl GithubPrCommandRunner for ReplayGithubRunner {
             }
             // Marker resolution mutation.
             return Ok(
-                json!({ "data": { "resolveReviewThread": { "thread": { "id": "thread-x" } } } })
+                json!({ "data": { "resolveReviewThread": { "thread": { "id": "thread-x", "isResolved": true } } } })
                     .to_string(),
             );
         }
@@ -535,6 +535,7 @@ impl PrFollowupLlxprtCommandRunner for ReplayLlxprtRunner {
                 if let Some(key) = item.get("stable_marker_key").and_then(Value::as_str) {
                     entry["thread_id"] = json!(key);
                     entry["body_hash"] = item.get("body_hash").cloned().unwrap_or(Value::Null);
+                    entry["comment_database_id"] = json!(7001);
                 }
                 entry
             })
@@ -1273,6 +1274,7 @@ fn coderabbit_actionable_threads() -> Value {
                 "startLine": 10,
                 "comments": { "nodes": [{
                     "id": "comment-1",
+                    "databaseId": 7001,
                     "body": "Please rename this variable for clarity.",
                     "author": { "login": "coderabbitai[bot]" },
                     "url": "https://github.com/example/workflow/pull/1910#discussion_r1",
