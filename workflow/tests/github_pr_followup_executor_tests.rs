@@ -185,17 +185,24 @@ impl FeedbackEvaluationAdapter for ScriptedFeedbackEvaluationAdapter {
             .lock()
             .expect("requests")
             .push(request.clone());
-        self.responses
-            .lock()
-            .expect("responses")
-            .pop()
-            .ok_or_else(|| luther_workflow::engine::runner::EngineError::StepExecutionError {
+        let response = self.responses.lock().expect("responses").pop().ok_or_else(|| {
+            luther_workflow::engine::runner::EngineError::StepExecutionError {
                 step_id: "scripted_feedback_evaluation_adapter".to_string(),
                 message: format!(
                     "No scripted response left for item_id={} head_sha={} stable_marker_key={} body_hash={}",
                     request.item_id, request.head_sha, request.stable_marker_key, request.body_hash
                 ),
-            })
+            }
+        })?;
+        if let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&response) {
+            if let Some(object) = value.as_object_mut() {
+                object
+                    .entry("response_text".to_string())
+                    .or_insert_with(|| serde_json::json!("Scripted reviewer-facing response."));
+            }
+            return Ok(value.to_string());
+        }
+        Ok(response)
     }
 }
 
@@ -3156,7 +3163,7 @@ fn feedback_evaluation_ignores_unresolved_identity_params_and_uses_context() {
 }
 
 #[test]
-fn feedback_evaluation_ignores_max_attempts_param_override() {
+fn feedback_evaluation_honors_max_attempts_param_override() {
     let temp = tempfile::tempdir().expect("tempdir");
     write_p09_feedback(
         &temp,
@@ -3210,25 +3217,25 @@ fn feedback_evaluation_ignores_max_attempts_param_override() {
     let mut context = p09_context(&temp);
     let outcome = FeedbackEvaluatorExecutor::new(adapter.clone(), FixedClock)
         .execute(&mut context, &params)
-        .expect("feedback evaluation ignores retry override");
+        .expect("feedback evaluation honors retry override");
     let artifact = read_json(&p09_evaluations_path(&temp));
 
     assert_expected_outcome(
         outcome,
-        StepOutcome::Fatal,
-        "configured retry overrides must be ignored; exactly three internal attempts are allowed",
+        StepOutcome::Success,
+        "configured retry overrides must allow the fourth evaluator attempt to succeed",
     );
     assert_eq!(
         adapter.requests().len(),
-        3,
-        "attempted max_attempts_per_item override must not allow a fourth evaluator call"
+        4,
+        "max_attempts_per_item override must allow a fourth evaluator call"
     );
     assert_eq!(
         artifact
             .get("max_attempts_per_item")
             .and_then(serde_json::Value::as_u64),
-        Some(3),
-        "audit artifact must expose the fixed internal retry cap"
+        Some(4),
+        "audit artifact must expose the configured retry cap"
     );
     assert_eq!(
         artifact
@@ -3237,18 +3244,85 @@ fn feedback_evaluation_ignores_max_attempts_param_override() {
             .expect("rejected")
             .len(),
         3,
-        "malformed or mismatched output must produce exactly three rejected attempts before exhaustion"
+        "malformed or mismatched output must produce exactly three rejected attempts before the successful fourth attempt"
     );
-    assert_eq!(
+    assert!(
         artifact
             .get("budget_exhausted_items")
             .and_then(serde_json::Value::as_array)
             .expect("budget")
-            .first()
-            .and_then(|item| item.get("attempts"))
-            .and_then(serde_json::Value::as_u64),
-        Some(3),
-        "budget exhaustion must record the fixed internal attempt count"
+            .is_empty(),
+        "successful fourth attempt must avoid budget exhaustion"
+    );
+}
+
+#[test]
+fn feedback_evaluation_treats_out_of_scope_resolution_policy_as_valid() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut item = p09_feedback_item("item-1", "review-comment:item-1", "hash-a");
+    item["body"] = serde_json::json!(
+        "The new policy says out-of-scope feedback should stay open. In comment_out_of_scope, resolve_out_of_scope=true still resolves the thread; return skip instead."
+    );
+    write_p09_feedback(&temp, serde_json::json!([item]), serde_json::json!([]));
+    let adapter = ScriptedFeedbackEvaluationAdapter::with_responses(vec![]);
+    let mut context = p09_context(&temp);
+    let outcome = FeedbackEvaluatorExecutor::new(adapter.clone(), FixedClock)
+        .execute(&mut context, &p09_params(&temp))
+        .expect("feedback evaluation");
+    let artifact = read_json(&p09_evaluations_path(&temp));
+    let accepted = artifact
+        .get("accepted_results")
+        .and_then(serde_json::Value::as_array)
+        .expect("accepted results");
+
+    assert_expected_outcome(outcome, StepOutcome::Success, "policy item is valid");
+    assert_eq!(adapter.requests().len(), 0, "policy item is deterministic");
+    assert_eq!(accepted.len(), 1, "one accepted result");
+    assert_eq!(
+        accepted[0]
+            .get("decision")
+            .and_then(serde_json::Value::as_str),
+        Some("valid"),
+        "out-of-scope resolution policy feedback must not block on human judgment"
+    );
+}
+
+#[test]
+fn feedback_evaluation_treats_review_thread_comment_database_id_fallback_as_valid() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut item = p09_feedback_item(
+        "rest-review:PRRC_database_id",
+        "review-comment:PRRC_database_id",
+        "hash-database-id",
+    );
+    item["body"] = serde_json::json!(
+        "For review-thread actions, missing comment_database_id must not fall back to a top-level issue comment. The /issues/{number}/comments fallback would reply outside the original review thread."
+    );
+    write_p09_feedback(&temp, serde_json::json!([item]), serde_json::json!([]));
+    let adapter = ScriptedFeedbackEvaluationAdapter::with_responses(vec![]);
+    let mut context = p09_context(&temp);
+    let outcome = FeedbackEvaluatorExecutor::new(adapter.clone(), FixedClock)
+        .execute(&mut context, &p09_params(&temp))
+        .expect("feedback evaluation");
+    let artifact = read_json(&p09_evaluations_path(&temp));
+    let accepted = artifact
+        .get("accepted_results")
+        .and_then(serde_json::Value::as_array)
+        .expect("accepted results");
+
+    assert_expected_outcome(outcome, StepOutcome::Success, "fallback item is valid");
+    assert_eq!(
+        adapter.requests().len(),
+        0,
+        "fallback item is deterministic"
+    );
+    assert_eq!(accepted.len(), 1, "one accepted result");
+    assert_eq!(
+        accepted[0]
+            .get("decision")
+            .and_then(serde_json::Value::as_str),
+        Some("valid"),
+        "review-thread fallback feedback must not exhaust LLM retry budget"
     );
 }
 
@@ -3278,6 +3352,8 @@ fn feedback_evaluation_reuses_unchanged_accepted_state_without_reinvoking_adapte
                 "decision": "invalid",
                 "reason": "already evaluated",
                 "recommended_action": "no code change",
+                "response_text": "No code change is required.",
+
                 "accepted_at": "2026-04-30T00:00:00Z",
                 "attempt_count": 1,
                 "source": "new",
@@ -3596,6 +3672,8 @@ fn p10_accepted(
         "decision": decision,
         "reason": format!("{decision} reason"),
         "recommended_action": format!("{decision} action"),
+        "response_text": format!("{decision} response"),
+
         "accepted_at": "2026-04-30T00:00:00Z",
         "attempt_count": 1,
         "source": "fixture",
@@ -4043,6 +4121,9 @@ fn p11_plan_items() -> Vec<serde_json::Value> {
             "source_artifact_sequence": 4,
             "decision": "valid",
             "body_hash": "hash-valid",
+            "thread_id": "thread-node-valid",
+            "comment_database_id": 12345,
+            "response_text": "This valid feedback has been addressed.",
             "evidence": { "item_id": "cr-valid", "stable_marker_key": "thread-valid" }
         }),
     ]
@@ -4705,6 +4786,81 @@ fn remediation_validator_writes_pending_marker_action_for_fixed_valid_feedback_b
     );
     assert!(action.get("remediation_result_evidence").is_some());
 }
+
+/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P11
+/// @requirement:REQ-PRFU-014
+/// @pseudocode lines 24-28
+#[test]
+fn remediation_validator_writes_pending_marker_action_for_already_satisfied_feedback() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_p11_plan_and_result(
+        &temp,
+        serde_json::json!([
+            { "source_type": "ci_failure", "source_id": "ci-build", "status": "fixed", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "fixed", "evidence": { "kind": "change", "current_head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "paths": ["src/lib.rs"] }, "evidence_paths": ["src/lib.rs"] },
+            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "thread-valid", "body_hash": "hash-valid", "status": "already_satisfied", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "output_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "verified", "evidence": { "kind": "current_repository_test", "current_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "commands": [{ "id": "cargo-test", "status": "passed", "argv": ["cargo", "test"] }] }, "evidence_paths": [] }
+        ]),
+    );
+    let mut context = p11_context(&temp);
+    let outcome = PrRemediationResultExecutor
+        .execute(&mut context, &p11_params(&temp))
+        .expect("validate already_satisfied result");
+    let result_artifact = read_json(&p11_result_path(&temp));
+    assert_eq!(
+        outcome,
+        StepOutcome::Success,
+        "already_satisfied feedback must validate before marker handling: {}",
+        result_artifact
+    );
+    let actions = read_json(&p11_current_artifact_path(
+        &temp,
+        "pending-feedback-marker-actions",
+    ));
+    let pending = actions
+        .get("pending_actions")
+        .and_then(serde_json::Value::as_array)
+        .expect("pending actions");
+    assert_eq!(
+        pending.len(),
+        1,
+        "already_satisfied valid feedback still requires a review-thread marker action"
+    );
+    let action = &pending[0];
+    assert_eq!(
+        action
+            .get("action_kind")
+            .and_then(serde_json::Value::as_str),
+        Some("comment_fixed")
+    );
+    assert_eq!(
+        action
+            .get("remediation_result_status")
+            .and_then(serde_json::Value::as_str),
+        Some("already_satisfied")
+    );
+    assert_eq!(
+        action
+            .get("resolution_required")
+            .and_then(serde_json::Value::as_bool),
+        Some(true)
+    );
+    assert_eq!(
+        action.get("thread_id").and_then(serde_json::Value::as_str),
+        Some("thread-node-valid")
+    );
+    assert_eq!(
+        action
+            .get("comment_database_id")
+            .and_then(serde_json::Value::as_i64),
+        Some(12345)
+    );
+    assert_eq!(
+        action
+            .get("response_text")
+            .and_then(serde_json::Value::as_str),
+        Some("This valid feedback has been addressed.")
+    );
+}
+
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P12
 /// @requirement:REQ-PRFU-013,REQ-PRFU-017
 /// @pseudocode lines 12-17
@@ -4845,33 +5001,21 @@ fn pr_followup_remediation_wrapper_records_owned_process_evidence() {
 #[test]
 fn pr_followup_remediation_timeout_with_result_is_validator_success_candidate() {
     let temp = tempfile::tempdir().expect("tempdir");
-    let mut owned = p12_result("timeout");
-    owned.result_file_present = true;
-    owned.result_file_size = Some(256);
-    let runner = P12FakeLlxprtRunner::new(owned);
-    let mut context = p12_context(&temp);
     let binding = p10_binding();
-    let store = PrFollowupArtifactStore::new(temp.path().join("artifacts"));
-    store
-        .write_json_artifact(
-            &binding,
-            "pr-remediation-result",
-            "remediate_pr_followup",
-            8,
-            &serde_json::json!({
-                "input_head_sha": binding.head_sha,
-                "output_head_sha": binding.head_sha,
-                "overall_status": "success",
-                "results": [{
-                    "source_id": "ci-linux",
-                    "action": "fixed",
-                    "evidence": { "summary": "result written before timeout" }
-                }]
-            }),
-            None,
-            &FixedClock,
-        )
-        .expect("seed result artifact");
+    let runner = P12WritingLlxprtRunner::new(
+        "timeout",
+        serde_json::json!({
+            "input_head_sha": binding.head_sha,
+            "output_head_sha": binding.head_sha,
+            "overall_status": "success",
+            "results": [{
+                "source_id": "ci-linux",
+                "action": "fixed",
+                "evidence": { "summary": "result written before timeout" }
+            }]
+        }),
+    );
+    let mut context = p12_context(&temp);
 
     let outcome = PrFollowupRemediationExecutorWithRunner::new(runner, FixedClock)
         .execute(&mut context, &p12_params(&temp))
@@ -4903,35 +5047,23 @@ fn pr_followup_remediation_timeout_with_result_is_validator_success_candidate() 
 #[test]
 fn pr_followup_remediation_timeout_repairs_stale_wrapper_failure_result() {
     let temp = tempfile::tempdir().expect("tempdir");
-    let mut owned = p12_result("timeout");
-    owned.result_file_present = true;
-    owned.result_file_size = Some(256);
-    let runner = P12FakeLlxprtRunner::new(owned);
-    let mut context = p12_context(&temp);
     let binding = p10_binding();
-    let store = PrFollowupArtifactStore::new(temp.path().join("artifacts"));
-    store
-        .write_json_artifact(
-            &binding,
-            "pr-remediation-result",
-            "remediate_pr_followup",
-            8,
-            &serde_json::json!({
-                "input_head_sha": binding.head_sha,
-                "output_head_sha": binding.head_sha,
-                "overall_status": "failed",
-                "results": [{
-                    "source_type": "ci_failure",
-                    "source_id": "ci-build",
-                    "status": "failed",
-                    "action": "llxprt_invocation_failed_before_result",
-                    "evidence": { "process_class": "timeout" }
-                }]
-            }),
-            None,
-            &FixedClock,
-        )
-        .expect("seed stale wrapper failure artifact");
+    let runner = P12WritingLlxprtRunner::new(
+        "timeout",
+        serde_json::json!({
+            "input_head_sha": binding.head_sha,
+            "output_head_sha": binding.head_sha,
+            "overall_status": "failed",
+            "results": [{
+                "source_type": "ci_failure",
+                "source_id": "ci-build",
+                "status": "failed",
+                "action": "llxprt_invocation_failed_before_result",
+                "evidence": { "process_class": "timeout" }
+            }]
+        }),
+    );
+    let mut context = p12_context(&temp);
 
     PrFollowupRemediationExecutorWithRunner::new(runner, FixedClock)
         .execute(&mut context, &p12_params(&temp))
@@ -4959,6 +5091,215 @@ fn pr_followup_remediation_timeout_repairs_stale_wrapper_failure_result() {
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P12
 /// @requirement:REQ-PRFU-013
 /// @pseudocode lines 13-14
+#[derive(Clone, Debug)]
+struct P12WritingLlxprtRunner {
+    process_class: String,
+    result_payload: serde_json::Value,
+    requests: Arc<Mutex<Vec<LlxprtInvocationRequest>>>,
+}
+
+impl P12WritingLlxprtRunner {
+    fn new(process_class: &str, result_payload: serde_json::Value) -> Self {
+        Self {
+            process_class: process_class.to_string(),
+            result_payload,
+            requests: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+}
+
+impl PrFollowupLlxprtCommandRunner for P12WritingLlxprtRunner {
+    fn invoke(&self, request: LlxprtInvocationRequest) -> LlxprtInvocationResult {
+        self.requests
+            .lock()
+            .expect("requests")
+            .push(request.clone());
+        std::fs::write(
+            &request.remediation_result_path,
+            serde_json::to_vec_pretty(&self.result_payload).expect("serialize scripted result"),
+        )
+        .expect("write scripted remediation result");
+        LlxprtInvocationResult {
+            argv: request.argv.clone(),
+            working_directory: request.working_directory.clone(),
+            exit_code: Some(0),
+            signal: None,
+            process_class: self.process_class.clone(),
+            bounded_stdout: "scripted llxprt remediation with fresh result".to_string(),
+            bounded_stderr: String::new(),
+            stdout_log_path: Some(request.stdout_log_path.clone()),
+            stderr_log_path: Some(request.stderr_log_path.clone()),
+            success_file_present: request
+                .success_file_path
+                .as_ref()
+                .is_some_and(|path| path.exists()),
+            success_file_size: request
+                .success_file_path
+                .as_ref()
+                .and_then(|path| path.metadata().ok())
+                .map(|metadata| metadata.len()),
+            result_file_present: true,
+            result_file_size: request
+                .remediation_result_path
+                .metadata()
+                .ok()
+                .map(|metadata| metadata.len()),
+            result_file_path: Some(request.remediation_result_path.clone()),
+            changed_paths: Vec::new(),
+            spawn_error: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+struct P12NoResultLlxprtRunner {
+    requests: Arc<Mutex<Vec<LlxprtInvocationRequest>>>,
+}
+
+impl P12NoResultLlxprtRunner {
+    fn requests(&self) -> Vec<LlxprtInvocationRequest> {
+        self.requests.lock().expect("requests").clone()
+    }
+}
+
+impl PrFollowupLlxprtCommandRunner for P12NoResultLlxprtRunner {
+    fn invoke(&self, request: LlxprtInvocationRequest) -> LlxprtInvocationResult {
+        self.requests
+            .lock()
+            .expect("requests")
+            .push(request.clone());
+        LlxprtInvocationResult {
+            argv: request.argv.clone(),
+            working_directory: request.working_directory.clone(),
+            exit_code: Some(0),
+            signal: None,
+            process_class: "success".to_string(),
+            bounded_stdout: "scripted success without fresh result".to_string(),
+            bounded_stderr: String::new(),
+            stdout_log_path: Some(request.stdout_log_path.clone()),
+            stderr_log_path: Some(request.stderr_log_path.clone()),
+            success_file_present: request
+                .success_file_path
+                .as_ref()
+                .is_some_and(|path| path.exists()),
+            success_file_size: request
+                .success_file_path
+                .as_ref()
+                .and_then(|path| path.metadata().ok())
+                .map(|metadata| metadata.len()),
+            result_file_present: request.remediation_result_path.exists(),
+            result_file_size: request
+                .remediation_result_path
+                .metadata()
+                .ok()
+                .map(|metadata| metadata.len()),
+            result_file_path: Some(request.remediation_result_path.clone()),
+            changed_paths: vec!["src/lib.rs".to_string()],
+            spawn_error: None,
+        }
+    }
+}
+
+#[test]
+fn pr_followup_remediation_does_not_accept_stale_current_result_as_fresh_output() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let runner = P12NoResultLlxprtRunner::default();
+    let mut context = p12_context(&temp);
+    let binding = p10_binding();
+    let store = PrFollowupArtifactStore::new(temp.path().join("artifacts"));
+    store
+        .write_json_artifact(
+            &binding,
+            "pr-remediation-result",
+            "validate_remediation_result",
+            9,
+            &serde_json::json!({
+                "input_head_sha": binding.head_sha,
+                "output_head_sha": binding.head_sha,
+                "overall_status": "failed",
+                "validation_state": "valid_but_unsuccessful",
+                "validation_retry_index": 1,
+                "max_validation_retries": 2,
+                "remediation_attempt_index": 1,
+                "max_remediation_attempts": 2,
+                "results": [{
+                    "source_type": "coderabbit_feedback",
+                    "source_id": "cr-valid",
+                    "stable_marker_key": "thread-valid",
+                    "body_hash": "hash-valid",
+                    "status": "failed",
+                    "input_head_sha": binding.head_sha,
+                    "action": "stale previous failure",
+                    "evidence": { "kind": "test", "current_head_sha": binding.head_sha }
+                }]
+            }),
+            None,
+            &FixedClock,
+        )
+        .expect("seed stale result");
+
+    let outcome = PrFollowupRemediationExecutorWithRunner::new(runner.clone(), FixedClock)
+        .execute(&mut context, &p12_params(&temp))
+        .expect("p12 stale result guard");
+    let run_artifact = read_json(&p10_current_artifact_path(
+        &temp,
+        "pr-remediation-llxprt-run",
+    ));
+    let failure_result = read_json(&p10_current_artifact_path(&temp, "pr-remediation-result"));
+
+    assert_expected_outcome(
+        outcome,
+        StepOutcome::Success,
+        "wrapper should write validator-readable invocation failure for a missing fresh result",
+    );
+    assert_eq!(runner.requests().len(), 1, "llxprt should be invoked once");
+    assert_eq!(
+        run_artifact
+            .get("remediation_invocation_state")
+            .and_then(serde_json::Value::as_str),
+        Some("success")
+    );
+    assert_eq!(
+        run_artifact
+            .get("validator_readable_result_written")
+            .and_then(serde_json::Value::as_bool),
+        Some(true)
+    );
+    assert_eq!(
+        run_artifact
+            .get("result_file_present")
+            .and_then(serde_json::Value::as_bool),
+        Some(false),
+        "run audit must report the child did not produce a fresh result"
+    );
+    assert_eq!(
+        failure_result
+            .pointer("/results/0/action")
+            .and_then(serde_json::Value::as_str),
+        Some("llxprt_invocation_failed_before_result")
+    );
+    assert_eq!(
+        failure_result
+            .pointer("/results/0/evidence/process_class")
+            .and_then(serde_json::Value::as_str),
+        Some("success")
+    );
+    assert_eq!(
+        failure_result
+            .get("remediation_attempt_index")
+            .and_then(serde_json::Value::as_u64),
+        Some(1),
+        "wrapper-written failure result must preserve the previous remediation attempt counter"
+    );
+    assert_eq!(
+        failure_result
+            .get("max_remediation_attempts")
+            .and_then(serde_json::Value::as_u64),
+        Some(2),
+        "wrapper-written failure result must preserve the configured remediation cap"
+    );
+}
+
 #[test]
 fn remediate_pr_followup_prompt_contract() {
     let temp = tempfile::tempdir().expect("tempdir");
@@ -5021,9 +5362,123 @@ fn remediate_pr_followup_prompt_contract() {
         .contains("fixed evidence for coderabbit_feedback:cr-valid is not tied to current head"));
     assert!(prompt.contains("do not create, copy, or modify any pr-followup/history files"));
 
-    assert!(prompt.contains("structured evidence"));
     assert!(prompt.contains("Free-form-only completion is not acceptable"));
+    assert!(request
+        .argv
+        .windows(2)
+        .any(|window| window[0] == "--extensions" && window[1].is_empty()));
+    assert!(request
+        .argv
+        .windows(2)
+        .any(|window| window[0] == "--allowed-mcp-server-names" && window[1].is_empty()));
 }
+#[test]
+fn remediate_pr_followup_prompt_includes_unsuccessful_result_feedback() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let runner = P12FakeLlxprtRunner::new(p12_result("success"));
+    let mut context = p12_context(&temp);
+    let binding = p10_binding();
+    PrFollowupArtifactStore::new(temp.path().join("artifacts"))
+        .write_json_artifact(
+            &binding,
+            "pr-remediation-result",
+            "validate_remediation_result",
+            9,
+            &serde_json::json!({
+                "validation_state": "valid_but_unsuccessful",
+                "validation_errors": [],
+                "results": [{
+                    "source_type": "coderabbit_feedback",
+                    "source_id": "cr-valid",
+                    "stable_marker_key": "thread-valid",
+                    "body_hash": "hash-valid",
+                    "status": "failed",
+                    "input_head_sha": binding.head_sha,
+                    "evidence": { "kind": "test", "current_head_sha": binding.head_sha }
+                }]
+            }),
+            None,
+            &FixedClock,
+        )
+        .expect("write previous unsuccessful feedback");
+
+    PrFollowupRemediationExecutorWithRunner::new(runner.clone(), FixedClock)
+        .execute(&mut context, &p12_params(&temp))
+        .expect("p12 prompt");
+    let request = runner.requests().into_iter().next().expect("owned request");
+    let prompt = request
+        .argv
+        .windows(2)
+        .find(|window| window[0] == "-p")
+        .map(|window| window[1].clone())
+        .expect("prompt argv");
+
+    assert!(prompt.contains("structurally valid but unsuccessful"));
+    assert!(prompt.contains("Do not repeat failed/skipped/not_fixed statuses"));
+    assert!(prompt.contains("\"status\": \"failed\""));
+    assert!(prompt.contains("evidence_summary"));
+}
+
+#[test]
+fn remediate_pr_followup_prompt_omits_recursive_invocation_details() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let runner = P12FakeLlxprtRunner::new(p12_result("success"));
+    let mut context = p12_context(&temp);
+    let binding = p10_binding();
+    PrFollowupArtifactStore::new(temp.path().join("artifacts"))
+        .write_json_artifact(
+            &binding,
+            "pr-remediation-result",
+            "validate_remediation_result",
+            9,
+            &serde_json::json!({
+                "validation_state": "valid_but_unsuccessful",
+                "validation_errors": [],
+                "results": [{
+                    "source_type": "coderabbit_feedback",
+                    "source_id": "cr-valid",
+                    "stable_marker_key": "thread-valid",
+                    "body_hash": "hash-valid",
+                    "status": "failed",
+                    "action": "llxprt_invocation_failed_before_result",
+                    "input_head_sha": binding.head_sha,
+                    "evidence": {
+                        "kind": "llxprt_invocation",
+                        "process_class": "timeout",
+                        "argv": ["llxprt", "-p", "very long recursive prompt that must not be copied into a retry prompt"],
+                        "changed_paths": ["workflow/src/lib.rs"],
+                        "bounded_stdout": "x".repeat(2000)
+                    }
+                }]
+            }),
+            None,
+            &FixedClock,
+        )
+        .expect("write recursive unsuccessful feedback");
+
+    PrFollowupRemediationExecutorWithRunner::new(runner.clone(), FixedClock)
+        .execute(&mut context, &p12_params(&temp))
+        .expect("p12 prompt");
+    let request = runner.requests().into_iter().next().expect("owned request");
+    let prompt = request
+        .argv
+        .windows(2)
+        .find(|window| window[0] == "-p")
+        .map(|window| window[1].clone())
+        .expect("prompt argv");
+
+    assert!(prompt.contains("Recursive invocation details such as argv are intentionally omitted"));
+    assert!(prompt.contains("workflow/src/lib.rs"));
+    assert!(prompt.contains("\"process_class\": \"timeout\""));
+    assert!(!prompt.contains("very long recursive prompt"));
+    assert!(!prompt.contains("\"argv\""));
+    assert!(
+        prompt.len() < 12_000,
+        "retry prompt should stay bounded: {}",
+        prompt.len()
+    );
+}
+
 #[test]
 fn remediate_pr_followup_interpolates_profile_and_omits_unresolved_profile() {
     let temp = tempfile::tempdir().expect("tempdir");
@@ -5735,6 +6190,22 @@ impl GithubPrCommandRunner for P15MarkerRunner {
         } else if argv.iter().any(|arg| arg.contains("/issues/1910/comments")) {
             Ok(serde_json::json!({ "id": 9001, "html_url": "https://github.com/example/workflow/pull/1910#issuecomment-9001" }).to_string())
         } else if argv.iter().any(|arg| arg == "graphql") {
+            if argv
+                .iter()
+                .any(|arg| arg.starts_with("query=") && arg.contains("reviewThreads"))
+            {
+                return Ok(serde_json::json!({
+                    "data": { "repository": { "pullRequest": { "reviewThreads": {
+                        "nodes": [{
+                            "id": "thread-valid",
+                            "isResolved": false,
+                            "isOutdated": false,
+                            "comments": { "nodes": [{ "id": "comment-node-valid", "databaseId": 12345 }] }
+                        }],
+                        "pageInfo": { "hasNextPage": false, "endCursor": null }
+                    } } } }
+                }).to_string());
+            }
             if self.fail_resolution {
                 return Err(
                     luther_workflow::engine::runner::EngineError::StepExecutionError {
@@ -5743,7 +6214,7 @@ impl GithubPrCommandRunner for P15MarkerRunner {
                     },
                 );
             }
-            Ok(serde_json::json!({ "data": { "resolveReviewThread": { "thread": { "id": "thread-invalid" } } } }).to_string())
+            Ok(serde_json::json!({ "data": { "resolveReviewThread": { "thread": { "id": "thread-valid", "isResolved": true } } } }).to_string())
         } else {
             Ok("[]".to_string())
         }
@@ -5796,6 +6267,9 @@ fn write_p15_validated_fixed_pending(temp: &tempfile::TempDir) {
                 "source_type": "coderabbit_feedback",
                 "source_id": "cr-valid",
                 "thread_id": "thread-valid",
+                "comment_database_id": 12345,
+                "response_text": "This valid feedback has been addressed.",
+
 
                 "stable_marker_key": "thread-valid",
                 "body_hash": "hash-valid",
@@ -5827,6 +6301,9 @@ fn write_p15_validated_fixed_pending(temp: &tempfile::TempDir) {
                         "remediation_output_head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
                         "remediation_output_head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
                         "body_hash": "hash-valid",
+                        "comment_database_id": 12345,
+                        "response_text": "This valid feedback has been addressed.",
+
                         "idempotency_key": "run-p11:example:workflow:1910:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb:thread-valid:comment_fixed",
                         "resolution_required": true,
                         "thread_id": "thread-valid",
@@ -6013,6 +6490,7 @@ fn marker_remote_only_resume_skips_duplicate_fixed_resolution_attempt() {
         "body": "Luther follow-up\n\n<!-- luther-pr-followup marker_key=thread-valid source_head=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa remediation_output_head=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb body=hash-valid action=comment_fixed run_id=run-p11 -->"
     });
     let runner = P15MarkerRunner::with_remote_comments(vec![remote_marker]);
+
     let mut context = p11_context(&temp);
     let outcome = GithubFeedbackMarkerExecutorWithRunner::new(runner.clone(), FixedClock)
         .execute(&mut context, &p11_params(&temp))
@@ -6028,6 +6506,100 @@ fn marker_remote_only_resume_skips_duplicate_fixed_resolution_attempt() {
         .filter(|call| call.iter().any(|arg| arg == "graphql"))
         .count();
     assert_eq!(graphql_calls, 0, "resolution must not be attempted twice");
+}
+/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P15
+/// @requirement:REQ-PRFU-015,REQ-PRFU-016,REQ-PRFU-017,REQ-PRFU-026
+/// @pseudocode lines 41-49
+#[test]
+fn marker_backfills_thread_id_from_review_threads_by_comment_database_id() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_p15_validated_fixed_pending(&temp);
+
+    let store = PrFollowupArtifactStore::new(temp.path().join("artifacts"));
+    store
+        .write_json_artifact(
+            &p11_binding(),
+            "coderabbit-feedback",
+            "collect_coderabbit_feedback",
+            10,
+            &serde_json::json!({
+                "readiness_state": "ready",
+                "items": [{
+                    "item_id": "cr-valid",
+                    "stable_marker_key": "thread-valid",
+                    "body_hash": "hash-valid",
+                    "thread_id": null,
+                    "comment_database_id": 12345
+                }]
+            }),
+            None,
+            &FixedClock,
+        )
+        .expect("write coderabbit feedback");
+
+    let mut plan = read_json(&p11_current_artifact_path(&temp, "pr-remediation-plan"));
+    plan["must_fix"][1]["thread_id"] = serde_json::Value::Null;
+    std::fs::write(
+        p11_current_artifact_path(&temp, "pr-remediation-plan"),
+        serde_json::to_vec_pretty(&plan).expect("plan json"),
+    )
+    .expect("write plan without thread id");
+
+    let mut result = read_json(&p11_current_artifact_path(&temp, "pr-remediation-result"));
+    result["results"][1]["thread_id"] = serde_json::Value::Null;
+    std::fs::write(
+        p11_current_artifact_path(&temp, "pr-remediation-result"),
+        serde_json::to_vec_pretty(&result).expect("result json"),
+    )
+    .expect("write result without thread id");
+
+    let mut pending = read_json(&p11_current_artifact_path(
+        &temp,
+        "pending-feedback-marker-actions",
+    ));
+    pending["pending_actions"][0]["thread_id"] = serde_json::Value::Null;
+    std::fs::write(
+        p11_current_artifact_path(&temp, "pending-feedback-marker-actions"),
+        serde_json::to_vec_pretty(&pending).expect("pending json"),
+    )
+    .expect("write pending without thread id");
+
+    let runner = P15MarkerRunner::default();
+    let mut context = p11_context(&temp);
+    let outcome = GithubFeedbackMarkerExecutorWithRunner::new(runner.clone(), FixedClock)
+        .execute(&mut context, &p11_params(&temp))
+        .expect("marker backfills thread id from GraphQL review threads");
+    assert_expected_outcome(
+        outcome,
+        StepOutcome::Success,
+        "marker must derive thread_id from reviewThreads when REST review feedback only has comment_database_id",
+    );
+    let calls = runner.calls();
+    assert!(calls.iter().any(|call| {
+        call.iter()
+            .any(|arg| arg.starts_with("query=") && arg.contains("reviewThreads"))
+    }));
+    assert!(calls.iter().any(|call| {
+        call.iter()
+            .any(|arg| arg.contains("/pulls/1910/comments/12345/replies"))
+    }));
+    assert!(
+        calls.iter().any(|call| {
+            call.iter().any(|arg| arg == "-f")
+                && call.iter().any(|arg| arg == "threadId=thread-valid")
+        }),
+        "expected resolveReviewThread call with backfilled thread id, calls: {calls:?}"
+    );
+    let report = read_json(&p11_current_artifact_path(
+        &temp,
+        "pr-feedback-marker-report",
+    ));
+    assert_eq!(
+        report
+            .get("marker_state")
+            .and_then(serde_json::Value::as_str),
+        Some("complete")
+    );
 }
 
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P15
@@ -6433,7 +7005,7 @@ fn feedback_evaluator_accepts_json_object_wrapped_by_llxprt_cli_progress() {
         serde_json::json!([p09_feedback_item("item-json", "thread-json", "hash-json")]),
         serde_json::json!([]),
     );
-    let raw = "## Todo Progress\n[opusthinking]\n{\"item_id\":\"item-json\",\"stable_marker_key\":\"thread-json\",\"body_hash\":\"hash-json\",\"head_sha\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"decision\":\"valid\",\"reason\":\"actionable\",\"recommended_action\":\"fix it\"}\n";
+    let raw = "## Todo Progress\n[opusthinking]\n{\"item_id\":\"item-json\",\"stable_marker_key\":\"thread-json\",\"body_hash\":\"hash-json\",\"head_sha\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"decision\":\"valid\",\"reason\":\"actionable\",\"recommended_action\":\"fix it\",\"response_text\":\"Reviewer-facing response.\"}\n";
     let runner = RecordingFeedbackEvaluatorRunner::new(raw.to_string());
     let adapter =
         CommandFeedbackEvaluationAdapter::new(vec!["feedback-evaluator-bin".to_string()], runner);
@@ -6483,6 +7055,16 @@ fn feedback_evaluator_default_argv_forbids_agentic_tool_loops() {
         argv.windows(2)
             .any(|window| window[0] == "--set" && window[1] == "maxTurnsPerPrompt=1"),
         "feedback evaluator must cap the model to a single turn so it cannot loop on tool calls: {argv:?}"
+    );
+    assert!(
+        argv.windows(2)
+            .any(|window| window[0] == "--extensions" && window[1].is_empty()),
+        "feedback evaluator must disable llxprt extensions/MCP so pure classification cannot wedge on tool startup: {argv:?}"
+    );
+    assert!(
+        argv.windows(2)
+            .any(|window| window[0] == "--allowed-mcp-server-names" && window[1].is_empty()),
+        "feedback evaluator must disable MCP servers for pure classification: {argv:?}"
     );
 }
 

@@ -4,7 +4,7 @@
 //! @requirement:REQ-PRFU-013,REQ-PRFU-020
 //! @pseudocode lines 1-53
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -402,6 +402,10 @@ fn feedback_plan_item(
         "source_artifact_sequence": artifact_sequence(evaluations),
         "decision": result.get("decision").cloned().unwrap_or(Value::Null),
         "body_hash": result.get("body_hash").cloned().unwrap_or(Value::Null),
+        "thread_id": result.get("thread_id").cloned().unwrap_or(Value::Null),
+        "comment_database_id": result.get("comment_database_id").cloned().unwrap_or(Value::Null),
+        "response_text": result.get("response_text").cloned().unwrap_or(Value::Null),
+
         "evidence": result
     })
 }
@@ -483,20 +487,24 @@ fn write_pending_marker_actions(
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
-    let mut seen: BTreeSet<String> = pending_actions
+    let mut action_indexes: BTreeMap<String, usize> = pending_actions
         .iter()
-        .filter_map(|action| {
+        .enumerate()
+        .filter_map(|(index, action)| {
             action
                 .get("idempotency_key")
                 .and_then(Value::as_str)
-                .map(ToString::to_string)
+                .map(|key| (key.to_string(), index))
         })
         .collect();
 
     for item in items {
         let action = pending_marker_action(binding, item, remediation_output_head_sha);
         if let Some(key) = action.get("idempotency_key").and_then(Value::as_str) {
-            if seen.insert(key.to_string()) {
+            if let Some(index) = action_indexes.get(key).copied() {
+                merge_pending_marker_action(&mut pending_actions[index], &action);
+            } else {
+                action_indexes.insert(key.to_string(), pending_actions.len());
                 pending_actions.push(action);
             }
         }
@@ -539,6 +547,25 @@ fn write_pending_marker_actions(
         clock,
     )?;
     Ok(())
+}
+
+fn merge_pending_marker_action(existing: &mut Value, incoming: &Value) {
+    let Some(existing_object) = existing.as_object_mut() else {
+        *existing = incoming.clone();
+        return;
+    };
+    let Some(incoming_object) = incoming.as_object() else {
+        return;
+    };
+    let existing_key = existing_object.get("idempotency_key").cloned();
+    for (key, value) in incoming_object {
+        if !value.is_null() {
+            existing_object.insert(key.clone(), value.clone());
+        }
+    }
+    if let Some(existing_key) = existing_key {
+        existing_object.insert("idempotency_key".to_string(), existing_key);
+    }
 }
 
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P10
@@ -607,6 +634,8 @@ fn pending_marker_action(
             "thread_id": item.get("thread_id").cloned().unwrap_or(Value::Null)
         },
         "thread_id": item.get("thread_id").cloned().unwrap_or(Value::Null),
+        "comment_database_id": item.get("comment_database_id").cloned().unwrap_or(Value::Null),
+        "response_text": item.get("response_text").cloned().unwrap_or(Value::Null),
         "stable_marker_key": stable_marker_key,
         "source_head_sha": binding.head_sha,
         "remediation_input_head_sha": remediation_input_head_sha,
@@ -669,7 +698,10 @@ fn fixed_feedback_marker_items(
             continue;
         }
         let status = string_field(result, "status", "");
-        if !matches!(status.as_str(), "fixed" | "changed") {
+        if !matches!(
+            status.as_str(),
+            "fixed" | "changed" | "already_satisfied" | "not_reproduced"
+        ) {
             continue;
         }
         let key = format!("{source_type}:{source_id}");
@@ -679,6 +711,21 @@ fn fixed_feedback_marker_items(
         if let Some(thread_id) = result.get("thread_id").cloned() {
             item["thread_id"] = thread_id;
         }
+        if let Some(comment_database_id) = result
+            .get("comment_database_id")
+            .filter(|value| !value.is_null())
+            .cloned()
+        {
+            item["comment_database_id"] = comment_database_id;
+        }
+        if let Some(response_text) = result
+            .get("response_text")
+            .filter(|value| !value.is_null())
+            .cloned()
+        {
+            item["response_text"] = response_text;
+        }
+
         item["decision"] = json!("valid");
         item["marker_action"] = json!("comment_fixed");
         item["remediation_result_status"] = json!(status);
@@ -1213,6 +1260,12 @@ fn remediate_pr_followup(
         .ok();
     let prompt = render_remediation_prompt(&binding, &plan, &result_path, previous_result.as_ref());
     let argv = remediation_argv(params, &prompt, context);
+    remove_stale_remediation_output(&result_path)?;
+    if let Some(path) = &success_file_path {
+        if path != &result_path {
+            remove_stale_remediation_output(path)?;
+        }
+    }
 
     let request = LlxprtInvocationRequest {
         argv: argv.clone(),
@@ -1222,7 +1275,7 @@ fn remediate_pr_followup(
         stderr_log_path: stderr_log_path.clone(),
         remediation_plan_path: store.canonical_path(&binding, "pr-remediation-plan"),
         remediation_result_path: result_path.clone(),
-        success_file_path,
+        success_file_path: success_file_path.clone(),
     };
     let mut invocation = runner.invoke(request);
     if invocation.argv.is_empty() {
@@ -1234,21 +1287,17 @@ fn remediate_pr_followup(
     if let Some(path) = &invocation.result_file_path {
         result_path = path.clone();
     }
+    refresh_invocation_artifact_presence(&mut invocation, &result_path, success_file_path.as_ref());
 
-    let result_present = result_path
-        .metadata()
-        .is_ok_and(|metadata| metadata.len() > 0)
-        || invocation.result_file_present;
     let process_class_before_result_reclassification = invocation.process_class.clone();
-    if result_present && invocation.process_class == "timeout" {
+    let mut validator_readable = read_json_file(&result_path).is_ok();
+
+    if validator_readable && invocation.process_class == "timeout" {
         invocation.process_class = "success".to_string();
         invocation.spawn_error = None;
     }
 
-    let validator_readable = result_path
-        .metadata()
-        .is_ok_and(|metadata| metadata.len() > 0);
-    if !result_present {
+    if !validator_readable {
         write_validator_readable_remediation_failure_result(
             &store,
             &binding,
@@ -1259,7 +1308,8 @@ fn remediate_pr_followup(
             &result_path,
             clock,
         )?;
-    } else if validator_readable && process_class_before_result_reclassification == "timeout" {
+        validator_readable = read_json_file(&result_path).is_ok();
+    } else if process_class_before_result_reclassification == "timeout" {
         repair_timeout_wrapper_failure_result_if_needed(
             &store,
             &binding,
@@ -1271,9 +1321,12 @@ fn remediate_pr_followup(
             clock,
         )?;
     }
-    let validator_readable = result_path
-        .metadata()
-        .is_ok_and(|metadata| metadata.len() > 0);
+    if validator_readable {
+        preserve_remediation_retry_metadata(&result_path, previous_result.as_ref())?;
+    }
+
+    let validator_readable = read_json_file(&result_path).is_ok();
+
     let state = invocation_state(&invocation, validator_readable);
     write_llxprt_run_artifact(
         &store,
@@ -1302,6 +1355,10 @@ fn remediation_argv(params: &Value, prompt: &str, context: &StepContext) -> Vec<
         "llxprt".to_string(),
         "--set".to_string(),
         "reasoning.includeInResponse=false".to_string(),
+        "--extensions".to_string(),
+        String::new(),
+        "--allowed-mcp-server-names".to_string(),
+        String::new(),
     ];
     if let Some(profile) = params
         .get("profile")
@@ -1332,21 +1389,7 @@ fn render_remediation_prompt(
         .and_then(Value::as_str)
         .unwrap_or("pr-remediation-plan.json");
     let validation_feedback = previous_result
-        .and_then(|result| result.get("validation_errors"))
-        .and_then(Value::as_array)
-        .filter(|errors| !errors.is_empty())
-        .map(|errors| {
-            let details = serde_json::to_string_pretty(errors).unwrap_or_else(|_| {
-                errors
-                    .iter()
-                    .map(Value::to_string)
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            });
-            format!(
-                "\n\nPrevious pr-remediation-result.json validation_errors must be corrected before finishing:\n{details}"
-            )
-        })
+        .map(previous_remediation_feedback)
         .unwrap_or_default();
     let plan_sequence = plan
         .get("artifact_sequence")
@@ -1365,6 +1408,209 @@ fn render_remediation_prompt(
         binding.head_sha,
         validation_feedback
     )
+}
+
+fn remove_stale_remediation_output(path: &Path) -> Result<(), EngineError> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(pr_remediation_error(format!(
+            "remove stale remediation output {}: {err}",
+            path.display()
+        ))),
+    }
+}
+
+fn refresh_invocation_artifact_presence(
+    invocation: &mut LlxprtInvocationResult,
+    result_path: &Path,
+    success_file_path: Option<&PathBuf>,
+) {
+    invocation.result_file_size = result_path.metadata().ok().map(|metadata| metadata.len());
+    invocation.result_file_present = invocation.result_file_size.is_some_and(|size| size > 0);
+    invocation.result_file_path = Some(result_path.to_path_buf());
+    invocation.success_file_size = success_file_path
+        .and_then(|path| path.metadata().ok())
+        .map(|metadata| metadata.len());
+    invocation.success_file_present = invocation.success_file_size.is_some_and(|size| size > 0);
+}
+
+fn previous_remediation_feedback(result: &Value) -> String {
+    let mut sections = Vec::new();
+    if let Some(errors) = result
+        .get("validation_errors")
+        .and_then(Value::as_array)
+        .filter(|errors| !errors.is_empty())
+    {
+        let details = serde_json::to_string_pretty(errors).unwrap_or_else(|_| {
+            errors
+                .iter()
+                .map(Value::to_string)
+                .collect::<Vec<_>>()
+                .join("\n")
+        });
+        sections.push(format!(
+            "Previous pr-remediation-result.json validation_errors must be corrected before finishing:\n{details}"
+        ));
+    }
+
+    let unsuccessful_results = result
+        .get("results")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or(&[])
+        .iter()
+        .filter(|item| {
+            item.get("status")
+                .and_then(Value::as_str)
+                .is_some_and(|status| REMEDIATION_RESULT_UNSUCCESSFUL_STATUSES.contains(&status))
+        })
+        .map(summarize_unsuccessful_remediation_result)
+        .collect::<Vec<_>>();
+    if !unsuccessful_results.is_empty() {
+        let details = serde_json::to_string_pretty(&unsuccessful_results).unwrap_or_else(|_| {
+            unsuccessful_results
+                .iter()
+                .map(Value::to_string)
+                .collect::<Vec<_>>()
+                .join("\n")
+        });
+        sections.push(format!(
+            "Previous pr-remediation-result.json was structurally valid but unsuccessful. Do not repeat failed/skipped/not_fixed statuses for these items; inspect the target code, finish the fixes, and return fixed/changed/already_satisfied/not_reproduced only when the evidence supports it. Recursive invocation details such as argv are intentionally omitted from this retry prompt:\n{details}"
+        ));
+    }
+
+    if sections.is_empty() {
+        String::new()
+    } else {
+        format!("\n\n{}", sections.join("\n\n"))
+    }
+}
+
+fn summarize_unsuccessful_remediation_result(item: &Value) -> Value {
+    let mut summary = serde_json::Map::new();
+    for field in [
+        "source_type",
+        "source_id",
+        "stable_marker_key",
+        "body_hash",
+        "status",
+        "action",
+        "input_head_sha",
+        "output_head_sha",
+        "response_text",
+    ] {
+        if let Some(value) = item.get(field) {
+            summary.insert(field.to_string(), truncate_prompt_value(value));
+        }
+    }
+    if let Some(evidence) = item.get("evidence") {
+        summary.insert(
+            "evidence_summary".to_string(),
+            summarize_remediation_evidence(evidence),
+        );
+    }
+    Value::Object(summary)
+}
+
+fn summarize_remediation_evidence(evidence: &Value) -> Value {
+    let mut summary = serde_json::Map::new();
+    for field in [
+        "kind",
+        "current_head_sha",
+        "process_class",
+        "exit_code",
+        "signal",
+        "spawn_error",
+        "bounded_stdout",
+        "bounded_stderr",
+        "changed_paths",
+        "verification_commands",
+        "commands",
+        "summary",
+    ] {
+        if let Some(value) = evidence.get(field) {
+            summary.insert(field.to_string(), truncate_prompt_value(value));
+        }
+    }
+    Value::Object(summary)
+}
+
+fn truncate_prompt_value(value: &Value) -> Value {
+    match value {
+        Value::String(text) => Value::String(bounded_excerpt(text, 800)),
+        Value::Array(items) => Value::Array(
+            items
+                .iter()
+                .take(12)
+                .map(truncate_prompt_value)
+                .collect::<Vec<_>>(),
+        ),
+        Value::Object(object) => Value::Object(
+            object
+                .iter()
+                .filter(|(key, _)| {
+                    !matches!(
+                        key.as_str(),
+                        "argv"
+                            | "prompt"
+                            | "working_directory"
+                            | "stdout_log_path"
+                            | "stderr_log_path"
+                            | "result_file_path"
+                            | "remediation_plan_path"
+                            | "remediation_result_path"
+                            | "success_file_path"
+                    )
+                })
+                .take(16)
+                .map(|(key, value)| (key.clone(), truncate_prompt_value(value)))
+                .collect::<serde_json::Map<_, _>>(),
+        ),
+        _ => value.clone(),
+    }
+}
+
+fn preserve_remediation_retry_metadata(
+    result_path: &Path,
+    previous_result: Option<&Value>,
+) -> Result<(), EngineError> {
+    let Some(previous_result) = previous_result else {
+        return Ok(());
+    };
+    let previous_state = previous_result
+        .get("validation_state")
+        .and_then(Value::as_str);
+    if previous_state == Some(ValidationState::Unvalidated.as_str()) {
+        return Ok(());
+    }
+
+    let mut result = match std::fs::read_to_string(result_path)
+        .ok()
+        .and_then(|content| serde_json::from_str::<Value>(&content).ok())
+    {
+        Some(value) => value,
+        None => return Ok(()),
+    };
+    let Some(object) = result.as_object_mut() else {
+        return Ok(());
+    };
+    for field in [
+        "validation_retry_index",
+        "max_validation_retries",
+        "remediation_attempt_index",
+        "max_remediation_attempts",
+        "retry_scope",
+    ] {
+        if let Some(value) = previous_result.get(field) {
+            object.insert(field.to_string(), value.clone());
+        }
+    }
+    let bytes = serde_json::to_vec_pretty(&result)
+        .map_err(|err| pr_remediation_error(format!("serialize retry metadata: {err}")))?;
+    std::fs::write(result_path, bytes)
+        .map_err(|err| pr_remediation_error(format!("write retry metadata: {err}")))?;
+    Ok(())
 }
 
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P12
