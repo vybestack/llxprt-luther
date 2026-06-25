@@ -26,12 +26,6 @@ const DEFAULT_OBSERVATION_INTERVAL_SECONDS: u64 = 300;
 const MARKER_NAMESPACE: &str = "luther-pr-followup";
 const MARKER_ARTIFACT_FAMILY: &str = "pr-feedback-marker-report";
 const PENDING_MARKER_ACTIONS_FAMILY: &str = "pending-feedback-marker-actions";
-/// Sentinel identity that, when present in the configured identity set, makes
-/// the feedback collector accept review threads from any reviewer (not only
-/// CodeRabbit). Selected via the `include_all_reviewers` step param.
-/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P15
-/// @requirement:REQ-PRFU-024
-const ALL_REVIEWERS_SENTINEL: &str = "*";
 /// Real GraphQL mutation used to resolve a PR review thread.
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P15
 /// @requirement:REQ-PRFU-016
@@ -310,6 +304,10 @@ fn collect_coderabbit_feedback(
         DEFAULT_OBSERVATION_INTERVAL_SECONDS,
     );
     let identities = configured_identities(params);
+    let include_all_reviewers = params
+        .get("include_all_reviewers")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     let mut observations = Vec::new();
     let mut previous_ready_hash: Option<String> = None;
     let mut stable_count = 0;
@@ -317,7 +315,8 @@ fn collect_coderabbit_feedback(
 
     for attempt in 1..=max_observations {
         let observed_at = clock.now_rfc3339();
-        let observation = observe_coderabbit_feedback(runner, &binding, &identities)?;
+        let observation =
+            observe_coderabbit_feedback(runner, &binding, &identities, include_all_reviewers)?;
         if let Some(fatal) = observation.fatal.clone() {
             let payload = feedback_payload(
                 &binding,
@@ -447,6 +446,7 @@ fn observe_coderabbit_feedback(
     runner: &dyn GithubPrCommandRunner,
     binding: &PrFollowupBinding,
     identities: &BTreeSet<String>,
+    include_all_reviewers: bool,
 ) -> Result<FeedbackObservation, EngineError> {
     let mut observation = FeedbackObservation::default();
     let graph = query_review_threads(runner, binding)?;
@@ -454,9 +454,21 @@ fn observe_coderabbit_feedback(
         observation.fatal = Some(json!({ "surface": "graphql_review_threads", "response": graph }));
         return Ok(observation);
     }
-    normalize_graphql_threads(&graph, binding, identities, &mut observation);
+    normalize_graphql_threads(
+        &graph,
+        binding,
+        identities,
+        include_all_reviewers,
+        &mut observation,
+    );
     for rest_comment in query_rest_review_comments(runner, binding)? {
-        normalize_rest_review_comment(&rest_comment, binding, identities, &mut observation);
+        normalize_rest_review_comment(
+            &rest_comment,
+            binding,
+            identities,
+            include_all_reviewers,
+            &mut observation,
+        );
     }
     for issue_comment in query_issue_comments(runner, binding)? {
         normalize_issue_comment(&issue_comment, binding, identities, &mut observation);
@@ -501,6 +513,7 @@ fn normalize_graphql_threads(
     value: &Value,
     binding: &PrFollowupBinding,
     identities: &BTreeSet<String>,
+    include_all_reviewers: bool,
     observation: &mut FeedbackObservation,
 ) {
     let nodes = value
@@ -527,7 +540,7 @@ fn normalize_graphql_threads(
                 .pointer("/author/login")
                 .and_then(Value::as_str)
                 .unwrap_or_default();
-            if !is_coderabbit(author, identities) {
+            if !is_coderabbit(author, identities, include_all_reviewers) {
                 observation
                     .noise
                     .push(json!({ "source": "graphql_review_thread", "author_login": author }));
@@ -586,13 +599,14 @@ fn normalize_rest_review_comment(
     comment: &Value,
     binding: &PrFollowupBinding,
     identities: &BTreeSet<String>,
+    include_all_reviewers: bool,
     observation: &mut FeedbackObservation,
 ) {
     let author = comment
         .pointer("/user/login")
         .and_then(Value::as_str)
         .unwrap_or_default();
-    if !is_coderabbit(author, identities) {
+    if !is_coderabbit(author, identities, include_all_reviewers) {
         observation
             .noise
             .push(json!({ "source": "rest_review_comment", "author_login": author }));
@@ -666,7 +680,7 @@ fn normalize_issue_comment(
         .pointer("/user/login")
         .and_then(Value::as_str)
         .unwrap_or_default();
-    if !is_coderabbit(author, identities) {
+    if !is_coderabbit(author, identities, false) {
         observation
             .noise
             .push(json!({ "source": "issue_comment", "author_login": author }));
@@ -727,7 +741,7 @@ fn normalize_readiness_signal(
         .or_else(|| signal.get("app_slug"))
         .and_then(Value::as_str)
         .unwrap_or_default();
-    if !is_coderabbit(bot, identities) {
+    if !is_coderabbit(bot, identities, false) {
         return;
     }
     observation.matched_identities.insert(bot.to_string());
@@ -1204,15 +1218,20 @@ fn mark_coderabbit_feedback(
         clock,
     );
     let thread_identifiers = collect_thread_identifiers_by_action_key(&store, &binding, runner)?;
-    let pending_actions = pending_artifact
+    let pending_action_values = pending_artifact
         .get("pending_actions")
         .and_then(Value::as_array)
         .cloned()
-        .unwrap_or_default()
+        .unwrap_or_default();
+    let pending_action_key_counts = thread_identifier_key_counts(&pending_action_values);
+    let pending_actions = pending_action_values
         .into_iter()
-        .map(|value| backfill_thread_identifiers(value, &thread_identifiers))
+        .map(|value| {
+            backfill_thread_identifiers(value, &thread_identifiers, &pending_action_key_counts)
+        })
         .filter_map(|value| pending_marker_action_from_value(value).ok())
         .collect::<Vec<_>>();
+
     if let Some(violations) = validate_marker_actions_before_mutation(&pending_actions) {
         let report = json!({
             "schema_version": PR_FOLLOWUP_SCHEMA_VERSION,
@@ -1238,7 +1257,7 @@ fn mark_coderabbit_feedback(
         return Ok(StepOutcome::Fatal);
     }
     let local_completed = read_local_marker_completions(&store, &binding);
-    let remote_comments = discover_marker_remote_comments(runner, &binding).unwrap_or_default();
+    let remote_comments = discover_marker_remote_comments(runner, &binding)?;
     let mut remote_completed = BTreeSet::new();
     let mut malformed_remote_markers = Vec::new();
     for comment in remote_comments {
@@ -1442,14 +1461,8 @@ fn collect_thread_identifiers_by_action_key(
     } else {
         BTreeMap::new()
     };
-    let mut stable_marker_key_counts: BTreeMap<String, usize> = BTreeMap::new();
-    for item in &items {
-        if let Some(stable_marker_key) = item.get("stable_marker_key").and_then(Value::as_str) {
-            *stable_marker_key_counts
-                .entry(stable_marker_key.to_string())
-                .or_default() += 1;
-        }
-    }
+    let action_key_counts = thread_identifier_key_counts(&items);
+
     for item in &items {
         let comment_database_id = item.get("comment_database_id").and_then(Value::as_i64);
         let thread_id = item
@@ -1460,7 +1473,7 @@ fn collect_thread_identifiers_by_action_key(
         if thread_id.is_none() && comment_database_id.is_none() {
             continue;
         }
-        let key = thread_identifier_action_key(item, &stable_marker_key_counts);
+        let key = thread_identifier_action_key(item, &action_key_counts);
         if !key.is_empty() {
             identifiers.insert(key, (thread_id, comment_database_id));
         }
@@ -1508,8 +1521,10 @@ fn review_thread_ids_by_comment_database_id(
 fn backfill_thread_identifiers(
     mut value: Value,
     identifiers: &BTreeMap<String, (Option<String>, Option<i64>)>,
+    pending_action_key_counts: &BTreeMap<String, usize>,
 ) -> Value {
-    let key = pending_action_thread_identifier_key(&value);
+    let key = pending_action_thread_identifier_key(&value, pending_action_key_counts);
+
     if key.is_empty() {
         return value;
     }
@@ -1537,45 +1552,50 @@ fn backfill_thread_identifiers(
     }
     value
 }
+fn thread_identifier_key_counts(items: &[Value]) -> BTreeMap<String, usize> {
+    let mut counts = BTreeMap::new();
+    for item in items {
+        for (field, prefix) in [
+            ("item_id", "item_id"),
+            ("body_hash", "body_hash"),
+            ("stable_marker_key", "stable_marker_key"),
+        ] {
+            let value = string_field(item, field);
+            if !value.is_empty() {
+                *counts.entry(format!("{prefix}:{value}")).or_default() += 1;
+            }
+        }
+    }
+    counts
+}
 
-fn thread_identifier_action_key(
-    item: &Value,
-    stable_marker_key_counts: &BTreeMap<String, usize>,
-) -> String {
-    let item_id = string_field(item, "item_id");
-    if !item_id.is_empty() {
-        return format!("item_id:{item_id}");
-    }
-    let body_hash = string_field(item, "body_hash");
-    if !body_hash.is_empty() {
-        return format!("body_hash:{body_hash}");
-    }
-    let stable_marker_key = string_field(item, "stable_marker_key");
-    if stable_marker_key_counts
-        .get(&stable_marker_key)
-        .copied()
-        .unwrap_or_default()
-        == 1
-    {
-        return format!("stable_marker_key:{stable_marker_key}");
+fn unique_thread_identifier_key(value: &Value, counts: &BTreeMap<String, usize>) -> String {
+    for (field, prefix) in [
+        ("item_id", "item_id"),
+        ("body_hash", "body_hash"),
+        ("stable_marker_key", "stable_marker_key"),
+    ] {
+        let field_value = string_field(value, field);
+        let key = format!("{prefix}:{field_value}");
+        if !field_value.is_empty() && counts.get(&key).copied().unwrap_or_default() == 1 {
+            return key;
+        }
     }
     String::new()
 }
 
-fn pending_action_thread_identifier_key(value: &Value) -> String {
-    let item_id = string_field(value, "item_id");
-    if !item_id.is_empty() {
-        return format!("item_id:{item_id}");
-    }
-    let body_hash = string_field(value, "body_hash");
-    if !body_hash.is_empty() {
-        return format!("body_hash:{body_hash}");
-    }
-    let stable_marker_key = string_field(value, "stable_marker_key");
-    if !stable_marker_key.is_empty() {
-        return format!("stable_marker_key:{stable_marker_key}");
-    }
-    String::new()
+fn thread_identifier_action_key(
+    item: &Value,
+    action_key_counts: &BTreeMap<String, usize>,
+) -> String {
+    unique_thread_identifier_key(item, action_key_counts)
+}
+
+fn pending_action_thread_identifier_key(
+    value: &Value,
+    pending_action_key_counts: &BTreeMap<String, usize>,
+) -> String {
+    unique_thread_identifier_key(value, pending_action_key_counts)
 }
 
 fn evaluation_identity_key(value: &Value) -> String {
@@ -1732,19 +1752,26 @@ fn pending_marker_action_from_value(value: Value) -> Result<PendingMarkerAction,
     let thread_id = value
         .get("thread_id")
         .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|thread_id| !thread_id.is_empty())
         .map(ToString::to_string)
         .or_else(|| {
             value
                 .pointer("/evidence/thread_id")
                 .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|thread_id| !thread_id.is_empty())
                 .map(ToString::to_string)
         })
         .or_else(|| {
             value
                 .pointer("/original_feedback_identity/thread_id")
                 .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|thread_id| !thread_id.is_empty())
                 .map(ToString::to_string)
         });
+
     let comment_database_id = value
         .get("comment_database_id")
         .and_then(Value::as_i64)
@@ -1902,7 +1929,7 @@ fn discover_marker_remote_comments(
     let mut comments = query_issue_comments(runner, binding)?;
     // Also scan in-thread review (pull) comments so previously posted in-thread
     // reply markers are detected for idempotency on retry/resume.
-    comments.extend(query_pull_review_comments(runner, binding).unwrap_or_default());
+    comments.extend(query_pull_review_comments(runner, binding)?);
     Ok(comments)
 }
 
@@ -3049,28 +3076,17 @@ fn configured_identities(params: &Value) -> BTreeSet<String> {
             identities.insert(identity.to_ascii_lowercase());
         }
     }
-    // When include_all_reviewers is set, add the wildcard sentinel so any
-    // reviewer's threads flow through the same deterministic mechanism.
-    // @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P15
-    // @requirement:REQ-PRFU-024
-    if params
-        .get("include_all_reviewers")
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
-    {
-        identities.insert(ALL_REVIEWERS_SENTINEL.to_string());
-    }
     identities
 }
 
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P08
 /// @requirement:REQ-PRFU-008,REQ-PRFU-024
 /// @pseudocode lines 10
-fn is_coderabbit(author: &str, identities: &BTreeSet<String>) -> bool {
+fn is_coderabbit(author: &str, identities: &BTreeSet<String>, allow_wildcard: bool) -> bool {
     if author.is_empty() {
         return false;
     }
-    identities.contains(ALL_REVIEWERS_SENTINEL) || identities.contains(&author.to_ascii_lowercase())
+    allow_wildcard || identities.contains(&author.to_ascii_lowercase())
 }
 
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P08

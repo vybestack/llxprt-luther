@@ -507,8 +507,8 @@ fn evaluate_coderabbit_feedback(
                                 "new",
                                 "not_reused",
                             );
-                            accepted = Some(accepted_value.clone());
                             enrich_accepted_result_from_item(&mut accepted_value, item);
+                            accepted = Some(accepted_value.clone());
 
                             upsert_state_entry(
                                 &mut new_state_entries,

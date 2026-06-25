@@ -4,7 +4,7 @@
 //! @requirement:REQ-PRFU-013,REQ-PRFU-020
 //! @pseudocode lines 1-53
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -487,20 +487,24 @@ fn write_pending_marker_actions(
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
-    let mut seen: BTreeSet<String> = pending_actions
+    let mut action_indexes: BTreeMap<String, usize> = pending_actions
         .iter()
-        .filter_map(|action| {
+        .enumerate()
+        .filter_map(|(index, action)| {
             action
                 .get("idempotency_key")
                 .and_then(Value::as_str)
-                .map(ToString::to_string)
+                .map(|key| (key.to_string(), index))
         })
         .collect();
 
     for item in items {
         let action = pending_marker_action(binding, item, remediation_output_head_sha);
         if let Some(key) = action.get("idempotency_key").and_then(Value::as_str) {
-            if seen.insert(key.to_string()) {
+            if let Some(index) = action_indexes.get(key).copied() {
+                merge_pending_marker_action(&mut pending_actions[index], &action);
+            } else {
+                action_indexes.insert(key.to_string(), pending_actions.len());
                 pending_actions.push(action);
             }
         }
@@ -543,6 +547,25 @@ fn write_pending_marker_actions(
         clock,
     )?;
     Ok(())
+}
+
+fn merge_pending_marker_action(existing: &mut Value, incoming: &Value) {
+    let Some(existing_object) = existing.as_object_mut() else {
+        *existing = incoming.clone();
+        return;
+    };
+    let Some(incoming_object) = incoming.as_object() else {
+        return;
+    };
+    let existing_key = existing_object.get("idempotency_key").cloned();
+    for (key, value) in incoming_object {
+        if !value.is_null() {
+            existing_object.insert(key.clone(), value.clone());
+        }
+    }
+    if let Some(existing_key) = existing_key {
+        existing_object.insert("idempotency_key".to_string(), existing_key);
+    }
 }
 
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P10
@@ -688,12 +711,21 @@ fn fixed_feedback_marker_items(
         if let Some(thread_id) = result.get("thread_id").cloned() {
             item["thread_id"] = thread_id;
         }
-        if let Some(comment_database_id) = result.get("comment_database_id").cloned() {
+        if let Some(comment_database_id) = result
+            .get("comment_database_id")
+            .filter(|value| !value.is_null())
+            .cloned()
+        {
             item["comment_database_id"] = comment_database_id;
         }
-        if let Some(response_text) = result.get("response_text").cloned() {
+        if let Some(response_text) = result
+            .get("response_text")
+            .filter(|value| !value.is_null())
+            .cloned()
+        {
             item["response_text"] = response_text;
         }
+
         item["decision"] = json!("valid");
         item["marker_action"] = json!("comment_fixed");
         item["remediation_result_status"] = json!(status);
@@ -1258,9 +1290,8 @@ fn remediate_pr_followup(
     refresh_invocation_artifact_presence(&mut invocation, &result_path, success_file_path.as_ref());
 
     let process_class_before_result_reclassification = invocation.process_class.clone();
-    let mut validator_readable = result_path
-        .metadata()
-        .is_ok_and(|metadata| metadata.len() > 0);
+    let mut validator_readable = read_json_file(&result_path).is_ok();
+
     if validator_readable && invocation.process_class == "timeout" {
         invocation.process_class = "success".to_string();
         invocation.spawn_error = None;
@@ -1277,9 +1308,7 @@ fn remediate_pr_followup(
             &result_path,
             clock,
         )?;
-        validator_readable = result_path
-            .metadata()
-            .is_ok_and(|metadata| metadata.len() > 0);
+        validator_readable = read_json_file(&result_path).is_ok();
     } else if process_class_before_result_reclassification == "timeout" {
         repair_timeout_wrapper_failure_result_if_needed(
             &store,
@@ -1296,9 +1325,8 @@ fn remediate_pr_followup(
         preserve_remediation_retry_metadata(&result_path, previous_result.as_ref())?;
     }
 
-    let validator_readable = result_path
-        .metadata()
-        .is_ok_and(|metadata| metadata.len() > 0);
+    let validator_readable = read_json_file(&result_path).is_ok();
+
     let state = invocation_state(&invocation, validator_readable);
     write_llxprt_run_artifact(
         &store,
