@@ -33,7 +33,7 @@ pub const DEFAULT_FEEDBACK_EVALUATOR_ARGV: &[&str] = &[
     "--set",
     "maxTurnsPerPrompt=1",
     "-p",
-    "Evaluate the single CodeRabbit feedback request JSON from stdin. Classify it using only the JSON provided; do not use any tools, do not run commands, and do not inspect the repository. Use needs_user_judgment only when the comment asks for a genuine product/scope/design choice that cannot be decided from the current PR. Speculative robustness suggestions, low-value nits, optional future hardening, and comments phrased as consider/if this becomes an issue should be invalid or out_of_scope unless they identify a concrete current defect. Respond with exactly one JSON object containing item_id, stable_marker_key, body_hash, head_sha, decision, reason, and recommended_action. Do not return arrays or extra item identities.",
+    "Evaluate the single PR review feedback request JSON from stdin. Classify it using only the JSON provided; do not use any tools, do not run commands, and do not inspect the repository. Use needs_user_judgment only when the comment asks for a genuine product/scope/design choice that cannot be decided from the current PR. Speculative robustness suggestions, low-value nits, optional future hardening, and comments phrased as consider/if this becomes an issue should be invalid or out_of_scope unless they identify a concrete current defect. Respond with exactly one JSON object containing item_id, stable_marker_key, body_hash, head_sha, decision, reason, recommended_action, and response_text. The response_text must be a non-empty, reviewer-facing message that Luther will post verbatim on the original review thread explaining the decision; do not address the reviewer as yourself or claim to have posted it. Do not return arrays or extra item identities.",
 ];
 
 #[must_use]
@@ -82,6 +82,7 @@ pub struct FeedbackEvaluationResponse {
     pub decision: String,
     pub reason: String,
     pub recommended_action: Option<String>,
+    pub response_text: String,
 }
 
 /// LLM invocation adapter seam for feedback evaluation behavior.
@@ -717,6 +718,11 @@ fn validate_response(
             .get("recommended_action")
             .and_then(Value::as_str)
             .map(ToString::to_string),
+        response_text: value
+            .get("response_text")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
     };
     if response.item_id != request.item_id {
         return Err(reject("wrong_item_id", &value));
@@ -747,6 +753,9 @@ fn validate_response(
         .is_empty()
     {
         return Err(reject("missing_recommended_action", &value));
+    }
+    if response.response_text.trim().is_empty() {
+        return Err(reject("missing_response_text", &value));
     }
     Ok(response)
 }
@@ -781,6 +790,7 @@ fn deterministic_feedback_evaluation(item: &FeedbackItem, accepted_at: String) -
         "decision": "invalid",
         "reason": "CodeRabbit summary/walkthrough comments are informational and do not identify a specific actionable feedback item.",
         "recommended_action": "No code changes or review-thread response are required for the summary comment.",
+        "response_text": "This is an informational CodeRabbit summary/walkthrough comment rather than an actionable review item, so no code change is required.",
         "accepted_at": accepted_at,
         "attempt_count": 0,
         "source": "deterministic",
@@ -877,6 +887,7 @@ fn accepted_result(
         "decision": response.decision,
         "reason": response.reason,
         "recommended_action": response.recommended_action.clone().unwrap_or_default(),
+        "response_text": response.response_text,
         "accepted_at": accepted_at,
         "attempt_count": attempt_count,
         "source": source,
@@ -919,6 +930,15 @@ fn validate_reusable_accepted(
             .is_empty()
     {
         return Err(feedback_eval_error("missing reusable reason"));
+    }
+    if value
+        .get("response_text")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim()
+        .is_empty()
+    {
+        return Err(feedback_eval_error("missing reusable response_text"));
     }
     Ok(())
 }

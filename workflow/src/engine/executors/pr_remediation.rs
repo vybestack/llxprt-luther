@@ -398,6 +398,8 @@ fn feedback_plan_item(
         "stable_marker_key": result.get("stable_marker_key").cloned().unwrap_or(Value::Null),
         "reason": string_field(result, "reason", "no_reason_provided"),
         "recommended_action": string_field(result, "recommended_action", "human_review_required"),
+        "response_text": result.get("response_text").cloned().unwrap_or(Value::Null),
+        "thread_id": result.get("thread_id").cloned().unwrap_or(Value::Null),
         "input_head_sha": binding.head_sha,
         "source_artifact_sequence": artifact_sequence(evaluations),
         "decision": result.get("decision").cloned().unwrap_or(Value::Null),
@@ -604,9 +606,11 @@ fn pending_marker_action(
             "stable_marker_key": stable_marker_key,
             "body_hash": body_hash,
             "source_head_sha": binding.head_sha,
-            "thread_id": item.get("thread_id").cloned().unwrap_or(Value::Null)
+            "thread_id": item.get("thread_id").cloned().unwrap_or(Value::Null),
+            "comment_database_id": item.get("comment_database_id").cloned().unwrap_or(Value::Null)
         },
         "thread_id": item.get("thread_id").cloned().unwrap_or(Value::Null),
+        "comment_database_id": item.get("comment_database_id").cloned().unwrap_or(Value::Null),
         "stable_marker_key": stable_marker_key,
         "source_head_sha": binding.head_sha,
         "remediation_input_head_sha": remediation_input_head_sha,
@@ -619,6 +623,7 @@ fn pending_marker_action(
         "resolution_required": action_kind == "comment_fixed",
         "status": "pending",
         "reason": string_field(item, "reason", decision),
+        "response_text": item.get("response_text").cloned().unwrap_or(Value::Null),
         "remediation_result_status": item.get("remediation_result_status").cloned().unwrap_or(Value::Null),
         "remediation_result_evidence": item.get("remediation_result_evidence").cloned().unwrap_or(Value::Null),
         "evidence": item.get("evidence").cloned().unwrap_or_else(|| item.clone()),
@@ -669,7 +674,10 @@ fn fixed_feedback_marker_items(
             continue;
         }
         let status = string_field(result, "status", "");
-        if !matches!(status.as_str(), "fixed" | "changed") {
+        if !matches!(
+            status.as_str(),
+            "fixed" | "changed" | "already_satisfied" | "not_reproduced"
+        ) {
             continue;
         }
         let key = format!("{source_type}:{source_id}");
@@ -679,11 +687,17 @@ fn fixed_feedback_marker_items(
         if let Some(thread_id) = result.get("thread_id").cloned() {
             item["thread_id"] = thread_id;
         }
+        if let Some(comment_database_id) = result.get("comment_database_id").cloned() {
+            item["comment_database_id"] = comment_database_id;
+        }
         item["decision"] = json!("valid");
         item["marker_action"] = json!("comment_fixed");
         item["remediation_result_status"] = json!(status);
         item["remediation_input_head_sha"] = json!(validation_payload.input_head_sha.clone());
         item["remediation_output_head_sha"] = json!(validation_payload.output_head_sha.clone());
+        if let Some(response_text) = result.get("response_text").cloned() {
+            item["response_text"] = response_text;
+        }
         item["remediation_result_evidence"] = result
             .get("evidence")
             .cloned()
@@ -1349,7 +1363,7 @@ fn render_remediation_prompt(
         })
         .unwrap_or_default();
     format!(
-        "PR follow-up remediation for {}/{}, PR #{} at head {}.\n\nRead {}. Fix only pr-remediation-plan.json.must_fix. Do not fix pr-remediation-plan.json.mark_invalid, out_of_scope feedback, or pr-remediation-plan.json.needs_user_judgment. Write {}. Use only canonical statuses fixed | changed | already_satisfied | not_reproduced | not_fixed | skipped | failed. Include structured evidence for every result item. Required result schema: every result item must include input_head_sha set to {} and output_head_sha set to the current PR head after remediation; fixed or changed results must include evidence.current_head_sha equal to the current PR head; already_satisfied or not_reproduced results must include evidence.current_head_sha equal to {}. already_satisfied results must also include evidence.commands with at least one command object whose status is passed and whose argv array is non-empty. Free-form-only completion is not acceptable; pr-remediation-result.json is required. Write only the requested canonical current pr-remediation-result.json path; do not create, copy, or modify any pr-followup/history files or artifact metadata fields.{}",
+        "PR follow-up remediation for {}/{}, PR #{} at head {}.\n\nRead {}. Fix only pr-remediation-plan.json.must_fix. Do not fix pr-remediation-plan.json.mark_invalid, out_of_scope feedback, or pr-remediation-plan.json.needs_user_judgment. Write {}. Use only canonical statuses fixed | changed | already_satisfied | not_reproduced | not_fixed | skipped | failed. Include structured evidence for every result item. Required result schema: every result item must include input_head_sha set to {} and output_head_sha set to the current PR head after remediation; every result item must also include response_text, a non-empty reviewer-facing message that Luther will post verbatim on the original review thread (do not post it yourself); fixed or changed results must include evidence.current_head_sha equal to the current PR head; already_satisfied or not_reproduced results must include evidence.current_head_sha equal to {}. already_satisfied results must also include evidence.commands with at least one command object whose status is passed and whose argv array is non-empty. Free-form-only completion is not acceptable; pr-remediation-result.json is required. Write only the requested canonical current pr-remediation-result.json path; do not create, copy, or modify any pr-followup/history files or artifact metadata fields.{}",
         binding.repository_owner,
         binding.repository_name,
         binding.pr_number,
@@ -1393,6 +1407,7 @@ fn write_validator_readable_remediation_failure_result(
                 "input_head_sha": binding.head_sha,
                 "status": "failed",
                 "action": "llxprt_invocation_failed_before_result",
+                "response_text": "Luther could not complete remediation for this item because the remediation agent invocation failed before producing a result. This thread is left open pending a retry.",
                 "evidence": {
                     "kind": "llxprt_invocation",
                     "current_head_sha": binding.head_sha,
@@ -2008,6 +2023,9 @@ fn evaluate_remediation_result(
         }
         if let Some(plan_item) = plan_item {
             validate_result_binding(binding, plan_item, item, &key, &mut errors);
+        }
+        if string_field(item, "response_text", "").trim().is_empty() {
+            errors.push(format!("result item {key} missing response_text"));
         }
         if !REMEDIATION_RESULT_VALID_STATUSES.contains(&status.as_str()) {
             errors.push(format!("unknown remediation status for {key}: {status}"));

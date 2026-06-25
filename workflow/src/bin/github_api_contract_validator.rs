@@ -16,7 +16,7 @@ const FORBIDDEN: [&str; 7] = [
     "@pseudocode TBD",
 ];
 
-const REQUIRED_FIXTURES: [&str; 20] = [
+const REQUIRED_FIXTURES: [&str; 21] = [
     "pr_identity_gh_pr_view.json",
     "pr_identity_graphql_fallback.json",
     "checks_gh_pr_checks_page1.json",
@@ -30,6 +30,7 @@ const REQUIRED_FIXTURES: [&str; 20] = [
     "review_comments_rest_fallback.json",
     "issue_comments_rest_page2.json",
     "create_issue_comment_response.json",
+    "create_review_comment_reply_response.json",
     "resolve_review_thread_response.json",
     "coderabbit_readiness_ready_empty.json",
     "coderabbit_readiness_in_progress.json",
@@ -39,7 +40,7 @@ const REQUIRED_FIXTURES: [&str; 20] = [
     "permission_denied_rest_actions.json",
 ];
 
-const REQUIRED_ASSERTIONS: [&str; 20] = [
+const REQUIRED_ASSERTIONS: [&str; 22] = [
     "github_api_contract::pr_identity_paths",
     "github_api_contract::checks_rest_page_two",
     "github_api_contract::actions_jobs_page_two",
@@ -48,6 +49,8 @@ const REQUIRED_ASSERTIONS: [&str; 20] = [
     "github_api_contract::review_comments_fallback_success",
     "github_api_contract::remote_marker_page_two",
     "github_api_contract::create_marker_comment_response",
+    "github_api_contract::create_review_comment_reply_response",
+    "github_api_contract::reply_in_thread_uses_database_id",
     "github_api_contract::resolve_thread_response",
     "github_api_contract::pending_marker_action_paths",
     "github_api_contract::readiness_ready_empty",
@@ -62,13 +65,14 @@ const REQUIRED_ASSERTIONS: [&str; 20] = [
     "github_api_contract::resolve_after_idempotency",
 ];
 
-const REQUIRED_PHRASES: [&str; 14] = [
+const REQUIRED_PHRASES: [&str; 15] = [
     "gh pr view <number-or-url> --repo <owner>/<repo> --json number,url,headRefName,headRefOid,baseRefName,baseRefOid,state,isDraft,id",
     "gh pr checks <number> --repo <owner>/<repo> --json name,state,bucket,link,workflow,startedAt,completedAt",
     "GET /repos/{owner}/{repo}/commits/{head_sha}/check-runs?per_page=100&page=<n>",
     "GET /repos/{owner}/{repo}/actions/runs/{run_id}/jobs?per_page=100&page=<n>",
     "GET /repos/{owner}/{repo}/pulls/{pull_number}/comments?per_page=100&page=<n>",
     "GET /repos/{owner}/{repo}/issues/{pull_number}/comments?per_page=100&page=<n>",
+    "POST /repos/{owner}/{repo}/pulls/{pull_number}/comments/{comment_id}/replies",
     "mutation resolveReviewThread($threadId:ID!)",
     "CodeRabbit readiness truth table",
     "Permission denied cases",
