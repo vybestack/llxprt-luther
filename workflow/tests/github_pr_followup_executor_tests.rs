@@ -4003,6 +4003,27 @@ fn remediation_plan_skips_summary_invalid_feedback_from_mark_invalid_and_pending
             .and_then(serde_json::Value::as_str),
         Some("thread:PRRT_valid:hash-valid")
     );
+    // The test name promises the summary's invalid feedback is skipped from the
+    // pending marker actions for this co-present (summary + actionable) case, not
+    // just from mark_invalid. Assert that path: read the pending marker actions
+    // output (absent or present-with-actions, since a NeedsRemediation plan need
+    // not persist it) and confirm no pending action ever carries the summary
+    // item's stable_marker_key.
+    let pending_path = p10_pending_marker_actions_path(&temp);
+    if pending_path.exists() {
+        let pending = read_json(&pending_path);
+        let pending_actions = pending
+            .get("pending_actions")
+            .and_then(serde_json::Value::as_array)
+            .expect("pending_actions");
+        assert!(
+            pending_actions.iter().all(|action| action
+                .get("stable_marker_key")
+                .and_then(serde_json::Value::as_str)
+                != Some("summary:IC_summarynode:hash-summary")),
+            "summary item must never materialize a pending marker action: {pending:?}"
+        );
+    }
 }
 
 /// A summary-only clean plan must produce no pending marker action at all so the

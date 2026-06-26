@@ -17,7 +17,8 @@ use crate::engine::executors::pr_followup_artifacts::{
     ArtifactWriter, ClockSleeper, PrFollowupArtifactStore,
 };
 use crate::engine::executors::pr_followup_types::{
-    is_summary_marker_key, PrFollowupBinding, PR_FOLLOWUP_SCHEMA_VERSION,
+    is_summary_marker_key, value_has_summary_marker_key, PrFollowupBinding,
+    PR_FOLLOWUP_SCHEMA_VERSION,
 };
 use crate::engine::runner::EngineError;
 use crate::engine::transition::StepOutcome;
@@ -1405,19 +1406,6 @@ fn refresh_pending_marker_actions_from_current_artifacts(
     }
     pending_artifact["pending_actions"] = json!(actions);
     pending_artifact["refreshed_from_current_artifacts_at"] = json!(clock.now_rfc3339());
-}
-
-/// Returns true when a JSON value (a pending marker action or an evaluation
-/// result) carries a CodeRabbit summary/walkthrough `stable_marker_key`. Such
-/// values are informational only and must never be carried forward, derived
-/// into an action, posted, or resolved.
-/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P15
-/// @requirement:REQ-PRFU-020
-fn value_has_summary_marker_key(value: &Value) -> bool {
-    value
-        .get("stable_marker_key")
-        .and_then(Value::as_str)
-        .is_some_and(is_summary_marker_key)
 }
 
 fn feedback_items_by_identity(feedback: &Value) -> BTreeMap<String, Value> {

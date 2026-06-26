@@ -20,7 +20,7 @@ use crate::engine::executors::pr_followup_artifacts::{
     SystemPrFollowupFilesystem,
 };
 use crate::engine::executors::pr_followup_types::{
-    is_summary_marker_key, PlanState, PrFollowupBinding, ValidationState,
+    value_has_summary_marker_key, PlanState, PrFollowupBinding, ValidationState,
     PR_FOLLOWUP_SCHEMA_VERSION,
 };
 use crate::engine::runner::EngineError;
@@ -250,7 +250,7 @@ fn build_remediation_plan(
                 // classified "invalid" purely as a readiness signal. They are
                 // informational only and must not become mark_invalid plan
                 // entries (which would later materialize a top-level PR comment).
-                if !is_summary_plan_item(result) {
+                if !value_has_summary_marker_key(result) {
                     mark_invalid.push(feedback_plan_item(
                         result,
                         "coderabbit_feedback",
@@ -392,19 +392,6 @@ fn ci_must_fix_item(
     })
 }
 
-/// Returns true when a remediation-flow JSON value (an accepted evaluation result
-/// or a materialized plan item) is a CodeRabbit summary/walkthrough marker.
-/// Summary items are informational readiness signals and must be suppressed from
-/// `mark_invalid` routing and pending marker actions.
-/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P10
-/// @requirement:REQ-PRFU-020
-fn is_summary_plan_item(value: &Value) -> bool {
-    value
-        .get("stable_marker_key")
-        .and_then(Value::as_str)
-        .is_some_and(is_summary_marker_key)
-}
-
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P10
 /// @requirement:REQ-PRFU-013
 /// @pseudocode lines 6-8
@@ -509,7 +496,7 @@ fn write_pending_marker_actions(
         .unwrap_or_default();
     // Carry-forward pruning: drop any prior summary-keyed action so stale
     // pre-fix pending summary actions are removed instead of re-persisted.
-    pending_actions.retain(|action| !is_summary_plan_item(action));
+    pending_actions.retain(|action| !value_has_summary_marker_key(action));
     let mut seen: BTreeSet<String> = pending_actions
         .iter()
         .filter_map(|action| {
@@ -524,7 +511,7 @@ fn write_pending_marker_actions(
         // Defensive second gate: never materialize a pending action for an
         // informational summary/walkthrough marker, regardless of upstream
         // routing.
-        if is_summary_plan_item(item) {
+        if value_has_summary_marker_key(item) {
             continue;
         }
         let action = pending_marker_action(binding, item, remediation_output_head_sha);
