@@ -18,6 +18,24 @@ fn is_present_non_null(field: &Option<Value>) -> bool {
 /// @pseudocode lines 1-53
 pub const PR_FOLLOWUP_SCHEMA_VERSION: u32 = 1;
 
+/// Stable-marker-key prefix that identifies a CodeRabbit summary/walkthrough
+/// issue comment. Summary items are informational readiness signals only: they
+/// must never produce `mark_invalid` plan entries, pending marker actions, or
+/// top-level PR comments. This single literal is the canonical discriminator
+/// shared across the plan stage, the live-refresh path, and the mutation gate.
+/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P09
+/// @requirement:REQ-PRFU-020
+pub const SUMMARY_MARKER_KEY_PREFIX: &str = "summary:";
+
+/// Returns true when a stable marker key identifies a CodeRabbit
+/// summary/walkthrough item (informational only).
+/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P09
+/// @requirement:REQ-PRFU-020
+#[must_use]
+pub fn is_summary_marker_key(stable_marker_key: &str) -> bool {
+    stable_marker_key.starts_with(SUMMARY_MARKER_KEY_PREFIX)
+}
+
 /// Typed terminal `overall_state` produced by PR check watching. Modeling the
 /// routing state as an enum makes invalid states unrepresentable instead of
 /// relying on ad hoc string comparisons against loosely validated JSON.

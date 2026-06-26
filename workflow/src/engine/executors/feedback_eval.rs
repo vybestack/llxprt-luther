@@ -19,7 +19,7 @@ use crate::engine::executors::pr_followup_artifacts::{
     ArtifactWriter, ClockSleeper, PrFollowupArtifactStore, SystemPrFollowupFilesystem,
 };
 use crate::engine::executors::pr_followup_types::{
-    EvaluationState, PrFollowupBinding, PR_FOLLOWUP_SCHEMA_VERSION,
+    EvaluationState, PrFollowupBinding, PR_FOLLOWUP_SCHEMA_VERSION, SUMMARY_MARKER_KEY_PREFIX,
 };
 use crate::engine::runner::EngineError;
 use crate::engine::transition::StepOutcome;
@@ -801,7 +801,7 @@ fn deterministic_feedback_evaluation(item: &FeedbackItem, accepted_at: String) -
 fn is_coderabbit_summary_item(item: &FeedbackItem) -> bool {
     let key = item.stable_marker_key.to_ascii_lowercase();
     let body = item.body.to_ascii_lowercase();
-    key.starts_with("summary:")
+    key.starts_with(SUMMARY_MARKER_KEY_PREFIX)
         || body.contains("summary by coderabbit")
         || body.contains("summarize by coderabbit")
         || (body.contains("walkthrough") && body.contains("coderabbit"))

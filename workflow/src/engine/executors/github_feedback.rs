@@ -16,7 +16,9 @@ use crate::engine::executors::github_pr::GithubPrCommandRunner;
 use crate::engine::executors::pr_followup_artifacts::{
     ArtifactWriter, ClockSleeper, PrFollowupArtifactStore,
 };
-use crate::engine::executors::pr_followup_types::{PrFollowupBinding, PR_FOLLOWUP_SCHEMA_VERSION};
+use crate::engine::executors::pr_followup_types::{
+    is_summary_marker_key, PrFollowupBinding, PR_FOLLOWUP_SCHEMA_VERSION,
+};
 use crate::engine::runner::EngineError;
 use crate::engine::transition::StepOutcome;
 
@@ -1373,6 +1375,10 @@ fn refresh_pending_marker_actions_from_current_artifacts(
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
+    // Carry-forward pruning: drop any stale summary-keyed action loaded from a
+    // pre-fix pending-feedback-marker-actions.json so reruns never re-persist or
+    // post an informational summary marker.
+    actions.retain(|action| !value_has_summary_marker_key(action));
     let mut seen = actions
         .iter()
         .map(pending_action_collision_key)
@@ -1399,6 +1405,19 @@ fn refresh_pending_marker_actions_from_current_artifacts(
     }
     pending_artifact["pending_actions"] = json!(actions);
     pending_artifact["refreshed_from_current_artifacts_at"] = json!(clock.now_rfc3339());
+}
+
+/// Returns true when a JSON value (a pending marker action or an evaluation
+/// result) carries a CodeRabbit summary/walkthrough `stable_marker_key`. Such
+/// values are informational only and must never be carried forward, derived
+/// into an action, posted, or resolved.
+/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P15
+/// @requirement:REQ-PRFU-020
+fn value_has_summary_marker_key(value: &Value) -> bool {
+    value
+        .get("stable_marker_key")
+        .and_then(Value::as_str)
+        .is_some_and(is_summary_marker_key)
 }
 
 fn feedback_items_by_identity(feedback: &Value) -> BTreeMap<String, Value> {
@@ -1570,6 +1589,12 @@ fn current_evaluation_marker_action(
     params: &Value,
     clock: &dyn ClockSleeper,
 ) -> Option<Value> {
+    // CodeRabbit summary/walkthrough evaluations are deterministically classified
+    // "invalid" purely as a readiness signal. Never derive a live marker action
+    // for them on the refresh path, or they would post a top-level PR comment.
+    if value_has_summary_marker_key(evaluation) {
+        return None;
+    }
     let decision = evaluation.get("decision").and_then(Value::as_str)?;
     let action_kind = match decision {
         "invalid" => "comment_invalid",
@@ -1887,6 +1912,12 @@ fn validate_marker_actions_before_mutation(actions: &[PendingMarkerAction]) -> O
         if action.action_kind == "skip_needs_user_judgment" {
             continue;
         }
+        // Informational summary/walkthrough markers are skipped at the mutation
+        // gate (post nothing, resolve nothing), so they cannot violate any
+        // mutation precondition.
+        if is_summary_marker_key(&action.stable_marker_key) {
+            continue;
+        }
         if !action.item_id.is_empty() && !seen_item_ids.insert(action.item_id.clone()) {
             violations.push(json!({
                 "item_id": action.item_id,
@@ -1936,8 +1967,6 @@ fn validate_marker_actions_before_mutation(actions: &[PendingMarkerAction]) -> O
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P15
 /// @requirement:REQ-PRFU-015,REQ-PRFU-016,REQ-PRFU-017,REQ-PRFU-026
 /// @pseudocode lines 43-49
-#[allow(clippy::too_many_arguments)]
-// Pre-existing marker action workflow; split in a dedicated refactor stage.
 fn marker_action_requires_review_thread_reply(action: &PendingMarkerAction) -> bool {
     matches!(
         action.action_kind.as_str(),
@@ -1950,6 +1979,8 @@ fn marker_action_requires_review_thread_reply(action: &PendingMarkerAction) -> b
         || action.stable_marker_key.starts_with("thread:"))
 }
 
+#[allow(clippy::too_many_arguments)]
+// Pre-existing marker action workflow; split in a dedicated refactor stage.
 #[allow(clippy::too_many_lines)]
 fn process_marker_action(
     binding: &PrFollowupBinding,
@@ -1965,6 +1996,17 @@ fn process_marker_action(
 ) -> Result<MarkerActionOutcome, EngineError> {
     let comment_key = marker_action_key(binding, &action, "comment");
     let resolution_key = marker_action_key(binding, &action, "resolution");
+    // Final safety net: a CodeRabbit summary/walkthrough marker is informational
+    // only. Even if a stale/pre-fix summary action slips past the earlier gates,
+    // it must post nothing and resolve nothing here.
+    if is_summary_marker_key(&action.stable_marker_key) {
+        return Ok(skipped_summary_marker_outcome(
+            action,
+            comment_key,
+            resolution_key,
+            clock,
+        ));
+    }
     if action.action_kind == "skip_needs_user_judgment" {
         return Ok(skipped_needs_user_judgment_outcome(
             action,
@@ -2270,6 +2312,74 @@ fn render_marker_comment_body(binding: &PrFollowupBinding, action: &PendingMarke
         binding.run_id
     );
     format!("{visible}\n\n{marker}\n")
+}
+
+/// Final-safety-net outcome for an informational CodeRabbit summary/walkthrough
+/// marker that reached the mutation gate. Posts nothing and resolves nothing,
+/// recording a clean `skipped` entry so the marker report stays complete and no
+/// top-level PR comment is ever created (even on reruns).
+/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P15
+/// @requirement:REQ-PRFU-020
+fn skipped_summary_marker_outcome(
+    action: PendingMarkerAction,
+    comment_key: String,
+    resolution_key: String,
+    clock: &dyn ClockSleeper,
+) -> MarkerActionOutcome {
+    let skipped = vec![
+        json!({
+            "idempotency_key": comment_key,
+            "action_id": action.value.get("action_id").cloned().unwrap_or(Value::Null),
+            "reason": "coderabbit_summary_informational_only",
+            "action_kind": action.action_kind
+        }),
+        json!({
+            "idempotency_key": resolution_key,
+            "action_id": action.value.get("action_id").cloned().unwrap_or(Value::Null),
+            "reason": "coderabbit_summary_informational_only",
+            "action_kind": "resolve_thread"
+        }),
+    ];
+    let mut updated_action = action.value.clone();
+    if let Some(object) = updated_action.as_object_mut() {
+        object.insert("status".to_string(), json!("skipped"));
+        object.insert("comment_idempotency_key".to_string(), json!(comment_key));
+        object.insert(
+            "resolution_idempotency_key".to_string(),
+            json!(resolution_key),
+        );
+        object.insert("updated_at".to_string(), json!(clock.now_rfc3339()));
+        object.insert(
+            "skipped_reason".to_string(),
+            json!("coderabbit_summary_informational_only"),
+        );
+    }
+    let audit = marker_action_audit(
+        &action,
+        "skipped",
+        &comment_key,
+        None,
+        &ResolveAudit {
+            resolve_attempted: false,
+            resolve_succeeded: false,
+            resolve_error: None,
+            final_thread_resolved_state: None,
+        },
+    );
+    MarkerActionOutcome {
+        action,
+        status: "skipped".to_string(),
+        comment_key,
+        resolution_key,
+        posted_comment: None,
+        resolved_thread: None,
+        skipped,
+        partial: None,
+        retryable: None,
+        failed: None,
+        audit,
+        updated_action,
+    }
 }
 
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P15
