@@ -4,9 +4,14 @@ on:
   pull_request:
     branches:
       - main
+  workflow_dispatch:
 
 permissions:
   contents: read
+
+concurrency:
+  group: pr-quality-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
@@ -21,6 +26,8 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
 
       - name: Cache cargo + target
         uses: Swatinem/rust-cache@v2
@@ -31,18 +38,22 @@ jobs:
   lint:
     name: Lint (clippy + structural)
     runs-on: ubuntu-latest
+    env:
+      CLIPPY_CONF_DIR: .github/clippy
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
 
       - name: Cache cargo + target
         uses: Swatinem/rust-cache@v2
 
       - name: Run clippy strict profile
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
       - name: Enforce no runtime stubs/TODO markers
         run: cargo xtask guard
@@ -64,7 +75,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Run tests
-        run: cargo test --lib --tests
+        run: cargo test --workspace --all-features --lib --tests
 
   coverage:
     name: Coverage (llvm-cov gate)
@@ -86,7 +97,9 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Install cargo-llvm-cov
-        run: cargo install cargo-llvm-cov --locked
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
 
       - name: Run coverage gate
         run: cargo coverage

@@ -14,7 +14,15 @@ const FILE_LINES_WARN: usize = 750;
 const RELEASE_BINARY_NAME: &str = "luther-workflow";
 const DEFAULT_HOMEBREW_TAP_REPO: &str = "acoliver/homebrew-tap";
 const DEFAULT_HOMEBREW_FORMULA_NAME: &str = "luther-workflow";
-const CLIPPY_ARGS: [&str; 5] = ["clippy", "--all-targets", "--", "-D", "warnings"];
+const CLIPPY_ARGS: [&str; 7] = [
+    "clippy",
+    "--workspace",
+    "--all-targets",
+    "--all-features",
+    "--",
+    "-D",
+    "warnings",
+];
 
 fn main() {
     if let Err(error) = run() {
@@ -39,7 +47,13 @@ fn run() -> Result<()> {
             "cargo fmt",
         ),
         Some("clippy") => run_checked(command("cargo", CLIPPY_ARGS), "cargo clippy"),
-        Some("test") => run_checked(command("cargo", ["test", "--lib", "--tests"]), "cargo test"),
+        Some("test") => run_checked(
+            command(
+                "cargo",
+                ["test", "--workspace", "--all-features", "--lib", "--tests"],
+            ),
+            "cargo test",
+        ),
         Some(cmd) => bail!("unknown xtask command: {cmd}"),
         None => {
             eprintln!(
@@ -58,7 +72,13 @@ fn qa() -> Result<()> {
     )?;
     run_checked(command("cargo", CLIPPY_ARGS), "cargo clippy")?;
     complexity()?;
-    run_checked(command("cargo", ["test", "--lib", "--tests"]), "cargo test")?;
+    run_checked(
+        command(
+            "cargo",
+            ["test", "--workspace", "--all-features", "--lib", "--tests"],
+        ),
+        "cargo test",
+    )?;
     coverage()
 }
 
@@ -95,7 +115,15 @@ fn coverage() -> Result<()> {
 
     let mut run_cmd = command(
         "cargo",
-        ["llvm-cov", "--no-report", "--lib", "--tests", "-q"],
+        [
+            "llvm-cov",
+            "--no-report",
+            "--workspace",
+            "--all-features",
+            "--lib",
+            "--tests",
+            "-q",
+        ],
     );
     run_cmd.env("LLVM_COV", &llvm_cov);
     run_cmd.env("LLVM_PROFDATA", &llvm_profdata);
@@ -183,7 +211,14 @@ fn complexity() -> Result<()> {
         "lizard complexity gate",
     )?;
 
-    enforce_file_line_limits(&workspace_root.join("src"))
+    enforce_file_line_limits(&workspace_root.join("src"))?;
+
+    let tests_dir = workspace_root.join("tests");
+    if tests_dir.is_dir() {
+        enforce_file_line_limits(&tests_dir)?;
+    }
+
+    Ok(())
 }
 
 fn release(tag_arg: Option<&str>) -> Result<()> {
