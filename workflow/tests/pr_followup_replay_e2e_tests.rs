@@ -1046,6 +1046,79 @@ fn replay_green_path_reaches_log_completion() {
     );
 }
 
+/// Predicate: a POST to the top-level PR issue-comments endpoint (where a stray
+/// summary marker would be posted as PR-level noise).
+fn is_top_level_issue_comment_post(call: &[String]) -> bool {
+    call.iter().any(|arg| arg == "POST")
+        && call.iter().any(|arg| arg.contains("/issues/"))
+        && call.iter().any(|arg| arg.contains("/comments"))
+}
+
+/// A ready PR whose only CodeRabbit feedback is a summary/walkthrough issue
+/// comment must flow evaluation -> plan -> marker execution without ever
+/// emitting a `mark_invalid` entry, a pending marker action, or a top-level PR
+/// comment for the summary. Reruns must stay idempotent (no duplicate noise).
+/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P18
+/// @requirement:REQ-PRFU-020
+#[test]
+fn replay_coderabbit_summary_posts_no_top_level_comment_and_is_idempotent() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let scenario = ScenarioFixtures::ready_no_actionable();
+    let run = run_tail(&scenario, &temp);
+
+    assert_success_at_log_completion(&run);
+
+    // Plan stage: summary never routes into mark_invalid; the plan is clean.
+    let plan = read_artifact(&run, "pr-remediation-plan");
+    assert_eq!(
+        plan.get("plan_state").and_then(Value::as_str),
+        Some("clean"),
+        "a summary-only ready PR must produce a clean plan"
+    );
+    assert!(
+        plan.get("mark_invalid")
+            .and_then(Value::as_array)
+            .expect("mark_invalid")
+            .is_empty(),
+        "summary feedback must not populate mark_invalid: {plan:?}"
+    );
+
+    // Marker stage: no top-level PR comment posted for the summary.
+    let marker = read_artifact(&run, "pr-feedback-marker-report");
+    assert_eq!(
+        marker.get("marker_state").and_then(Value::as_str),
+        Some("complete"),
+        "summary-only marker run must complete cleanly"
+    );
+    assert!(
+        marker
+            .get("posted_comments")
+            .and_then(Value::as_array)
+            .expect("posted_comments")
+            .is_empty(),
+        "no marker comment may be posted for a summary: {marker:?}"
+    );
+    assert!(
+        !marker
+            .get("action_audit")
+            .and_then(Value::as_array)
+            .expect("action_audit")
+            .iter()
+            .any(|audit| audit
+                .get("stable_marker_key")
+                .and_then(Value::as_str)
+                .is_some_and(|key| key.starts_with("summary:"))),
+        "no marker action may be derived for a summary item: {marker:?}"
+    );
+    assert_eq!(
+        run.handles
+            .github
+            .count_calls(is_top_level_issue_comment_post),
+        0,
+        "a summary must never trigger a top-level PR issue-comment POST"
+    );
+}
+
 // ============================================================================
 // Scenario 2: Failed CI is fixed and loops back to success.
 // ============================================================================

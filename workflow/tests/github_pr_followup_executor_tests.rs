@@ -3939,6 +3939,146 @@ fn remediation_plan_invalid_out_of_scope_only_writes_pending_marker_actions_and_
     );
 }
 
+/// A deterministically-`invalid` CodeRabbit summary/walkthrough item must never
+/// be routed into `mark_invalid` nor produce a pending marker action, while a
+/// co-present actionable review thread is still routed normally.
+/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P10
+/// @requirement:REQ-PRFU-020
+#[test]
+fn remediation_plan_skips_summary_invalid_feedback_from_mark_invalid_and_pending_actions() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut summary = p10_accepted(
+        "cr-summary-1",
+        "summary:IC_summarynode:hash-summary",
+        "hash-summary",
+        "invalid",
+    );
+    summary["source"] = serde_json::json!("deterministic");
+    write_p10_inputs(
+        &temp,
+        serde_json::json!([]),
+        serde_json::json!([]),
+        serde_json::json!([
+            summary,
+            p10_accepted(
+                "cr-valid",
+                "thread:PRRT_valid:hash-valid",
+                "hash-valid",
+                "valid"
+            )
+        ]),
+        serde_json::json!([]),
+        serde_json::json!([]),
+    );
+    let mut context = p10_context(&temp);
+    let outcome = PrRemediationPlanExecutor
+        .execute(&mut context, &p10_params(&temp))
+        .expect("build remediation plan with summary item");
+    let plan = read_json(&p10_plan_path(&temp));
+
+    assert_expected_outcome(
+        outcome,
+        StepOutcome::Fixable,
+        "summary-only suppression must not change the actionable must_fix routing",
+    );
+    assert!(
+        plan.get("mark_invalid")
+            .and_then(serde_json::Value::as_array)
+            .expect("mark_invalid")
+            .is_empty(),
+        "summary item must not be routed into mark_invalid: {plan:?}"
+    );
+    let must_fix = plan
+        .get("must_fix")
+        .and_then(serde_json::Value::as_array)
+        .expect("must_fix");
+    assert_eq!(
+        must_fix.len(),
+        1,
+        "actionable thread must remain in must_fix"
+    );
+    assert_eq!(
+        must_fix[0]
+            .get("stable_marker_key")
+            .and_then(serde_json::Value::as_str),
+        Some("thread:PRRT_valid:hash-valid")
+    );
+    // The test name promises the summary's invalid feedback is skipped from the
+    // pending marker actions for this co-present (summary + actionable) case, not
+    // just from mark_invalid. Assert that path: read the pending marker actions
+    // output (absent or present-with-actions, since a NeedsRemediation plan need
+    // not persist it) and confirm no pending action ever carries the summary
+    // item's stable_marker_key.
+    let pending_path = p10_pending_marker_actions_path(&temp);
+    if pending_path.exists() {
+        let pending = read_json(&pending_path);
+        let pending_actions = pending
+            .get("pending_actions")
+            .and_then(serde_json::Value::as_array)
+            .expect("pending_actions");
+        assert!(
+            pending_actions.iter().all(|action| action
+                .get("stable_marker_key")
+                .and_then(serde_json::Value::as_str)
+                != Some("summary:IC_summarynode:hash-summary")),
+            "summary item must never materialize a pending marker action: {pending:?}"
+        );
+    }
+}
+
+/// A summary-only clean plan must produce no pending marker action at all so the
+/// marker pipeline can never post a top-level PR comment for it.
+/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P10
+/// @requirement:REQ-PRFU-020
+#[test]
+fn remediation_plan_summary_only_writes_no_pending_marker_actions() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut summary = p10_accepted(
+        "cr-summary-1",
+        "summary:IC_summarynode:hash-summary",
+        "hash-summary",
+        "invalid",
+    );
+    summary["source"] = serde_json::json!("deterministic");
+    write_p10_inputs(
+        &temp,
+        serde_json::json!([]),
+        serde_json::json!([]),
+        serde_json::json!([summary]),
+        serde_json::json!([]),
+        serde_json::json!([]),
+    );
+    let mut context = p10_context(&temp);
+    let outcome = PrRemediationPlanExecutor
+        .execute(&mut context, &p10_params(&temp))
+        .expect("build summary-only clean plan");
+    let plan = read_json(&p10_plan_path(&temp));
+
+    assert_expected_outcome(
+        outcome,
+        StepOutcome::Success,
+        "a PR whose only CodeRabbit feedback is a summary resolves to clean",
+    );
+    assert_eq!(
+        plan.get("plan_state").and_then(serde_json::Value::as_str),
+        Some("clean")
+    );
+    // A summary-only clean plan must materialize no pending marker action: the
+    // artifact is either absent entirely or present with an empty action list.
+    let pending_path = p10_pending_marker_actions_path(&temp);
+    if pending_path.exists() {
+        let actions = read_json(&pending_path);
+        assert!(
+            actions
+                .get("pending_actions")
+                .and_then(serde_json::Value::as_array)
+                .expect("pending_actions")
+                .is_empty(),
+            "summary item must not materialize any pending marker action: {actions:?}"
+        );
+    }
+}
+
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P10
 /// @requirement:REQ-PRFU-013
 /// @pseudocode lines 7-10
@@ -6151,6 +6291,234 @@ fn marker_executor_derives_current_invalid_actions_without_pending_artifact() {
             .len(),
         1
     );
+}
+
+/// Count POST calls the marker runner issued against the top-level PR
+/// issue-comments endpoint (where a stray summary marker would land).
+fn p15_top_level_issue_comment_posts(runner: &P15MarkerRunner) -> usize {
+    runner
+        .calls()
+        .into_iter()
+        .filter(|call| {
+            call.iter().any(|arg| arg == "POST")
+                && call.iter().any(|arg| arg.contains("/issues/1910/comments"))
+        })
+        .count()
+}
+
+/// The live-refresh path must never derive a marker action for a CodeRabbit
+/// summary evaluation, while still deriving one for an actionable invalid
+/// review-thread evaluation present in the same artifacts.
+/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P15
+/// @requirement:REQ-PRFU-020
+#[test]
+fn marker_refresh_suppresses_summary_but_keeps_actionable_invalid_action() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut summary = p10_accepted(
+        "cr-summary-1",
+        "summary:IC_summarynode:hash-summary",
+        "hash-summary",
+        "invalid",
+    );
+    summary["source"] = serde_json::json!("deterministic");
+    write_p10_inputs(
+        &temp,
+        serde_json::json!([]),
+        serde_json::json!([]),
+        serde_json::json!([
+            summary,
+            p10_accepted("cr-invalid", "thread-invalid", "hash-invalid", "invalid")
+        ]),
+        serde_json::json!([]),
+        serde_json::json!([]),
+    );
+    let runner = P15MarkerRunner::default();
+    let mut context = p10_context(&temp);
+    let outcome = GithubFeedbackMarkerExecutorWithRunner::new(runner.clone(), FixedClock)
+        .execute(&mut context, &p10_params(&temp))
+        .expect("mark feedback with co-present summary and invalid thread");
+    assert_expected_outcome(
+        outcome,
+        StepOutcome::Success,
+        "summary suppression must leave the actionable invalid review-thread action intact",
+    );
+    let report = read_json(&p15_marker_report_path(&temp));
+    let posted = report
+        .get("posted_comments")
+        .and_then(serde_json::Value::as_array)
+        .expect("posted_comments");
+    assert_eq!(
+        posted.len(),
+        1,
+        "only the actionable invalid thread may post a marker comment: {report:?}"
+    );
+    assert!(
+        report
+            .get("action_audit")
+            .and_then(serde_json::Value::as_array)
+            .expect("action_audit")
+            .iter()
+            .all(|audit| audit
+                .get("stable_marker_key")
+                .and_then(serde_json::Value::as_str)
+                != Some("summary:IC_summarynode:hash-summary")),
+        "no marker action may be derived for the summary evaluation: {report:?}"
+    );
+    assert_eq!(
+        p15_top_level_issue_comment_posts(&runner),
+        0,
+        "summary must never post a top-level PR comment"
+    );
+}
+
+/// A stale, pre-fix summary `comment_invalid` action persisted in
+/// pending-feedback-marker-actions.json must be pruned/skipped: no top-level PR
+/// comment is posted and the marker report records no posted comment for it.
+/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P15
+/// @requirement:REQ-PRFU-020
+#[test]
+fn marker_prunes_stale_summary_pending_action_and_posts_no_top_level_comment() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut summary = p10_accepted(
+        "cr-summary-1",
+        "summary:IC_summarynode:hash-summary",
+        "hash-summary",
+        "invalid",
+    );
+    summary["source"] = serde_json::json!("deterministic");
+    write_p10_inputs(
+        &temp,
+        serde_json::json!([]),
+        serde_json::json!([]),
+        serde_json::json!([summary]),
+        serde_json::json!([]),
+        serde_json::json!([]),
+    );
+    write_stale_summary_pending_action(&temp);
+
+    let runner = P15MarkerRunner::default();
+    let mut context = p10_context(&temp);
+    let outcome = GithubFeedbackMarkerExecutorWithRunner::new(runner.clone(), FixedClock)
+        .execute(&mut context, &p10_params(&temp))
+        .expect("mark feedback with stale summary pending action");
+    assert_expected_outcome(
+        outcome,
+        StepOutcome::Success,
+        "a stale summary pending action must not fail or post a top-level PR comment",
+    );
+    let report = read_json(&p15_marker_report_path(&temp));
+    assert!(
+        report
+            .get("posted_comments")
+            .and_then(serde_json::Value::as_array)
+            .expect("posted_comments")
+            .is_empty(),
+        "no comment may be posted for a stale summary action: {report:?}"
+    );
+    assert_eq!(
+        p15_top_level_issue_comment_posts(&runner),
+        0,
+        "stale summary action must not post a top-level PR comment"
+    );
+}
+
+/// Rerunning the marker step over a stale summary pending action must remain
+/// idempotent: still no posted comment and no second top-level PR comment.
+/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P15
+/// @requirement:REQ-PRFU-020
+#[test]
+fn marker_rerun_does_not_duplicate_stale_summary_pending_action() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut summary = p10_accepted(
+        "cr-summary-1",
+        "summary:IC_summarynode:hash-summary",
+        "hash-summary",
+        "invalid",
+    );
+    summary["source"] = serde_json::json!("deterministic");
+    write_p10_inputs(
+        &temp,
+        serde_json::json!([]),
+        serde_json::json!([]),
+        serde_json::json!([summary]),
+        serde_json::json!([]),
+        serde_json::json!([]),
+    );
+    write_stale_summary_pending_action(&temp);
+
+    let runner = P15MarkerRunner::default();
+    let params = p10_params(&temp);
+    let mut context = p10_context(&temp);
+    GithubFeedbackMarkerExecutorWithRunner::new(runner.clone(), FixedClock)
+        .execute(&mut context, &params)
+        .expect("first marker pass over stale summary action");
+    GithubFeedbackMarkerExecutorWithRunner::new(runner.clone(), FixedClock)
+        .execute(&mut context, &params)
+        .expect("rerun marker pass over stale summary action");
+    assert_eq!(
+        p15_top_level_issue_comment_posts(&runner),
+        0,
+        "reruns must never post a top-level PR comment for a summary marker"
+    );
+    let report = read_json(&p15_marker_report_path(&temp));
+    assert!(
+        report
+            .get("posted_comments")
+            .and_then(serde_json::Value::as_array)
+            .expect("posted_comments")
+            .is_empty(),
+        "rerun must still post no comment for a stale summary action: {report:?}"
+    );
+}
+
+/// Persist a pre-fix pending-feedback-marker-actions.json containing a stale
+/// summary `comment_invalid` action, exactly as a pre-fix run would have.
+/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P15
+/// @requirement:REQ-PRFU-020
+fn write_stale_summary_pending_action(temp: &tempfile::TempDir) {
+    let store = PrFollowupArtifactStore::new(temp.path().join("artifacts"));
+    let binding = p10_binding();
+    store
+        .write_json_artifact(
+            &binding,
+            "pending-feedback-marker-actions",
+            "build_remediation_plan",
+            7,
+            &serde_json::json!({
+                "pending_actions": [{
+                    "action_id": "comment_invalid:summary:IC_summarynode:hash-summary:hash-summary:none",
+                    "action_kind": "comment_invalid",
+                    "item_id": "cr-summary-1",
+                    "stable_marker_key": "summary:IC_summarynode:hash-summary",
+                    "source_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "remediation_input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "remediation_output_head_sha": serde_json::Value::Null,
+                    "remediation_output_head": "none",
+                    "body_hash": "hash-summary",
+                    "idempotency_key": "run-p10:example:workflow:1910:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:none:summary:IC_summarynode:hash-summary:comment_invalid",
+                    "resolution_required": false,
+                    "thread_id": serde_json::Value::Null,
+                    "comment_database_id": serde_json::Value::Null,
+                    "response_text": "This is an informational CodeRabbit summary/walkthrough comment rather than an actionable review item, so no code change is required.",
+                    "status": "pending",
+                    "reason": "CodeRabbit summary/walkthrough comments are informational.",
+                    "original_feedback_identity": {
+                        "item_id": "cr-summary-1",
+                        "stable_marker_key": "summary:IC_summarynode:hash-summary",
+                        "body_hash": "hash-summary",
+                        "source_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                        "thread_id": serde_json::Value::Null,
+                        "comment_database_id": serde_json::Value::Null
+                    }
+                }],
+                "carry_forward_from_artifact_sequence": serde_json::Value::Null,
+                "marker_policy": {},
+                "updated_at": "2026-04-30T00:00:00Z"
+            }),
+            None,
+            &FixedClock,
+        )
+        .expect("write stale summary pending action");
 }
 
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P15

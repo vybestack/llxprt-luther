@@ -89,6 +89,30 @@
       "source": "review_thread",
       "raw_node_id": "PRRT_example",
       "commit_sha": "1111111111111111111111111111111111111111"
+    },
+    {
+      "item_id": "cr-summary-1",
+      "stable_marker_key": "summary:IC_summary_example:sha256:summary",
+      "thread_id": null,
+      "comment_id": "IC_summary_example",
+      "review_id": null,
+      "author_login": "coderabbitai[bot]",
+      "author_association": "NONE",
+      "bot_identity": "coderabbitai[bot]",
+      "path": null,
+      "line": null,
+      "side": null,
+      "body": "## Summary by CodeRabbit\n\n- New feature: adds the regression test harness.\n\n## Walkthrough\n\nCodeRabbit finished reviewing this pull request.",
+      "body_hash": "sha256:summary",
+      "url": "https://github.com/luther/workflow/pull/1910#issuecomment-4796092600",
+      "created_at": "2026-04-30T00:01:30Z",
+      "updated_at": "2026-04-30T00:01:30Z",
+      "resolved": false,
+      "outdated": false,
+      "resolution_state_available": false,
+      "source": "issue_comment",
+      "raw_node_id": "IC_summary_example",
+      "commit_sha": "1111111111111111111111111111111111111111"
     }
   ]
 }

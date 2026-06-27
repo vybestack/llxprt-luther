@@ -20,7 +20,8 @@ use crate::engine::executors::pr_followup_artifacts::{
     SystemPrFollowupFilesystem,
 };
 use crate::engine::executors::pr_followup_types::{
-    PlanState, PrFollowupBinding, ValidationState, PR_FOLLOWUP_SCHEMA_VERSION,
+    value_has_summary_marker_key, PlanState, PrFollowupBinding, ValidationState,
+    PR_FOLLOWUP_SCHEMA_VERSION,
 };
 use crate::engine::runner::EngineError;
 use crate::engine::transition::StepOutcome;
@@ -244,12 +245,20 @@ fn build_remediation_plan(
                 &binding,
                 &inputs.evaluations,
             )),
-            Some("invalid" | "out_of_scope") => mark_invalid.push(feedback_plan_item(
-                result,
-                "coderabbit_feedback",
-                &binding,
-                &inputs.evaluations,
-            )),
+            Some("invalid" | "out_of_scope") => {
+                // CodeRabbit summary/walkthrough comments are deterministically
+                // classified "invalid" purely as a readiness signal. They are
+                // informational only and must not become mark_invalid plan
+                // entries (which would later materialize a top-level PR comment).
+                if !value_has_summary_marker_key(result) {
+                    mark_invalid.push(feedback_plan_item(
+                        result,
+                        "coderabbit_feedback",
+                        &binding,
+                        &inputs.evaluations,
+                    ));
+                }
+            }
             Some("needs_user_judgment") => needs_user_judgment.push(feedback_plan_item(
                 result,
                 "coderabbit_feedback",
@@ -485,6 +494,9 @@ fn write_pending_marker_actions(
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
+    // Carry-forward pruning: drop any prior summary-keyed action so stale
+    // pre-fix pending summary actions are removed instead of re-persisted.
+    pending_actions.retain(|action| !value_has_summary_marker_key(action));
     let mut seen: BTreeSet<String> = pending_actions
         .iter()
         .filter_map(|action| {
@@ -496,6 +508,12 @@ fn write_pending_marker_actions(
         .collect();
 
     for item in items {
+        // Defensive second gate: never materialize a pending action for an
+        // informational summary/walkthrough marker, regardless of upstream
+        // routing.
+        if value_has_summary_marker_key(item) {
+            continue;
+        }
         let action = pending_marker_action(binding, item, remediation_output_head_sha);
         if let Some(key) = action.get("idempotency_key").and_then(Value::as_str) {
             if seen.insert(key.to_string()) {

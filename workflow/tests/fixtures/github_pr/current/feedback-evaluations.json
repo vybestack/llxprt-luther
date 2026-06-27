@@ -19,7 +19,7 @@
   },
   "step_order_index": 6,
   "producer_step_id": "evaluate_coderabbit_feedback",
-  "items_seen": 1,
+  "items_seen": 2,
   "accepted_results": [
     {
       "item_id": "cr-thread-1",
@@ -32,6 +32,20 @@
       "accepted_at": "2026-04-30T00:14:00Z",
       "attempt_count": 1,
       "source": "new",
+      "reuse_state": "not_reused"
+    },
+    {
+      "item_id": "cr-summary-1",
+      "stable_marker_key": "summary:IC_summary_example:sha256:summary",
+      "body_hash": "sha256:summary",
+      "head_sha": "1111111111111111111111111111111111111111",
+      "decision": "invalid",
+      "reason": "CodeRabbit summary/walkthrough comments are informational and do not identify a specific actionable feedback item.",
+      "recommended_action": "No code changes or review-thread response are required for the summary comment.",
+      "response_text": "This is an informational CodeRabbit summary/walkthrough comment rather than an actionable review item, so no code change is required.",
+      "accepted_at": "2026-04-30T00:14:00Z",
+      "attempt_count": 0,
+      "source": "deterministic",
       "reuse_state": "not_reused"
     }
   ],
