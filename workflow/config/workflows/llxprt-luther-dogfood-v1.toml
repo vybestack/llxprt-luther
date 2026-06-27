@@ -397,14 +397,14 @@ description = "Invoke llxprt to remediate verification or evaluator feedback"
 
 [steps.parameters]
 profile = "{profile_remediating}"
-timeout_seconds = 1800
+timeout_seconds = 3600
 stdout_file = "{artifact_dir}/remediate-stdout.txt"
 stderr_file = "{artifact_dir}/remediate-stderr.txt"
 outcome_on_stdout = { REMEDIATION_COMPLETE = "success", REMEDIATION_SYSTEM_ERROR = "fatal" }
 success_on_existing_diff = true
-
-success_on_diff = false
-idle_timeout_seconds = 300
+success_on_diff = true
+early_success_on_diff = false
+idle_timeout_seconds = 1800
 
 
 prompt = """

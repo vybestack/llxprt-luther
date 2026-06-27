@@ -1381,7 +1381,7 @@ fn render_remediation_prompt(
         })
         .unwrap_or_default();
     format!(
-        "PR follow-up remediation for {}/{}, PR #{} at head {}.\n\nRead {}. Fix only pr-remediation-plan.json.must_fix. Do not fix pr-remediation-plan.json.mark_invalid, out_of_scope feedback, or pr-remediation-plan.json.needs_user_judgment. Write {}. Use only canonical statuses fixed | changed | already_satisfied | not_reproduced | not_fixed | skipped | failed. Include structured evidence for every result item. Required result schema: every result item must include input_head_sha set to {} and output_head_sha set to the current PR head after remediation; every result item must also include response_text, a non-empty reviewer-facing message that Luther will post verbatim on the original review thread (do not post it yourself); fixed or changed results must include evidence.current_head_sha equal to the current PR head; already_satisfied or not_reproduced results must include evidence.current_head_sha equal to {}. already_satisfied results must also include evidence.commands with at least one command object whose status is passed and whose argv array is non-empty. Free-form-only completion is not acceptable; pr-remediation-result.json is required. Write only the requested canonical current pr-remediation-result.json path; do not create, copy, or modify any pr-followup/history files or artifact metadata fields.{}",
+        "PR follow-up remediation for {}/{}, PR #{} at head {}.\n\nRead {}. Fix only pr-remediation-plan.json.must_fix. Do not fix pr-remediation-plan.json.mark_invalid, out_of_scope feedback, or pr-remediation-plan.json.needs_user_judgment. Write {}. Use only canonical statuses fixed | changed | already_satisfied | not_reproduced | not_fixed | skipped | failed. Include structured evidence for every result item. Required result schema: every result item must include input_head_sha set to {} and output_head_sha set to the current PR head after remediation; every result item must also include response_text, a non-empty reviewer-facing message that Luther will post verbatim on the original review thread (do not post it yourself); fixed or changed results must include evidence.current_head_sha equal to the current PR head; already_satisfied or not_reproduced results must include evidence.current_head_sha equal to {}. already_satisfied results must also include evidence.commands with at least one command object whose status is passed and whose argv array is non-empty. Copy pr-remediation-plan.json artifact_sequence into top-level plan_artifact_sequence and retry_scope.plan_artifact_sequence; include retry_scope.run_id and retry_scope.input_head_sha. Free-form-only completion is not acceptable; pr-remediation-result.json is required. Write only the requested canonical current pr-remediation-result.json path; do not create, copy, or modify any pr-followup/history files or artifact metadata fields.{}",
         binding.repository_owner,
         binding.repository_name,
         binding.pr_number,
@@ -1921,7 +1921,7 @@ fn validate_remediation_result(
     let pr = store.read_current_json(&fallback, "pr")?;
     let binding = binding_from_value(&pr)?;
     let plan = store.read_current_json(&binding, "pr-remediation-plan")?;
-    let result = read_remediation_result_for_validation(&store, &binding)?;
+    let result = read_remediation_result_for_validation(&store, &binding, &plan)?;
     let step_id = current_step_id(context, "validate_remediation_result");
     let step_order = u64_param(params, "step_order_index", 9);
 
@@ -1965,15 +1965,54 @@ fn validate_remediation_result(
 fn read_remediation_result_for_validation(
     store: &PrFollowupArtifactStore,
     binding: &PrFollowupBinding,
+    plan: &Value,
 ) -> Result<Value, EngineError> {
     let result = store.read_current_raw_json(binding, "pr-remediation-result")?;
-    if store
-        .validate_artifact_value(binding, "pr-remediation-result", &result)
-        .is_ok()
+    Ok(normalize_remediation_result_for_validation(
+        binding, plan, result,
+    ))
+}
+
+fn normalize_remediation_result_for_validation(
+    binding: &PrFollowupBinding,
+    plan: &Value,
+    mut result: Value,
+) -> Value {
+    let Some(object) = result.as_object_mut() else {
+        return result;
+    };
+
+    let plan_sequence = plan
+        .get("artifact_sequence")
+        .cloned()
+        .unwrap_or(Value::Null);
+    if object
+        .get("plan_artifact_sequence")
+        .is_none_or(Value::is_null)
     {
-        return Ok(result);
+        object.insert("plan_artifact_sequence".to_string(), plan_sequence.clone());
     }
-    Ok(result)
+    if !object.get("retry_scope").is_some_and(Value::is_object) {
+        object.insert("retry_scope".to_string(), json!({}));
+    }
+    if let Some(scope) = object.get_mut("retry_scope").and_then(Value::as_object_mut) {
+        if scope.get("run_id").is_none_or(Value::is_null) {
+            scope.insert("run_id".to_string(), Value::String(binding.run_id.clone()));
+        }
+        if scope.get("input_head_sha").is_none_or(Value::is_null) {
+            scope.insert(
+                "input_head_sha".to_string(),
+                Value::String(binding.head_sha.clone()),
+            );
+        }
+        if scope
+            .get("plan_artifact_sequence")
+            .is_none_or(Value::is_null)
+        {
+            scope.insert("plan_artifact_sequence".to_string(), plan_sequence);
+        }
+    }
+    result
 }
 
 // Pre-existing result validation flow; split in a dedicated refactor stage.

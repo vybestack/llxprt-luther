@@ -4375,6 +4375,70 @@ fn write_p11_plan_and_result(temp: &tempfile::TempDir, results: serde_json::Valu
     }), None, &FixedClock).expect("write p11 result");
 }
 
+/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P11
+/// @requirement:REQ-PRFU-012,REQ-PRFU-014
+/// @pseudocode lines 18-28
+#[test]
+fn remediation_validator_restores_engine_known_plan_sequence_for_agent_result() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_p11_plan_and_result(
+        &temp,
+        serde_json::json!([
+            { "source_type": "ci_failure", "source_id": "ci-build", "status": "fixed", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "fixed", "evidence": { "kind": "change", "current_head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "paths": ["src/lib.rs"] }, "response_text": "Luther addressed this CI failure and will post the remediation evidence on the original thread.", "evidence_paths": ["src/lib.rs"] },
+            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "thread-valid", "body_hash": "hash-valid", "status": "fixed", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "fixed", "evidence": { "kind": "change", "current_head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "paths": ["src/lib.rs"] }, "response_text": "Luther addressed this CodeRabbit item and will post the remediation evidence on the original thread.", "evidence_paths": ["src/lib.rs"] }
+        ]),
+    );
+    let mut result = read_json(&p11_result_path(&temp));
+    result["plan_artifact_sequence"] = serde_json::Value::Null;
+    result["retry_scope"] = serde_json::json!({});
+    result["validation_retry_index"] = serde_json::json!(2);
+    std::fs::write(
+        p11_result_path(&temp),
+        serde_json::to_vec_pretty(&result).expect("result json"),
+    )
+    .expect("rewrite agent-like result without engine sequence fields");
+
+    let mut context = p11_context(&temp);
+    let outcome = PrRemediationResultExecutor
+        .execute(&mut context, &p11_params(&temp))
+        .expect("validate result with normalized plan sequence");
+    let artifact = read_json(&p11_result_path(&temp));
+    let plan = read_json(&p11_current_artifact_path(&temp, "pr-remediation-plan"));
+
+    assert_expected_outcome(
+        outcome,
+        StepOutcome::Success,
+        "validator should restore engine-known plan sequence fields instead of looping malformed remediation forever",
+    );
+    assert_eq!(
+        artifact
+            .get("validation_state")
+            .and_then(serde_json::Value::as_str),
+        Some("valid")
+    );
+    assert_eq!(
+        artifact.get("plan_artifact_sequence"),
+        plan.get("artifact_sequence")
+    );
+    assert_eq!(
+        artifact.pointer("/retry_scope/plan_artifact_sequence"),
+        plan.get("artifact_sequence")
+    );
+    assert_eq!(
+        artifact
+            .pointer("/retry_scope/run_id")
+            .and_then(serde_json::Value::as_str),
+        Some("run-p11")
+    );
+    assert!(
+        artifact
+            .get("validation_errors")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(Vec::is_empty),
+        "normalization should clear plan_artifact_sequence mismatch: {artifact}"
+    );
+}
+
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P04
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P11
 /// @requirement:REQ-PRFU-012,REQ-PRFU-014
@@ -5217,6 +5281,54 @@ fn pr_followup_remediation_timeout_repairs_stale_wrapper_failure_result() {
     );
 }
 
+fn extract_remediation_prompt(request: &LlxprtInvocationRequest) -> String {
+    request
+        .argv
+        .windows(2)
+        .find(|window| window[0] == "-p")
+        .map(|window| window[1].clone())
+        .expect("prompt argv")
+}
+
+fn assert_remediation_prompt_scope(prompt: &str, request: &LlxprtInvocationRequest) {
+    assert!(prompt.contains("Fix only pr-remediation-plan.json.must_fix"));
+    assert!(prompt.contains("Do not fix pr-remediation-plan.json.mark_invalid"));
+    assert!(prompt.contains("out_of_scope"));
+    assert!(prompt.contains("pr-remediation-plan.json.needs_user_judgment"));
+    assert!(prompt.contains("Write"));
+    assert!(!request
+        .argv
+        .iter()
+        .any(|arg| matches!(arg.as_str(), "--artifact-root" | "--remediation-plan" | "--remediation-result" | "--input-head-sha" | "--repository-owner" | "--repository-name" | "--pr-number" | "--head-ref" | "--base-ref")),
+        "llxprt CLI must receive remediation contract only in prompt, not unsupported wrapper flags: {:?}",
+        request.argv
+    );
+}
+
+fn assert_remediation_prompt_result_schema(prompt: &str) {
+    assert!(prompt.contains("pr-remediation-result.json"));
+    assert!(prompt.contains(
+        "fixed | changed | already_satisfied | not_reproduced | not_fixed | skipped | failed"
+    ));
+    assert!(prompt.contains("input_head_sha set to aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"));
+    assert!(prompt.contains("evidence.current_head_sha equal to the current PR head"));
+    assert!(prompt
+        .contains("evidence.commands with at least one command object whose status is passed"));
+    assert!(prompt.contains("top-level plan_artifact_sequence"));
+    assert!(prompt.contains("retry_scope.plan_artifact_sequence"));
+    assert!(prompt.contains("retry_scope.run_id"));
+    assert!(prompt.contains("retry_scope.input_head_sha"));
+}
+
+fn assert_remediation_prompt_retry_feedback(prompt: &str) {
+    assert!(prompt.contains("Previous pr-remediation-result.json validation_errors"));
+    assert!(prompt
+        .contains("fixed evidence for coderabbit_feedback:cr-valid is not tied to current head"));
+    assert!(prompt.contains("do not create, copy, or modify any pr-followup/history files"));
+    assert!(prompt.contains("structured evidence"));
+    assert!(prompt.contains("Free-form-only completion is not acceptable"));
+}
+
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P12
 /// @requirement:REQ-PRFU-013
 /// @pseudocode lines 13-14
@@ -5249,41 +5361,11 @@ fn remediate_pr_followup_prompt_contract() {
         .expect("p12 prompt");
     let requests = runner.requests();
     let request = requests.first().expect("owned request");
-    let prompt = request
-        .argv
-        .windows(2)
-        .find(|window| window[0] == "-p")
-        .map(|window| window[1].clone())
-        .expect("prompt argv");
+    let prompt = extract_remediation_prompt(request);
 
-    assert!(prompt.contains("Fix only pr-remediation-plan.json.must_fix"));
-    assert!(prompt.contains("Do not fix pr-remediation-plan.json.mark_invalid"));
-    assert!(prompt.contains("out_of_scope"));
-    assert!(prompt.contains("pr-remediation-plan.json.needs_user_judgment"));
-    assert!(prompt.contains("Write"));
-    assert!(!request
-        .argv
-        .iter()
-        .any(|arg| matches!(arg.as_str(), "--artifact-root" | "--remediation-plan" | "--remediation-result" | "--input-head-sha" | "--repository-owner" | "--repository-name" | "--pr-number" | "--head-ref" | "--base-ref")),
-        "llxprt CLI must receive remediation contract only in prompt, not unsupported wrapper flags: {:?}",
-        request.argv
-    );
-
-    assert!(prompt.contains("pr-remediation-result.json"));
-    assert!(prompt.contains(
-        "fixed | changed | already_satisfied | not_reproduced | not_fixed | skipped | failed"
-    ));
-    assert!(prompt.contains("input_head_sha set to aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"));
-    assert!(prompt.contains("evidence.current_head_sha equal to the current PR head"));
-    assert!(prompt
-        .contains("evidence.commands with at least one command object whose status is passed"));
-    assert!(prompt.contains("Previous pr-remediation-result.json validation_errors"));
-    assert!(prompt
-        .contains("fixed evidence for coderabbit_feedback:cr-valid is not tied to current head"));
-    assert!(prompt.contains("do not create, copy, or modify any pr-followup/history files"));
-
-    assert!(prompt.contains("structured evidence"));
-    assert!(prompt.contains("Free-form-only completion is not acceptable"));
+    assert_remediation_prompt_scope(&prompt, request);
+    assert_remediation_prompt_result_schema(&prompt);
+    assert_remediation_prompt_retry_feedback(&prompt);
 }
 #[test]
 fn remediate_pr_followup_interpolates_profile_and_omits_unresolved_profile() {
@@ -6924,6 +7006,156 @@ fn marker_resolve_uses_real_mutation_and_thread_variable() {
             .iter()
             .any(|arg| arg.contains("resolve_review_thread_mutation")),
         "resolve must not use the placeholder named query: {graphql_call:?}"
+    );
+}
+
+fn write_p15_validated_rest_review_comment_only_pending(temp: &tempfile::TempDir) {
+    write_p15_validated_fixed_pending(temp);
+    let pending_path = p11_current_artifact_path(temp, "pending-feedback-marker-actions");
+    let mut pending = read_json(&pending_path);
+    let action = pending["pending_actions"][0]
+        .as_object_mut()
+        .expect("pending action object");
+    action.insert(
+        "action_id".to_string(),
+        serde_json::json!("comment_fixed:review-comment:PRRC_rest:hash-valid:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
+    );
+    action.insert(
+        "item_id".to_string(),
+        serde_json::json!("rest-review:PRRC_rest"),
+    );
+    action.insert(
+        "stable_marker_key".to_string(),
+        serde_json::json!("review-comment:PRRC_rest"),
+    );
+    action.insert(
+        "idempotency_key".to_string(),
+        serde_json::json!("run-p11:example:workflow:1910:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb:review-comment:PRRC_rest:comment_fixed"),
+    );
+    action.remove("thread_id");
+    action.remove("comment_database_id");
+    let identity = action
+        .get_mut("original_feedback_identity")
+        .and_then(serde_json::Value::as_object_mut)
+        .expect("original feedback identity object");
+    identity.insert(
+        "item_id".to_string(),
+        serde_json::json!("rest-review:PRRC_rest"),
+    );
+    identity.insert(
+        "stable_marker_key".to_string(),
+        serde_json::json!("review-comment:PRRC_rest"),
+    );
+    identity.remove("thread_id");
+    identity.remove("comment_database_id");
+    std::fs::write(
+        &pending_path,
+        serde_json::to_vec_pretty(&pending).expect("rest review pending json"),
+    )
+    .expect("write rest review pending action");
+
+    let result_path = p11_result_path(temp);
+    let mut result = read_json(&result_path);
+    let result_item = result["results"]
+        .as_array_mut()
+        .and_then(|items| {
+            items.iter_mut().find(|item| {
+                item.get("source_type").and_then(serde_json::Value::as_str)
+                    == Some("coderabbit_feedback")
+            })
+        })
+        .and_then(serde_json::Value::as_object_mut)
+        .expect("coderabbit remediation result object");
+    result_item.insert(
+        "source_id".to_string(),
+        serde_json::json!("rest-review:PRRC_rest"),
+    );
+    result_item.insert(
+        "stable_marker_key".to_string(),
+        serde_json::json!("review-comment:PRRC_rest"),
+    );
+    result_item.remove("thread_id");
+    result_item.remove("comment_database_id");
+    std::fs::write(
+        result_path,
+        serde_json::to_vec_pretty(&result).expect("rest review result json"),
+    )
+    .expect("write rest review remediation result");
+}
+
+/// REST review comments collected without GraphQL review-thread identity can be
+/// answered as comment-only marker actions, but they must never fatal before
+/// mutation or attempt an unavailable thread resolution.
+/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P15
+/// @requirement:REQ-PRFU-015,REQ-PRFU-016
+/// @pseudocode lines 41-49
+#[test]
+fn marker_posts_comment_only_for_rest_review_action_without_thread_id() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_p15_validated_rest_review_comment_only_pending(&temp);
+    let runner = P15MarkerRunner::default();
+    let mut context = p11_context(&temp);
+    let outcome = GithubFeedbackMarkerExecutorWithRunner::new(runner.clone(), FixedClock)
+        .execute(&mut context, &p11_params(&temp))
+        .expect("mark rest review feedback without thread id");
+
+    assert_expected_outcome(
+        outcome,
+        StepOutcome::Success,
+        "non-thread REST review marker actions should be comment-only successes",
+    );
+    let calls = runner.calls();
+    assert!(
+        calls.iter().any(|call| {
+            call.iter().any(|arg| arg == "POST")
+                && call.iter().any(|arg| arg.contains("/issues/1910/comments"))
+        }),
+        "comment-only marker should post a PR timeline comment: {calls:?}"
+    );
+    assert!(
+        calls
+            .iter()
+            .all(|call| !call.iter().any(|arg| arg.contains("/replies"))),
+        "comment-only marker must not require an in-thread reply endpoint: {calls:?}"
+    );
+    assert!(
+        calls
+            .iter()
+            .all(|call| !call.iter().any(|arg| arg == "graphql")),
+        "comment-only marker must not attempt thread resolution: {calls:?}"
+    );
+    let report = read_json(&p11_current_artifact_path(
+        &temp,
+        "pr-feedback-marker-report",
+    ));
+    assert_eq!(
+        report
+            .get("marker_state")
+            .and_then(serde_json::Value::as_str),
+        Some("complete")
+    );
+    assert!(
+        report
+            .get("validation_violations")
+            .and_then(serde_json::Value::as_array)
+            .is_none_or(Vec::is_empty),
+        "comment-only REST review marker must pass pre-mutation validation: {report}"
+    );
+    assert!(
+        report
+            .get("action_audit")
+            .and_then(serde_json::Value::as_array)
+            .expect("action audit")
+            .iter()
+            .any(|entry| entry
+                .get("stable_marker_key")
+                .and_then(serde_json::Value::as_str)
+                == Some("review-comment:PRRC_rest")
+                && entry
+                    .get("resolve_attempted")
+                    .and_then(serde_json::Value::as_bool)
+                    == Some(false)),
+        "comment-only audit must record no resolution attempt: {report}"
     );
 }
 
