@@ -2135,6 +2135,45 @@ fn run_tests_mirrors_ci_lint_typecheck_and_build_before_push() {
 }
 
 /// @plan:PLAN-20260408-LLXPRT-FIRST.P17
+/// @requirement:REQ-LF-IMPLEMENT-001,REQ-LF-VERIFY-003
+#[test]
+fn dogfood_remediation_waits_for_agent_or_diff_instead_of_idle_abandoning() {
+    let workflow_type = resolve_workflow_type(
+        "llxprt-luther-dogfood-v1",
+        &std::path::PathBuf::from("config"),
+    )
+    .expect("production dogfood workflow type should load");
+    let remediate = workflow_type
+        .steps
+        .iter()
+        .find(|step| step.step_id == "remediate")
+        .expect("dogfood remediate step exists");
+    let params = remediate
+        .parameters
+        .as_ref()
+        .expect("remediate params exist");
+
+    assert_eq!(
+        params.get("success_on_diff"),
+        Some(&serde_json::json!(true))
+    );
+    assert_eq!(
+        params.get("early_success_on_diff"),
+        Some(&serde_json::json!(false))
+    );
+    assert_eq!(params.get("min_runtime_before_success_seconds"), None);
+    assert_eq!(params.get("max_runtime_after_required_diff_seconds"), None);
+    assert_eq!(
+        params.get("idle_timeout_seconds"),
+        Some(&serde_json::json!(1800))
+    );
+    assert_eq!(
+        params.get("timeout_seconds"),
+        Some(&serde_json::json!(3600))
+    );
+}
+
+/// @plan:PLAN-20260408-LLXPRT-FIRST.P17
 /// @requirement:REQ-LF-VERIFY-003
 #[test]
 fn remediate_fatal_routes_to_cleanup_instead_of_default_success_transition() {

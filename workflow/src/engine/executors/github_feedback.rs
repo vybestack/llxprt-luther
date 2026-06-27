@@ -281,6 +281,18 @@ struct MarkerActionOutcome {
     updated_action: Value,
 }
 
+struct MarkerActionProcessor<'a> {
+    binding: &'a PrFollowupBinding,
+    store: &'a PrFollowupArtifactStore,
+    step_id: &'a str,
+    step_order: u64,
+    runner: &'a dyn GithubPrCommandRunner,
+    clock: &'a dyn ClockSleeper,
+    local_completed: &'a BTreeSet<String>,
+    remote_completed: &'a BTreeSet<String>,
+    params: &'a Value,
+}
+
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P08
 /// @requirement:REQ-PRFU-008,REQ-PRFU-009,REQ-PRFU-017,REQ-PRFU-024,REQ-PRFU-034
 /// @pseudocode lines 1-29
@@ -1266,20 +1278,20 @@ fn mark_coderabbit_feedback(
         }
     }
 
+    let processor = MarkerActionProcessor {
+        binding: &binding,
+        store: &store,
+        step_id: &step_id,
+        step_order,
+        runner,
+        clock,
+        local_completed: &local_completed,
+        remote_completed: &remote_completed,
+        params,
+    };
     let mut outcomes = Vec::new();
     for action in pending_actions {
-        outcomes.push(process_marker_action(
-            &binding,
-            &store,
-            &step_id,
-            step_order,
-            runner,
-            clock,
-            action,
-            &local_completed,
-            &remote_completed,
-            params,
-        )?);
+        outcomes.push(process_marker_action(&processor, action)?);
     }
     write_updated_pending_actions(
         &store,
@@ -1907,7 +1919,10 @@ fn validate_marker_actions_before_mutation(actions: &[PendingMarkerAction]) -> O
                 "violation": "missing_response_text"
             }));
         }
-        if action.resolution_required && action.thread_id.is_none() {
+        if action.resolution_required
+            && action.thread_id.is_none()
+            && action.stable_marker_key.starts_with("thread:")
+        {
             violations.push(json!({
                 "item_id": action.item_id,
                 "stable_marker_key": action.stable_marker_key,
@@ -1936,8 +1951,6 @@ fn validate_marker_actions_before_mutation(actions: &[PendingMarkerAction]) -> O
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P15
 /// @requirement:REQ-PRFU-015,REQ-PRFU-016,REQ-PRFU-017,REQ-PRFU-026
 /// @pseudocode lines 43-49
-#[allow(clippy::too_many_arguments)]
-// Pre-existing marker action workflow; split in a dedicated refactor stage.
 fn marker_action_requires_review_thread_reply(action: &PendingMarkerAction) -> bool {
     matches!(
         action.action_kind.as_str(),
@@ -1945,24 +1958,23 @@ fn marker_action_requires_review_thread_reply(action: &PendingMarkerAction) -> b
             | "comment_invalid"
             | "comment_out_of_scope"
             | "comment_needs_user_judgment"
-    ) && (action.thread_id.is_some()
-        || action.stable_marker_key.starts_with("review-comment:")
-        || action.stable_marker_key.starts_with("thread:"))
+    ) && (action.thread_id.is_some() || action.comment_database_id.is_some())
 }
 
 #[allow(clippy::too_many_lines)]
 fn process_marker_action(
-    binding: &PrFollowupBinding,
-    store: &PrFollowupArtifactStore,
-    step_id: &str,
-    step_order: u64,
-    runner: &dyn GithubPrCommandRunner,
-    clock: &dyn ClockSleeper,
+    processor: &MarkerActionProcessor<'_>,
     action: PendingMarkerAction,
-    local_completed: &BTreeSet<String>,
-    remote_completed: &BTreeSet<String>,
-    params: &Value,
 ) -> Result<MarkerActionOutcome, EngineError> {
+    let binding = processor.binding;
+    let store = processor.store;
+    let step_id = processor.step_id;
+    let step_order = processor.step_order;
+    let runner = processor.runner;
+    let clock = processor.clock;
+    let local_completed = processor.local_completed;
+    let remote_completed = processor.remote_completed;
+    let params = processor.params;
     let comment_key = marker_action_key(binding, &action, "comment");
     let resolution_key = marker_action_key(binding, &action, "resolution");
     if action.action_kind == "skip_needs_user_judgment" {
@@ -2508,6 +2520,9 @@ fn write_marker_comment_body_file(
 fn resolution_policy(action: &PendingMarkerAction, params: &Value) -> &'static str {
     // needs_user_judgment is always left open for a human to decide.
     if action.action_kind == "comment_needs_user_judgment" {
+        return "skip";
+    }
+    if action.thread_id.is_none() {
         return "skip";
     }
     // Legacy explicit overrides remain honored for fixed feedback only.
