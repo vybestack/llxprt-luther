@@ -115,7 +115,15 @@ fn coverage() -> Result<()> {
 
     let mut run_cmd = command(
         "cargo",
-        ["llvm-cov", "--no-report", "--lib", "--tests", "-q"],
+        [
+            "llvm-cov",
+            "--no-report",
+            "--workspace",
+            "--all-features",
+            "--lib",
+            "--tests",
+            "-q",
+        ],
     );
     run_cmd.env("LLVM_COV", &llvm_cov);
     run_cmd.env("LLVM_PROFDATA", &llvm_profdata);

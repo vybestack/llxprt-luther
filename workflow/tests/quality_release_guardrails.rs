@@ -372,6 +372,10 @@ fn test_xtask_clippy_uses_shared_cargo_lint_policy_command() {
         "xtask should share one clippy argv definition"
     );
     assert!(
+        xtask.contains("CLIPPY_ARGS: [&str; 7]"),
+        "xtask CLIPPY_ARGS should be a 7-element array"
+    );
+    assert!(
         xtask.contains("\"--workspace\"")
             && xtask.contains("\"--all-targets\"")
             && xtask.contains("\"--all-features\"")
