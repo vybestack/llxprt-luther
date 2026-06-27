@@ -343,7 +343,7 @@ fn test_pr_quality_uses_cargo_lint_policy() {
     let workflow = fs::read_to_string(&workflow_path).expect("Failed to read pr-quality.yml");
 
     assert!(
-        workflow.contains("cargo clippy --all-targets -- -D warnings"),
+        workflow.contains("cargo clippy --workspace --all-targets --all-features -- -D warnings"),
         "PR quality workflow should run clippy with the Cargo.toml lint policy"
     );
 
@@ -372,8 +372,12 @@ fn test_xtask_clippy_uses_shared_cargo_lint_policy_command() {
         "xtask should share one clippy argv definition"
     );
     assert!(
-        xtask.contains("\"clippy\", \"--all-targets\", \"--\", \"-D\", \"warnings\""),
-        "xtask should run cargo clippy --all-targets -- -D warnings"
+        xtask.contains("\"--workspace\"")
+            && xtask.contains("\"--all-targets\"")
+            && xtask.contains("\"--all-features\"")
+            && xtask.contains("\"-D\"")
+            && xtask.contains("\"warnings\""),
+        "xtask should run cargo clippy --workspace --all-targets --all-features -- -D warnings"
     );
 
     for duplicated_lint in [
