@@ -397,3 +397,212 @@ fn test_xtask_clippy_uses_shared_cargo_lint_policy_command() {
         );
     }
 }
+
+/// Helper to read the OCR PR review workflow content for guardrail tests.
+fn ocr_pr_review_workflow_content() -> String {
+    let workflow_path = workspace_root()
+        .join(".github")
+        .join("workflows")
+        .join("ocr-pr-review.yml");
+    fs::read_to_string(&workflow_path)
+        .unwrap_or_else(|_| panic!("Failed to read ocr-pr-review.yml at {workflow_path:?}"))
+}
+
+/// Test: the OCR PR review workflow file exists.
+/// @plan:PLAN-20260404-INITIAL-RUNTIME.P11
+#[test]
+fn test_ocr_pr_review_workflow_exists() {
+    let workflow_path = workspace_root()
+        .join(".github")
+        .join("workflows")
+        .join("ocr-pr-review.yml");
+    assert!(
+        workflow_path.is_file(),
+        "OCR PR review workflow should exist at {workflow_path:?}"
+    );
+    let content = ocr_pr_review_workflow_content();
+    assert!(!content.trim().is_empty(), "ocr-pr-review.yml is empty");
+}
+
+/// Test: the workflow uses `pull_request_target` with the required event types.
+#[test]
+fn test_ocr_pr_review_uses_pull_request_target() {
+    let content = ocr_pr_review_workflow_content();
+    assert!(
+        content.contains("pull_request_target:"),
+        "Workflow must use pull_request_target for fork-safe secret access"
+    );
+    for required in ["opened", "reopened", "synchronize", "ready_for_review"] {
+        assert!(
+            content.contains(&format!("- {required}")),
+            "pull_request_target must list the {required} event type"
+        );
+    }
+}
+
+/// Test: permissions are minimal and explicit.
+#[test]
+fn test_ocr_pr_review_permissions_are_minimal() {
+    let content = ocr_pr_review_workflow_content();
+    assert!(
+        content.contains("contents: read"),
+        "Workflow must request contents: read"
+    );
+    assert!(
+        content.contains("pull-requests: write"),
+        "Workflow must request pull-requests: write"
+    );
+    assert!(
+        content.contains("issues: write"),
+        "Workflow must request issues: write"
+    );
+    assert!(
+        !content.contains("actions: write"),
+        "Workflow must not request actions: write"
+    );
+    assert!(
+        !content.contains("permissions: write-all"),
+        "Workflow must not use write-all permissions"
+    );
+}
+
+/// Test: duplicate runs for a PR are cancelled by concurrency.
+#[test]
+fn test_ocr_pr_review_concurrency_cancels_duplicates() {
+    let content = ocr_pr_review_workflow_content();
+    assert!(
+        content.contains("concurrency:"),
+        "Workflow must define a concurrency block"
+    );
+    assert!(
+        content.contains("cancel-in-progress: true"),
+        "Concurrency must cancel in-progress duplicate runs"
+    );
+    // Group must be keyed by PR/issue number for per-PR cancellation.
+    assert!(
+        content.contains("github.event.pull_request.number")
+            || content.contains("github.event.issue.number"),
+        "Concurrency group must key on the PR/issue number"
+    );
+}
+
+/// Test: OCR runs with --timeout 30 over the merge-base..head diff.
+#[test]
+fn test_ocr_pr_review_uses_timeout_30_and_merge_base() {
+    let content = ocr_pr_review_workflow_content();
+    assert!(
+        content.contains("--timeout 30"),
+        "Workflow must run OCR with --timeout 30"
+    );
+    assert!(
+        content.contains("--audience agent"),
+        "Workflow must run OCR with --audience agent"
+    );
+    assert!(
+        content.contains("--format json"),
+        "Workflow must request JSON output for parsing"
+    );
+    assert!(
+        content.contains("merge-base"),
+        "Workflow must review the merge-base..head diff, not origin/main..head"
+    );
+}
+
+/// Test: credential handling — URL is a variable, only the token is a secret.
+#[test]
+fn test_ocr_pr_review_credential_handling() {
+    let content = ocr_pr_review_workflow_content();
+    assert!(
+        content.contains("secrets.OCR_LLM_AUTH_TOKEN"),
+        "Workflow must reference OCR_LLM_AUTH_TOKEN via secrets."
+    );
+    assert!(
+        content.contains("vars.OCR_LLM_URL"),
+        "Workflow must reference OCR_LLM_URL via vars. (not a secret)"
+    );
+    assert!(
+        content.contains("vars.OCR_LLM_MODEL"),
+        "Workflow must reference OCR_LLM_MODEL via vars."
+    );
+    // The URL must not also be exposed as a secret.
+    assert!(
+        !content.contains("secrets.OCR_LLM_URL"),
+        "OCR_LLM_URL must be a variable, not a secret"
+    );
+}
+
+/// Test: stable sticky summary marker, updateComment, and artifact upload.
+#[test]
+fn test_ocr_pr_review_has_sticky_marker_and_artifacts() {
+    let content = ocr_pr_review_workflow_content();
+    assert!(
+        content.contains("<!-- luther-ocr-review -->"),
+        "Workflow must maintain the stable sticky summary marker"
+    );
+    assert!(
+        content.contains("updateComment"),
+        "Workflow must update the existing summary in place on reruns"
+    );
+    assert!(
+        content.contains("createComment"),
+        "Workflow must create a summary when none exists yet"
+    );
+    assert!(
+        content.contains("upload-artifact"),
+        "Workflow must upload OCR output artifacts"
+    );
+    assert!(
+        content.contains("ocr-result.json") && content.contains("ocr-stderr.log"),
+        "Workflow must upload both the OCR JSON result and stderr log"
+    );
+}
+
+/// Test: the workflow does not execute untrusted PR code.
+#[test]
+fn test_ocr_pr_review_does_not_execute_pr_code() {
+    let content = ocr_pr_review_workflow_content();
+    // No repository build/test tooling may run (PR-supplied scripts excluded).
+    assert!(
+        !content.contains("make "),
+        "Workflow must not invoke make (PR-supplied Makefiles)"
+    );
+    assert!(
+        !content.contains("cargo "),
+        "Workflow must not invoke cargo (PR-supplied build)"
+    );
+    assert!(
+        !content.contains("npm run"),
+        "Workflow must not run repository npm scripts"
+    );
+    assert!(
+        !content.contains("npm ci"),
+        "Workflow must not run npm ci against the repo"
+    );
+    // Only the global OCR install is permitted.
+    assert!(
+        content.contains("npm install -g @alibaba-group/open-code-review"),
+        "Workflow may only globally install OCR"
+    );
+    assert!(
+        !content.contains("safe.directory '*'"),
+        "Workflow must not use safe.directory '*'"
+    );
+}
+
+/// Test: CodeRabbit remains enabled (OCR is additive).
+#[test]
+fn test_ocr_pr_review_keeps_coderabbit() {
+    let pr_quality_path = workspace_root()
+        .join(".github")
+        .join("workflows")
+        .join("pr-quality.yml");
+    assert!(
+        pr_quality_path.is_file(),
+        "pr-quality.yml must remain so CodeRabbit stays enabled"
+    );
+    let content = ocr_pr_review_workflow_content();
+    assert!(
+        !content.contains("CodeRabbit"),
+        "OCR workflow must not disable or remove CodeRabbit wiring"
+    );
+}

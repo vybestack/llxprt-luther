@@ -1,0 +1,328 @@
+name: OCR PR Review
+
+# Runs OpenCodeReview (OCR) on pull requests alongside the existing review
+# bot. OCR is an observational, non-required review signal while it is being
+# proven out. The existing review bot remains enabled and untouched.
+#
+# Fork-safety model: this workflow uses `pull_request_target` so repository
+# secrets are available for fork PRs, but it NEVER checks out or executes
+# PR-supplied code/config while secrets are in scope. The trusted base
+# branch is checked out first; the PR head is fetched into an explicit local
+# ref and read for diff computation only. No make/cargo/npm-repo-scripts are
+# invoked. OCR rules/config are configured from variables+secret only; no
+# PR-supplied OCR rules are loaded.
+
+on:
+  pull_request_target:
+    types:
+      - opened
+      - reopened
+      - synchronize
+      - ready_for_review
+  issue_comment:
+    types:
+      - created
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: "Pull request number to review"
+        required: true
+        type: string
+
+# Duplicate OCR runs for the same PR are cancelled so only the latest
+# head SHA is reviewed.
+concurrency:
+  group: ocr-pr-review-${{ github.event.pull_request.number || github.event.issue.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+jobs:
+  code-review:
+    name: OpenCodeReview
+    runs-on: ubuntu-latest
+    # For issue_comment, only run on PR comments requesting a review.
+    if: |
+      github.event_name == 'pull_request_target' ||
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'issue_comment' &&
+       github.event.issue.pull_request != null &&
+       (contains(github.event.comment.body, '/ocr') ||
+        contains(github.event.comment.body, '/open-code-review')))
+    steps:
+      - name: Resolve PR context
+        uses: actions/github-script@v7
+        id: pr-context
+        with:
+          script: |
+            const number = (context.payload.pull_request && context.payload.pull_request.number)
+              || (context.issue && context.issue.number)
+              || Number(context.payload.inputs && context.payload.inputs.pr_number);
+            if (!number) {
+              core.setFailed('Could not resolve a pull request number from the event.');
+              return;
+            }
+            const { data: pr } = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: number,
+            });
+            core.setOutput('number', String(number));
+            core.setOutput('base_ref', pr.base.ref);
+            core.setOutput('base_sha', pr.base.sha);
+            core.setOutput('head_sha', pr.head.sha);
+
+      - name: Checkout trusted base
+        # Fork-safety keystone: check out the trusted base branch (never the
+        # PR head) so the working tree never reflects PR-supplied files.
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.pr-context.outputs.base_sha }}
+          fetch-depth: 0
+
+      - name: Fetch PR head and compute merge-base
+        env:
+          PR_NUMBER: ${{ steps.pr-context.outputs.number }}
+          HEAD_SHA: ${{ steps.pr-context.outputs.head_sha }}
+          BASE_REF: ${{ steps.pr-context.outputs.base_ref }}
+        run: |
+          # Fetch the PR head into an explicit local ref WITHOUT making it the
+          # working copy, so no PR-supplied scripts become executable.
+          git fetch origin "pull/${PR_NUMBER}/head:pr-head"
+          git fetch origin "${BASE_REF}"
+
+          # Scope safe.directory to the runner workspace only (never '*').
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+          BASE_SHA="$(git merge-base "origin/${BASE_REF}" pr-head)"
+          {
+            echo "BASE_SHA=${BASE_SHA}"
+            echo "HEAD_SHA=${HEAD_SHA}"
+          } >> "$GITHUB_ENV"
+
+      - name: Install OpenCodeReview
+        run: |
+          # Global install of OCR only; no repository scripts are executed.
+          npm install -g @alibaba-group/open-code-review
+          ocr version > ocr-version.txt
+          cat ocr-version.txt
+
+      - name: Configure OCR (variables + secret only)
+        env:
+          OCR_LLM_URL: ${{ vars.OCR_LLM_URL }}
+          OCR_LLM_AUTH_TOKEN: ${{ secrets.OCR_LLM_AUTH_TOKEN }}
+          OCR_LLM_MODEL: ${{ vars.OCR_LLM_MODEL }}
+          OCR_LLM_USE_ANTHROPIC: ${{ vars.OCR_LLM_USE_ANTHROPIC }}
+        run: |
+          if [ -z "$OCR_LLM_URL" ]; then
+            echo "::error::Required variable OCR_LLM_URL is not set"
+            exit 1
+          fi
+          if [ -z "$OCR_LLM_AUTH_TOKEN" ]; then
+            echo "::error::Required secret OCR_LLM_AUTH_TOKEN is not set"
+            exit 1
+          fi
+          if [ -z "$OCR_LLM_MODEL" ]; then
+            echo "::error::Required variable OCR_LLM_MODEL is not set"
+            exit 1
+          fi
+          ocr config set llm.url "$OCR_LLM_URL"
+          ocr config set llm.auth_token "$OCR_LLM_AUTH_TOKEN"
+          ocr config set llm.model "$OCR_LLM_MODEL"
+          # Anthropic mode only when the variable is explicitly "true".
+          if [ "$OCR_LLM_USE_ANTHROPIC" = "true" ]; then
+            ocr config set llm.use_anthropic true
+          fi
+
+      - name: Verify review scope includes changed tests
+        env:
+          BASE_SHA: ${{ env.BASE_SHA }}
+          HEAD_SHA: ${{ env.HEAD_SHA }}
+        run: |
+          set -euo pipefail
+          # Fail loudly rather than silently letting OCR exclude changed
+          # test/spec files (project policy: tests must be reviewed).
+          changed_tests="$(
+            git diff --name-only "${BASE_SHA}..${HEAD_SHA}" \
+              | grep -Ei '(^|/)(tests/|__tests__/).*|(\.test\.|\.spec\.|_tests?\.rs)$' \
+              || true
+          )"
+          if [ -n "$changed_tests" ]; then
+            echo "Changed test/spec files detected that must be reviewed:"
+            echo "$changed_tests"
+            # Inspect OCR preview scope; if any changed test path appears in
+            # the Excluded set, fail clearly.
+            ocr review --preview --from "$BASE_SHA" --to "$HEAD_SHA" \
+              > ocr-preview.txt 2> ocr-preview-stderr.log || true
+            excluded="$(grep -A100 -i 'excluded' ocr-preview.txt || true)"
+            missing=""
+            while IFS= read -r t; do
+              [ -z "$t" ] && continue
+              if echo "$excluded" | grep -F -- "$t" >/dev/null 2>&1; then
+                missing="${missing}${t}"$'\n'
+              fi
+            done <<< "$changed_tests"
+            if [ -n "$missing" ]; then
+              echo "::error::OCR would exclude changed test files that must be reviewed:"
+              echo "$missing"
+              exit 1
+            fi
+          fi
+
+      - name: Run OpenCodeReview
+        # Full merge-base..head diff. Parse failures are handled distinctly
+        # in the posting step (OCR failed vs. no findings).
+        env:
+          BASE_SHA: ${{ env.BASE_SHA }}
+          HEAD_SHA: ${{ env.HEAD_SHA }}
+        run: |
+          ocr review \
+            --from "$BASE_SHA" \
+            --to "$HEAD_SHA" \
+            --format json \
+            --audience agent \
+            --timeout 30 \
+            > ocr-result.json 2> ocr-stderr.log || true
+
+      - name: Upload OCR artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ocr-review-output
+          path: |
+            ocr-result.json
+            ocr-stderr.log
+            ocr-version.txt
+            ocr-preview.txt
+            ocr-preview-stderr.log
+          if-no-files-found: ignore
+
+      - name: Post OCR results
+        uses: actions/github-script@v7
+        env:
+          BASE_SHA: ${{ env.BASE_SHA }}
+          HEAD_SHA: ${{ env.HEAD_SHA }}
+        with:
+          script: |
+            const fs = require('fs');
+            const MARKER = '<!-- luther-ocr-review -->';
+            const number = Number('${{ steps.pr-context.outputs.number }}');
+            const headSha = process.env.HEAD_SHA;
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+
+            let ocrVersion = 'unknown';
+            try {
+              ocrVersion = fs.readFileSync('ocr-version.txt', 'utf8').trim();
+            } catch (_) { /* leave unknown */ }
+
+            let ran = true;
+            let findings = [];
+            try {
+              const raw = fs.readFileSync('ocr-result.json', 'utf8').trim();
+              if (!raw) {
+                ran = false;
+              } else {
+                const parsed = JSON.parse(raw);
+                if (!Array.isArray(parsed)) {
+                  ran = false;
+                } else {
+                  findings = parsed;
+                }
+              }
+            } catch (_) {
+              ran = false;
+            }
+
+            // Split findings into inline (resolvable file/line) vs. lineless.
+            const inline = [];
+            const lineless = [];
+            for (const f of findings) {
+              if (f && f.path && Number.isInteger(f.start_line) &&
+                  Number.isInteger(f.end_line)) {
+                inline.push({
+                  path: String(f.path),
+                  line: Number(f.start_line),
+                  start_line: Number(f.start_line),
+                  end_line: Number(f.end_line),
+                  body: String(f.comment || f.message || f.body || 'OCR finding'),
+                });
+              } else {
+                lineless.push(f);
+              }
+            }
+
+            // Post inline comments via a COMMENT review on the head SHA.
+            let postedInline = 0;
+            if (ran && inline.length > 0) {
+              try {
+                await github.rest.pulls.createReview({
+                  owner, repo, pull_number: number,
+                  event: 'COMMENT', commit_id: headSha, comments: inline,
+                });
+                postedInline = inline.length;
+              } catch (batchErr) {
+                // Fallback: post each inline comment individually.
+                for (const c of inline) {
+                  try {
+                    await github.rest.pulls.createReview({
+                      owner, repo, pull_number: number,
+                      event: 'COMMENT', commit_id: headSha, comments: [c],
+                    });
+                    postedInline += 1;
+                  } catch (_) { /* skip unpostable comment */ }
+                }
+              }
+            }
+
+            // Build the sticky summary, including lineless findings.
+            const artifactLine =
+              'Artifacts: download the `ocr-review-output` artifact from this workflow run for the raw JSON and stderr.';
+            let statusLine;
+            if (!ran) {
+              statusLine = '⚠️ OCR failed to run or parse output.';
+            } else if (findings.length === 0) {
+              statusLine = '✅ No findings.';
+            } else {
+              statusLine = `🔎 ${findings.length} finding(s) (${postedInline} posted inline).`;
+            }
+            let body = [
+              MARKER,
+              `## OpenCodeReview — PR #${number}`,
+              '',
+              `- Reviewed head SHA: \`${headSha}\``,
+              `- Merge base: \`${process.env.BASE_SHA}\``,
+              `- OCR version: \`${ocrVersion}\``,
+              `- ${statusLine}`,
+              `- ${artifactLine}`,
+            ];
+            if (lineless.length > 0) {
+              body.push('', '### Findings without a resolvable position', '');
+              for (const f of lineless) {
+                const where = f.path ? `\`${f.path}\`: ` : '';
+                body.push(`- ${where}${String(f.comment || f.message || f.body || 'OCR finding')}`);
+              }
+            }
+            const summary = body.join('\n');
+
+            // Sticky summary: update in place if the marker exists, else create.
+            const comments = await github.rest.issues.listComments({
+              owner, repo, issue_number: number,
+            });
+            const existing = comments.data.find((c) =>
+              c.body && c.body.includes(MARKER));
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner, repo, comment_id: existing.id, body: summary,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner, repo, issue_number: number, body: summary,
+              });
+            }
