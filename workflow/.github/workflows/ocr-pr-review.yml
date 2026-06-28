@@ -104,6 +104,11 @@ jobs:
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
           BASE_SHA="$(git merge-base "${BASE_SHA}" pr-head)"
+          FETCHED_HEAD="$(git rev-parse pr-head)"
+          if [ "${FETCHED_HEAD}" != "${HEAD_SHA}" ]; then
+            echo "::error::PR head changed between API resolution and fetch (expected ${HEAD_SHA}, got ${FETCHED_HEAD}). Re-run to review the latest push."
+            exit 1
+          fi
           {
             echo "BASE_SHA=${BASE_SHA}"
             echo "HEAD_SHA=${HEAD_SHA}"
@@ -123,15 +128,16 @@ jobs:
           OCR_LLM_MODEL: ${{ vars.OCR_LLM_MODEL }}
           OCR_LLM_USE_ANTHROPIC: ${{ vars.OCR_LLM_USE_ANTHROPIC }}
         run: |
-          if [ -z "$OCR_LLM_URL" ]; then
+          set -euo pipefail
+          if [ -z "${OCR_LLM_URL:-}" ]; then
             echo "::error::Required variable OCR_LLM_URL is not set"
             exit 1
           fi
-          if [ -z "$OCR_LLM_AUTH_TOKEN" ]; then
+          if [ -z "${OCR_LLM_AUTH_TOKEN:-}" ]; then
             echo "::error::Required secret OCR_LLM_AUTH_TOKEN is not set"
             exit 1
           fi
-          if [ -z "$OCR_LLM_MODEL" ]; then
+          if [ -z "${OCR_LLM_MODEL:-}" ]; then
             echo "::error::Required variable OCR_LLM_MODEL is not set"
             exit 1
           fi
@@ -139,7 +145,7 @@ jobs:
           ocr config set llm.auth_token "$OCR_LLM_AUTH_TOKEN"
           ocr config set llm.model "$OCR_LLM_MODEL"
           # Anthropic mode only when the variable is explicitly "true".
-          if [ "$OCR_LLM_USE_ANTHROPIC" = "true" ]; then
+          if [ "${OCR_LLM_USE_ANTHROPIC:-}" = "true" ]; then
             ocr config set llm.use_anthropic true
           fi
 

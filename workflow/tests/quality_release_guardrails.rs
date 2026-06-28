@@ -409,13 +409,15 @@ fn ocr_pr_review_workflow_content() -> String {
 }
 
 fn yaml_block_after(content: &str, header: &str) -> String {
-    let header_indent = header.chars().take_while(|ch| *ch == ' ').count();
+    let header_key = header.trim();
+    let mut header_indent = 0;
     let mut in_block = false;
     let mut block = String::new();
 
     for line in content.lines() {
         if !in_block {
-            if line == header {
+            if line.trim() == header_key {
+                header_indent = line.chars().take_while(|ch| *ch == ' ').count();
                 in_block = true;
                 block.push_str(line);
                 block.push('\n');
@@ -490,7 +492,7 @@ fn test_ocr_pr_review_uses_pull_request_target() {
         content.contains("pull_request_target:"),
         "Workflow must use pull_request_target for fork-safe secret access"
     );
-    let pull_request_target = yaml_block_after(&content, "  pull_request_target:");
+    let pull_request_target = yaml_block_after(&content, "pull_request_target:");
     assert!(
         pull_request_target.contains("types:"),
         "pull_request_target must define explicit event types"
@@ -584,6 +586,11 @@ fn test_ocr_pr_review_credential_handling() {
         !content.contains("secrets.OCR_LLM_URL"),
         "OCR_LLM_URL must be a variable, not a secret"
     );
+    assert_eq!(
+        content.matches("secrets.").count(),
+        1,
+        "OCR_LLM_AUTH_TOKEN must be the only secret reference"
+    );
 }
 
 /// Test: stable sticky summary marker, updateComment, and artifact upload.
@@ -612,28 +619,73 @@ fn test_ocr_pr_review_has_sticky_marker_and_artifacts() {
     );
 }
 
+/// Test: issue_comment and workflow_dispatch triggers are explicitly gated.
+#[test]
+fn test_ocr_pr_review_manual_triggers_are_gated() {
+    let content = ocr_pr_review_workflow_content();
+    assert!(
+        content.contains("issue_comment:"),
+        "Workflow must support comment triggers"
+    );
+    assert!(
+        content.contains("workflow_dispatch:"),
+        "Workflow must support manual dispatch"
+    );
+    assert!(
+        content.contains("github.event.issue.pull_request != null"),
+        "Comment trigger must only run on PR-linked comments"
+    );
+    for command in ["/ocr", "/open-code-review"] {
+        assert!(
+            content.contains(&format!("github.event.comment.body == '{command}'"))
+                && content.contains(&format!(
+                    "startsWith(github.event.comment.body, '{command} ')"
+                )),
+            "Comment trigger must require the {command} command as a standalone prefix"
+        );
+    }
+    assert!(
+        content.contains("pr_number:"),
+        "workflow_dispatch must require a pr_number input"
+    );
+}
+
 /// Test: the workflow does not execute untrusted PR code.
 #[test]
 fn test_ocr_pr_review_does_not_execute_pr_code() {
     let content = ocr_pr_review_workflow_content();
     let commands = run_blocks(&content).join("\n");
     for forbidden in ["make", "cargo", "npm run", "npm ci"] {
+        let separator_pattern = format!(" {forbidden}");
         assert!(
             !commands
                 .lines()
+                .flat_map(|line| line.split(['&', '|', ';']))
                 .map(str::trim_start)
-                .any(|line| line.starts_with(forbidden)),
+                .any(|token| token.starts_with(forbidden) || token.contains(&separator_pattern)),
             "Workflow must not invoke {forbidden} from a run step"
         );
     }
+    // Fork-safety: checkout must use the trusted base SHA, never the PR head.
+    assert!(
+        content.contains("ref: ${{ steps.pr-context.outputs.base_sha }}"),
+        "Checkout must use the trusted base SHA"
+    );
+    assert!(
+        !content.contains("ref: ${{ steps.pr-context.outputs.head_sha }}")
+            && !content.contains("ref: ${{ github.event.pull_request.head.sha }}"),
+        "Checkout must never directly use the PR head SHA"
+    );
     // Only the global OCR install is permitted.
     assert!(
         commands.contains("npm install -g @alibaba-group/open-code-review"),
         "Workflow may only globally install OCR"
     );
     assert!(
-        !content.contains("safe.directory '*'"),
-        "Workflow must not use safe.directory '*'"
+        !content.contains("safe.directory '*'")
+            && !content.contains("safe.directory=*")
+            && !content.contains("safe.directory *"),
+        "Workflow must not use a wildcard safe.directory"
     );
 }
 
