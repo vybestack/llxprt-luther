@@ -116,6 +116,7 @@ jobs:
             git config --global --unset-all http."${server_url}".extraheader 2>/dev/null || true
             git config --global --unset-all safe.directory "$GITHUB_WORKSPACE" 2>/dev/null || true
             rm -f "${RUNNER_TEMP}/ocr-git-auth-config"
+            unset GIT_CONFIG_GLOBAL
           }
           trap cleanup_git_auth EXIT
           trap 'cleanup_git_auth; exit 130' INT TERM
@@ -150,31 +151,43 @@ jobs:
             echo "::error::PR head changed between API resolution and fetch (expected ${HEAD_SHA}, got ${FETCHED_HEAD}). Re-run to review the latest push."
             exit 1
           fi
+          cleanup_git_auth
+          trap - EXIT INT TERM HUP
           {
             echo "BASE_SHA=${BASE_SHA}"
             echo "HEAD_SHA=${HEAD_SHA}"
           } >> "$GITHUB_ENV"
 
+      - name: Initialize OCR artifact files
+        run: |
+          : > ocr-result.json
+          : > ocr-stdout.raw
+          : > ocr-stderr.log
+          : > ocr-version.txt
+          : > ocr-preview.txt
+          : > ocr-preview-stderr.log
+          : > ocr-exit-code.txt
+
       - name: Install OpenCodeReview
         run: |
-          # Global install of OCR only; no repository scripts are executed.
-          npm install -g @alibaba-group/open-code-review@1.6.1
+          # Global install of OCR only; package lifecycle scripts are disabled.
+          npm install -g --ignore-scripts @alibaba-group/open-code-review@1.6.1
           ocr version > ocr-version.txt
           cat ocr-version.txt
 
-      - name: Configure OCR (variables + secret only)
+      - name: Validate OCR configuration
         env:
           OCR_LLM_URL: ${{ vars.OCR_LLM_URL }}
-          OCR_LLM_AUTH_TOKEN: ${{ secrets.OCR_LLM_AUTH_TOKEN }}
+          OCR_LLM_TOKEN: ${{ secrets.OCR_LLM_AUTH_TOKEN }}
           OCR_LLM_MODEL: ${{ vars.OCR_LLM_MODEL }}
-          OCR_LLM_USE_ANTHROPIC: ${{ vars.OCR_LLM_USE_ANTHROPIC }}
+          OCR_USE_ANTHROPIC: ${{ vars.OCR_LLM_USE_ANTHROPIC }}
         run: |
           set -euo pipefail
           if [ -z "${OCR_LLM_URL:-}" ]; then
             echo "::error::Required variable OCR_LLM_URL is not set"
             exit 1
           fi
-          if [ -z "${OCR_LLM_AUTH_TOKEN:-}" ]; then
+          if [ -z "${OCR_LLM_TOKEN:-}" ]; then
             echo "::error::Required secret OCR_LLM_AUTH_TOKEN is not set"
             exit 1
           fi
@@ -182,25 +195,24 @@ jobs:
             echo "::error::Required variable OCR_LLM_MODEL is not set"
             exit 1
           fi
-          ocr config set llm.url "$OCR_LLM_URL"
-          ocr config set llm.auth_token "$OCR_LLM_AUTH_TOKEN"
-          ocr config set llm.model "$OCR_LLM_MODEL"
-          # Anthropic mode only when the variable is explicitly "true".
-          if [ "${OCR_LLM_USE_ANTHROPIC:-}" = "true" ]; then
-            ocr config set llm.use_anthropic true
-          fi
 
       - name: Verify review scope includes changed tests
         env:
           BASE_SHA: ${{ env.BASE_SHA }}
           HEAD_SHA: ${{ env.HEAD_SHA }}
+          OCR_LLM_URL: ${{ vars.OCR_LLM_URL }}
+          OCR_LLM_TOKEN: ${{ secrets.OCR_LLM_AUTH_TOKEN }}
+          OCR_LLM_MODEL: ${{ vars.OCR_LLM_MODEL }}
+          OCR_USE_ANTHROPIC: ${{ vars.OCR_LLM_USE_ANTHROPIC }}
         run: |
           set -euo pipefail
           # Fail loudly rather than silently letting OCR exclude changed
           # test/spec files (project policy: tests must be reviewed).
+          : > ocr-preview.txt
+          : > ocr-preview-stderr.log
           changed_tests="$(
             git diff --name-only "${BASE_SHA}..${HEAD_SHA}" \
-              | grep -Ei '(^|/)(tests/|__tests__/).*(\.(rs|ts|tsx|js|jsx|mjs|cjs|go|py|java|c|cc|cpp|h|hpp|rb|php|kt|kts|swift|scala))$|(^|/)(test_[^/]*\.py|[^/]*_test\.py|[^/]*_test\.go|[^/]*(Test|Tests)\.java|[^/]*_test\.(c|cc|cpp|h|hpp))$|(\.test\.|\.spec\.|_tests?\.rs)$' \
+              | grep -Ei '(^|/)(tests?|specs?|__tests__)/.*(\.(rs|ts|tsx|js|jsx|mjs|cjs|go|py|java|c|cc|cpp|h|hpp|rb|php|kt|kts|swift|scala))$|(^|/)(test_[^/]*\.py|[^/]*_test\.py|[^/]*_test\.go|[^/]*_spec\.(rs|ts|tsx|js|jsx|mjs|cjs|go|py|java|c|cc|cpp|h|hpp|rb|php|kt|kts|swift|scala)|[^/]*(Test|Tests)\.java|[^/]*_test\.(c|cc|cpp|h|hpp))$|(\.test\.|\.spec\.|_tests?\.rs|_spec\.rs)$' \
               || true
           )"
           if [ -n "$changed_tests" ]; then
@@ -213,15 +225,36 @@ jobs:
               echo "::error::Could not verify OCR preview scope for changed test files."
               exit 1
             fi
-            reviewed="$(awk 'BEGIN{IGNORECASE=1} /will review/{found=1} found{print}' ocr-preview.txt || true)"
-            excluded="$(awk 'BEGIN{IGNORECASE=1} /excluded/{found=1} found{print}' ocr-preview.txt || true)"
+            reviewed="$(awk '
+              BEGIN { IGNORECASE = 1; in_section = 0 }
+              /^Will review[[:space:]]*\(/ { in_section = 1; next }
+              /^[[:alpha:] ]+[[:space:]]*\([0-9]+\):/ { in_section = 0 }
+              in_section { print }
+            ' ocr-preview.txt || true)"
+            excluded="$(awk '
+              BEGIN { IGNORECASE = 1; in_section = 0 }
+              /^Excluded[[:space:]]*\(/ { in_section = 1; next }
+              /^[[:alpha:] ]+[[:space:]]*\([0-9]+\):/ { if (in_section) in_section = 0 }
+              in_section { print }
+            ' ocr-preview.txt || true)"
             missing=""
             excluded_tests=""
             path_in_section() {
-              awk -v needle="]  $1" '
-                index($0, needle) {
-                  after = substr($0, index($0, needle) + length(needle), 1)
-                  if (after == "" || after == " " || after == "	") found = 1
+              awk -v target="$1" '
+                {
+                  line = $0
+                  sub(/^[[:space:]]*/, "", line)
+                  sub(/^[-*][[:space:]]*/, "", line)
+                  sub(/^\[[^]]+\][[:space:]]*/, "", line)
+                  sub(/^[[:space:]]*/, "", line)
+                  split(line, fields, /[[:space:]]+/)
+                  candidate = fields[1]
+                  quote = sprintf("%c", 39)
+                  if ((substr(candidate, 1, 1) == "\"" && substr(candidate, length(candidate), 1) == "\"") ||
+                      (substr(candidate, 1, 1) == quote && substr(candidate, length(candidate), 1) == quote)) {
+                    candidate = substr(candidate, 2, length(candidate) - 2)
+                  }
+                  if (candidate == target) found = 1
                 }
                 END { exit found ? 0 : 1 }
               '
@@ -253,6 +286,10 @@ jobs:
         env:
           BASE_SHA: ${{ env.BASE_SHA }}
           HEAD_SHA: ${{ env.HEAD_SHA }}
+          OCR_LLM_URL: ${{ vars.OCR_LLM_URL }}
+          OCR_LLM_TOKEN: ${{ secrets.OCR_LLM_AUTH_TOKEN }}
+          OCR_LLM_MODEL: ${{ vars.OCR_LLM_MODEL }}
+          OCR_USE_ANTHROPIC: ${{ vars.OCR_LLM_USE_ANTHROPIC }}
         run: |
           set +e
           ocr review \
@@ -292,12 +329,17 @@ jobs:
           script: |
             const fs = require('fs');
             const MARKER = '<!-- luther-ocr-review -->';
+            const INLINE_MARKER = '<!-- luther-ocr-inline -->';
             const number = Number(process.env.PR_NUMBER);
             if (!Number.isInteger(number) || number <= 0) {
               core.setFailed('No valid PR number resolved from pr-context step.');
               return;
             }
             const headSha = process.env.HEAD_SHA;
+            if (!headSha) {
+              core.setFailed('No valid HEAD_SHA resolved from environment.');
+              return;
+            }
             const owner = context.repo.owner;
             const repo = context.repo.repo;
 
@@ -330,19 +372,59 @@ jobs:
                   core.warning(`OCR result was not valid JSON and no JSON array could be extracted: ${parseErr.message || parseErr}`);
                   return null;
                 }
-                const parsed = JSON.parse(trimmed.slice(start, end + 1));
-                return Array.isArray(parsed) ? parsed : null;
+                try {
+                  const parsed = JSON.parse(trimmed.slice(start, end + 1));
+                  return Array.isArray(parsed) ? parsed : null;
+                } catch (innerErr) {
+                  core.warning(`OCR result was not valid JSON and extracted array substring could not be parsed: ${innerErr.message || innerErr}`);
+                  return null;
+                }
               }
             }
 
+            function escapeMarkdownHtml(value) {
+              return value
+                .replace(new RegExp('&', 'g'), '&amp;')
+                .replace(new RegExp('<', 'g'), '&lt;')
+                .replace(new RegExp('>', 'g'), '&gt;');
+            }
+
             function renderFindingText(value) {
-              const text = String(value || 'OCR finding')
+              const text = escapeMarkdownHtml(String(typeof value === 'string' && value ? value : 'OCR finding')
                 .replace(/<!--[\s\S]*?-->/g, '')
                 .replace(/!\[([^\]]*)\]\([^)]*\)/g, '$1')
-                .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
-                .replace(/<[^>\n]+>/g, '')
+                .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1'))
+                .replace(/@/g, '@\u200b')
                 .replace(/^(\s*[-*]\s*)\[[ xX]\]/gm, '$1\\[ \\]');
               return `> ${text.replace(/\n/g, '\n> ')}`;
+            }
+
+            function unrenderFindingText(value) {
+              return String(value || 'OCR finding')
+                .replace(/<!--[\s\S]*?-->/g, '')
+                .replace(/^> ?/gm, '')
+                .trim();
+            }
+
+            function inlineCommentKey(comment) {
+              const startLine = comment.start_line || '';
+              return `${comment.path} ${comment.line} ${startLine} ${unrenderFindingText(comment.body)}`;
+            }
+
+            async function existingInlineCommentKeys() {
+              const comments = await github.paginate(github.rest.pulls.listReviewComments, {
+                owner, repo, pull_number: number, per_page: 100,
+              });
+              return new Set(comments
+                .filter((comment) => comment.commit_id === headSha
+                  && typeof comment.body === 'string'
+                  && comment.body.includes(INLINE_MARKER))
+                .map((comment) => inlineCommentKey({
+                  path: comment.path,
+                  line: comment.line || comment.original_line,
+                  start_line: comment.start_line || comment.original_start_line,
+                  body: comment.body,
+                })));
             }
             try {
               const raw = fs.readFileSync('ocr-result.json', 'utf8');
@@ -368,12 +450,14 @@ jobs:
                 if (startLine > endLine) {
                   [startLine, endLine] = [endLine, startLine];
                 }
-                const text = renderFindingText(f.comment || f.message || f.body || 'OCR finding');
+                const rawText = f.comment || f.message || f.body;
+                const text = renderFindingText(typeof rawText === 'string' ? rawText : 'OCR finding');
                 const comment = {
                   path: String(f.path),
                   line: endLine,
                   side: 'RIGHT',
-                  body: text,
+                  body: `${INLINE_MARKER}
+${text}`,
                 };
                 if (startLine < endLine) {
                   comment.start_line = startLine;
@@ -396,8 +480,33 @@ jobs:
                 postedInline = inline.length;
               } catch (batchErr) {
                 core.warning(`Batch review post failed (${inline.length} comments), falling back to individual posting: ${batchErr.message || batchErr}`);
-                // Fallback: post each inline comment individually.
-                for (const c of inline) {
+                // Fallback: post each inline comment individually, with a cap to avoid secondary rate limits.
+                let existingInlineKeys = new Set();
+                try {
+                  existingInlineKeys = await existingInlineCommentKeys();
+                } catch (listErr) {
+                  core.warning(`Could not list existing OCR inline comments before fallback posting: ${listErr.message || listErr}`);
+                }
+                const MAX_INLINE_FALLBACK = 50;
+                for (const [index, c] of inline.entries()) {
+                  if (index >= MAX_INLINE_FALLBACK) {
+                    const lineRange = c.start_line && c.start_line !== c.line
+                      ? `${c.start_line}-${c.line}`
+                      : String(c.line);
+                    const overflowBody = `${unrenderFindingText(c.body)} (line ${lineRange})`;
+                    lineless.push({
+                      path: c.path,
+                      comment: overflowBody,
+                      message: overflowBody,
+                      body: overflowBody,
+                    });
+                    continue;
+                  }
+                  if (existingInlineKeys.has(inlineCommentKey(c))) {
+                    core.warning(`Skipping duplicate OCR inline comment on ${c.path}:${c.line} after batch post uncertainty.`);
+                    postedInline += 1;
+                    continue;
+                  }
                   try {
                     await github.rest.pulls.createReviewComment({
                       owner,
@@ -417,7 +526,7 @@ jobs:
                     const lineRange = c.start_line && c.start_line !== c.line
                       ? `${c.start_line}-${c.line}`
                       : String(c.line);
-                    const fallbackBody = `${c.body} (line ${lineRange})`;
+                    const fallbackBody = `${unrenderFindingText(c.body)} (line ${lineRange})`;
                     lineless.push({
                       path: c.path,
                       comment: fallbackBody,
@@ -455,7 +564,8 @@ jobs:
               for (const f of lineless) {
                 const item = f && typeof f === 'object' ? f : {};
                 const where = item.path ? `\`${item.path}\`: ` : '';
-                const text = renderFindingText(item.comment || item.message || item.body || f || 'OCR finding');
+                const rawText = item.comment || item.message || item.body;
+                const text = renderFindingText(typeof rawText === 'string' ? rawText : 'OCR finding');
                 body.push(`- ${where}${text}`);
               }
             }
@@ -490,3 +600,9 @@ jobs:
             if (!ran) {
               core.setFailed(`OpenCodeReview failed or produced unparsable output (exit code ${exitCode}).`);
             }
+
+      - name: Clean up scoped safe.directory
+        if: always()
+        run: |
+          set +e
+          git config --file "${HOME}/.gitconfig" --unset-all safe.directory "$GITHUB_WORKSPACE" 2>/dev/null || true

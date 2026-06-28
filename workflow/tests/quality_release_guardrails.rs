@@ -405,7 +405,7 @@ fn ocr_pr_review_workflow_content() -> String {
         .join("workflows")
         .join("ocr-pr-review.yml");
     fs::read_to_string(&workflow_path)
-        .unwrap_or_else(|_| panic!("Failed to read ocr-pr-review.yml at {workflow_path:?}"))
+        .unwrap_or_else(|e| panic!("Failed to read ocr-pr-review.yml at {workflow_path:?}: {e}"))
 }
 
 fn yaml_block_after(content: &str, header: &str) -> String {
@@ -458,11 +458,32 @@ fn normalize_run_block(block: &str) -> String {
         .unwrap_or(0);
     let mut normalized = String::new();
     for line in lines {
-        let without_indent = line.get(min_indent..).unwrap_or(line);
+        let without_indent = line.get(min_indent..).unwrap_or("");
         normalized.push_str(without_indent);
         normalized.push('\n');
     }
     normalized
+}
+
+fn unescape_double_quoted(inner: &str) -> String {
+    let mut unescaped = String::new();
+    let mut chars = inner.chars();
+    while let Some(ch) = chars.next() {
+        if ch != '\\' {
+            unescaped.push(ch);
+            continue;
+        }
+        match chars.next() {
+            Some('\\') => unescaped.push('\\'),
+            Some('"') => unescaped.push('"'),
+            Some(other) => {
+                unescaped.push('\\');
+                unescaped.push(other);
+            }
+            None => unescaped.push('\\'),
+        }
+    }
+    unescaped
 }
 
 fn unquote_inline_run_command(command: &str) -> String {
@@ -472,13 +493,13 @@ fn unquote_inline_run_command(command: &str) -> String {
             .strip_prefix('"')
             .and_then(|value| value.strip_suffix('"'))
         {
-            return inner.replace("\\\"", "\"").replace("\\\\", "\\");
+            return unescape_double_quoted(inner);
         }
         if let Some(inner) = trimmed
             .strip_prefix('\'')
             .and_then(|value| value.strip_suffix('\''))
         {
-            return inner.replace("''", "'");
+            return unescape_double_quoted(inner);
         }
     }
     trimmed.to_string()
@@ -518,7 +539,8 @@ fn run_blocks(content: &str) -> Vec<String> {
         }
 
         let trimmed = line.trim_start();
-        if let Some((key, rest)) = trimmed.split_once(':') {
+        let run_entry = trimmed.strip_prefix("- ").unwrap_or(trimmed).trim_start();
+        if let Some((key, rest)) = run_entry.split_once(':') {
             if key.trim() != "run" {
                 continue;
             }
@@ -597,9 +619,9 @@ fn strip_shell_comment(line: &str) -> String {
 #[test]
 fn test_ocr_pr_review_run_block_parsing_handles_shell_edge_cases() {
     let content =
-        "steps:\n  - name: strip\n    run: |-\n      echo \"\\#notcomment\" # strip this\n  - name: runtime-key\n    runtime: node20\n  - name: inline\n    run: |+ echo inline\n  - name: quoted-inline\n    run: \"bash scripts/review.sh\"\n  - name: following-line-scalar\n    run:\n      |\n        echo late-block\n";
+        "steps:\n  - name: strip\n    run: |-\n      echo \"\\#notcomment\" # strip this\n  - name: runtime-key\n    runtime: node20\n  - name: inline\n    run: |+ echo inline\n  - name: quoted-inline\n    run: \"bash scripts/review.sh\"\n  - name: following-line-scalar\n    run:\n      |\n        echo late-block\n  - run: ./direct.sh\n";
     let blocks = run_blocks(content);
-    assert_eq!(blocks.len(), 4);
+    assert_eq!(blocks.len(), 5);
     assert!(blocks[0].contains("echo \"\\#notcomment\" # strip this"));
     assert_eq!(strip_shell_comment(&blocks[0]), "echo \"\\#notcomment\" ");
     assert_eq!(blocks[1], "echo inline\n");
@@ -614,6 +636,7 @@ fn test_ocr_pr_review_run_block_parsing_handles_shell_edge_cases() {
         strip_shell_comment(&blocks[3]).contains("echo late-block"),
         "run keys with a following-line scalar indicator should still be scanned"
     );
+    assert_eq!(blocks[4], "./direct.sh\n");
 }
 
 /// Test: the OCR PR review workflow file exists.
@@ -672,9 +695,13 @@ fn test_ocr_pr_review_permissions_are_minimal() {
         .map(str::trim)
         .filter(|line| !line.is_empty() && !line.starts_with('#'))
         .collect();
+    let mut sorted_permission_lines = permission_lines;
+    sorted_permission_lines.sort_unstable();
+    let mut expected_permission_lines =
+        vec!["contents: read", "pull-requests: write", "issues: write"];
+    expected_permission_lines.sort_unstable();
     assert_eq!(
-        permission_lines,
-        vec!["contents: read", "pull-requests: write", "issues: write"],
+        sorted_permission_lines, expected_permission_lines,
         "Workflow permissions must be exactly the approved minimal set"
     );
 }
@@ -700,9 +727,7 @@ fn test_ocr_pr_review_concurrency_cancels_duplicates() {
         "Concurrency group must key on the PR/issue number for automatic, comment, and manual runs"
     );
     assert!(
-        !concurrency_block.contains("github.ref }}")
-            && !concurrency_block.contains("github.ref}}")
-            && !concurrency_block.contains("github.ref ||"),
+        !concurrency_block.contains("github.ref"),
         "Concurrency must not fall back to github.ref for PR review runs"
     );
 }
@@ -760,20 +785,26 @@ fn secret_reference_names(content: &str) -> Vec<String> {
 fn test_ocr_pr_review_test_scope_guard_fails_closed() {
     let content = ocr_pr_review_workflow_content();
     assert!(
-        content.contains("test_[^/]*\\.py")
+        content.contains("(tests?|specs?|__tests__)")
+            && content.contains("test_[^/]*\\.py")
             && content.contains("[^/]*_test\\.py")
             && content.contains("[^/]*_test\\.go")
             && content.contains("[^/]*(Test|Tests)\\.java")
-            && content.contains("[^/]*_test\\.(c|cc|cpp|h|hpp)"),
+            && content.contains("[^/]*_test\\.(c|cc|cpp|h|hpp)")
+            && content.contains("[^/]*_spec\\.(rs|ts|tsx|js|jsx|mjs|cjs|go|py|java|c|cc|cpp|h|hpp|rb|php|kt|kts|swift|scala)"),
         "Changed-test detection must include common language-specific test filenames outside test directories"
     );
     assert!(
         content.contains("if ! ocr review --preview --from \"$BASE_SHA\" --to \"$HEAD_SHA\"")
             && content.contains("Could not verify OCR preview scope for changed test files")
             && content.contains("OCR preview did not list changed test files in the reviewed set")
-            && content.contains("awk 'BEGIN{IGNORECASE=1} /will review/{found=1} found{print}'")
-            && content.contains("awk 'BEGIN{IGNORECASE=1} /excluded/{found=1} found{print}'")
-            && content.contains("path_in_section"),
+            && content.contains("/^Will review[[:space:]]*\\(/ { in_section = 1; next }")
+            && content.contains("/^Excluded[[:space:]]*\\(/ { in_section = 1; next }")
+            && content.contains("sub(/^[-*][[:space:]]*/, \"\", line)")
+            && content.contains("sub(/^\\[[^]]+\\][[:space:]]*/, \"\", line)")
+            && content.contains("split(line, fields, /[[:space:]]+/)")
+            && content.contains("candidate = fields[1]")
+            && content.contains("if (candidate == target) found = 1"),
         "Changed-test scope validation must fail closed when OCR preview cannot be generated or parsed"
     );
 }
@@ -785,6 +816,10 @@ fn test_ocr_pr_review_credential_handling() {
     assert!(
         content.contains("secrets.OCR_LLM_AUTH_TOKEN"),
         "Workflow must reference OCR_LLM_AUTH_TOKEN via secrets."
+    );
+    assert!(
+        content.contains("OCR_LLM_TOKEN: ${{ secrets.OCR_LLM_AUTH_TOKEN }}"),
+        "Workflow must expose OCR's supported env var name instead of passing the token on argv."
     );
     assert!(
         content.contains("vars.OCR_LLM_URL"),
@@ -801,11 +836,13 @@ fn test_ocr_pr_review_credential_handling() {
             && !content.contains("secrets[\"OCR_LLM_URL\"]"),
         "OCR_LLM_URL must be a variable, not a secret (dot or bracket notation)"
     );
-    let secret_refs = secret_reference_names(&content);
+    let mut secret_refs = secret_reference_names(&content);
+    secret_refs.sort_unstable();
+    secret_refs.dedup();
     assert_eq!(
         secret_refs,
         vec!["OCR_LLM_AUTH_TOKEN"],
-        "OCR_LLM_AUTH_TOKEN must be the only secret reference, using either dot or bracket syntax"
+        "OCR_LLM_AUTH_TOKEN must be the only referenced secret, using either dot or bracket syntax"
     );
 }
 
@@ -838,6 +875,8 @@ fn test_ocr_pr_review_has_sticky_marker_and_artifacts() {
     );
     assert!(
         content.contains("ocr-exit-code.txt")
+            && content.contains(": > ocr-result.json")
+            && content.contains(": > ocr-preview-stderr.log")
             && content
                 .contains("core.setFailed(`OpenCodeReview failed or produced unparsable output"),
         "Workflow must preserve OCR exit status and fail the posting step on OCR failure"
@@ -861,7 +900,16 @@ fn test_ocr_pr_review_inline_payload_is_github_compatible() {
     assert!(
         content.contains("line: endLine")
             && content.contains("side: 'RIGHT'")
-            && content.contains("renderFindingText"),
+            && content.contains("renderFindingText")
+            && content
+                .contains("String(typeof value === 'string' && value ? value : 'OCR finding')")
+            && content.contains("function escapeMarkdownHtml(value)")
+            && content.contains(".replace(new RegExp('&', 'g'), '&amp;')")
+            && content.contains(".replace(new RegExp('<', 'g'), '&lt;')")
+            && content.contains(".replace(new RegExp('>', 'g'), '&gt;')")
+            && content.contains("function unrenderFindingText(value)")
+            && content.contains("INLINE_MARKER")
+            && content.contains(".replace(/@/g, '@\\u200b')"),
         "Inline comments must target the ending line with an explicit side"
     );
     assert!(
@@ -885,20 +933,28 @@ fn test_ocr_pr_review_inline_payload_is_github_compatible() {
     assert!(
         content.contains("lineless.push(f && typeof f === 'object' ? f : { body: f || 'Malformed OCR finding' })")
             && content.contains("const item = f && typeof f === 'object' ? f : {}")
-            && content.contains("renderFindingText(item.comment || item.message || item.body || f || 'OCR finding')"),
+            && content.contains("const rawText = item.comment || item.message || item.body")
+            && content.contains("renderFindingText(typeof rawText === 'string' ? rawText : 'OCR finding')")
+            && !content.contains("|| f || 'OCR finding'"),
         "Sticky summary must safely render malformed lineless findings"
     );
     assert!(
         content.contains("No valid PR number resolved from pr-context step")
+            && content.contains("No valid HEAD_SHA resolved from environment")
             && content
                 .contains("OCR result was not valid JSON and no JSON array could be extracted"),
-        "Posting script must fail clearly if PR context did not resolve a valid PR number"
+        "Posting script must fail clearly if PR context did not resolve a valid PR number or head SHA"
     );
     assert!(
         content.contains("github.rest.pulls.createReviewComment")
             && content.contains("Batch review post failed")
+            && content.contains("const MAX_INLINE_FALLBACK = 50")
+            && content.contains("for (const [index, c] of inline.entries())")
+            && content.contains("if (index >= MAX_INLINE_FALLBACK)")
             && content.contains("core.warning(`Failed to post inline comment on ${c.path}:${c.line}:")
             && content.contains("const lineRange = c.start_line && c.start_line !== c.line")
+            && content.contains("const overflowBody = `${unrenderFindingText(c.body)} (line ${lineRange})`")
+            && content.contains("const fallbackBody = `${unrenderFindingText(c.body)} (line ${lineRange})`")
             && content.contains("comment: fallbackBody")
             && content.contains("message: fallbackBody")
             && content.contains("body: fallbackBody"),
@@ -945,7 +1001,7 @@ fn test_ocr_pr_review_manual_triggers_are_gated() {
         .next()
         .expect("workflow trigger guard appears before jobs");
     assert!(
-        !trigger_guard.contains("\\f") && !trigger_guard.contains("\\v"),
+        !trigger_guard.contains('\u{000C}') && !trigger_guard.contains('\u{000B}'),
         "Comment trigger must only match documented space, LF, CRLF, and tab separators"
     );
     for association in ["OWNER", "MEMBER", "COLLABORATOR"] {
@@ -968,25 +1024,41 @@ fn split_shell_segments(line: &str) -> Vec<&str> {
     let mut in_single = false;
     let mut in_double = false;
     let mut escaped = false;
-    for (idx, ch) in line.char_indices() {
+    let mut chars = line.char_indices().peekable();
+    while let Some((idx, ch)) = chars.next() {
         if escaped {
             escaped = false;
             continue;
         }
-        if ch == char::from(92) && !in_single {
-            escaped = true;
+        if ch == '\\' && !in_single {
+            let escapes_next = !in_double
+                || chars
+                    .peek()
+                    .is_some_and(|(_, next_ch)| matches!(next_ch, '$' | '`' | '"' | '\\'));
+            if escapes_next {
+                escaped = true;
+            }
             continue;
         }
-        if ch == char::from(39) && !in_double {
+        if ch == '\'' && !in_double {
             in_single = !in_single;
             continue;
         }
-        if ch == char::from(34) && !in_single {
+        if ch == '"' && !in_single {
             in_double = !in_double;
             continue;
         }
         if !in_single && !in_double && matches!(ch, '&' | '|' | ';') {
             segments.push(&line[start..idx]);
+            if matches!(ch, '&' | '|') {
+                if let Some(&(next_idx, next_ch)) = chars.peek() {
+                    if next_ch == ch {
+                        chars.next();
+                        start = next_idx + next_ch.len_utf8();
+                        continue;
+                    }
+                }
+            }
             start = idx + ch.len_utf8();
         }
     }
@@ -1006,9 +1078,35 @@ fn shell_command_segments(scanned_commands: &str) -> impl Iterator<Item = &str> 
 fn test_ocr_pr_review_shell_segment_splitter_respects_quotes() {
     assert_eq!(split_shell_segments(r#"echo "a;cargo"; npm test"#).len(), 2);
     assert_eq!(
-        split_shell_segments(r#"echo 'a&node' && pnpm test"#).len(),
-        3
+        split_shell_segments(r#"echo 'a&node' && pnpm test"#),
+        vec![r#"echo 'a&node' "#, " pnpm test"]
     );
+    assert_eq!(
+        split_shell_segments(r"echo foo\;bar"),
+        vec![r"echo foo\;bar"]
+    );
+    assert_eq!(
+        strip_shell_comment(r"echo a\\\ #cargo build"),
+        r"echo a\\\ #cargo build"
+    );
+}
+
+fn command_token_after_env_assignments(token: &str) -> &str {
+    let mut current = token.trim_start();
+    loop {
+        let first = first_shell_word(current);
+        let Some((name, _)) = first.split_once('=') else {
+            return current;
+        };
+        if name.is_empty()
+            || !name
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+        {
+            return current;
+        }
+        current = current[first.len()..].trim_start();
+    }
 }
 
 fn first_shell_word(token: &str) -> &str {
@@ -1016,10 +1114,12 @@ fn first_shell_word(token: &str) -> &str {
         .split(|ch: char| ch.is_whitespace() || matches!(ch, '>' | '<' | '|' | '&' | ';'))
         .next()
         .unwrap_or_default()
-        .trim_matches(|ch| ch == char::from(34) || ch == char::from(39))
+        .trim_matches(|ch| ch == '"' || ch == '\'')
 }
 fn command_matches_forbidden(first_word: &str, forbidden: &str) -> bool {
-    if first_word == forbidden {
+    // Multi-word forbidden commands are detected by token prefix checks in
+    // token_invokes_forbidden_command; first_shell_word only handles one word.
+    if !forbidden.contains(' ') && first_word == forbidden {
         return true;
     }
     forbidden == "python"
@@ -1038,14 +1138,17 @@ fn invokes_relative_repo_path(first_word: &str) -> bool {
     first_word.starts_with("./")
         || first_word.starts_with("../")
         || (first_word.contains('/')
+            && !first_word.contains("(/")
             && !first_word.starts_with('/')
+            && !first_word.starts_with('.')
             && !first_word.starts_with('$')
             && !first_word.starts_with('"')
             && !first_word.starts_with('\''))
 }
 
 fn token_invokes_repo_code(token: &str) -> bool {
-    let first_word = first_shell_word(token);
+    let command_token = command_token_after_env_assignments(token);
+    let first_word = first_shell_word(command_token);
     invokes_relative_repo_path(first_word)
         || token.contains("$(./")
         || token.contains("$(../")
@@ -1053,26 +1156,33 @@ fn token_invokes_repo_code(token: &str) -> bool {
         || token.contains("`../")
 }
 
+fn command_starts_with_forbidden_command(command: &str, forbidden: &str) -> bool {
+    let normalized_command = command.split_whitespace().collect::<Vec<_>>().join(" ");
+    normalized_command
+        .strip_prefix(forbidden)
+        .is_some_and(|suffix| {
+            suffix
+                .chars()
+                .next()
+                .is_none_or(|ch| ch.is_whitespace() || matches!(ch, '>' | '<' | '|' | '&' | ';'))
+        })
+        || command_matches_forbidden(first_shell_word(command.trim_start()), forbidden)
+}
+
+fn token_contains_forbidden_after_shell_prefix(token: &str, prefix: &str, forbidden: &str) -> bool {
+    token.match_indices(prefix).any(|(idx, _)| {
+        command_starts_with_forbidden_command(&token[idx + prefix.len()..], forbidden)
+    })
+}
+
 fn token_invokes_forbidden_command(token: &str, forbidden: &str) -> bool {
-    let direct_match = token.strip_prefix(forbidden).is_some_and(|suffix| {
-        suffix
-            .chars()
-            .next()
-            .is_none_or(|ch| ch.is_whitespace() || matches!(ch, '>' | '<' | '|' | '&' | ';'))
-    });
-    if direct_match || command_matches_forbidden(first_shell_word(token), forbidden) {
+    let command_token = command_token_after_env_assignments(token);
+    if command_starts_with_forbidden_command(command_token, forbidden) {
         return true;
     }
-    let substitution_pattern = format!("$({forbidden}");
-    let spaced_substitution_pattern = format!("$( {forbidden}");
-    let brace_substitution_pattern = format!("${{{forbidden}");
-    let spaced_brace_substitution_pattern = format!("${{ {forbidden}");
-    let backtick_pattern = format!("`{forbidden}");
-    token.contains(&substitution_pattern)
-        || token.contains(&spaced_substitution_pattern)
-        || token.contains(&brace_substitution_pattern)
-        || token.contains(&spaced_brace_substitution_pattern)
-        || token.contains(&backtick_pattern)
+    token_contains_forbidden_after_shell_prefix(token, "$(", forbidden)
+        || token_contains_forbidden_after_shell_prefix(token, "${", forbidden)
+        || token_contains_forbidden_after_shell_prefix(token, "`", forbidden)
 }
 
 const FORBIDDEN_PR_CODE_COMMANDS: &[&str] = &[
@@ -1102,6 +1212,7 @@ const FORBIDDEN_PR_CODE_COMMANDS: &[&str] = &[
     "pip3",
     "eval",
     "source",
+    "sudo",
 ];
 
 const FORBIDDEN_REPO_EXECUTION_FALLBACKS: &[&str] = &[
@@ -1114,6 +1225,10 @@ const FORBIDDEN_REPO_EXECUTION_FALLBACKS: &[&str] = &[
     "zsh",
     "eval",
     "source",
+    "sudo",
+    "npm run",
+    "npm ci",
+    "npm test",
     "npm exec",
     "npm start",
     "npx",
@@ -1124,6 +1239,7 @@ const FORBIDDEN_REPO_EXECUTION_FALLBACKS: &[&str] = &[
 const REJECTED_REPO_EXECUTION_PATTERNS: &[&str] = &[
     "scripts/review.sh",
     "../tool",
+    "FOO=bar ./malicious.sh",
     "sh scripts/review.sh",
     "dash scripts/review.sh",
     "source scripts/env.sh",
@@ -1137,6 +1253,11 @@ const REJECTED_REPO_EXECUTION_PATTERNS: &[&str] = &[
     "$(../tool)",
     "$( cargo build)",
     "${ cargo test}",
+    "FOO=1 npm   run test",
+    "FOO=1 ./scripts/review.sh",
+    "sudo npm run build",
+    "$(  cargo build)",
+    "${  cargo test}",
 ];
 
 fn assert_scoped_git_auth_cleanup(content: &str) {
@@ -1150,9 +1271,13 @@ fn assert_scoped_git_auth_cleanup(content: &str) {
             && content.contains("trap cleanup_git_auth EXIT")
             && content.contains("trap 'cleanup_git_auth; exit 130' INT TERM")
             && content.contains("trap 'cleanup_git_auth; exit 129' HUP")
+            && content.contains("unset GIT_CONFIG_GLOBAL")
+            && content.contains("trap - EXIT INT TERM HUP")
             && content.contains("set +e")
             && content.contains("git config --global --unset-all safe.directory")
             && content.contains("git config --file \"${HOME}/.gitconfig\" --add safe.directory")
+            && content
+                .contains("git config --file \"${HOME}/.gitconfig\" --unset-all safe.directory")
             && content.contains("rm -f \"${RUNNER_TEMP}/ocr-git-auth-config\"")
             && content.contains("chmod 600 \"${RUNNER_TEMP}/ocr-git-auth-config\"")
             && content.contains("printf '%s\\n'")
@@ -1166,12 +1291,17 @@ fn assert_scoped_git_auth_cleanup(content: &str) {
     let safe_directory = content
         .find("git config --global --add safe.directory")
         .expect("temporary safe.directory must be scoped");
+    let persistent_safe_directory_cleanup = content
+        .rfind("git config --file \"${HOME}/.gitconfig\" --unset-all safe.directory")
+        .expect("persistent safe.directory must be cleaned up after later steps");
     let pr_fetch = content
         .find("git fetch origin \"pull/${PR_NUMBER}/head:pr-head\"")
         .expect("PR head fetch must be present");
     assert!(
-        persistent_safe_directory < safe_directory && safe_directory < pr_fetch,
-        "safe.directory should be scoped before fetching PR-controlled refs"
+        persistent_safe_directory < safe_directory
+            && safe_directory < pr_fetch
+            && pr_fetch < persistent_safe_directory_cleanup,
+        "safe.directory should be scoped before fetching PR-controlled refs and cleaned up after later steps"
     );
 }
 
@@ -1179,7 +1309,6 @@ fn scanned_ocr_pr_review_run_commands() -> String {
     let commands = run_blocks(&ocr_pr_review_workflow_content()).join("\n");
     let continued_commands = commands.replace(concat!("\\", "\n"), " ");
     continued_commands
-        .replace("\\n", "\n")
         .lines()
         .map(strip_shell_comment)
         .collect::<Vec<_>>()
@@ -1256,12 +1385,13 @@ fn test_ocr_pr_review_uses_only_pinned_ocr_install() {
         .collect();
     assert_eq!(
         ocr_installs,
-        vec!["npm install -g @alibaba-group/open-code-review@1.6.1"],
+        vec!["npm install -g --ignore-scripts @alibaba-group/open-code-review@1.6.1"],
         "Workflow may only globally install the reviewed pinned OCR version"
     );
     for install in &ocr_installs {
         assert!(
             install.ends_with("@1.6.1")
+                && install.contains(" --ignore-scripts ")
                 && !install.contains("@file:")
                 && !install.contains("@link:")
                 && !install.contains("@./")
@@ -1269,9 +1399,10 @@ fn test_ocr_pr_review_uses_only_pinned_ocr_install() {
             "OCR install must use an explicit registry version, not a local or linked package"
         );
         let version = install
-            .strip_prefix("npm install -g @alibaba-group/open-code-review@")
+            .strip_prefix("npm install -g --ignore-scripts @alibaba-group/open-code-review@")
             .expect("install command must include the OCR package prefix");
-        let semver_parts: Vec<&str> = version.split('.').collect();
+        let core = version.split(['-', '+']).next().unwrap_or(version);
+        let semver_parts: Vec<&str> = core.split('.').collect();
         assert!(
             semver_parts.len() == 3
                 && semver_parts
@@ -1289,20 +1420,30 @@ fn test_ocr_pr_review_uses_only_pinned_ocr_install() {
     );
 }
 
-/// Test: CodeRabbit remains enabled (OCR is additive).
+/// Test: OCR remains additive to existing PR quality gates.
 #[test]
-fn test_ocr_pr_review_keeps_coderabbit() {
+fn test_ocr_pr_review_keeps_existing_pr_quality_gates() {
     let pr_quality_path = workspace_root()
         .join(".github")
         .join("workflows")
         .join("pr-quality.yml");
     assert!(
         pr_quality_path.is_file(),
-        "pr-quality.yml must remain so CodeRabbit stays enabled"
+        "pr-quality.yml must remain so existing PR quality checks stay enabled"
+    );
+    let pr_quality = fs::read_to_string(&pr_quality_path)
+        .expect("pr-quality.yml must be readable to verify existing PR quality wiring");
+    assert!(
+        pr_quality.contains("pull_request:")
+            && pr_quality.contains("cargo fmt --all -- --check")
+            && pr_quality
+                .contains("cargo clippy --workspace --all-targets --all-features -- -D warnings")
+            && pr_quality.contains("cargo test --workspace --all-features --lib --tests"),
+        "pr-quality.yml must retain existing PR quality gates so OCR is additive"
     );
     let content = ocr_pr_review_workflow_content();
     assert!(
         !content.contains("CodeRabbit"),
-        "OCR workflow must not disable or remove CodeRabbit wiring"
+        "OCR workflow must not try to disable or replace existing PR review tooling"
     );
 }
