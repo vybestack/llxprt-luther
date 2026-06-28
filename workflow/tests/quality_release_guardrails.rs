@@ -449,15 +449,47 @@ fn run_blocks(content: &str) -> Vec<String> {
                 blocks.push(std::mem::take(block));
                 current = None;
             } else {
+                let indicator = trimmed.chars().next();
+                if let Some(indicator_ch) = indicator {
+                    if block.is_empty() && matches!(indicator_ch, '|' | '>') {
+                        let rest_after_indicator = &trimmed[indicator_ch.len_utf8()..]
+                            .trim_start_matches(|ch: char| {
+                                matches!(ch, '-' | '+') || ch.is_ascii_digit()
+                            })
+                            .trim_start();
+                        if !rest_after_indicator.is_empty() {
+                            block.push_str(rest_after_indicator);
+                            block.push('\n');
+                        }
+                        continue;
+                    }
+                }
                 block.push_str(line);
                 block.push('\n');
                 continue;
             }
         }
 
-        if line.trim() == "run: |" {
+        let trimmed = line.trim_start();
+        if let Some(rest) = trimmed.strip_prefix("run:") {
             let indent = line.chars().take_while(|ch| *ch == ' ').count();
-            current = Some((indent, String::new()));
+            let command = rest.trim_start();
+            let indicator = command.chars().next();
+            if indicator.is_none() || indicator.is_some_and(|ch| matches!(ch, '|' | '>')) {
+                let rest_after_indicator = indicator
+                    .map(|ch| &command[ch.len_utf8()..])
+                    .unwrap_or("")
+                    .trim_start_matches(|ch: char| matches!(ch, '-' | '+') || ch.is_ascii_digit())
+                    .trim_start();
+                let mut block = String::new();
+                if !rest_after_indicator.is_empty() {
+                    block.push_str(rest_after_indicator);
+                    block.push('\n');
+                }
+                current = Some((indent, block));
+            } else if !command.is_empty() {
+                blocks.push(format!("{command}\n"));
+            }
         }
     }
 
@@ -466,6 +498,73 @@ fn run_blocks(content: &str) -> Vec<String> {
     }
 
     blocks
+}
+
+fn strip_shell_comment(line: &str) -> String {
+    let mut result = String::new();
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut escaped = false;
+    let mut previous = ' '; // Leading '#' comments should strip like shell comments.
+    let mut chars = line.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        if escaped {
+            result.push(ch);
+            // Escaped whitespace is not a shell word boundary, so it must not
+            // enable comment stripping for a following '#'.
+            if !ch.is_whitespace() {
+                previous = ch;
+            }
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' && !in_single {
+            let escapes_next = !in_double
+                || chars
+                    .peek()
+                    .is_some_and(|next| matches!(*next, '$' | '`' | '"' | '\\'));
+            result.push(ch);
+            previous = ch;
+            if escapes_next {
+                escaped = true;
+            }
+            continue;
+        }
+        if ch == '\'' && !in_double {
+            in_single = !in_single;
+        } else if ch == '"' && !in_single {
+            in_double = !in_double;
+        } else if ch == '#' && !in_single && !in_double && previous.is_whitespace() {
+            break;
+        }
+        result.push(ch);
+        previous = ch;
+    }
+
+    result
+}
+
+#[test]
+fn test_ocr_pr_review_run_block_parsing_handles_shell_edge_cases() {
+    let content =
+        "steps:\n  - name: strip\n    run: |-\n      echo \"\\#notcomment\" # strip this\n  - name: inline\n    run: |+ echo inline\n  - name: following-line-scalar\n    run:\n      |\n        echo late-block\n";
+    let blocks = run_blocks(content);
+    assert_eq!(blocks.len(), 3);
+    assert!(blocks[0].contains("echo \"\\#notcomment\" # strip this"));
+    assert_eq!(
+        strip_shell_comment(&blocks[0]),
+        "      echo \"\\#notcomment\" "
+    );
+    assert_eq!(blocks[1], "echo inline\n");
+    assert_eq!(
+        strip_shell_comment("echo \\ #notcomment"),
+        "echo \\ #notcomment"
+    );
+    assert!(
+        strip_shell_comment(&blocks[2]).contains("echo late-block"),
+        "run keys with a following-line scalar indicator should still be scanned"
+    );
 }
 
 /// Test: the OCR PR review workflow file exists.
@@ -536,10 +635,16 @@ fn test_ocr_pr_review_concurrency_cancels_duplicates() {
         "Concurrency must cancel in-progress duplicate runs"
     );
     // Group must be keyed by PR/issue number for per-PR cancellation.
+    let concurrency_block = yaml_block_after(&content, "concurrency:");
     assert!(
-        content.contains("github.event.pull_request.number")
-            || content.contains("github.event.issue.number"),
-        "Concurrency group must key on the PR/issue number"
+        concurrency_block.contains("github.event.pull_request.number")
+            && concurrency_block.contains("github.event.issue.number")
+            && concurrency_block.contains("inputs.pr_number"),
+        "Concurrency group must key on the PR/issue number for automatic, comment, and manual runs"
+    );
+    assert!(
+        !concurrency_block.contains("github.ref"),
+        "Concurrency must not fall back to github.ref for PR review runs"
     );
 }
 
@@ -586,9 +691,18 @@ fn test_ocr_pr_review_credential_handling() {
         !content.contains("secrets.OCR_LLM_URL"),
         "OCR_LLM_URL must be a variable, not a secret"
     );
+    let secret_refs: Vec<&str> = content
+        .match_indices("secrets.")
+        .map(|(idx, _)| &content[idx..])
+        .map(|tail| {
+            tail.split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_' || ch == '.'))
+                .next()
+                .unwrap_or_default()
+        })
+        .collect();
     assert_eq!(
-        content.matches("secrets.").count(),
-        1,
+        secret_refs,
+        vec!["secrets.OCR_LLM_AUTH_TOKEN"],
         "OCR_LLM_AUTH_TOKEN must be the only secret reference"
     );
 }
@@ -617,6 +731,53 @@ fn test_ocr_pr_review_has_sticky_marker_and_artifacts() {
         content.contains("ocr-result.json") && content.contains("ocr-stderr.log"),
         "Workflow must upload both the OCR JSON result and stderr log"
     );
+    assert!(
+        content.contains("github.paginate(github.rest.issues.listComments"),
+        "Sticky summary lookup must paginate comments to avoid duplicates"
+    );
+    assert!(
+        content.contains("const markerComments = comments.filter")
+            && content.contains("markerComments.slice(1)")
+            && content.contains("github.rest.issues.deleteComment"),
+        "Sticky summary maintenance must delete duplicate marker comments"
+    );
+}
+
+/// Test: inline review payloads use GitHub-compatible diff fields and fallback.
+#[test]
+fn test_ocr_pr_review_inline_payload_is_github_compatible() {
+    let content = ocr_pr_review_workflow_content();
+    assert!(
+        content.contains("line: endLine") && content.contains("side: 'RIGHT'"),
+        "Inline comments must target the ending line with an explicit side"
+    );
+    assert!(
+        content.contains("if (startLine > endLine)")
+            && content.contains("[startLine, endLine] = [endLine, startLine]"),
+        "Inline comments must normalize inverted OCR ranges before posting"
+    );
+    assert!(
+        content.contains("f.start_line > 0 && f.end_line > 0"),
+        "Inline comments must only be attempted for positive GitHub line numbers"
+    );
+    assert!(
+        content.contains("comment.start_line = startLine")
+            && content.contains("comment.start_side = 'RIGHT'"),
+        "Multi-line OCR findings must include GitHub start_line/start_side metadata"
+    );
+    assert!(
+        content.contains("await new Promise((resolve) => setTimeout(resolve, 1000))"),
+        "Individual fallback comment posting must be paced to reduce secondary rate limit risk"
+    );
+    assert!(
+        content.contains("github.rest.pulls.createReviewComment")
+            && content.contains("core.warning(`Failed to post inline comment on ${c.path}:${c.line}:")
+            && content.contains("const lineRange = c.start_line && c.start_line !== c.line")
+            && content.contains("comment: fallbackBody")
+            && content.contains("message: fallbackBody")
+            && content.contains("body: fallbackBody"),
+        "Unpostable inline comments must be logged and demoted to the sticky summary with location context"
+    );
 }
 
 /// Test: issue_comment and workflow_dispatch triggers are explicitly gated.
@@ -637,11 +798,32 @@ fn test_ocr_pr_review_manual_triggers_are_gated() {
     );
     for command in ["/ocr", "/open-code-review"] {
         assert!(
-            content.contains(&format!("github.event.comment.body == '{command}'"))
-                && content.contains(&format!(
-                    "startsWith(github.event.comment.body, '{command} ')"
-                )),
-            "Comment trigger must require the {command} command as a standalone prefix"
+            content.contains(&format!("github.event.comment.body == '{command}'")),
+            "Comment trigger must support standalone {command} comments"
+        );
+        assert!(
+            content.contains(&format!(
+                "startsWith(github.event.comment.body, '{command} ')"
+            )) && content.contains(&format!(
+                "startsWith(toJSON(github.event.comment.body), '\"{command}\\n')"
+            )) && content.contains(&format!(
+                "startsWith(toJSON(github.event.comment.body), '\"{command}\\r\\n')"
+            )) && content.contains(&format!(
+                "startsWith(toJSON(github.event.comment.body), '\"{command}\\t')"
+            )),
+            "Comment trigger must support {command} followed by a space, LF, CRLF, or tab"
+        );
+    }
+    assert!(
+        !content.contains("\\f") && !content.contains("\\v"),
+        "Comment trigger must only match documented space, LF, CRLF, and tab separators"
+    );
+    for association in ["OWNER", "MEMBER", "COLLABORATOR"] {
+        assert!(
+            content.contains(&format!(
+                "github.event.comment.author_association == '{association}'"
+            )),
+            "Comment trigger must allow trusted association {association}"
         );
     }
     assert!(
@@ -655,17 +837,52 @@ fn test_ocr_pr_review_manual_triggers_are_gated() {
 fn test_ocr_pr_review_does_not_execute_pr_code() {
     let content = ocr_pr_review_workflow_content();
     let commands = run_blocks(&content).join("\n");
-    for forbidden in ["make", "cargo", "npm run", "npm ci"] {
-        let separator_pattern = format!(" {forbidden}");
+    let scanned_commands = commands
+        .lines()
+        .map(strip_shell_comment)
+        .collect::<Vec<_>>()
+        .join("\n");
+    for forbidden in [
+        "make", "cargo", "npm run", "npm ci", "python", "python3", "node", "bash",
+    ] {
+        let substitution_pattern = format!("$({forbidden}");
+        let brace_substitution_pattern = format!("${{{forbidden}");
+        let backtick_pattern = format!("`{forbidden}");
         assert!(
-            !commands
+            !scanned_commands
                 .lines()
                 .flat_map(|line| line.split(['&', '|', ';']))
                 .map(str::trim_start)
-                .any(|token| token.starts_with(forbidden) || token.contains(&separator_pattern)),
-            "Workflow must not invoke {forbidden} from a run step"
+                .any(|token| {
+                    let next_is_command_delimiter = token
+                        .strip_prefix(forbidden)
+                        .and_then(|suffix| suffix.chars().next())
+                        .is_none_or(|ch| {
+                            ch.is_whitespace() || matches!(ch, '>' | '<' | '|' | '&' | ';')
+                        });
+                    let direct_pattern = token.starts_with(forbidden) && next_is_command_delimiter;
+                    direct_pattern
+                        || token.contains(&substitution_pattern)
+                        || token.contains(&brace_substitution_pattern)
+                        // This guardrail intentionally over-approximates backtick
+                        // command substitutions: false positives are safer than
+                        // accidentally allowing PR code execution paths.
+                        || token.contains(&backtick_pattern)
+                }),
+            "Workflow must not invoke {} from a run step",
+            forbidden
         );
     }
+    assert!(
+        !scanned_commands
+            .lines()
+            .flat_map(|line| line.split(['&', '|', ';']))
+            .map(str::trim_start)
+            .any(|token| token.starts_with("./")
+                || token.contains("$(./")
+                || token.contains("`./")),
+        "Workflow must not directly execute relative-path scripts from a run step"
+    );
     // Fork-safety: checkout must use the trusted base SHA, never the PR head.
     assert!(
         content.contains("ref: ${{ steps.pr-context.outputs.base_sha }}"),
@@ -676,10 +893,39 @@ fn test_ocr_pr_review_does_not_execute_pr_code() {
             && !content.contains("ref: ${{ github.event.pull_request.head.sha }}"),
         "Checkout must never directly use the PR head SHA"
     );
+    assert!(
+        content.contains("persist-credentials: false"),
+        "Checkout must not persist the token for later OCR steps"
+    );
+    assert!(
+        content.contains("GH_TOKEN: ${{ github.token }}")
+            && content.contains("GH_SERVER_URL=\"${GITHUB_SERVER_URL:-https://github.com}\"")
+            && content.contains("GH_SERVER_URL=\"${GH_SERVER_URL%/}/\"")
+            && content.contains("extraheader = AUTHORIZATION: bearer ")
+            && content.contains("GIT_CONFIG_GLOBAL")
+            && content.contains("ocr-git-auth-config")
+            && content.contains("trap cleanup_git_auth EXIT")
+            && content.contains("trap 'cleanup_git_auth; exit 130' INT TERM")
+            && content.contains("trap 'cleanup_git_auth; exit 129' HUP")
+            && !content
+                .contains("git fetch origin \"${BASE_SHA}\"\n          unset GIT_CONFIG_GLOBAL")
+            && content.contains("git config --global --unset-all safe.directory")
+            && content.contains("unset GIT_CONFIG_GLOBAL")
+            && content.contains("rm -f \"${RUNNER_TEMP}/ocr-git-auth-config\"")
+            && content.contains("chmod 600 \"${RUNNER_TEMP}/ocr-git-auth-config\"")
+            && content.contains("printf '%s\\n'")
+            && content.contains(r#""${GH_TOKEN}""#),
+        "Fetch step must use scoped GitHub authentication and clean it up"
+    );
     // Only the global OCR install is permitted.
     assert!(
-        commands.contains("npm install -g @alibaba-group/open-code-review"),
-        "Workflow may only globally install OCR"
+        scanned_commands.lines().any(|line| {
+            let command = line.trim();
+            command.starts_with("npm install -g @alibaba-group/open-code-review@")
+                && command != "npm install -g @alibaba-group/open-code-review@"
+                && !command.contains(" @alibaba-group/open-code-review ")
+        }),
+        "Workflow may only globally install a pinned OCR version"
     );
     assert!(
         !content.contains("safe.directory '*'")

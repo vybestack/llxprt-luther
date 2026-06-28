@@ -32,7 +32,7 @@ on:
 # Duplicate OCR runs for the same PR are cancelled so only the latest
 # head SHA is reviewed.
 concurrency:
-  group: ocr-pr-review-${{ github.event.pull_request.number || github.event.issue.number || github.ref }}
+  group: ocr-pr-review-${{ github.event.pull_request.number || github.event.issue.number || inputs.pr_number }}
   cancel-in-progress: true
 
 permissions:
@@ -48,15 +48,26 @@ jobs:
     name: OpenCodeReview
     runs-on: ubuntu-latest
     # For issue_comment, only run on PR comments requesting a review.
+    # The toJSON checks intentionally support LF, CRLF, and tab after the
+    # command; other whitespace is not matched to keep triggers predictable.
     if: |
       github.event_name == 'pull_request_target' ||
       github.event_name == 'workflow_dispatch' ||
       (github.event_name == 'issue_comment' &&
        github.event.issue.pull_request != null &&
+       (github.event.comment.author_association == 'OWNER' ||
+        github.event.comment.author_association == 'MEMBER' ||
+        github.event.comment.author_association == 'COLLABORATOR') &&
        (github.event.comment.body == '/ocr' ||
         startsWith(github.event.comment.body, '/ocr ') ||
+        startsWith(toJSON(github.event.comment.body), '"/ocr\n') ||
+        startsWith(toJSON(github.event.comment.body), '"/ocr\r\n') ||
+        startsWith(toJSON(github.event.comment.body), '"/ocr\t') ||
         github.event.comment.body == '/open-code-review' ||
-        startsWith(github.event.comment.body, '/open-code-review ')))
+        startsWith(github.event.comment.body, '/open-code-review ') ||
+        startsWith(toJSON(github.event.comment.body), '"/open-code-review\n') ||
+        startsWith(toJSON(github.event.comment.body), '"/open-code-review\r\n') ||
+        startsWith(toJSON(github.event.comment.body), '"/open-code-review\t')))
     steps:
       - name: Resolve PR context
         uses: actions/github-script@v7
@@ -87,14 +98,35 @@ jobs:
         with:
           ref: ${{ steps.pr-context.outputs.base_sha }}
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Fetch PR head and compute merge-base
         env:
           PR_NUMBER: ${{ steps.pr-context.outputs.number }}
           HEAD_SHA: ${{ steps.pr-context.outputs.head_sha }}
           BASE_SHA: ${{ steps.pr-context.outputs.base_sha }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          { set +x; } 2>/dev/null
+          cleanup_git_auth() {
+            git config --global --unset-all safe.directory "$GITHUB_WORKSPACE" 2>/dev/null || true
+            unset GIT_CONFIG_GLOBAL
+            rm -f "${RUNNER_TEMP}/ocr-git-auth-config"
+          }
+          trap cleanup_git_auth EXIT
+          trap 'cleanup_git_auth; exit 130' INT TERM
+          trap 'cleanup_git_auth; exit 129' HUP
+          umask 077
+          GH_SERVER_URL="${GITHUB_SERVER_URL:-https://github.com}"
+          GH_SERVER_URL="${GH_SERVER_URL%/}/"
+          {
+            printf '[http "%s"]\n\textraheader = AUTHORIZATION: bearer ' "${GH_SERVER_URL}"
+            printf '%s\n' "${GH_TOKEN}"
+          } > "${RUNNER_TEMP}/ocr-git-auth-config"
+          chmod 600 "${RUNNER_TEMP}/ocr-git-auth-config"
+          export GIT_CONFIG_GLOBAL="${RUNNER_TEMP}/ocr-git-auth-config"
+
           # Fetch the PR head into an explicit local ref WITHOUT making it the
           # working copy, so no PR-supplied scripts become executable.
           git fetch origin "pull/${PR_NUMBER}/head:pr-head"
@@ -117,7 +149,7 @@ jobs:
       - name: Install OpenCodeReview
         run: |
           # Global install of OCR only; no repository scripts are executed.
-          npm install -g @alibaba-group/open-code-review
+          npm install -g @alibaba-group/open-code-review@1.6.1
           ocr version > ocr-version.txt
           cat ocr-version.txt
 
@@ -254,14 +286,23 @@ jobs:
             const lineless = [];
             for (const f of findings) {
               if (f && f.path && Number.isInteger(f.start_line) &&
-                  Number.isInteger(f.end_line)) {
-                inline.push({
+                  Number.isInteger(f.end_line) && f.start_line > 0 && f.end_line > 0) {
+                let startLine = Number(f.start_line);
+                let endLine = Number(f.end_line);
+                if (startLine > endLine) {
+                  [startLine, endLine] = [endLine, startLine];
+                }
+                const comment = {
                   path: String(f.path),
-                  line: Number(f.start_line),
-                  start_line: Number(f.start_line),
-                  end_line: Number(f.end_line),
+                  line: endLine,
+                  side: 'RIGHT',
                   body: String(f.comment || f.message || f.body || 'OCR finding'),
-                });
+                };
+                if (startLine < endLine) {
+                  comment.start_line = startLine;
+                  comment.start_side = 'RIGHT';
+                }
+                inline.push(comment);
               } else {
                 lineless.push(f);
               }
@@ -280,12 +321,32 @@ jobs:
                 // Fallback: post each inline comment individually.
                 for (const c of inline) {
                   try {
-                    await github.rest.pulls.createReview({
-                      owner, repo, pull_number: number,
-                      event: 'COMMENT', commit_id: headSha, comments: [c],
+                    await github.rest.pulls.createReviewComment({
+                      owner,
+                      repo,
+                      pull_number: number,
+                      commit_id: headSha,
+                      path: c.path,
+                      line: c.line,
+                      side: c.side,
+                      body: c.body,
+                      ...(c.start_line ? { start_line: c.start_line, start_side: c.start_side } : {}),
                     });
                     postedInline += 1;
-                  } catch (_) { /* skip unpostable comment */ }
+                    await new Promise((resolve) => setTimeout(resolve, 1000));
+                  } catch (commentErr) {
+                    core.warning(`Failed to post inline comment on ${c.path}:${c.line}: ${commentErr.message || commentErr}`);
+                    const lineRange = c.start_line && c.start_line !== c.line
+                      ? `${c.start_line}-${c.line}`
+                      : String(c.line);
+                    const fallbackBody = `${c.body} (line ${lineRange})`;
+                    lineless.push({
+                      path: c.path,
+                      comment: fallbackBody,
+                      message: fallbackBody,
+                      body: fallbackBody,
+                    });
+                  }
                 }
               }
             }
@@ -321,11 +382,22 @@ jobs:
             const summary = body.join('\n');
 
             // Sticky summary: update in place if the marker exists, else create.
-            const comments = await github.rest.issues.listComments({
-              owner, repo, issue_number: number,
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              owner, repo, issue_number: number, per_page: 100,
             });
-            const existing = comments.data.find((c) =>
+            const markerComments = comments.filter((c) =>
               c.body && c.body.includes(MARKER));
+            const existing = markerComments[0];
+            for (const duplicate of markerComments.slice(1)) {
+              try {
+                await github.rest.issues.deleteComment({
+                  owner, repo, comment_id: duplicate.id,
+                });
+                await new Promise((resolve) => setTimeout(resolve, 1000));
+              } catch (duplicateError) {
+                core.warning(`Failed to delete duplicate OCR marker comment ${duplicate.id}: ${duplicateError.message || duplicateError}`);
+              }
+            }
             if (existing) {
               await github.rest.issues.updateComment({
                 owner, repo, comment_id: existing.id, body: summary,
