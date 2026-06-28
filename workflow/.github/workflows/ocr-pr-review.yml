@@ -110,8 +110,11 @@ jobs:
           set -euo pipefail
           { set +x; } 2>/dev/null
           cleanup_git_auth() {
+            set +e
+            local server_url="${GH_SERVER_URL:-${GITHUB_SERVER_URL:-https://github.com}}"
+            server_url="${server_url%/}/"
+            git config --global --unset-all http."${server_url}".extraheader 2>/dev/null || true
             git config --global --unset-all safe.directory "$GITHUB_WORKSPACE" 2>/dev/null || true
-            unset GIT_CONFIG_GLOBAL
             rm -f "${RUNNER_TEMP}/ocr-git-auth-config"
           }
           trap cleanup_git_auth EXIT
@@ -127,13 +130,19 @@ jobs:
           chmod 600 "${RUNNER_TEMP}/ocr-git-auth-config"
           export GIT_CONFIG_GLOBAL="${RUNNER_TEMP}/ocr-git-auth-config"
 
+          # Scope safe.directory to this trusted workspace only (never '*').
+          # Persist one entry for later steps, then also add it to the temp
+          # fetch-step config used with the scoped auth header below.
+          git config --file "${HOME}/.gitconfig" --add safe.directory "$GITHUB_WORKSPACE"
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
           # Fetch the PR head into an explicit local ref WITHOUT making it the
           # working copy, so no PR-supplied scripts become executable.
           git fetch origin "pull/${PR_NUMBER}/head:pr-head"
-          git fetch origin "${BASE_SHA}"
-
-          # Scope safe.directory to the runner workspace only (never '*').
-          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          if ! git cat-file -e "${BASE_SHA}^{commit}"; then
+            echo "::error::Base SHA ${BASE_SHA} is missing after trusted checkout. It may no longer be reachable from origin."
+            exit 1
+          fi
 
           BASE_SHA="$(git merge-base "${BASE_SHA}" pr-head)"
           FETCHED_HEAD="$(git rev-parse pr-head)"
@@ -191,27 +200,49 @@ jobs:
           # test/spec files (project policy: tests must be reviewed).
           changed_tests="$(
             git diff --name-only "${BASE_SHA}..${HEAD_SHA}" \
-              | grep -Ei '(^|/)(tests/|__tests__/).*(\.(rs|ts|tsx|js|jsx|mjs|cjs|go|py|java|c|cc|cpp|h|hpp|rb|php|kt|kts|swift|scala))$|(\.test\.|\.spec\.|_tests?\.rs)$' \
+              | grep -Ei '(^|/)(tests/|__tests__/).*(\.(rs|ts|tsx|js|jsx|mjs|cjs|go|py|java|c|cc|cpp|h|hpp|rb|php|kt|kts|swift|scala))$|(^|/)(test_[^/]*\.py|[^/]*_test\.py|[^/]*_test\.go|[^/]*(Test|Tests)\.java|[^/]*_test\.(c|cc|cpp|h|hpp))$|(\.test\.|\.spec\.|_tests?\.rs)$' \
               || true
           )"
           if [ -n "$changed_tests" ]; then
             echo "Changed test/spec files detected that must be reviewed:"
             echo "$changed_tests"
-            # Inspect OCR preview scope; if any changed test path appears in
-            # the Excluded set, fail clearly.
-            ocr review --preview --from "$BASE_SHA" --to "$HEAD_SHA" \
-              > ocr-preview.txt 2> ocr-preview-stderr.log || true
-            excluded="$(grep -A100 -i 'excluded' ocr-preview.txt || true)"
+            # Inspect OCR preview scope. Each changed test must appear in
+            # the reviewed set and must not appear in the excluded set.
+            if ! ocr review --preview --from "$BASE_SHA" --to "$HEAD_SHA" \
+              > ocr-preview.txt 2> ocr-preview-stderr.log; then
+              echo "::error::Could not verify OCR preview scope for changed test files."
+              exit 1
+            fi
+            reviewed="$(awk 'BEGIN{IGNORECASE=1} /will review/{found=1} found{print}' ocr-preview.txt || true)"
+            excluded="$(awk 'BEGIN{IGNORECASE=1} /excluded/{found=1} found{print}' ocr-preview.txt || true)"
             missing=""
+            excluded_tests=""
+            path_in_section() {
+              awk -v needle="]  $1" '
+                index($0, needle) {
+                  after = substr($0, index($0, needle) + length(needle), 1)
+                  if (after == "" || after == " " || after == "	") found = 1
+                }
+                END { exit found ? 0 : 1 }
+              '
+            }
             while IFS= read -r t; do
               [ -z "$t" ] && continue
-              if echo "$excluded" | grep -F -- "$t" >/dev/null 2>&1; then
+              if ! echo "$reviewed" | path_in_section "$t"; then
                 missing="${missing}${t}"$'\n'
+              fi
+              if echo "$excluded" | path_in_section "$t"; then
+                excluded_tests="${excluded_tests}${t}"$'\n'
               fi
             done <<< "$changed_tests"
             if [ -n "$missing" ]; then
-              echo "::error::OCR would exclude changed test files that must be reviewed:"
+              echo "::error::OCR preview did not list changed test files in the reviewed set:"
               echo "$missing"
+              exit 1
+            fi
+            if [ -n "$excluded_tests" ]; then
+              echo "::error::OCR would exclude changed test files that must be reviewed:"
+              echo "$excluded_tests"
               exit 1
             fi
           fi
@@ -223,13 +254,18 @@ jobs:
           BASE_SHA: ${{ env.BASE_SHA }}
           HEAD_SHA: ${{ env.HEAD_SHA }}
         run: |
+          set +e
           ocr review \
             --from "$BASE_SHA" \
             --to "$HEAD_SHA" \
             --format json \
             --audience agent \
             --timeout 30 \
-            > ocr-result.json 2> ocr-stderr.log || true
+            > ocr-stdout.raw 2> ocr-stderr.log
+          status=$?
+          cp ocr-stdout.raw ocr-result.json
+          echo "$status" > ocr-exit-code.txt
+          exit 0
 
       - name: Upload OCR artifacts
         if: always()
@@ -238,22 +274,29 @@ jobs:
           name: ocr-review-output
           path: |
             ocr-result.json
+            ocr-stdout.raw
             ocr-stderr.log
             ocr-version.txt
             ocr-preview.txt
             ocr-preview-stderr.log
-          if-no-files-found: ignore
+            ocr-exit-code.txt
+          if-no-files-found: error
 
       - name: Post OCR results
         uses: actions/github-script@v7
         env:
           BASE_SHA: ${{ env.BASE_SHA }}
           HEAD_SHA: ${{ env.HEAD_SHA }}
+          PR_NUMBER: ${{ steps.pr-context.outputs.number }}
         with:
           script: |
             const fs = require('fs');
             const MARKER = '<!-- luther-ocr-review -->';
-            const number = Number('${{ steps.pr-context.outputs.number }}');
+            const number = Number(process.env.PR_NUMBER);
+            if (!Number.isInteger(number) || number <= 0) {
+              core.setFailed('No valid PR number resolved from pr-context step.');
+              return;
+            }
             const headSha = process.env.HEAD_SHA;
             const owner = context.repo.owner;
             const repo = context.repo.repo;
@@ -265,19 +308,52 @@ jobs:
 
             let ran = true;
             let findings = [];
+            let exitCode = 0;
             try {
-              const raw = fs.readFileSync('ocr-result.json', 'utf8').trim();
-              if (!raw) {
-                ran = false;
-              } else {
-                const parsed = JSON.parse(raw);
-                if (!Array.isArray(parsed)) {
-                  ran = false;
-                } else {
-                  findings = parsed;
-                }
-              }
+              exitCode = Number(fs.readFileSync('ocr-exit-code.txt', 'utf8').trim());
             } catch (_) {
+              exitCode = 1;
+            }
+            if (!Number.isInteger(exitCode) || exitCode !== 0) {
+              ran = false;
+            }
+            function parseFindings(raw) {
+              const trimmed = raw.trim();
+              if (!trimmed) return null;
+              try {
+                const parsed = JSON.parse(trimmed);
+                return Array.isArray(parsed) ? parsed : null;
+              } catch (parseErr) {
+                const start = trimmed.indexOf('[');
+                const end = trimmed.lastIndexOf(']');
+                if (start < 0 || end <= start) {
+                  core.warning(`OCR result was not valid JSON and no JSON array could be extracted: ${parseErr.message || parseErr}`);
+                  return null;
+                }
+                const parsed = JSON.parse(trimmed.slice(start, end + 1));
+                return Array.isArray(parsed) ? parsed : null;
+              }
+            }
+
+            function renderFindingText(value) {
+              const text = String(value || 'OCR finding')
+                .replace(/<!--[\s\S]*?-->/g, '')
+                .replace(/!\[([^\]]*)\]\([^)]*\)/g, '$1')
+                .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
+                .replace(/<[^>\n]+>/g, '')
+                .replace(/^(\s*[-*]\s*)\[[ xX]\]/gm, '$1\\[ \\]');
+              return `> ${text.replace(/\n/g, '\n> ')}`;
+            }
+            try {
+              const raw = fs.readFileSync('ocr-result.json', 'utf8');
+              const parsed = parseFindings(raw);
+              if (parsed) {
+                findings = parsed;
+              } else {
+                ran = false;
+              }
+            } catch (parseErr) {
+              core.warning(`Failed to parse OCR JSON output: ${parseErr.message || parseErr}`);
               ran = false;
             }
 
@@ -292,11 +368,12 @@ jobs:
                 if (startLine > endLine) {
                   [startLine, endLine] = [endLine, startLine];
                 }
+                const text = renderFindingText(f.comment || f.message || f.body || 'OCR finding');
                 const comment = {
                   path: String(f.path),
                   line: endLine,
                   side: 'RIGHT',
-                  body: String(f.comment || f.message || f.body || 'OCR finding'),
+                  body: text,
                 };
                 if (startLine < endLine) {
                   comment.start_line = startLine;
@@ -304,7 +381,7 @@ jobs:
                 }
                 inline.push(comment);
               } else {
-                lineless.push(f);
+                lineless.push(f && typeof f === 'object' ? f : { body: f || 'Malformed OCR finding' });
               }
             }
 
@@ -318,6 +395,7 @@ jobs:
                 });
                 postedInline = inline.length;
               } catch (batchErr) {
+                core.warning(`Batch review post failed (${inline.length} comments), falling back to individual posting: ${batchErr.message || batchErr}`);
                 // Fallback: post each inline comment individually.
                 for (const c of inline) {
                   try {
@@ -375,8 +453,10 @@ jobs:
             if (lineless.length > 0) {
               body.push('', '### Findings without a resolvable position', '');
               for (const f of lineless) {
-                const where = f.path ? `\`${f.path}\`: ` : '';
-                body.push(`- ${where}${String(f.comment || f.message || f.body || 'OCR finding')}`);
+                const item = f && typeof f === 'object' ? f : {};
+                const where = item.path ? `\`${item.path}\`: ` : '';
+                const text = renderFindingText(item.comment || item.message || item.body || f || 'OCR finding');
+                body.push(`- ${where}${text}`);
               }
             }
             const summary = body.join('\n');
@@ -406,4 +486,7 @@ jobs:
               await github.rest.issues.createComment({
                 owner, repo, issue_number: number, body: summary,
               });
+            }
+            if (!ran) {
+              core.setFailed(`OpenCodeReview failed or produced unparsable output (exit code ${exitCode}).`);
             }
