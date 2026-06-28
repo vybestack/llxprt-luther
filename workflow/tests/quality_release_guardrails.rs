@@ -408,6 +408,64 @@ fn ocr_pr_review_workflow_content() -> String {
         .unwrap_or_else(|_| panic!("Failed to read ocr-pr-review.yml at {workflow_path:?}"))
 }
 
+fn yaml_block_after(content: &str, header: &str) -> String {
+    let header_indent = header.chars().take_while(|ch| *ch == ' ').count();
+    let mut in_block = false;
+    let mut block = String::new();
+
+    for line in content.lines() {
+        if !in_block {
+            if line == header {
+                in_block = true;
+                block.push_str(line);
+                block.push('\n');
+            }
+            continue;
+        }
+
+        let trimmed = line.trim();
+        let indent = line.chars().take_while(|ch| *ch == ' ').count();
+        if !trimmed.is_empty() && !trimmed.starts_with('#') && indent <= header_indent {
+            break;
+        }
+        block.push_str(line);
+        block.push('\n');
+    }
+
+    block
+}
+
+fn run_blocks(content: &str) -> Vec<String> {
+    let mut blocks = Vec::new();
+    let mut current: Option<(usize, String)> = None;
+
+    for line in content.lines() {
+        if let Some((run_indent, block)) = current.as_mut() {
+            let trimmed = line.trim();
+            let indent = line.chars().take_while(|ch| *ch == ' ').count();
+            if !trimmed.is_empty() && indent <= *run_indent {
+                blocks.push(std::mem::take(block));
+                current = None;
+            } else {
+                block.push_str(line);
+                block.push('\n');
+                continue;
+            }
+        }
+
+        if line.trim() == "run: |" {
+            let indent = line.chars().take_while(|ch| *ch == ' ').count();
+            current = Some((indent, String::new()));
+        }
+    }
+
+    if let Some((_, block)) = current {
+        blocks.push(block);
+    }
+
+    blocks
+}
+
 /// Test: the OCR PR review workflow file exists.
 /// @plan:PLAN-20260404-INITIAL-RUNTIME.P11
 #[test]
@@ -432,9 +490,14 @@ fn test_ocr_pr_review_uses_pull_request_target() {
         content.contains("pull_request_target:"),
         "Workflow must use pull_request_target for fork-safe secret access"
     );
+    let pull_request_target = yaml_block_after(&content, "  pull_request_target:");
+    assert!(
+        pull_request_target.contains("types:"),
+        "pull_request_target must define explicit event types"
+    );
     for required in ["opened", "reopened", "synchronize", "ready_for_review"] {
         assert!(
-            content.contains(&format!("- {required}")),
+            pull_request_target.contains(&format!("- {required}")),
             "pull_request_target must list the {required} event type"
         );
     }
@@ -444,25 +507,17 @@ fn test_ocr_pr_review_uses_pull_request_target() {
 #[test]
 fn test_ocr_pr_review_permissions_are_minimal() {
     let content = ocr_pr_review_workflow_content();
-    assert!(
-        content.contains("contents: read"),
-        "Workflow must request contents: read"
-    );
-    assert!(
-        content.contains("pull-requests: write"),
-        "Workflow must request pull-requests: write"
-    );
-    assert!(
-        content.contains("issues: write"),
-        "Workflow must request issues: write"
-    );
-    assert!(
-        !content.contains("actions: write"),
-        "Workflow must not request actions: write"
-    );
-    assert!(
-        !content.contains("permissions: write-all"),
-        "Workflow must not use write-all permissions"
+    let permissions = yaml_block_after(&content, "permissions:");
+    let permission_lines: Vec<&str> = permissions
+        .lines()
+        .skip(1)
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .collect();
+    assert_eq!(
+        permission_lines,
+        vec!["contents: read", "pull-requests: write", "issues: write"],
+        "Workflow permissions must be exactly the approved minimal set"
     );
 }
 
@@ -561,26 +616,19 @@ fn test_ocr_pr_review_has_sticky_marker_and_artifacts() {
 #[test]
 fn test_ocr_pr_review_does_not_execute_pr_code() {
     let content = ocr_pr_review_workflow_content();
-    // No repository build/test tooling may run (PR-supplied scripts excluded).
-    assert!(
-        !content.contains("make "),
-        "Workflow must not invoke make (PR-supplied Makefiles)"
-    );
-    assert!(
-        !content.contains("cargo "),
-        "Workflow must not invoke cargo (PR-supplied build)"
-    );
-    assert!(
-        !content.contains("npm run"),
-        "Workflow must not run repository npm scripts"
-    );
-    assert!(
-        !content.contains("npm ci"),
-        "Workflow must not run npm ci against the repo"
-    );
+    let commands = run_blocks(&content).join("\n");
+    for forbidden in ["make", "cargo", "npm run", "npm ci"] {
+        assert!(
+            !commands
+                .lines()
+                .map(str::trim_start)
+                .any(|line| line.starts_with(forbidden)),
+            "Workflow must not invoke {forbidden} from a run step"
+        );
+    }
     // Only the global OCR install is permitted.
     assert!(
-        content.contains("npm install -g @alibaba-group/open-code-review"),
+        commands.contains("npm install -g @alibaba-group/open-code-review"),
         "Workflow may only globally install OCR"
     );
     assert!(
