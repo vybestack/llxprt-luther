@@ -1,3 +1,5 @@
+mod ocr_review;
+
 use anyhow::{bail, Context, Result};
 use serde_json::Value;
 use std::env;
@@ -38,6 +40,7 @@ fn run() -> Result<()> {
         Some("guard") => guard(),
         Some("coverage") => coverage(),
         Some("complexity") => complexity(),
+        Some("ocr-review") => ocr_review::run(args.collect()),
         Some("release") => release(args.next().as_deref()),
         Some("release-package") => release_package_cmd(args.next().as_deref()),
         Some("release-publish") => release_publish_cmd(args.next().as_deref()),
@@ -57,7 +60,10 @@ fn run() -> Result<()> {
         Some(cmd) => bail!("unknown xtask command: {cmd}"),
         None => {
             eprintln!(
-                "usage: cargo xtask <qa|guard|coverage|complexity|fmt|clippy|test|release|release-package|release-publish|release-update-tap> [vX.Y.Z]"
+                "usage: cargo xtask <qa|guard|coverage|complexity|ocr-review|fmt|clippy|test|release|release-package|release-publish|release-update-tap> [vX.Y.Z]"
+            );
+            eprintln!(
+                "ocr-review modes: [--current | --from <ref> --to <ref> | --pr <number>] [--preview] [--format json]"
             );
             Ok(())
         }

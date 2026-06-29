@@ -1956,6 +1956,52 @@ fn dogfood_verify_step_uses_cargo_profile() {
     );
 }
 
+/// Issue #75: local project verification for Luther issue fixes includes the
+/// Luther-owned OCR wrapper so the same review contract is exercised before
+/// push without embedding raw profile-provided shell snippets in the workflow.
+#[test]
+fn reusable_issue_fix_run_tests_includes_profile_driven_ocr_review() {
+    let workflow_type = post_pr_workflow();
+    let config = workflow_config("llxprt-luther-issue-fix");
+    let context = context_from_config(&config);
+    let run_tests = workflow_type
+        .steps
+        .iter()
+        .find(|step| step.step_id == "run_tests")
+        .expect("run_tests step exists");
+    let params = run_tests
+        .parameters
+        .as_ref()
+        .expect("run_tests parameters exist");
+    let checks = params
+        .get("checks")
+        .and_then(serde_json::Value::as_array)
+        .expect("checks array exists");
+    let check_names = checks
+        .iter()
+        .filter_map(serde_json::Value::as_str)
+        .collect::<Vec<_>>();
+    assert!(
+        check_names.contains(&"ocr_review"),
+        "issue-fix verification should include the local OCR wrapper: {check_names:?}"
+    );
+
+    let command = params
+        .get("check_commands")
+        .and_then(|commands| commands.get("ocr_review"))
+        .and_then(serde_json::Value::as_str)
+        .expect("ocr_review command exists");
+    assert_eq!(
+        command, "{ocr_review_command}",
+        "workflow type should use a structured profile variable for the OCR command"
+    );
+    let command = interpolate_string(command, &context);
+    assert!(
+        command == "cd workflow && cargo xtask ocr-review --preview",
+        "llxprt-luther issue-fix profile should run the local OCR preview wrapper: {command}"
+    );
+}
+
 /// @plan:PLAN-20260408-LLXPRT-FIRST.P18
 /// @requirement:REQ-LF-PLAN-002
 #[test]
@@ -2080,7 +2126,7 @@ fn run_tests_mirrors_ci_lint_typecheck_and_build_before_push() {
         .filter_map(serde_json::Value::as_str)
         .collect::<Vec<_>>();
 
-    for expected in ["lint", "typecheck", "build", "test", "format"] {
+    for expected in ["lint", "typecheck", "build", "test", "format", "ocr_review"] {
         assert!(
             check_names.contains(&expected),
             "run_tests should include {expected} before push: {check_names:?}"
@@ -2127,6 +2173,14 @@ fn run_tests_mirrors_ci_lint_typecheck_and_build_before_push() {
             .map(|command| interpolate_string(command, &context)),
         Some("npm run build 2>&1".to_string()),
         "pre-PR verification should run the full build rather than only core"
+    );
+    let ocr_review_command = commands
+        .get("ocr_review")
+        .and_then(serde_json::Value::as_str)
+        .expect("ocr_review command exists");
+    assert_eq!(
+        ocr_review_command, "{ocr_review_command}",
+        "workflow type should source local OCR review command from target profile config"
     );
     assert!(
         commands.get("build_core").is_none(),

@@ -224,6 +224,9 @@ At minimum:
 - `cargo xtask test`
 - `cargo xtask coverage`
 - `cargo xtask guard`
+- `cargo xtask ocr-review`
+
+The OCR wrapper is a local/project review contract, not part of `qa`; see [Local OpenCodeReview wrapper](../guides/local-ocr-review.md).
 
 Recommended later additions:
 

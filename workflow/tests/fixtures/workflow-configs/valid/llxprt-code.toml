@@ -63,6 +63,7 @@ fi
 typecheck_command = "npm run typecheck 2>&1"
 build_command = "npm run build 2>&1"
 test_command = "npm run test --workspace @vybestack/llxprt-code 2>&1"
+ocr_review_command = "echo 'Local OCR wrapper is not configured for this target profile'"
 format_command = """
 CHANGED=$(git status --porcelain --untracked-files=all | sed 's/^...//' | grep -E '[.](ts|tsx|js|jsx|json|md)$' | tr '\n' ' ')
 

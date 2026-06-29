@@ -52,6 +52,7 @@ diff_failure_message = "No alternate issue source/test diff found and no reusabl
 typecheck_command = "npm run typecheck --workspace @vybestack/llxprt-code-core 2>&1"
 build_command = "npm run build 2>&1"
 test_command = "npm run test --workspace @vybestack/llxprt-code-core -- StreamProcessor 2>&1"
+ocr_review_command = "echo 'Local OCR wrapper is not configured for this target profile'"
 lint_command = """
 CHANGED=$(git status --porcelain --untracked-files=all | sed 's/^...//' | grep -E '[.](ts|tsx|js|jsx)$' | tr '\n' ' ')
 if [ -z "$CHANGED" ]; then

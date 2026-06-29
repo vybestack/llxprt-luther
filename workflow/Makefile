@@ -8,8 +8,9 @@
 #   make complexity # cargo xtask complexity (lizard + file-size gates)
 #   make coverage   # cargo coverage (llvm-cov gate)
 #   make test       # cargo test --workspace --all-features --lib --tests
+#   make ocr-review ARGS="--preview" # local OpenCodeReview wrapper
 
-.PHONY: ci-check qa fmt clippy complexity coverage test
+.PHONY: ci-check qa fmt clippy complexity coverage test ocr-review
 
 CLIPPY_CONF_DIR := .github/clippy
 
@@ -32,3 +33,6 @@ coverage:
 
 test:
 	cargo test --workspace --all-features --lib --tests
+
+ocr-review:
+	cargo xtask ocr-review $(ARGS)

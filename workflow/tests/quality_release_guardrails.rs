@@ -1447,3 +1447,50 @@ fn test_ocr_pr_review_keeps_existing_pr_quality_gates() {
         "OCR workflow must not try to disable or replace existing PR review tooling"
     );
 }
+
+#[test]
+fn test_local_ocr_review_contract_is_documented_and_guarded() {
+    let workspace = workspace_root();
+    let xtask_main = fs::read_to_string(workspace.join("xtask/src/main.rs"))
+        .expect("xtask main should be readable");
+    let ocr_module = fs::read_to_string(workspace.join("xtask/src/ocr_review.rs"))
+        .expect("ocr_review module should be readable");
+    let cargo_config = fs::read_to_string(workspace.join(".cargo/config.toml"))
+        .expect("cargo config should be readable");
+    let makefile =
+        fs::read_to_string(workspace.join("Makefile")).expect("Makefile should be readable");
+    let guide = fs::read_to_string(workspace.join("docs/guides/local-ocr-review.md"))
+        .expect("local OCR guide should be readable");
+    let readme =
+        fs::read_to_string(workspace.join("README.md")).expect("README should be readable");
+
+    assert!(
+        xtask_main.contains("ocr-review"),
+        "xtask should dispatch ocr-review"
+    );
+    assert!(cargo_config.contains("ocr-review = \"xtask ocr-review\""));
+    assert!(makefile.contains("ocr-review:"));
+    assert!(makefile.contains("cargo xtask ocr-review $(ARGS)"));
+    assert!(guide.contains("--timeout 20"));
+    assert!(guide.contains("--audience agent"));
+    assert!(readme.contains("docs/guides/local-ocr-review.md"));
+
+    for required in [
+        "DEFAULT_TIMEOUT_MINUTES: &str = \"20\"",
+        "--audience",
+        "agent",
+        "ocr-preview.txt",
+        "ocr-preview-stderr.log",
+        "ocr-stdout.raw",
+        "ocr-stderr.log",
+        "ocr-result.json",
+        "ocr-exit-code.txt",
+        "is_test_path",
+        "allow_excluded_tests",
+    ] {
+        assert!(
+            ocr_module.contains(required),
+            "OCR wrapper should contain {required}"
+        );
+    }
+}
