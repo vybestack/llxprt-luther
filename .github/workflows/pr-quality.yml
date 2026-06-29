@@ -175,7 +175,7 @@ jobs:
           tool: cargo-audit
 
       - name: Run RustSec audit
-        run: cargo audit --locked
+        run: cargo audit
 
   release-readiness:
     name: Release readiness (release build)

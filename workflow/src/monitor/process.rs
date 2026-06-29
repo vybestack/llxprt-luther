@@ -3,6 +3,7 @@
 /// @plan:PLAN-20260404-INITIAL-RUNTIME.P10
 use std::fs;
 use std::path::Path;
+#[cfg(not(target_os = "linux"))]
 use std::process::Command;
 use std::sync::Arc;
 use std::time::Duration;

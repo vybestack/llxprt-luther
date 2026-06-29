@@ -8,7 +8,8 @@ use serde_json::Value;
 
 const FORBIDDEN: [&str; 7] = [
     "TBD",
-    "TODO",
+    // Split the task marker so the source scanner does not match its own denylist.
+    concat!("TO", "DO"),
     "json_path TBD",
     "fixture TBD",
     "assertion TBD",

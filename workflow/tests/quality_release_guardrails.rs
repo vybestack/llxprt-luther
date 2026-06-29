@@ -690,7 +690,7 @@ fn test_pr_quality_exposes_expected_checks() {
         "name: Security (cargo audit)",
         "name: Release readiness (release build)",
         "cargo doc --workspace --all-features --no-deps",
-        "cargo audit --locked",
+        "run: cargo audit",
         "cargo build --release --bin luther-workflow",
     ] {
         assert!(
