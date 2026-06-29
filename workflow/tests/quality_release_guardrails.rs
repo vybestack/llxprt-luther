@@ -7,10 +7,31 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 
-/// Helper to get the workspace root path.
+/// Helper to get the Rust crate root path.
 /// @plan:PLAN-PLAN-20260404-INITIAL-RUNTIME.P11
 fn workspace_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+}
+
+fn repository_root() -> PathBuf {
+    workspace_root()
+        .parent()
+        .expect("workflow crate should live under the repository root")
+        .to_path_buf()
+}
+
+fn root_workflow_path(name: &str) -> PathBuf {
+    repository_root()
+        .join(".github")
+        .join("workflows")
+        .join(name)
+}
+
+fn nested_workflow_path(name: &str) -> PathBuf {
+    workspace_root()
+        .join(".github")
+        .join("workflows")
+        .join(name)
 }
 
 fn lint_level(value: &toml::Value) -> Option<&str> {
@@ -121,6 +142,23 @@ fn test_xtask_qa_exists() {
     }
 }
 
+#[test]
+fn test_workflows_are_discoverable_from_repository_root_only() {
+    for workflow in ["ocr-pr-review.yml", "pr-quality.yml", "release.yml"] {
+        let root_path = root_workflow_path(workflow);
+        assert!(
+            root_path.is_file(),
+            "GitHub Actions workflow must live at repository root path {root_path:?}"
+        );
+
+        let nested_path = nested_workflow_path(workflow);
+        assert!(
+            !nested_path.exists(),
+            "workflow/.github/workflows must not contain undiscoverable replacement workflow {nested_path:?}"
+        );
+    }
+}
+
 /// Test: PR quality workflow YAML file exists and is valid.
 /// GIVEN: the repository has GitHub Actions workflows
 /// WHEN: examining .github/workflows/pr-quality.yml
@@ -130,11 +168,7 @@ fn test_xtask_qa_exists() {
 #[test]
 fn test_pr_quality_workflow_exists() {
     // GIVEN: the repository should have GitHub Actions workflows
-    let workspace_root = workspace_root();
-    let workflow_path = workspace_root
-        .join(".github")
-        .join("workflows")
-        .join("pr-quality.yml");
+    let workflow_path = root_workflow_path("pr-quality.yml");
 
     // WHEN: examining the workflow file
     // THEN: file should exist
@@ -179,11 +213,7 @@ fn test_pr_quality_workflow_exists() {
 #[test]
 fn test_release_workflow_exists() {
     // GIVEN: the repository should have GitHub Actions workflows
-    let workspace_root = workspace_root();
-    let workflow_path = workspace_root
-        .join(".github")
-        .join("workflows")
-        .join("release.yml");
+    let workflow_path = root_workflow_path("release.yml");
 
     // WHEN: examining the workflow file
     // THEN: file should exist
@@ -221,11 +251,7 @@ fn test_release_workflow_exists() {
 #[test]
 fn test_release_workflow_triggers_on_tag() {
     // GIVEN: the release workflow exists
-    let workspace_root = workspace_root();
-    let workflow_path = workspace_root
-        .join(".github")
-        .join("workflows")
-        .join("release.yml");
+    let workflow_path = root_workflow_path("release.yml");
 
     // WHEN: examining the workflow trigger configuration
     let content = fs::read_to_string(&workflow_path).expect("Failed to read release.yml");
@@ -261,11 +287,7 @@ fn test_release_workflow_triggers_on_tag() {
 #[test]
 fn test_release_secrets_validation() {
     // GIVEN: the release workflow exists
-    let workspace_root = workspace_root();
-    let workflow_path = workspace_root
-        .join(".github")
-        .join("workflows")
-        .join("release.yml");
+    let workflow_path = root_workflow_path("release.yml");
 
     // WHEN: examining the workflow secret handling
     let content = fs::read_to_string(&workflow_path).expect("Failed to read release.yml");
@@ -335,11 +357,7 @@ fn test_lint_policy_contains_high_signal_clippy_denies() {
 
 #[test]
 fn test_pr_quality_uses_cargo_lint_policy() {
-    let workspace_root = workspace_root();
-    let workflow_path = workspace_root
-        .join(".github")
-        .join("workflows")
-        .join("pr-quality.yml");
+    let workflow_path = root_workflow_path("pr-quality.yml");
     let workflow = fs::read_to_string(&workflow_path).expect("Failed to read pr-quality.yml");
 
     assert!(
@@ -400,10 +418,7 @@ fn test_xtask_clippy_uses_shared_cargo_lint_policy_command() {
 
 /// Helper to read the OCR PR review workflow content for guardrail tests.
 fn ocr_pr_review_workflow_content() -> String {
-    let workflow_path = workspace_root()
-        .join(".github")
-        .join("workflows")
-        .join("ocr-pr-review.yml");
+    let workflow_path = root_workflow_path("ocr-pr-review.yml");
     fs::read_to_string(&workflow_path)
         .unwrap_or_else(|e| panic!("Failed to read ocr-pr-review.yml at {workflow_path:?}: {e}"))
 }
@@ -456,6 +471,7 @@ fn normalize_run_block(block: &str) -> String {
         .map(|line| line.chars().take_while(|ch| *ch == ' ').count())
         .min()
         .unwrap_or(0);
+
     let mut normalized = String::new();
     for line in lines {
         let without_indent = line.get(min_indent..).unwrap_or("");
@@ -627,6 +643,7 @@ fn test_ocr_pr_review_run_block_parsing_handles_shell_edge_cases() {
     assert_eq!(blocks[1], "echo inline\n");
     assert_eq!(blocks[2], "bash scripts/review.sh\n");
     // Escaped spaces do not delimit a shell word, so the following '#'
+
     // remains part of the same word instead of starting a shell comment.
     assert_eq!(
         strip_shell_comment("echo \\ #notcomment"),
@@ -639,14 +656,77 @@ fn test_ocr_pr_review_run_block_parsing_handles_shell_edge_cases() {
     assert_eq!(blocks[4], "./direct.sh\n");
 }
 
+#[test]
+fn test_pr_quality_targets_nested_workflow_crate() {
+    let workflow = fs::read_to_string(root_workflow_path("pr-quality.yml"))
+        .expect("Failed to read pr-quality.yml");
+
+    assert!(
+        workflow.matches("working-directory: workflow").count() >= 7,
+        "Every PR quality job that runs project commands should execute from workflow/"
+    );
+    assert!(
+        workflow.contains("CLIPPY_CONF_DIR: .github/clippy"),
+        "Clippy config should remain relative to the workflow crate root"
+    );
+    assert!(
+        workflow.contains("fetch-depth: 0")
+            && workflow
+                .contains("cargo xtask complexity --changed origin/${{ github.base_ref }} HEAD"),
+        "Changed-file complexity checks require full git history and an explicit PR base"
+    );
+    assert!(
+        workflow.contains("workspaces: workflow -> target")
+            && workflow.contains("path: workflow/target/llvm-cov-target/workspace-summary.json"),
+        "Action-managed cache and artifact paths must be rooted at repository paths"
+    );
+}
+
+#[test]
+fn test_pr_quality_exposes_expected_checks() {
+    let workflow = fs::read_to_string(root_workflow_path("pr-quality.yml"))
+        .expect("Failed to read pr-quality.yml");
+
+    for required in [
+        "name: Format (rustfmt)",
+        "name: Lint (clippy + structural)",
+        "name: Tests (lib + integration)",
+        "name: Coverage (llvm-cov gate)",
+        "name: Docs (cargo doc)",
+        "name: Security (cargo audit)",
+        "name: Release readiness (release build)",
+        "cargo doc --workspace --all-features --no-deps",
+        "run: cargo audit",
+        "cargo build --release --bin luther-workflow",
+    ] {
+        assert!(
+            workflow.contains(required),
+            "PR quality workflow should contain {required}"
+        );
+    }
+}
+
+#[test]
+fn test_release_workflow_targets_nested_workflow_crate() {
+    let workflow =
+        fs::read_to_string(root_workflow_path("release.yml")).expect("Failed to read release.yml");
+
+    assert!(
+        workflow.contains("working-directory: workflow"),
+        "Release shell steps should execute from workflow/ so cargo aliases resolve"
+    );
+    assert!(
+        workflow.contains("workspaces: workflow -> target")
+            && workflow.contains("cargo release-all \"${RELEASE_TAG}\""),
+        "Release workflow should cache the nested workspace and run the existing cargo release flow"
+    );
+}
 /// Test: the OCR PR review workflow file exists.
 /// @plan:PLAN-20260404-INITIAL-RUNTIME.P11
 #[test]
+
 fn test_ocr_pr_review_workflow_exists() {
-    let workflow_path = workspace_root()
-        .join(".github")
-        .join("workflows")
-        .join("ocr-pr-review.yml");
+    let workflow_path = root_workflow_path("ocr-pr-review.yml");
     assert!(
         workflow_path.is_file(),
         "OCR PR review workflow should exist at {workflow_path:?}"
@@ -1423,10 +1503,7 @@ fn test_ocr_pr_review_uses_only_pinned_ocr_install() {
 /// Test: OCR remains additive to existing PR quality gates.
 #[test]
 fn test_ocr_pr_review_keeps_existing_pr_quality_gates() {
-    let pr_quality_path = workspace_root()
-        .join(".github")
-        .join("workflows")
-        .join("pr-quality.yml");
+    let pr_quality_path = root_workflow_path("pr-quality.yml");
     assert!(
         pr_quality_path.is_file(),
         "pr-quality.yml must remain so existing PR quality checks stay enabled"

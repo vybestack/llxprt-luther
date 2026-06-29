@@ -44,9 +44,9 @@ plan_static_content = """
 4. Add or update focused tests and fixtures covering llxprt-code and llxprt-luther target profiles.
 5. Run targeted verification for the changed workflow files only, then keep the final diff narrowly scoped to issue #{issue_number}.
 """
-required_changed_path_pattern = "workflow/"
-diff_required_path_regex = "^workflow/(src/|config/|tests/)"
-diff_failure_message = "No Luther workflow source/config/test diff found and no reusable open PR exists"
+required_changed_path_pattern = "workflow"
+diff_required_path_regex = "^([.]github/workflows/|workflow/(src/|config/|tests/|docs/))"
+diff_failure_message = "No Luther workflow/config/test/doc diff found and no reusable open PR exists"
 lint_command = "cargo fmt --check --manifest-path workflow/Cargo.toml 2>&1"
 typecheck_command = "cargo check --manifest-path workflow/Cargo.toml 2>&1"
 build_command = "cargo build --manifest-path workflow/Cargo.toml 2>&1"

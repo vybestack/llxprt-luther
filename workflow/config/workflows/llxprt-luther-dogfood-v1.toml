@@ -292,7 +292,7 @@ success_on_diff = true
 success_on_existing_diff = false
 
 continue_on_empty_diff = false
-required_changed_path_patterns = ["workflow/config/", "workflow/tests/", "workflow/src/", "workflow/docs/"]
+required_changed_path_patterns = [".github/workflows/", "workflow/config/", "workflow/tests/", "workflow/src/", "workflow/docs/"]
 
 min_runtime_before_success_seconds = 60
 stdout_file = "{artifact_dir}/implement-stdout.txt"
@@ -375,14 +375,14 @@ artifact_root = "{artifact_dir}"
 
 [steps.parameters.check_commands]
 diff_or_existing_pr = """
-CHANGED=$(git status --porcelain --untracked-files=all | sed 's/^...//' | grep -E '^workflow/(config/|tests/|src/|docs/)' || true)
+CHANGED=$(git status --porcelain --untracked-files=all | sed 's/^...//' | grep -E '^([.]github/workflows/|workflow/(config/|tests/|src/|docs/))' || true)
 if [ -n "$CHANGED" ]; then
   exit 0
 fi
 if [ "{setup_workspace.existing_pr_number}" != "0" ]; then
   exit 0
 fi
-echo 'No Luther source/config/test/doc diff found and no reusable open PR exists'
+echo 'No Luther workflow/config/test/doc diff found and no reusable open PR exists'
 exit 1
 """
 format = "cargo fmt --check --manifest-path workflow/Cargo.toml 2>&1"

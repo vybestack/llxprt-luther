@@ -12,6 +12,7 @@ const LIZARD_COMPLEXITY_MAX: u32 = 25;
 const LIZARD_FUNCTION_LINES_MAX: u32 = 80;
 const FILE_LINES_MAX: usize = 1000;
 const FILE_LINES_WARN: usize = 750;
+const COMPLEXITY_USAGE: &str = "usage: cargo xtask complexity [--changed <base> <head>]";
 
 const RELEASE_BINARY_NAME: &str = "luther-workflow";
 const DEFAULT_HOMEBREW_TAP_REPO: &str = "acoliver/homebrew-tap";
@@ -39,7 +40,7 @@ fn run() -> Result<()> {
         Some("qa") => qa(),
         Some("guard") => guard(),
         Some("coverage") => coverage(),
-        Some("complexity") => complexity(),
+        Some("complexity") => complexity(&args.collect::<Vec<_>>()),
         Some("ocr-review") => ocr_review::run(args.collect()),
         Some("release") => release(args.next().as_deref()),
         Some("release-package") => release_package_cmd(args.next().as_deref()),
@@ -77,7 +78,7 @@ fn qa() -> Result<()> {
         "cargo fmt",
     )?;
     run_checked(command("cargo", CLIPPY_ARGS), "cargo clippy")?;
-    complexity()?;
+    complexity(&[])?;
     run_checked(
         command(
             "cargo",
@@ -172,10 +173,11 @@ fn coverage() -> Result<()> {
     Ok(())
 }
 
-fn complexity() -> Result<()> {
+fn complexity(args: &[String]) -> Result<()> {
     let workspace_root = workspace_root();
     let venv_dir = workspace_root.join(".venv-lizard");
     let venv_python = venv_dir.join("bin/python");
+    let changed_paths = complexity_paths(args, &workspace_root)?;
 
     if !venv_python.exists() {
         run_checked(
@@ -200,31 +202,97 @@ fn complexity() -> Result<()> {
         "pip install lizard",
     )?;
 
-    run_checked(
-        command(
-            venv_python.to_string_lossy().as_ref(),
-            [
-                "-m",
-                "lizard",
-                "-C",
-                &LIZARD_COMPLEXITY_MAX.to_string(),
-                "-L",
-                &LIZARD_FUNCTION_LINES_MAX.to_string(),
-                "-w",
-                "src/",
-            ],
-        ),
-        "lizard complexity gate",
-    )?;
+    match changed_paths {
+        Some(paths) if paths.is_empty() => {
+            eprintln!("No changed Rust source files under src/; skipping lizard complexity gate.");
+        }
+        Some(paths) => {
+            run_lizard(&venv_python, paths.iter())?;
+            enforce_file_line_limits_for_files(paths.iter())?;
+        }
+        None => {
+            run_lizard(&venv_python, [workspace_root.join("src")].iter())?;
+            enforce_file_line_limits(&workspace_root.join("src"))?;
 
-    enforce_file_line_limits(&workspace_root.join("src"))?;
-
-    let tests_dir = workspace_root.join("tests");
-    if tests_dir.is_dir() {
-        enforce_file_line_limits(&tests_dir)?;
+            let tests_dir = workspace_root.join("tests");
+            if tests_dir.is_dir() {
+                enforce_file_line_limits(&tests_dir)?;
+            }
+        }
     }
 
     Ok(())
+}
+
+fn complexity_paths(args: &[String], workspace_root: &Path) -> Result<Option<Vec<PathBuf>>> {
+    match args {
+        [] => Ok(None),
+        [flag, base, head] if flag == "--changed" => {
+            changed_rust_source_files(workspace_root, base, head).map(Some)
+        }
+        _ => bail!(COMPLEXITY_USAGE),
+    }
+}
+
+fn changed_rust_source_files(
+    workspace_root: &Path,
+    base: &str,
+    head: &str,
+) -> Result<Vec<PathBuf>> {
+    let range = format!("{base}...{head}");
+    let output = capture_in_dir(
+        workspace_root,
+        "git",
+        [
+            "diff",
+            "--name-only",
+            "--relative",
+            "--diff-filter=ACMRT",
+            range.as_str(),
+            "--",
+            "src",
+        ],
+    )?;
+
+    let mut paths = Vec::new();
+    for line in output
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+    {
+        let path = workspace_root.join(line);
+        if path.extension().and_then(|ext| ext.to_str()) == Some("rs") && path.is_file() {
+            paths.push(path);
+        }
+    }
+    paths.sort();
+    paths.dedup();
+    Ok(paths)
+}
+
+fn run_lizard<'a, I>(venv_python: &Path, paths: I) -> Result<()>
+where
+    I: IntoIterator<Item = &'a PathBuf>,
+{
+    let mut args = vec![
+        "-m".to_string(),
+        "lizard".to_string(),
+        "-C".to_string(),
+        LIZARD_COMPLEXITY_MAX.to_string(),
+        "-L".to_string(),
+        LIZARD_FUNCTION_LINES_MAX.to_string(),
+        "-w".to_string(),
+    ];
+    args.extend(
+        paths
+            .into_iter()
+            .map(|path| path.to_string_lossy().into_owned()),
+    );
+
+    run_checked(
+        command(venv_python.to_string_lossy().as_ref(), args),
+        "lizard complexity gate",
+    )
 }
 
 fn release(tag_arg: Option<&str>) -> Result<()> {
@@ -583,9 +651,17 @@ fn read_trimmed(path: &Path) -> Result<String> {
 }
 
 fn enforce_file_line_limits(src_dir: &Path) -> Result<()> {
+    let files = walk_rs_files(src_dir)?;
+    enforce_file_line_limits_for_files(files.iter())
+}
+
+fn enforce_file_line_limits_for_files<'a, I>(paths: I) -> Result<()>
+where
+    I: IntoIterator<Item = &'a PathBuf>,
+{
     let mut error_exit = false;
-    for path in walk_rs_files(src_dir)? {
-        let content = fs::read_to_string(&path)
+    for path in paths {
+        let content = fs::read_to_string(path)
             .with_context(|| format!("read source file {}", path.display()))?;
         let lines = content.lines().count();
         if lines > FILE_LINES_MAX {
