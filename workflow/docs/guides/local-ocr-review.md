@@ -11,7 +11,7 @@ npm install -g @alibaba-group/open-code-review
 cargo xtask ocr-review --ocr-path /path/to/ocr --preview
 ```
 
-The wrapper also honors `OCR_BIN=/path/to/ocr`. Local runs use your local OCR LLM configuration, keyring, and provider credentials. GitHub Actions uses repository secrets and the separate `.github/workflows/ocr-pr-review.yml` publication workflow.
+The wrapper also honors `OCR_BIN=/path/to/ocr`. Local runs use your local OCR LLM configuration, keyring, and provider credentials. GitHub Actions uses repository secrets and the separate repository-root `.github/workflows/ocr-pr-review.yml` publication workflow.
 
 ## Usage
 

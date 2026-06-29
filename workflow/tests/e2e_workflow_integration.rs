@@ -2002,6 +2002,57 @@ fn reusable_issue_fix_run_tests_includes_profile_driven_ocr_review() {
     );
 }
 
+/// Issue #78: relocating GitHub Actions workflows to the repository root must
+/// still satisfy Luther's own issue-fix diff gate and changed-path scope.
+#[test]
+fn reusable_issue_fix_scope_accepts_root_github_workflows() {
+    let workflow_type = post_pr_workflow();
+    let config = workflow_config("llxprt-luther-issue-fix");
+    let context = context_from_config(&config);
+
+    let implement = workflow_type
+        .steps
+        .iter()
+        .find(|step| step.step_id == "implement")
+        .expect("implement step exists");
+    let patterns = implement
+        .parameters
+        .as_ref()
+        .and_then(|params| params.get("required_changed_path_patterns"))
+        .and_then(serde_json::Value::as_array)
+        .expect("implement required_changed_path_patterns exists");
+    let interpolated_patterns = patterns
+        .iter()
+        .filter_map(serde_json::Value::as_str)
+        .map(|pattern| interpolate_string(pattern, &context))
+        .collect::<Vec<_>>();
+    assert_eq!(interpolated_patterns, ["workflow"]);
+    assert!(
+        ".github/workflows/pr-quality.yml".contains(&interpolated_patterns[0]),
+        "root workflow relocations should satisfy the issue-fix changed-path gate through their path segment"
+    );
+
+    let run_tests = workflow_type
+        .steps
+        .iter()
+        .find(|step| step.step_id == "run_tests")
+        .expect("run_tests step exists");
+    let diff_command = run_tests
+        .parameters
+        .as_ref()
+        .and_then(|params| params.get("check_commands"))
+        .and_then(|commands| commands.get("diff_or_existing_pr"))
+        .and_then(serde_json::Value::as_str)
+        .expect("diff_or_existing_pr command exists");
+    let diff_command = interpolate_string(diff_command, &context);
+    assert!(
+        diff_command.contains("[.]github/workflows/")
+            && diff_command.contains("workflow/(src/|config/|tests/|docs/)")
+            && diff_command.contains("No Luther workflow/config/test/doc diff found"),
+        "issue-fix diff gate should accept repository-root workflow YAML plus Luther source/config/test/doc changes: {diff_command}"
+    );
+}
+
 /// @plan:PLAN-20260408-LLXPRT-FIRST.P18
 /// @requirement:REQ-LF-PLAN-002
 #[test]
