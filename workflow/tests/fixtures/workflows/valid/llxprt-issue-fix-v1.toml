@@ -327,7 +327,7 @@ step_type = "verify"
 description = "Run lint, typecheck, test, format, build checks"
 
 [steps.parameters]
-checks = ["diff_or_existing_pr", "lint", "typecheck", "build", "test", "format", "diff_or_existing_pr"]
+checks = ["diff_or_existing_pr", "lint", "typecheck", "build", "test", "format", "ocr_review", "diff_or_existing_pr"]
 timeout_seconds = 2400
 artifact_root = "{artifact_dir}"
 
@@ -349,6 +349,7 @@ typecheck = "{typecheck_command}"
 build = "{build_command}"
 test = "{test_command}"
 format = "{format_command}"
+ocr_review = "{ocr_review_command}"
 
 
 [[steps]]

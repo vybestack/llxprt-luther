@@ -15,6 +15,10 @@ cargo run -- run --workflow-type hello-world-v1 --dry-run
 cargo test
 ```
 
+## Local quality tooling
+
+Use `cargo xtask ocr-review` or `make ocr-review ARGS="..."` for Luther's local OpenCodeReview wrapper. See [Local OpenCodeReview wrapper](docs/guides/local-ocr-review.md) for current diff, explicit range, PR, preview, JSON, artifact, and test-inclusion behavior.
+
 ## What It Does
 
 luther-workflow reads a **workflow type** (a graph of steps and transitions) and a **workflow config** (runtime parameters), binds them into a workflow instance, and executes each step through pluggable executors.
