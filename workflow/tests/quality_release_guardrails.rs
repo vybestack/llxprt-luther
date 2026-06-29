@@ -670,6 +670,12 @@ fn test_pr_quality_targets_nested_workflow_crate() {
         "Clippy config should remain relative to the workflow crate root"
     );
     assert!(
+        workflow.contains("fetch-depth: 0")
+            && workflow
+                .contains("cargo xtask complexity --changed origin/${{ github.base_ref }} HEAD"),
+        "Changed-file complexity checks require full git history and an explicit PR base"
+    );
+    assert!(
         workflow.contains("workspaces: workflow -> target")
             && workflow.contains("path: workflow/target/llvm-cov-target/workspace-summary.json"),
         "Action-managed cache and artifact paths must be rooted at repository paths"

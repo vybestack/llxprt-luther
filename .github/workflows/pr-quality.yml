@@ -51,6 +51,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -69,7 +71,7 @@ jobs:
         run: cargo xtask guard
 
       - name: Enforce complexity and file-size gates
-        run: cargo xtask complexity
+        run: cargo xtask complexity --changed origin/${{ github.base_ref }} HEAD
 
   test:
     name: Tests (lib + integration)
