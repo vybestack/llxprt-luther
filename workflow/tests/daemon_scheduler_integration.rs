@@ -7,11 +7,11 @@
 //!
 //! @plan:PLAN-20260415-DAEMON-DISCOVERY.P06
 //! @requirement:REQ-DAEMON-DISCOVERY-005,REQ-DAEMON-DISCOVERY-006,REQ-DAEMON-DISCOVERY-007
-use std::cell::RefCell;
+use std::sync::Mutex;
 
 use luther_workflow::adapters::github::GithubError;
 use luther_workflow::adapters::github_issues::{GithubIssue, GithubIssueQuery};
-use luther_workflow::daemon::launcher::{LaunchRequest, WorkflowLauncher};
+use luther_workflow::daemon::launcher::{LaunchRequest, WorkflowLaunchResult, WorkflowLauncher};
 use luther_workflow::daemon::scheduler::run_once;
 use luther_workflow::persistence::leases::{
     count_active_leases_for_config, init_leases_table, list_all_leases, mark_stale_leases,
@@ -46,13 +46,13 @@ impl GithubIssueQuery for MockQuery {
 /// Records every launch request and always reports success.
 #[derive(Default)]
 struct RecordingLauncher {
-    launched: RefCell<Vec<u64>>,
+    launched: Mutex<Vec<u64>>,
 }
 
 impl WorkflowLauncher for RecordingLauncher {
-    fn launch(&self, request: &LaunchRequest) -> Result<bool, String> {
-        self.launched.borrow_mut().push(request.issue_number);
-        Ok(true)
+    fn launch(&self, request: &LaunchRequest) -> Result<WorkflowLaunchResult, String> {
+        self.launched.lock().unwrap().push(request.issue_number);
+        Ok(WorkflowLaunchResult::CompletedSuccess)
     }
 }
 
@@ -78,12 +78,16 @@ fn cfg(max: u32) -> DiscoveryConfig {
         milestone_order: Some("none".to_string()),
         max_concurrent_runs: Some(max),
         poll_interval_secs: Some(300),
+        max_concurrent_active_runs: None,
+        max_concurrent_runs_per_repository: None,
+        max_concurrent_runs_per_config: None,
     }
 }
 
 fn memory_db() -> Connection {
     let conn = Connection::open_in_memory().expect("open db");
     init_leases_table(&conn).expect("init");
+    luther_workflow::persistence::wait_state::init_wait_states_table(&conn).expect("init waits");
     conn
 }
 
@@ -100,7 +104,7 @@ fn run_once_launches_up_to_concurrency_limit() {
         summary.launched, 2,
         "only two issues launched under limit 2"
     );
-    assert_eq!(launcher.launched.borrow().len(), 2);
+    assert_eq!(launcher.launched.lock().unwrap().len(), 2);
     // Completed launches free the slot, so no active leases remain.
     let all = list_all_leases(&conn).expect("leases");
     assert_eq!(all.len(), 2, "one lease created per launched issue");
@@ -115,13 +119,13 @@ fn second_pass_does_not_duplicate_completed_work() {
     let conn = memory_db();
 
     run_once(&cfg(1), &query, &conn, &launcher, "cfg-a").expect("pass 1");
-    assert_eq!(launcher.launched.borrow().len(), 1);
+    assert_eq!(launcher.launched.lock().unwrap().len(), 1);
 
     // The lease is Completed; a second discovery pass must not relaunch it
     // because the issue already has a (terminal) lease record.
     run_once(&cfg(1), &query, &conn, &launcher, "cfg-a").expect("pass 2");
     assert_eq!(
-        launcher.launched.borrow().len(),
+        launcher.launched.lock().unwrap().len(),
         1,
         "completed issue is not relaunched"
     );

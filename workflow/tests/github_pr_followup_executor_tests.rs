@@ -2781,8 +2781,8 @@ fn coderabbit_feedback_discovers_existing_pr_identity_when_params_are_defaults()
 
     assert_expected_outcome(
         outcome,
-        StepOutcome::Fatal,
-        "single-observation feedback collection should fail readiness budget after reusing captured PR identity",
+        StepOutcome::Wait,
+        "single-observation feedback collection should suspend after reusing captured PR identity",
     );
 
     assert!(
@@ -2870,8 +2870,8 @@ fn coderabbit_feedback_ignores_unresolved_identity_params_and_uses_captured_pr()
 
     assert_expected_outcome(
         outcome,
-        StepOutcome::Fatal,
-        "single-observation feedback collection should fail readiness budget after reusing captured PR identity",
+        StepOutcome::Wait,
+        "single-observation feedback collection should suspend after reusing captured PR identity",
     );
 
     let artifact_path = temp

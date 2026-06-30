@@ -13,6 +13,8 @@ pub enum RunStatus {
     Starting,
     Running,
     WaitingForChecks,
+    WaitingExternal,
+    ReadyToResume,
     Remediating,
     Blocked,
     Paused,
@@ -31,6 +33,8 @@ impl std::fmt::Display for RunStatus {
             RunStatus::Starting => "starting",
             RunStatus::Running => "running",
             RunStatus::WaitingForChecks => "waiting_for_checks",
+            RunStatus::WaitingExternal => "waiting_external",
+            RunStatus::ReadyToResume => "ready_to_resume",
             RunStatus::Remediating => "remediating",
             RunStatus::Blocked => "blocked",
             RunStatus::Paused => "paused",
@@ -54,6 +58,8 @@ impl std::str::FromStr for RunStatus {
             "starting" => Ok(RunStatus::Starting),
             "running" => Ok(RunStatus::Running),
             "waiting_for_checks" => Ok(RunStatus::WaitingForChecks),
+            "waiting_external" => Ok(RunStatus::WaitingExternal),
+            "ready_to_resume" => Ok(RunStatus::ReadyToResume),
             "remediating" => Ok(RunStatus::Remediating),
             "blocked" => Ok(RunStatus::Blocked),
             "paused" => Ok(RunStatus::Paused),
@@ -92,6 +98,8 @@ impl RunStatus {
         matches!(
             self,
             RunStatus::WaitingForChecks
+                | RunStatus::WaitingExternal
+                | RunStatus::ReadyToResume
                 | RunStatus::Paused
                 | RunStatus::Blocked
                 | RunStatus::Failed
@@ -403,6 +411,8 @@ mod tests {
             RunStatus::Starting,
             RunStatus::Running,
             RunStatus::WaitingForChecks,
+            RunStatus::WaitingExternal,
+            RunStatus::ReadyToResume,
             RunStatus::Remediating,
             RunStatus::Blocked,
             RunStatus::Paused,
@@ -429,12 +439,16 @@ mod tests {
         assert!(!RunStatus::Running.is_terminal());
         assert!(!RunStatus::Starting.is_terminal());
         assert!(!RunStatus::WaitingForChecks.is_terminal());
+        assert!(!RunStatus::WaitingExternal.is_terminal());
+        assert!(!RunStatus::ReadyToResume.is_terminal());
     }
 
     #[test]
     fn resumable_classification() {
         // @plan:PLAN-20260623-LUTHER-CONTINUATION
         assert!(RunStatus::WaitingForChecks.is_resumable());
+        assert!(RunStatus::WaitingExternal.is_resumable());
+        assert!(RunStatus::ReadyToResume.is_resumable());
         assert!(RunStatus::Paused.is_resumable());
         assert!(RunStatus::Blocked.is_resumable());
         // Terminal Failed is resumable only via explicit continuation.

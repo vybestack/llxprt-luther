@@ -322,7 +322,7 @@ fn pending_wait_pauses_run_with_resumable_checkpoint() {
 
     let conn = rusqlite::Connection::open(&db_path).expect("open db");
     let md = get_run_with_conn(&conn, run_id).unwrap().unwrap();
-    assert_eq!(md.status, RunStatus::WaitingForChecks);
+    assert_eq!(md.status, RunStatus::WaitingExternal);
     assert!(
         !md.status.is_terminal(),
         "waiting status must be non-terminal"

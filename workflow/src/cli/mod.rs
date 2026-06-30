@@ -261,6 +261,9 @@ pub struct DaemonRunArgs {
     /// Path to config file (config id is its file stem)
     #[arg(short, long, value_name = "PATH")]
     pub config: PathBuf,
+    /// Path to a daemon scheduler config with multiple targets
+    #[arg(long, value_name = "PATH")]
+    pub scheduler_config: Option<PathBuf>,
     /// Directory containing workflows/ and workflow-configs/ subdirectories
     #[arg(long, value_name = "DIR")]
     pub config_dir: Option<PathBuf>,
@@ -1119,6 +1122,31 @@ mod tests {
                 command: DaemonCommand::Run(run),
             }) => {
                 assert!(run.once);
+            }
+            other => panic!("expected daemon run, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn daemon_run_parses_scheduler_config() {
+        let cli = Cli::try_parse_from([
+            "luther-workflow",
+            "daemon",
+            "run",
+            "--config",
+            "llxprt-code.toml",
+            "--scheduler-config",
+            "daemon-scheduler.toml",
+        ])
+        .expect("daemon run --scheduler-config should parse");
+        match cli.command {
+            Commands::Daemon(DaemonArgs {
+                command: DaemonCommand::Run(run),
+            }) => {
+                assert_eq!(
+                    run.scheduler_config,
+                    Some(PathBuf::from("daemon-scheduler.toml"))
+                );
             }
             other => panic!("expected daemon run, got {other:?}"),
         }

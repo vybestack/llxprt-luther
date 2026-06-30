@@ -884,7 +884,7 @@ impl EngineRunner {
             // A recoverable external wait maps to a non-terminal status so the
             // run stays visible/active and can be resumed.
             // @plan:PLAN-20260623-LUTHER-CONTINUATION
-            RunOutcome::WaitingExternal { .. } => RunStatus::WaitingForChecks,
+            RunOutcome::WaitingExternal { .. } => RunStatus::WaitingExternal,
         };
 
         // Update the existing run record (created at start) rather than

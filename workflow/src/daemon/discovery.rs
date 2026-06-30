@@ -25,6 +25,7 @@ pub enum SkipReason {
     HasActiveLease,
     HasOpenPr,
     ConcurrencyLimitReached,
+    InvalidLeaseState,
 }
 
 impl std::fmt::Display for SkipReason {
@@ -34,11 +35,12 @@ impl std::fmt::Display for SkipReason {
             SkipReason::HasExcludedLabel(l) => write!(f, "has excluded label '{l}'"),
             SkipReason::WrongState(s) => write!(f, "wrong state '{s}'"),
             SkipReason::AssigneeMismatch(a) => write!(f, "assignee mismatch (wanted '{a}')"),
-            SkipReason::HasActiveLease => write!(f, "issue already has an active lease"),
+            SkipReason::HasActiveLease => write!(f, "issue already has an in-progress lease"),
             SkipReason::HasOpenPr => write!(f, "issue already has an open PR"),
             SkipReason::ConcurrencyLimitReached => {
                 write!(f, "per-config concurrency limit reached")
             }
+            SkipReason::InvalidLeaseState => write!(f, "invalid lease state"),
         }
     }
 }
@@ -56,6 +58,7 @@ impl SkipReason {
             SkipReason::HasActiveLease => "has_active_lease",
             SkipReason::HasOpenPr => "has_open_pr",
             SkipReason::ConcurrencyLimitReached => "concurrency_limit_reached",
+            SkipReason::InvalidLeaseState => "invalid_lease_state",
         }
     }
 }
@@ -150,7 +153,10 @@ pub fn discover(
     let mut issues = q.list_issues(repo, &cfg.include_labels, &cfg.issue_states)?;
     order_issues(cfg, &mut issues);
 
-    let max = cfg.max_concurrent_runs.unwrap_or(1) as usize;
+    let max = cfg
+        .max_concurrent_runs_per_config
+        .or(cfg.max_concurrent_runs)
+        .unwrap_or(1) as usize;
     let mut result = DiscoveryResult::default();
 
     for issue in issues {
@@ -184,7 +190,7 @@ fn dynamic_skip(
     repo: &str,
 ) -> Result<Option<SkipReason>, GithubError> {
     if let Ok(Some(lease)) = get_lease_for_issue(conn, repo, issue.number) {
-        if lease.status.is_active() {
+        if lease.status.blocks_duplicate_work() {
             return Ok(Some(SkipReason::HasActiveLease));
         }
     }
@@ -210,6 +216,9 @@ mod tests {
             milestone_order: Some("semver".to_string()),
             max_concurrent_runs: Some(2),
             poll_interval_secs: Some(300),
+            max_concurrent_active_runs: None,
+            max_concurrent_runs_per_repository: None,
+            max_concurrent_runs_per_config: None,
         }
     }
 
@@ -319,6 +328,35 @@ mod tests {
         assert_eq!(r.skipped[0].1, SkipReason::HasActiveLease);
     }
 
+    #[test]
+    fn waiting_external_lease_skipped_without_consuming_capacity() {
+        let c = conn();
+        let lease = try_claim(&c, "o/r", 1, "cfg").unwrap().unwrap();
+        crate::persistence::leases::update_lease_status(
+            &c,
+            &lease.lease_id,
+            crate::persistence::leases::LeaseStatus::WaitingExternal,
+            Some("run-1"),
+        )
+        .unwrap();
+        let q = MockQuery {
+            issues: vec![issue(1, &["OK for Luther"]), issue(2, &["OK for Luther"])],
+            open_pr_for: vec![],
+        };
+        let mut cfg = cfg();
+        cfg.max_concurrent_runs = Some(1);
+
+        let r = discover(&cfg, &q, &c, 0).unwrap();
+
+        assert_eq!(r.skipped[0].1, SkipReason::HasActiveLease);
+        assert_eq!(
+            r.eligible
+                .iter()
+                .map(|issue| issue.number)
+                .collect::<Vec<_>>(),
+            vec![2]
+        );
+    }
     #[test]
     fn open_pr_skipped() {
         let q = MockQuery {

@@ -116,6 +116,35 @@ pub fn write_artifact_with_kind(
     Ok(record)
 }
 
+pub fn write_wait_state_artifact(
+    run_id: &str,
+    record: &crate::persistence::wait_state::WaitStateRecord,
+) -> Result<PathBuf, PersistenceError> {
+    let content = serde_json::to_vec_pretty(record)
+        .map_err(|e| PersistenceError::Serialization(e.to_string()))?;
+    write_artifact(run_id, "wait-state.json", &content)
+}
+
+pub fn write_poll_result_artifact(
+    run_id: &str,
+    result: &serde_json::Value,
+) -> Result<PathBuf, PersistenceError> {
+    let timestamp = Utc::now().format("%Y%m%d%H%M%S%f");
+    let name = format!("poll-result-{timestamp}.json");
+    let content = serde_json::to_vec_pretty(result)
+        .map_err(|e| PersistenceError::Serialization(e.to_string()))?;
+    write_artifact(run_id, &name, &content)
+}
+
+pub fn write_resume_decision_artifact(
+    run_id: &str,
+    decision: &impl serde::Serialize,
+) -> Result<PathBuf, PersistenceError> {
+    let content = serde_json::to_vec_pretty(decision)
+        .map_err(|e| PersistenceError::Serialization(e.to_string()))?;
+    write_artifact(run_id, "resume-decision.json", &content)
+}
+
 /// Read an artifact file for a run.
 /// @plan:PLAN-20260404-INITIAL-RUNTIME.P06
 pub fn read_artifact(run_id: &str, name: &str) -> Result<Vec<u8>, PersistenceError> {

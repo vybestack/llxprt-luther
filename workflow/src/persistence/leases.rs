@@ -15,6 +15,8 @@ pub enum LeaseStatus {
     Pending,
     Claimed,
     Running,
+    WaitingExternal,
+    ReadyToResume,
     Completed,
     Failed,
     Abandoned,
@@ -27,6 +29,8 @@ impl std::fmt::Display for LeaseStatus {
             LeaseStatus::Pending => "pending",
             LeaseStatus::Claimed => "claimed",
             LeaseStatus::Running => "running",
+            LeaseStatus::WaitingExternal => "waiting_external",
+            LeaseStatus::ReadyToResume => "ready_to_resume",
             LeaseStatus::Completed => "completed",
             LeaseStatus::Failed => "failed",
             LeaseStatus::Abandoned => "abandoned",
@@ -44,6 +48,8 @@ impl std::str::FromStr for LeaseStatus {
             "pending" => Ok(LeaseStatus::Pending),
             "claimed" => Ok(LeaseStatus::Claimed),
             "running" => Ok(LeaseStatus::Running),
+            "waiting_external" => Ok(LeaseStatus::WaitingExternal),
+            "ready_to_resume" => Ok(LeaseStatus::ReadyToResume),
             "completed" => Ok(LeaseStatus::Completed),
             "failed" => Ok(LeaseStatus::Failed),
             "abandoned" => Ok(LeaseStatus::Abandoned),
@@ -58,6 +64,18 @@ impl LeaseStatus {
     #[must_use]
     pub fn is_active(self) -> bool {
         matches!(self, LeaseStatus::Claimed | LeaseStatus::Running)
+    }
+
+    /// Whether this lease retains duplicate-work protection for an issue.
+    #[must_use]
+    pub fn blocks_duplicate_work(self) -> bool {
+        !matches!(
+            self,
+            LeaseStatus::Completed
+                | LeaseStatus::Failed
+                | LeaseStatus::Abandoned
+                | LeaseStatus::Stale
+        )
     }
 }
 
@@ -304,6 +322,28 @@ pub fn list_leases_by_status(
     collect_leases(&mut stmt, &[&status.to_string()])
 }
 
+/// List ready-to-resume leases for a config, oldest first.
+pub fn list_ready_to_resume_leases(
+    conn: &Connection,
+    config_id: &str,
+) -> SqliteResult<Vec<IssueLease>> {
+    let sql = format!(
+        "{SELECT_COLUMNS} WHERE config_id = ?1 AND status = 'ready_to_resume' ORDER BY updated_at, issue_repo, issue_number"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    collect_leases(&mut stmt, &[&config_id])
+}
+
+/// Count all active (Claimed + Running) leases — the global concurrency gate.
+pub fn count_active_leases(conn: &Connection) -> SqliteResult<usize> {
+    let count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM issue_leases WHERE status IN ('claimed', 'running')",
+        [],
+        |row| row.get(0),
+    )?;
+    Ok(count as usize)
+}
+
 /// Count active (Claimed + Running) leases for a config — the concurrency gate.
 /// @plan:PLAN-20260415-DAEMON-DISCOVERY.P02
 /// @requirement:REQ-DAEMON-DISCOVERY-006
@@ -317,17 +357,45 @@ pub fn count_active_leases_for_config(conn: &Connection, config_id: &str) -> Sql
     Ok(count as usize)
 }
 
+/// Count active (Claimed + Running) leases for a repository.
+pub fn count_active_leases_for_repository(conn: &Connection, repo: &str) -> SqliteResult<usize> {
+    let count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM issue_leases
+         WHERE issue_repo = ?1 AND status IN ('claimed', 'running')",
+        params![repo],
+        |row| row.get(0),
+    )?;
+    Ok(count as usize)
+}
+
 /// Mark Claimed/Running leases whose heartbeat is older than `timeout_secs` as
 /// Stale, returning the number of leases recovered. Run on daemon startup so a
 /// crashed previous instance does not permanently block an issue.
 /// @plan:PLAN-20260415-DAEMON-DISCOVERY.P02
 /// @requirement:REQ-DAEMON-DISCOVERY-007
 pub fn mark_stale_leases(conn: &Connection, timeout_secs: u64) -> SqliteResult<usize> {
-    let cutoff = (Utc::now() - chrono::Duration::seconds(timeout_secs as i64)).to_rfc3339();
-    let now = Utc::now().to_rfc3339();
+    let now_ts = Utc::now();
+    let cutoff = (now_ts - chrono::Duration::seconds(timeout_secs as i64)).to_rfc3339();
+    let now = now_ts.to_rfc3339();
     let updated = conn.execute(
         "UPDATE issue_leases SET status = 'stale', updated_at = ?1
          WHERE status IN ('claimed', 'running') AND heartbeat_at < ?2",
+        params![now, cutoff],
+    )?;
+    Ok(updated)
+}
+
+/// Mark overdue ready-to-resume leases stale while leaving deliberate external waits intact.
+pub fn mark_stale_ready_to_resume_leases(
+    conn: &Connection,
+    timeout_secs: u64,
+) -> SqliteResult<usize> {
+    let now_ts = Utc::now();
+    let cutoff = (now_ts - chrono::Duration::seconds(timeout_secs as i64)).to_rfc3339();
+    let now = now_ts.to_rfc3339();
+    let updated = conn.execute(
+        "UPDATE issue_leases SET status = 'stale', updated_at = ?1
+         WHERE status = 'ready_to_resume' AND updated_at < ?2",
         params![now, cutoff],
     )?;
     Ok(updated)
@@ -349,6 +417,8 @@ mod tests {
             LeaseStatus::Pending,
             LeaseStatus::Claimed,
             LeaseStatus::Running,
+            LeaseStatus::WaitingExternal,
+            LeaseStatus::ReadyToResume,
             LeaseStatus::Completed,
             LeaseStatus::Failed,
             LeaseStatus::Abandoned,
@@ -400,6 +470,58 @@ mod tests {
         // l1 Claimed + l2 Running = 2 active; l3 Completed excluded.
         assert_eq!(count_active_leases_for_config(&c, "cfg").unwrap(), 2);
         let _ = l1;
+    }
+
+    #[test]
+    fn waiting_external_blocks_duplicates_but_not_active_capacity() {
+        let c = conn();
+        let lease = try_claim(&c, "o/r", 13, "cfg").unwrap().unwrap();
+        update_lease_status(
+            &c,
+            &lease.lease_id,
+            LeaseStatus::WaitingExternal,
+            Some("run-13"),
+        )
+        .unwrap();
+        let duplicate = try_claim(&c, "o/r", 13, "cfg").unwrap();
+        assert!(duplicate.is_none());
+        assert_eq!(count_active_leases_for_config(&c, "cfg").unwrap(), 0);
+        let fetched = get_lease_for_issue(&c, "o/r", 13).unwrap().unwrap();
+        assert!(fetched.status.blocks_duplicate_work());
+    }
+
+    #[test]
+    fn stale_sweep_ignores_deliberately_waiting_leases() {
+        let c = conn();
+        let old = (Utc::now() - chrono::Duration::seconds(10_000)).to_rfc3339();
+        c.execute(
+            "INSERT INTO issue_leases
+                (lease_id, issue_repo, issue_number, config_id, run_id, status,
+                 claimed_at, updated_at, heartbeat_at)
+             VALUES ('waiting-1','o/r',32,'cfg','run-32','waiting_external',?1,?1,?1)",
+            params![old],
+        )
+        .unwrap();
+        assert_eq!(mark_stale_leases(&c, 300).unwrap(), 0);
+        let lease = get_lease_for_issue(&c, "o/r", 32).unwrap().unwrap();
+        assert_eq!(lease.status, LeaseStatus::WaitingExternal);
+    }
+
+    #[test]
+    fn stale_sweep_recovers_overdue_ready_to_resume_leases() {
+        let c = conn();
+        let old = (Utc::now() - chrono::Duration::seconds(10_000)).to_rfc3339();
+        c.execute(
+            "INSERT INTO issue_leases
+                (lease_id, issue_repo, issue_number, config_id, run_id, status,
+                 claimed_at, updated_at, heartbeat_at)
+             VALUES ('ready-1','o/r',33,'cfg','run-33','ready_to_resume',?1,?1,?1)",
+            params![old],
+        )
+        .unwrap();
+        assert_eq!(mark_stale_ready_to_resume_leases(&c, 300).unwrap(), 1);
+        let lease = get_lease_for_issue(&c, "o/r", 33).unwrap().unwrap();
+        assert_eq!(lease.status, LeaseStatus::Stale);
     }
 
     #[test]

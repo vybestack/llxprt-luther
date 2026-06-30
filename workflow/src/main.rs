@@ -28,13 +28,16 @@ use luther_workflow::persistence::leases::{
     list_all_leases, list_leases_by_config, list_leases_by_status, IssueLease, LeaseStatus,
 };
 use luther_workflow::persistence::{
-    list_artifacts, load_events, load_recent_events, EventRecord, RunMetadata, RunStatus,
-    SqliteStore,
+    get_run_with_conn, get_wait_state, list_artifacts, list_wait_states, load_checkpoint_with_conn,
+    load_events, load_recent_events, persist_run_with_conn, upsert_wait_state,
+    write_wait_state_artifact, EventRecord, RunMetadata, RunStatus, SqliteStore, WaitKind,
+    WaitStateRecord,
 };
 use luther_workflow::service::{Service, ServiceConfig};
 use luther_workflow::workflow::config_loader::{
-    resolve_discovery_config, resolve_workflow, resolve_workflow_config, resolve_workflow_type,
-    validate_artifact_dependencies, validate_workflow_tokens,
+    load_daemon_scheduler_config, resolve_discovery_config, resolve_workflow,
+    resolve_workflow_config, resolve_workflow_type, validate_artifact_dependencies,
+    validate_workflow_tokens,
 };
 use luther_workflow::workflow::schema::{WorkflowConfig, WorkflowType};
 use luther_workflow::workflow::target_profile::{
@@ -447,12 +450,14 @@ fn build_run_context(
 /// runner for a claimed issue, applying `repo`/`issue` overrides to the config.
 /// @plan:PLAN-20260415-DAEMON-DISCOVERY.P06
 struct DaemonWorkflowLauncher {
-    config_id: String,
+    _config_id: String,
 }
 
 impl DaemonWorkflowLauncher {
     fn new(config_id: String) -> Self {
-        Self { config_id }
+        Self {
+            _config_id: config_id,
+        }
     }
 }
 
@@ -460,27 +465,346 @@ impl luther_workflow::daemon::launcher::WorkflowLauncher for DaemonWorkflowLaunc
     fn launch(
         &self,
         request: &luther_workflow::daemon::launcher::LaunchRequest,
-    ) -> Result<bool, String> {
-        let config_root = std::path::PathBuf::from("config");
-        let mut config = resolve_workflow_config(&self.config_id, &config_root)
-            .map_err(|e| format!("resolve config '{}': {e}", self.config_id))?;
-        let workflow_type = resolve_workflow_type(&config.workflow_type_id, &config_root)
-            .map_err(|e| format!("resolve workflow type: {e}"))?;
-        let overrides = TargetProfileOverrides {
-            repo: Some(request.repo.clone()),
-            issue: Some(request.issue_number.to_string()),
-            work_dir: None,
-            artifact_dir: None,
-        };
-        apply_target_profile_overrides(&mut config, &overrides)
-            .map_err(|e| format!("apply overrides: {e}"))?;
-        let db_path = luther_workflow::runtime_paths::get_data_dir().join("checkpoints.db");
-        let mut runner = create_durable_runner(workflow_type, config, &request.run_id, &db_path);
-        match runner.run() {
-            Ok(RunOutcome::Success) => Ok(true),
-            Ok(_) => Ok(false),
-            Err(e) => Err(format!("run error: {e}")),
+    ) -> Result<luther_workflow::daemon::launcher::WorkflowLaunchResult, String> {
+        launch_daemon_workflow(&request.config_id, request)
+    }
+
+    fn resume(
+        &self,
+        request: &luther_workflow::daemon::launcher::LaunchRequest,
+    ) -> Result<luther_workflow::daemon::launcher::WorkflowLaunchResult, String> {
+        resume_daemon_workflow(request)
+    }
+}
+
+fn launch_daemon_workflow(
+    config_id: &str,
+    request: &luther_workflow::daemon::launcher::LaunchRequest,
+) -> Result<luther_workflow::daemon::launcher::WorkflowLaunchResult, String> {
+    let config_root = std::path::PathBuf::from("config");
+    let mut config = resolve_workflow_config(config_id, &config_root)
+        .map_err(|e| format!("resolve config '{config_id}': {e}"))?;
+    let workflow_type = resolve_workflow_type(&config.workflow_type_id, &config_root)
+        .map_err(|e| format!("resolve workflow type: {e}"))?;
+    let overrides = TargetProfileOverrides {
+        repo: Some(request.repo.clone()),
+        issue: Some(request.issue_number.to_string()),
+        work_dir: None,
+        artifact_dir: None,
+    };
+    apply_target_profile_overrides(&mut config, &overrides)
+        .map_err(|e| format!("apply overrides: {e}"))?;
+    let db_path = luther_workflow::runtime_paths::get_data_dir().join("checkpoints.db");
+    let wait_config = config.clone();
+    let mut runner = create_durable_runner(workflow_type, config, &request.run_id, &db_path);
+    run_daemon_runner(request, &wait_config, &db_path, &mut runner)
+}
+
+fn resume_daemon_workflow(
+    request: &luther_workflow::daemon::launcher::LaunchRequest,
+) -> Result<luther_workflow::daemon::launcher::WorkflowLaunchResult, String> {
+    let db_path = luther_workflow::runtime_paths::get_data_dir().join("checkpoints.db");
+    let conn = rusqlite::Connection::open(&db_path).map_err(|e| e.to_string())?;
+    let metadata = get_run_with_conn(&conn, &request.run_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("missing run metadata for {}", request.run_id))?;
+    let config_root = std::path::PathBuf::from("config");
+    let wait_config = resolve_workflow_config(&metadata.config_id, &config_root)
+        .map_err(|e| format!("resolve config '{}': {e}", metadata.config_id))?;
+    let step = metadata
+        .current_step
+        .as_deref()
+        .filter(|step| !step.is_empty())
+        .ok_or_else(|| format!("missing current_step for resume of run {}", request.run_id))?;
+    luther_workflow::engine::commit_continuation(
+        &conn,
+        &luther_workflow::engine::ContinuationRequest {
+            run_id: request.run_id.clone(),
+            kind: luther_workflow::engine::ContinuationKind::Resume,
+            force: true,
+        },
+        step,
+    )
+    .map_err(|e| format!("commit resume: {e}"))?;
+    let mut runner = reconstruct_runner(&metadata, &request.run_id, &db_path)?;
+    run_daemon_runner(request, &wait_config, &db_path, &mut runner)
+}
+
+fn run_daemon_runner(
+    request: &luther_workflow::daemon::launcher::LaunchRequest,
+    wait_config: &WorkflowConfig,
+    db_path: &std::path::Path,
+    runner: &mut EngineRunner,
+) -> Result<luther_workflow::daemon::launcher::WorkflowLaunchResult, String> {
+    match runner.run() {
+        Ok(RunOutcome::Success) => {
+            Ok(luther_workflow::daemon::launcher::WorkflowLaunchResult::CompletedSuccess)
         }
+        Ok(RunOutcome::WaitingExternal { step_id, reason }) => {
+            persist_external_wait_state(request, wait_config, db_path, &step_id, &reason)
+                .map_err(|e| format!("persist wait state: {e}"))?;
+            Ok(luther_workflow::daemon::launcher::WorkflowLaunchResult::SuspendedExternalWait)
+        }
+        Ok(_) => Ok(luther_workflow::daemon::launcher::WorkflowLaunchResult::CompletedFailure),
+        Err(e) => Err(format!("run error: {e}")),
+    }
+}
+
+fn persist_external_wait_state(
+    request: &luther_workflow::daemon::launcher::LaunchRequest,
+    config: &WorkflowConfig,
+    db_path: &std::path::Path,
+    step_id: &str,
+    reason: &str,
+) -> Result<(), String> {
+    let conn = rusqlite::Connection::open(db_path).map_err(|e| e.to_string())?;
+    let checkpoint = load_checkpoint_with_conn(&conn, &request.run_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("missing waiting checkpoint for {}", request.run_id))?;
+    let mut metadata = get_run_with_conn(&conn, &request.run_id).map_err(|e| e.to_string())?;
+    let wait_kind = wait_kind_for_step(step_id);
+    let identity = wait_poll_identity(request, config, metadata.as_ref(), wait_kind)?;
+    if let Some(md) = metadata.as_mut() {
+        persist_run_poll_identity(&conn, md, &identity)?;
+    }
+    let previous = get_wait_state(&conn, &request.run_id).map_err(|e| e.to_string())?;
+    let mut record =
+        previous.unwrap_or_else(|| WaitStateRecord::new(&request.run_id, &config.config_id));
+    record.lease_id = lookup_lease_id(&conn, request)?;
+    record.workflow_type = config.workflow_type_id.clone();
+    record.config_id = config.config_id.clone();
+    record.repository = request.repo.clone();
+    record.issue_number = request.issue_number;
+    record.pr_number = identity.pr_number;
+    record.head_sha = identity.head_sha;
+    record.wait_kind = wait_kind;
+    record.wait_condition = serde_json::json!({
+        "step_id": step_id,
+        "reason": reason,
+        "repository": request.repo,
+        "issue_number": request.issue_number
+    });
+    record.last_observed_state = serde_json::json!({
+        "classification": "suspended",
+        "step_id": step_id,
+        "reason": reason
+    });
+    let poll_interval = config
+        .discovery
+        .as_ref()
+        .and_then(|d| d.poll_interval_secs)
+        .unwrap_or(300);
+    record.poll_interval_seconds = poll_interval;
+    record.next_poll_at = chrono::Utc::now() + chrono::Duration::seconds(poll_interval as i64);
+    record.resume_step = checkpoint.step_id.clone();
+    record.checkpoint_id = luther_workflow::engine::continuation::checkpoint_identity(&checkpoint);
+    upsert_wait_state(&conn, &record).map_err(|e| e.to_string())?;
+    if let Err(e) = write_wait_state_artifact(&request.run_id, &record) {
+        eprintln!(
+            "Warning: failed to write wait-state artifact for run {}: {e}",
+            request.run_id
+        );
+    }
+    Ok(())
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WaitPollIdentity {
+    pr_number: Option<u64>,
+    head_sha: Option<String>,
+}
+
+fn persist_run_poll_identity(
+    conn: &rusqlite::Connection,
+    metadata: &mut RunMetadata,
+    identity: &WaitPollIdentity,
+) -> Result<(), String> {
+    let mut changed = false;
+    if let Some(pr_number) = identity.pr_number {
+        let pr_number = i64::try_from(pr_number).map_err(|e| e.to_string())?;
+        if metadata.pr_number != Some(pr_number) {
+            metadata.pr_number = Some(pr_number);
+            changed = true;
+        }
+    }
+    if let Some(head_sha) = identity.head_sha.as_ref() {
+        if metadata.head_sha.as_deref() != Some(head_sha.as_str()) {
+            metadata.head_sha = Some(head_sha.clone());
+            changed = true;
+        }
+    }
+    if changed {
+        persist_run_with_conn(conn, metadata).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+fn wait_poll_identity(
+    request: &luther_workflow::daemon::launcher::LaunchRequest,
+    config: &WorkflowConfig,
+    metadata: Option<&RunMetadata>,
+    wait_kind: WaitKind,
+) -> Result<WaitPollIdentity, String> {
+    let artifact_root = wait_artifact_root(config, metadata)?;
+    let artifact_identity = artifact_root
+        .as_deref()
+        .map(|root| read_pr_identity_artifact(root, &request.run_id))
+        .transpose()?
+        .flatten();
+    let artifact_pr_number = artifact_identity
+        .as_ref()
+        .and_then(|value| value.get("pr_number").and_then(serde_json::Value::as_u64));
+    let artifact_head_sha = artifact_identity
+        .as_ref()
+        .and_then(|value| string_field(value, "head_sha"));
+    let identity = WaitPollIdentity {
+        pr_number: artifact_pr_number.or_else(|| metadata_pr_number(metadata)),
+        head_sha: artifact_head_sha.or_else(|| metadata.and_then(|md| md.head_sha.clone())),
+    };
+    validate_wait_poll_identity(wait_kind, &identity)?;
+    Ok(identity)
+}
+
+fn validate_wait_poll_identity(
+    wait_kind: WaitKind,
+    identity: &WaitPollIdentity,
+) -> Result<(), String> {
+    match wait_kind {
+        WaitKind::PrChecks => {
+            if identity.pr_number.is_none() || identity.head_sha.is_none() {
+                return Err("missing PR number or head SHA for PR checks wait state".to_string());
+            }
+        }
+        WaitKind::CoderabbitReview
+        | WaitKind::HumanReview
+        | WaitKind::PrMerge
+        | WaitKind::DependencyChildMerge => {
+            if identity.pr_number.is_none() {
+                return Err(format!("missing PR number for {wait_kind} wait state"));
+            }
+        }
+        WaitKind::RateLimitBackoff => {}
+    }
+    Ok(())
+}
+
+fn metadata_pr_number(metadata: Option<&RunMetadata>) -> Option<u64> {
+    metadata
+        .and_then(|md| md.pr_number)
+        .and_then(|number| u64::try_from(number).ok())
+}
+
+fn wait_artifact_root(
+    config: &WorkflowConfig,
+    metadata: Option<&RunMetadata>,
+) -> Result<Option<std::path::PathBuf>, String> {
+    let Some(raw) = metadata
+        .and_then(|md| md.artifact_root.clone())
+        .or_else(|| config.variables.get("artifact_dir").cloned())
+    else {
+        return Ok(None);
+    };
+    let path = std::path::PathBuf::from(interpolate_config_variables(&raw, config));
+    let path = if path.is_absolute() {
+        path
+    } else {
+        std::env::current_dir()
+            .map_err(|e| e.to_string())?
+            .join(path)
+    };
+    Ok(Some(path))
+}
+
+fn interpolate_config_variables(raw: &str, config: &WorkflowConfig) -> String {
+    let mut value = raw.to_string();
+    for (key, replacement) in &config.variables {
+        value = value.replace(&format!("{{{key}}}"), replacement);
+    }
+    value
+}
+
+fn read_pr_identity_artifact(
+    artifact_root: &std::path::Path,
+    run_id: &str,
+) -> Result<Option<serde_json::Value>, String> {
+    let current_root = artifact_root
+        .join("pr-followup")
+        .join("current")
+        .join(run_id);
+    if !current_root.exists() {
+        return Ok(None);
+    }
+    let mut matches = Vec::new();
+    collect_pr_identity_artifacts(&current_root, run_id, &mut matches)?;
+    matches.sort_by(|left, right| left.0.cmp(&right.0));
+    match matches.len() {
+        0 => Ok(None),
+        1 => Ok(Some(matches.remove(0).1)),
+        _ => Err(format!(
+            "multiple PR identity artifacts found for run {run_id}; cannot choose poll identity"
+        )),
+    }
+}
+
+fn collect_pr_identity_artifacts(
+    dir: &std::path::Path,
+    run_id: &str,
+    matches: &mut Vec<(std::path::PathBuf, serde_json::Value)>,
+) -> Result<(), String> {
+    for entry in std::fs::read_dir(dir).map_err(|e| e.to_string())? {
+        let path = entry.map_err(|e| e.to_string())?.path();
+        if path.is_dir() {
+            collect_pr_identity_artifacts(&path, run_id, matches)?;
+        } else if path.file_name().and_then(|name| name.to_str()) == Some("pr.json") {
+            let value = read_json_path(&path)?;
+            if value.get("run_id").and_then(serde_json::Value::as_str) == Some(run_id)
+                && value
+                    .get("pr_number")
+                    .and_then(serde_json::Value::as_u64)
+                    .is_some()
+                && value
+                    .get("head_sha")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|head| !head.is_empty())
+            {
+                matches.push((path, value));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn read_json_path(path: &std::path::Path) -> Result<serde_json::Value, String> {
+    let content = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+    serde_json::from_str(&content).map_err(|e| e.to_string())
+}
+
+fn string_field(value: &serde_json::Value, field: &str) -> Option<String> {
+    value
+        .get(field)
+        .and_then(serde_json::Value::as_str)
+        .filter(|text| !text.is_empty())
+        .map(ToString::to_string)
+}
+
+fn lookup_lease_id(
+    conn: &rusqlite::Connection,
+    request: &luther_workflow::daemon::launcher::LaunchRequest,
+) -> Result<Option<String>, String> {
+    luther_workflow::persistence::leases::get_lease_for_issue(
+        conn,
+        &request.repo,
+        request.issue_number,
+    )
+    .map(|lease| lease.map(|lease| lease.lease_id))
+    .map_err(|e| e.to_string())
+}
+
+fn wait_kind_for_step(step_id: &str) -> WaitKind {
+    match step_id {
+        "watch_pr_checks" => WaitKind::PrChecks,
+        "collect_coderabbit_feedback" => WaitKind::CoderabbitReview,
+        "merge_pr" | "wait_for_merge" => WaitKind::PrMerge,
+        _ => WaitKind::HumanReview,
     }
 }
 
@@ -956,10 +1280,26 @@ async fn handle_daemon_command(args: &luther_workflow::cli::DaemonArgs) {
     match &args.command {
         DaemonCommand::Start(start) => {
             println!("Starting daemon in foreground (Ctrl-C to stop)...");
-            handle_daemon_run(&store, &start.config, start.force, &start.config_dir, false).await;
+            handle_daemon_run(
+                &store,
+                &start.config,
+                start.force,
+                &start.config_dir,
+                false,
+                &None,
+            )
+            .await;
         }
         DaemonCommand::Run(run) => {
-            handle_daemon_run(&store, &run.config, run.force, &run.config_dir, run.once).await;
+            handle_daemon_run(
+                &store,
+                &run.config,
+                run.force,
+                &run.config_dir,
+                run.once,
+                &run.scheduler_config,
+            )
+            .await;
         }
         DaemonCommand::Stop(stop) => handle_daemon_stop(&store, stop),
         DaemonCommand::Status(status) => handle_daemon_status(&store, status),
@@ -1127,15 +1467,19 @@ fn collect_queue_leases(
 /// Print the lease queue as JSON.
 /// @plan:PLAN-20260415-DAEMON-DISCOVERY.P05
 fn print_queue_json(leases: &[IssueLease]) {
+    let waits = queue_wait_summaries();
     let items: Vec<serde_json::Value> = leases
         .iter()
         .map(|l| {
+            let wait = l.run_id.as_deref().and_then(|run_id| waits.get(run_id));
             serde_json::json!({
                 "issue_repo": l.issue_repo,
                 "issue_number": l.issue_number,
                 "config_id": l.config_id,
                 "run_id": l.run_id,
                 "status": l.status.to_string(),
+                "active_slot_used": l.status.is_active(),
+                "wait": wait,
             })
         })
         .collect();
@@ -1149,10 +1493,13 @@ fn print_queue_text(leases: &[IssueLease]) {
         println!("Queue is empty.");
         return;
     }
+    let waits = queue_wait_summaries();
     for status in [
         LeaseStatus::Pending,
         LeaseStatus::Claimed,
         LeaseStatus::Running,
+        LeaseStatus::WaitingExternal,
+        LeaseStatus::ReadyToResume,
         LeaseStatus::Completed,
         LeaseStatus::Failed,
         LeaseStatus::Abandoned,
@@ -1165,12 +1512,68 @@ fn print_queue_text(leases: &[IssueLease]) {
         println!("{} ({}):", status, group.len());
         for lease in group {
             let run = lease.run_id.as_deref().unwrap_or("-");
+            let active_slot = if lease.status.is_active() {
+                "yes"
+            } else {
+                "no"
+            };
+            let wait = lease
+                .run_id
+                .as_deref()
+                .and_then(|run_id| waits.get(run_id))
+                .map(|w| format!(" wait={}", format_wait_summary(w)))
+                .unwrap_or_default();
             println!(
-                "  {}#{} config={} run={}",
-                lease.issue_repo, lease.issue_number, lease.config_id, run
+                "  {}#{} config={} run={} active_slot_used={}{}",
+                lease.issue_repo, lease.issue_number, lease.config_id, run, active_slot, wait
             );
         }
     }
+}
+
+fn queue_wait_summaries() -> std::collections::HashMap<String, serde_json::Value> {
+    let conn = open_daemon_db();
+    let waits = match list_wait_states(&conn) {
+        Ok(waits) => waits,
+        Err(e) => {
+            eprintln!("Warning: failed to load wait states: {e}");
+            return std::collections::HashMap::new();
+        }
+    };
+    waits
+        .into_iter()
+        .map(|wait| {
+            (
+                wait.run_id.clone(),
+                serde_json::json!({
+                    "wait_kind": wait.wait_kind.to_string(),
+                    "next_poll_at": wait.next_poll_at.to_rfc3339(),
+                    "poll_count": wait.poll_count,
+                    "last_observed_state": wait.last_observed_state,
+                    "resume_step": wait.resume_step,
+                    "active_slot_used": false,
+                }),
+            )
+        })
+        .collect()
+}
+
+fn format_wait_summary(wait: &serde_json::Value) -> String {
+    format!(
+        "kind={} next_poll_at={} poll_count={} resume_step={}",
+        wait.get("wait_kind")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("-"),
+        wait.get("next_poll_at")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("-"),
+        wait.get("poll_count")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or_default(),
+        wait.get("resume_step")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("-"),
+    )
 }
 
 /// Acquire the per-config singleton lock, honoring `--force` recovery.
@@ -1226,6 +1629,7 @@ async fn handle_daemon_run(
     force: bool,
     config_dir: &Option<std::path::PathBuf>,
     once: bool,
+    scheduler_config: &Option<std::path::PathBuf>,
 ) {
     let config_id = daemon_config_id(config);
 
@@ -1249,7 +1653,12 @@ async fn handle_daemon_run(
 
     let discovery = resolve_discovery_for(config, config_dir);
     if discovery.enabled {
-        run_daemon_discovery_loop(store, &mut state, &shutdown, &discovery, &config_id, once).await;
+        if let Some(path) = scheduler_config {
+            run_daemon_supervisor_loop(store, &mut state, &shutdown, path, config_dir, once).await;
+        } else {
+            run_daemon_discovery_loop(store, &mut state, &shutdown, &discovery, &config_id, once)
+                .await;
+        }
     } else {
         run_daemon_heartbeat_loop(store, &mut state, &shutdown).await;
     }
@@ -1259,6 +1668,142 @@ async fn handle_daemon_run(
     state.set_status(DaemonStatus::Stopped);
     let _ = store.write(&state);
     println!("Daemon stopped (config={config_id}).");
+}
+
+fn scheduler_targets(
+    scheduler: &luther_workflow::workflow::schema::DaemonSchedulerConfig,
+    config_dir: &Option<std::path::PathBuf>,
+) -> Vec<luther_workflow::daemon::scheduler::SchedulerTarget> {
+    let config_root = config_dir
+        .clone()
+        .unwrap_or_else(|| std::path::PathBuf::from("config"));
+    scheduler
+        .targets
+        .iter()
+        .filter_map(|target| scheduler_target(target, scheduler, &config_root))
+        .collect()
+}
+
+fn scheduler_target(
+    target: &luther_workflow::workflow::schema::DaemonTargetConfig,
+    scheduler: &luther_workflow::workflow::schema::DaemonSchedulerConfig,
+    config_root: &std::path::Path,
+) -> Option<luther_workflow::daemon::scheduler::SchedulerTarget> {
+    let cfg = match resolve_workflow_config(&target.config_id, config_root) {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            eprintln!(
+                "Error: Failed to resolve config '{}': {e}",
+                target.config_id
+            );
+            return None;
+        }
+    };
+    let mut discovery = resolve_discovery_config(&cfg);
+    discovery.max_concurrent_active_runs = discovery
+        .max_concurrent_active_runs
+        .or(scheduler.max_concurrent_active_runs);
+    discovery.max_concurrent_runs_per_config = discovery
+        .max_concurrent_runs_per_config
+        .or(scheduler.max_concurrent_runs_per_config);
+    discovery.max_concurrent_runs_per_repository = discovery
+        .max_concurrent_runs_per_repository
+        .or(scheduler.max_concurrent_runs_per_repository);
+    if discovery.poll_interval_secs.is_none() {
+        discovery.poll_interval_secs = scheduler.poll_interval_seconds;
+    }
+    discovery
+        .enabled
+        .then(|| luther_workflow::daemon::scheduler::SchedulerTarget {
+            config_id: target.config_id.clone(),
+            discovery,
+        })
+}
+fn recover_stale_daemon_leases(conn: &rusqlite::Connection, stale_timeout: u64) {
+    let recovered = luther_workflow::persistence::leases::mark_stale_leases(conn, stale_timeout);
+    let ready_recovered = luther_workflow::persistence::leases::mark_stale_ready_to_resume_leases(
+        conn,
+        stale_timeout,
+    );
+    match (recovered, ready_recovered) {
+        (Ok(recovered), Ok(ready_recovered)) => {
+            if recovered > 0 || ready_recovered > 0 {
+                println!(
+                    "recovered {recovered} active stale lease(s) and {ready_recovered} ready-to-resume stale lease(s) on startup"
+                );
+            }
+        }
+        (Err(e), _) => eprintln!("Warning: active stale lease recovery failed: {e}"),
+        (_, Err(e)) => eprintln!("Warning: ready-to-resume stale lease recovery failed: {e}"),
+    }
+}
+
+async fn run_daemon_supervisor_loop(
+    store: &DaemonStore,
+    state: &mut DaemonState,
+    shutdown: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    scheduler_path: &std::path::Path,
+    config_dir: &Option<std::path::PathBuf>,
+    once: bool,
+) {
+    use std::sync::atomic::Ordering;
+
+    let scheduler = match load_daemon_scheduler_config(scheduler_path) {
+        Ok(config) => config,
+        Err(e) => {
+            eprintln!("Error: Failed to load daemon scheduler config: {e}");
+            return;
+        }
+    };
+    let targets = scheduler_targets(&scheduler, config_dir);
+    let conn = open_daemon_db();
+    let queries = targets
+        .iter()
+        .map(|_| SystemGithubIssueQuery::new(SystemGithubCommandRunner))
+        .collect::<Vec<_>>();
+    let query_refs = queries
+        .iter()
+        .map(|query| query as &dyn luther_workflow::adapters::github_issues::GithubIssueQuery)
+        .collect::<Vec<_>>();
+    let stale_timeout = scheduler
+        .poll_interval_seconds
+        .unwrap_or(300)
+        .saturating_mul(4);
+    recover_stale_daemon_leases(&conn, stale_timeout);
+    let launcher = DaemonWorkflowLauncher::new("supervisor".to_string());
+    let poll = scheduler.poll_interval_seconds.unwrap_or(300);
+    while !shutdown.load(Ordering::SeqCst) {
+        match luther_workflow::daemon::scheduler::run_multi_target_once(
+            &targets,
+            &query_refs,
+            &conn,
+            &launcher,
+        ) {
+            Ok(summary)
+                if summary.launched > 0
+                    || summary.resumed > 0
+                    || summary.suspended > 0
+                    || summary.failed > 0 =>
+            {
+                println!(
+                    "scheduler pass: {} launched, {} resumed, {} suspended, {} failed, {} skipped",
+                    summary.launched,
+                    summary.resumed,
+                    summary.suspended,
+                    summary.failed,
+                    summary.skipped
+                );
+            }
+            Ok(_) => {}
+            Err(e) => eprintln!("scheduler error: {e}"),
+        }
+        state.touch_heartbeat();
+        let _ = store.write(state);
+        if once {
+            break;
+        }
+        sleep_secs_with_shutdown(poll, shutdown).await;
+    }
 }
 
 /// Drive the discovery/launch scheduler, writing heartbeats between passes.
@@ -1284,13 +1829,7 @@ async fn run_daemon_discovery_loop(
         .unwrap_or(300)
         .saturating_mul(4);
 
-    if let Ok(recovered) =
-        luther_workflow::persistence::leases::mark_stale_leases(&conn, stale_timeout)
-    {
-        if recovered > 0 {
-            println!("recovered {recovered} stale lease(s) on startup");
-        }
-    }
+    recover_stale_daemon_leases(&conn, stale_timeout);
 
     let poll = discovery.poll_interval_secs.unwrap_or(300);
     loop {
@@ -1300,10 +1839,19 @@ async fn run_daemon_discovery_loop(
         match luther_workflow::daemon::scheduler::run_once(
             discovery, &query, &conn, &launcher, config_id,
         ) {
-            Ok(summary) if summary.launched > 0 || summary.failed > 0 => {
+            Ok(summary)
+                if summary.launched > 0
+                    || summary.resumed > 0
+                    || summary.suspended > 0
+                    || summary.failed > 0 =>
+            {
                 println!(
-                    "scheduler pass: {} launched, {} failed, {} skipped",
-                    summary.launched, summary.failed, summary.skipped
+                    "scheduler pass: {} launched, {} resumed, {} suspended, {} failed, {} skipped",
+                    summary.launched,
+                    summary.resumed,
+                    summary.suspended,
+                    summary.failed,
+                    summary.skipped
                 );
             }
             Ok(_) => {}
@@ -2657,4 +3205,169 @@ fn format_child_pids(child_pids: &[u32], stale_child_pids: &[u32]) -> String {
         })
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    fn workflow_config(artifact_dir: &std::path::Path) -> WorkflowConfig {
+        WorkflowConfig {
+            config_id: "cfg".to_string(),
+            workflow_type_id: "wf".to_string(),
+            runtime: luther_workflow::workflow::schema::RuntimeConfig {
+                timeout_seconds: 1,
+                max_retries: 0,
+                parallel_steps: None,
+                log_level: None,
+            },
+            repo: luther_workflow::workflow::schema::RepoConfig {
+                workspace_strategy: "reuse".to_string(),
+                branch_template: "issue{issue_number}".to_string(),
+                base_branch: Some("main".to_string()),
+                workspace_root: None,
+            },
+            guard_limits: luther_workflow::workflow::schema::GuardLimits {
+                max_iterations: None,
+                max_file_changes: None,
+                max_tokens: None,
+                max_cost: None,
+            },
+            variables: HashMap::from([(
+                "artifact_dir".to_string(),
+                artifact_dir.to_string_lossy().to_string(),
+            )]),
+            discovery: None,
+        }
+    }
+
+    #[test]
+    fn wait_poll_identity_reads_captured_pr_artifact_when_metadata_is_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pr_dir = tmp
+            .path()
+            .join("pr-followup")
+            .join("current")
+            .join("run-identity")
+            .join("owner")
+            .join("repo")
+            .join("62");
+        std::fs::create_dir_all(&pr_dir).unwrap();
+        std::fs::write(
+            pr_dir.join("pr.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "run_id": "run-identity",
+                "pr_number": 62,
+                "head_sha": "abcdef123456",
+                "repository_owner": "owner",
+                "repository_name": "repo"
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let request = luther_workflow::daemon::launcher::LaunchRequest {
+            config_id: "cfg".to_string(),
+            run_id: "run-identity".to_string(),
+            repo: "owner/repo".to_string(),
+            issue_number: 62,
+        };
+        let identity = wait_poll_identity(
+            &request,
+            &workflow_config(tmp.path()),
+            None,
+            WaitKind::PrChecks,
+        )
+        .unwrap();
+
+        assert_eq!(identity.pr_number, Some(62));
+        assert_eq!(identity.head_sha.as_deref(), Some("abcdef123456"));
+    }
+
+    #[test]
+    fn wait_poll_identity_rejects_missing_pr_check_identity() {
+        let tmp = tempfile::tempdir().unwrap();
+        let request = luther_workflow::daemon::launcher::LaunchRequest {
+            config_id: "cfg".to_string(),
+            run_id: "run-missing".to_string(),
+            repo: "owner/repo".to_string(),
+            issue_number: 62,
+        };
+
+        let err = wait_poll_identity(
+            &request,
+            &workflow_config(tmp.path()),
+            None,
+            WaitKind::PrChecks,
+        )
+        .unwrap_err();
+
+        assert!(err.contains("missing PR number or head SHA"));
+    }
+
+    #[test]
+    fn persist_run_poll_identity_updates_stale_or_empty_metadata() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        luther_workflow::persistence::sqlite::init_runs_schema(&conn).unwrap();
+        let mut metadata = RunMetadata::new("run-identity", "wf", "cfg");
+        metadata.pr_number = Some(1);
+        metadata.head_sha = Some("old".to_string());
+        persist_run_with_conn(&conn, &metadata).unwrap();
+        let identity = WaitPollIdentity {
+            pr_number: Some(62),
+            head_sha: Some("new".to_string()),
+        };
+
+        persist_run_poll_identity(&conn, &mut metadata, &identity).unwrap();
+
+        let loaded = get_run_with_conn(&conn, "run-identity").unwrap().unwrap();
+        assert_eq!(loaded.pr_number, Some(62));
+        assert_eq!(loaded.head_sha.as_deref(), Some("new"));
+    }
+
+    #[test]
+    fn wait_poll_identity_prefers_captured_pr_artifact_over_stale_metadata() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pr_dir = tmp
+            .path()
+            .join("pr-followup")
+            .join("current")
+            .join("run-stale")
+            .join("owner")
+            .join("repo")
+            .join("62");
+        std::fs::create_dir_all(&pr_dir).unwrap();
+        std::fs::write(
+            pr_dir.join("pr.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "run_id": "run-stale",
+                "pr_number": 62,
+                "head_sha": "fresh-head",
+                "repository_owner": "owner",
+                "repository_name": "repo"
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let request = luther_workflow::daemon::launcher::LaunchRequest {
+            config_id: "cfg".to_string(),
+            run_id: "run-stale".to_string(),
+            repo: "owner/repo".to_string(),
+            issue_number: 62,
+        };
+        let mut metadata = RunMetadata::new("run-stale", "wf", "cfg");
+        metadata.pr_number = Some(1);
+        metadata.head_sha = Some("stale-head".to_string());
+
+        let identity = wait_poll_identity(
+            &request,
+            &workflow_config(tmp.path()),
+            Some(&metadata),
+            WaitKind::PrChecks,
+        )
+        .unwrap();
+
+        assert_eq!(identity.pr_number, Some(62));
+        assert_eq!(identity.head_sha.as_deref(), Some("fresh-head"));
+    }
 }

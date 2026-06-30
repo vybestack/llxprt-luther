@@ -1286,6 +1286,54 @@ fn post_pr_exact_p17_routing_contract_is_present() {
         "success",
         "log_completion",
     );
+    assert!(
+        transition_targets(&workflow_type, "watch_pr_checks", Some("wait")).is_empty(),
+        "PR check pending waits should checkpoint for daemon reactivation instead of blocking in-process",
+    );
+    assert!(
+        transition_targets(&workflow_type, "collect_coderabbit_feedback", Some("wait")).is_empty(),
+        "CodeRabbit pending waits should checkpoint for daemon reactivation instead of blocking in-process",
+    );
+    let watch_params = workflow_type
+        .steps
+        .iter()
+        .find(|step| step.step_id == "watch_pr_checks")
+        .and_then(|step| step.parameters.as_ref())
+        .expect("watch_pr_checks params");
+    assert_eq!(
+        watch_params
+            .get("max_attempts")
+            .and_then(serde_json::Value::as_u64),
+        Some(1),
+        "PR checks should observe once and suspend rather than hold an active worker",
+    );
+    let coderabbit_params = workflow_type
+        .steps
+        .iter()
+        .find(|step| step.step_id == "collect_coderabbit_feedback")
+        .and_then(|step| step.parameters.as_ref())
+        .expect("collect_coderabbit_feedback params");
+    assert_eq!(
+        coderabbit_params
+            .get("max_observations")
+            .and_then(serde_json::Value::as_u64),
+        Some(1),
+        "CodeRabbit collection should observe once and suspend rather than hold an active worker",
+    );
+    assert_eq!(
+        watch_params
+            .get("check_status_result_path")
+            .and_then(serde_json::Value::as_str),
+        Some("{artifact_dir}/pr-followup/current/pr-check-status.json"),
+        "suspended PR check waits must retain artifact-backed poll identity",
+    );
+    assert_eq!(
+        coderabbit_params
+            .get("coderabbit_feedback_result_path")
+            .and_then(serde_json::Value::as_str),
+        Some("{artifact_dir}/pr-followup/current/coderabbit-feedback.json"),
+        "suspended CodeRabbit waits must retain artifact-backed poll identity",
+    );
     assert_single_target(
         &workflow_type,
         "mark_coderabbit_feedback",

@@ -452,7 +452,7 @@ fn collect_coderabbit_feedback(
             json!({ "max_observations": max_observations }),
         )),
     )?;
-    Ok(StepOutcome::Fatal)
+    Ok(StepOutcome::Wait)
 }
 
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P08

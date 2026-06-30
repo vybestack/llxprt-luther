@@ -25,10 +25,12 @@ use std::process::Command;
 // @plan:PLAN-20260415-DAEMON-DISCOVERY.P04
 pub mod discovery;
 pub mod launcher;
+pub mod poller;
 pub mod scheduler;
 
 pub use discovery::{discover, DiscoveryResult, SkipReason};
-pub use launcher::{claim_and_launch, LaunchOutcome};
+pub use launcher::{claim_and_launch, LaunchOutcome, WorkflowLaunchResult};
+pub use poller::{apply_poll_decision, PollClassification, PollDecision};
 pub use scheduler::{run_once, RunSummary};
 
 /// Lifecycle status of a per-config daemon instance.
