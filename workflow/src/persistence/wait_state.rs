@@ -280,21 +280,41 @@ fn row_to_wait_state(row: &rusqlite::Row<'_>) -> SqliteResult<WaitStateRecord> {
         workflow_type: row.get(2)?,
         config_id: row.get(3)?,
         repository: row.get(4)?,
-        issue_number: nonnegative_i64_to_u64(row.get(5)?, 5)?,
-        pr_number: optional_nonnegative_i64_to_u64(row.get(6)?, 6)?,
+        issue_number: row_u64(row, 5)?,
+        pr_number: optional_row_u64(row, 6)?,
         head_sha: row.get(7)?,
-        wait_kind: parse_wait_kind(&row.get::<_, String>(8)?, 8)?,
-        wait_condition: parse_json(&row.get::<_, String>(9)?, 9)?,
-        last_observed_state: parse_json(&row.get::<_, String>(10)?, 10)?,
-        next_poll_at: parse_ts(&row.get::<_, String>(11)?, 11)?,
-        poll_interval_seconds: nonnegative_i64_to_u64(row.get(12)?, 12)?,
-        max_wait_seconds: optional_nonnegative_i64_to_u64(row.get(13)?, 13)?,
+        wait_kind: row_wait_kind(row, 8)?,
+        wait_condition: row_json(row, 9)?,
+        last_observed_state: row_json(row, 10)?,
+        next_poll_at: row_ts(row, 11)?,
+        poll_interval_seconds: row_u64(row, 12)?,
+        max_wait_seconds: optional_row_u64(row, 13)?,
         resume_step: row.get(14)?,
         checkpoint_id: row.get(15)?,
-        poll_count: nonnegative_i64_to_u64(row.get(16)?, 16)?,
-        created_at: parse_ts(&row.get::<_, String>(17)?, 17)?,
-        updated_at: parse_ts(&row.get::<_, String>(18)?, 18)?,
+        poll_count: row_u64(row, 16)?,
+        created_at: row_ts(row, 17)?,
+        updated_at: row_ts(row, 18)?,
     })
+}
+
+fn row_u64(row: &rusqlite::Row<'_>, col: usize) -> SqliteResult<u64> {
+    nonnegative_i64_to_u64(row.get(col)?, col)
+}
+
+fn optional_row_u64(row: &rusqlite::Row<'_>, col: usize) -> SqliteResult<Option<u64>> {
+    optional_nonnegative_i64_to_u64(row.get(col)?, col)
+}
+
+fn row_wait_kind(row: &rusqlite::Row<'_>, col: usize) -> SqliteResult<WaitKind> {
+    parse_wait_kind(&row.get::<_, String>(col)?, col)
+}
+
+fn row_json(row: &rusqlite::Row<'_>, col: usize) -> SqliteResult<serde_json::Value> {
+    parse_json(&row.get::<_, String>(col)?, col)
+}
+
+fn row_ts(row: &rusqlite::Row<'_>, col: usize) -> SqliteResult<DateTime<Utc>> {
+    parse_ts(&row.get::<_, String>(col)?, col)
 }
 
 fn parse_wait_kind(s: &str, col: usize) -> SqliteResult<WaitKind> {

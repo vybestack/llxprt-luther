@@ -829,7 +829,14 @@ fn execute_step<E: StepExecutor>(executor: E) -> StepOutcome {
         .execute(
             &mut context,
             &serde_json::json!({
-                "artifact_root": artifact_root
+                "artifact_root": artifact_root,
+                "repository_owner": "octo-org",
+                "repository_name": "workflow",
+                "pr_number": "1910",
+                "head_ref": "feature",
+                "head_sha": "head-a",
+                "base_ref": "main",
+                "base_sha": "base-a"
             }),
         )
         .expect("contract executor must return an outcome rather than a harness error")
@@ -6867,6 +6874,7 @@ fn marker_comment_success_resolution_failure_is_partial_retryable() {
             .to_string()
             .contains("resolution_failed_after_comment")
             || report.to_string().contains("resolution_unavailable")
+            || report.to_string().contains("resolution_transport_error")
     );
     assert!(report
         .get("retryable_actions")

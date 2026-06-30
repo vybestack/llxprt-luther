@@ -1,6 +1,6 @@
 /// @plan:PLAN-20260404-INITIAL-RUNTIME.P05
 /// SQLite persistence layer for run metadata.
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use rusqlite::{params, Connection, Result as SqliteResult};
 
@@ -13,6 +13,7 @@ use crate::persistence::run_metadata::{
 /// @plan:PLAN-20260404-INITIAL-RUNTIME.P05
 pub struct SqliteStore {
     conn: Connection,
+    db_path: Option<PathBuf>,
 }
 
 impl SqliteStore {
@@ -20,8 +21,12 @@ impl SqliteStore {
     /// Initializes the schema if needed.
     /// @plan:PLAN-20260404-INITIAL-RUNTIME.P05
     pub fn open(db_path: impl AsRef<Path>) -> SqliteResult<Self> {
-        let conn = Connection::open(db_path)?;
-        let store = Self { conn };
+        let db_path = db_path.as_ref().to_path_buf();
+        let conn = Connection::open(&db_path)?;
+        let store = Self {
+            conn,
+            db_path: Some(db_path),
+        };
         store.init_schema()?;
         Ok(store)
     }
@@ -30,7 +35,10 @@ impl SqliteStore {
     /// @plan:PLAN-20260404-INITIAL-RUNTIME.P05
     pub fn open_in_memory() -> SqliteResult<Self> {
         let conn = Connection::open_in_memory()?;
-        let store = Self { conn };
+        let store = Self {
+            conn,
+            db_path: None,
+        };
         store.init_schema()?;
         Ok(store)
     }
@@ -106,6 +114,11 @@ impl SqliteStore {
     /// Get the underlying database connection (for advanced use).
     pub fn conn(&self) -> &Connection {
         &self.conn
+    }
+
+    #[must_use]
+    pub fn db_path(&self) -> Option<&Path> {
+        self.db_path.as_deref()
     }
 
     /// Create a store from an existing connection (for use with borrowed connections).
