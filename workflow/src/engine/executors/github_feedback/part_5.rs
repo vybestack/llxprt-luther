@@ -208,7 +208,7 @@ fn read_or_build_binding(
     store: &PrFollowupArtifactStore,
 ) -> Result<PrFollowupBinding, EngineError> {
     let requested = fallback_binding(context, params)?;
-    if let Some(value) = find_current_pr_artifact(context, store, &requested)? {
+    if let Some(value) = store.find_current_pr_artifact_for_run(context.run_id(), &requested)? {
         return binding_from_value(&value);
     }
     require_binding_identity(context, params)
@@ -257,65 +257,6 @@ fn require_binding_identity(context: &StepContext, params: &Value) -> Result<PrF
     })
 }
 
-fn find_current_pr_artifact(
-    context: &StepContext,
-    store: &PrFollowupArtifactStore,
-    requested: &PrFollowupBinding,
-) -> Result<Option<Value>, EngineError> {
-    let requested_path = store.canonical_path(requested, "pr");
-    if requested_path.exists() {
-        return read_json_file(&requested_path).map(Some);
-    }
-
-    // canonical_path is `{root}/pr-followup/current/{run}/{owner}/{repo}/{pr}/pr.json`;
-    // the fifth ancestor is the `current/` directory scanned for current-run PR artifacts.
-    let current_root = requested_path
-        .ancestors()
-        .nth(5)
-        .ok_or_else(|| github_feedback_error("invalid pr-followup artifact path"))?;
-    if !current_root.exists() {
-        return Ok(None);
-    }
-
-    let expected_run_id = context.run_id();
-    let mut matches = Vec::new();
-    collect_pr_artifacts(current_root, expected_run_id, &mut matches)?;
-    matches.sort_by(|left, right| left.0.cmp(&right.0));
-    match matches.len() {
-        0 => Ok(None),
-        1 => Ok(Some(matches.remove(0).1)),
-        _ => Err(github_feedback_error(format!(
-            "multiple PR identity artifacts found for run {expected_run_id}; provide repository_owner, repository_name, and pr_number parameters"
-        ))),
-    }
-}
-
-fn collect_pr_artifacts(
-    dir: &Path,
-    expected_run_id: &str,
-    matches: &mut Vec<(PathBuf, Value)>,
-) -> Result<(), EngineError> {
-    for entry in std::fs::read_dir(dir)
-        .map_err(|err| github_feedback_error(format!("read pr artifact directory: {err}")))?
-    {
-        let entry = entry.map_err(|err| {
-            github_feedback_error(format!("read pr artifact directory entry: {err}"))
-        })?;
-        let path = entry.path();
-        if path.is_dir() {
-            collect_pr_artifacts(&path, expected_run_id, matches)?;
-        } else if path.file_name().and_then(|name| name.to_str()) == Some("pr.json") {
-            let value = read_json_file(&path)?;
-            if value.get("run_id").and_then(Value::as_str) == Some(expected_run_id)
-                && binding_from_value(&value).is_ok()
-            {
-                matches.push((path, value));
-            }
-        }
-    }
-    Ok(())
-}
-
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P08
 /// @requirement:REQ-PRFU-008
 /// @pseudocode lines 22
@@ -324,17 +265,6 @@ fn is_permission_or_schema_error(value: &Value) -> bool {
         .get("errors")
         .and_then(Value::as_array)
         .is_some_and(|errors| !errors.is_empty())
-}
-
-/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P08
-/// @requirement:REQ-PRFU-008
-/// @pseudocode lines 6,15
-/// @pseudocode lines 1
-fn read_json_file(path: &std::path::Path) -> Result<Value, EngineError> {
-    let content = std::fs::read_to_string(path)
-        .map_err(|err| github_feedback_error(format!("read {}: {err}", path.display())))?;
-    serde_json::from_str(&content)
-        .map_err(|err| github_feedback_error(format!("parse {}: {err}", path.display())))
 }
 
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P08

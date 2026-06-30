@@ -4,6 +4,11 @@
 //! @requirement:REQ-PRFU-013,REQ-PRFU-020
 //! @pseudocode lines 1-53
 
+mod result_freshness;
+
+use self::result_freshness::{
+    remediation_result_state, result_file_non_empty, PreviousResultSnapshot,
+};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -86,14 +91,11 @@ fn build_remediation_plan(
     let artifact_root = artifact_root(context, params)?;
     let store =
         PrFollowupArtifactStore::with_filesystem(&artifact_root, &SystemPrFollowupFilesystem)?;
-    let fallback = binding_from_params(context, params);
     let step_id = current_step_id(context, "build_remediation_plan");
     let step_order = u64_param(params, "step_order_index", 7);
-
-    ensure_legacy_harness_inputs(&store, &fallback, clock)?;
-
-    let pr = match store.read_current_json(&fallback, "pr") {
-        Ok(value) => value,
+    let fallback = binding_from_params(context, params);
+    let binding = match binding_for_context(context, params, &store, clock) {
+        Ok(binding) => binding,
         Err(err) => {
             return write_fatal_plan(
                 &store,
@@ -107,17 +109,17 @@ fn build_remediation_plan(
             );
         }
     };
-    let binding = match binding_from_value(&pr) {
-        Ok(binding) => binding,
+    let pr = match store.read_current_json(&binding, "pr") {
+        Ok(value) => value,
         Err(err) => {
             return write_fatal_plan(
                 &store,
-                &fallback,
+                &binding,
                 &step_id,
                 step_order,
                 clock,
                 "missing_or_unbindable_pr",
-                vec![source_artifact(&pr, "pr")],
+                vec![json!({ "artifact_family": "pr", "error": err.to_string() })],
                 json!({ "error": err.to_string() }),
             );
         }
@@ -842,6 +844,21 @@ fn binding_from_params(context: &StepContext, params: &Value) -> PrFollowupBindi
     }
 }
 
+fn binding_for_context(
+    context: &StepContext,
+    params: &Value,
+    store: &PrFollowupArtifactStore,
+    clock: &dyn ClockSleeper,
+) -> Result<PrFollowupBinding, EngineError> {
+    let requested = binding_from_params(context, params);
+    if let Some(value) = store.find_current_pr_artifact_for_run(context.run_id(), &requested)? {
+        return binding_from_value(&value);
+    }
+    ensure_legacy_harness_inputs(store, &requested, clock)?;
+    let pr = store.read_current_json(&requested, "pr")?;
+    binding_from_value(&pr)
+}
+
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P10
 /// @requirement:REQ-PRFU-013
 /// @pseudocode lines 1-11
@@ -1219,10 +1236,7 @@ fn remediate_pr_followup(
     let artifact_root = artifact_root(context, params)?;
     let store =
         PrFollowupArtifactStore::with_filesystem(&artifact_root, &SystemPrFollowupFilesystem)?;
-    let fallback = binding_from_params(context, params);
-    ensure_legacy_harness_inputs(&store, &fallback, clock)?;
-    let pr = store.read_current_json(&fallback, "pr")?;
-    let binding = binding_from_value(&pr)?;
+    let binding = binding_for_context(context, params, &store, clock)?;
     let plan = match store.read_current_json(&binding, "pr-remediation-plan") {
         Ok(plan) => plan,
         Err(_) => {
@@ -1243,13 +1257,14 @@ fn remediate_pr_followup(
     let previous_result = store
         .read_current_raw_json(&binding, "pr-remediation-result")
         .ok();
+    let previous_result_snapshot = PreviousResultSnapshot::capture(&result_path);
     let prompt = render_remediation_prompt(&binding, &plan, &result_path, previous_result.as_ref());
     let argv = remediation_argv(params, &prompt, context);
 
     let request = LlxprtInvocationRequest {
         argv: argv.clone(),
         working_directory: context.work_dir().clone(),
-        timeout_seconds: u64_param(params, "timeout_seconds", 900),
+        timeout_seconds: u64_param(params, "timeout_seconds", 1800),
         stdout_log_path: stdout_log_path.clone(),
         stderr_log_path: stderr_log_path.clone(),
         remediation_plan_path: store.canonical_path(&binding, "pr-remediation-plan"),
@@ -1267,20 +1282,15 @@ fn remediate_pr_followup(
         result_path = path.clone();
     }
 
-    let result_present = result_path
-        .metadata()
-        .is_ok_and(|metadata| metadata.len() > 0)
-        || invocation.result_file_present;
+    let result_state =
+        remediation_result_state(&invocation, &result_path, &previous_result_snapshot);
     let process_class_before_result_reclassification = invocation.process_class.clone();
-    if result_present && invocation.process_class == "timeout" {
+    if result_state.was_updated && invocation.process_class == "timeout" {
         invocation.process_class = "success".to_string();
         invocation.spawn_error = None;
     }
 
-    let validator_readable = result_path
-        .metadata()
-        .is_ok_and(|metadata| metadata.len() > 0);
-    if !result_present {
+    if !result_state.available {
         write_validator_readable_remediation_failure_result(
             &store,
             &binding,
@@ -1291,7 +1301,9 @@ fn remediate_pr_followup(
             &result_path,
             clock,
         )?;
-    } else if validator_readable && process_class_before_result_reclassification == "timeout" {
+    } else if result_state.validator_readable
+        && process_class_before_result_reclassification == "timeout"
+    {
         repair_timeout_wrapper_failure_result_if_needed(
             &store,
             &binding,
@@ -1303,9 +1315,7 @@ fn remediate_pr_followup(
             clock,
         )?;
     }
-    let validator_readable = result_path
-        .metadata()
-        .is_ok_and(|metadata| metadata.len() > 0);
+    let validator_readable = result_file_non_empty(&result_path);
     let state = invocation_state(&invocation, validator_readable);
     write_llxprt_run_artifact(
         &store,
@@ -1381,7 +1391,7 @@ fn render_remediation_prompt(
         })
         .unwrap_or_default();
     format!(
-        "PR follow-up remediation for {}/{}, PR #{} at head {}.\n\nRead {}. Fix only pr-remediation-plan.json.must_fix. Do not fix pr-remediation-plan.json.mark_invalid, out_of_scope feedback, or pr-remediation-plan.json.needs_user_judgment. Write {}. Use only canonical statuses fixed | changed | already_satisfied | not_reproduced | not_fixed | skipped | failed. Include structured evidence for every result item. Required result schema: every result item must include input_head_sha set to {} and output_head_sha set to the current PR head after remediation; every result item must also include response_text, a non-empty reviewer-facing message that Luther will post verbatim on the original review thread (do not post it yourself); fixed or changed results must include evidence.current_head_sha equal to the current PR head; already_satisfied or not_reproduced results must include evidence.current_head_sha equal to {}. already_satisfied results must also include evidence.commands with at least one command object whose status is passed and whose argv array is non-empty. Copy pr-remediation-plan.json artifact_sequence into top-level plan_artifact_sequence and retry_scope.plan_artifact_sequence; include retry_scope.run_id and retry_scope.input_head_sha. Free-form-only completion is not acceptable; pr-remediation-result.json is required. Write only the requested canonical current pr-remediation-result.json path; do not create, copy, or modify any pr-followup/history files or artifact metadata fields.{}",
+        "PR follow-up remediation for {}/{}, PR #{} at head {}.\n\nRead {}. Fix only pr-remediation-plan.json.must_fix. Do not fix pr-remediation-plan.json.mark_invalid, out_of_scope feedback, or pr-remediation-plan.json.needs_user_judgment. Write {}. Use only canonical statuses fixed | changed | already_satisfied | not_reproduced | not_fixed | skipped | failed. Include structured evidence for every result item. Required result schema: every result item must copy source_type, source_id, stable_marker_key, and body_hash exactly from the corresponding pr-remediation-plan.json.must_fix item; every result item must include input_head_sha set to {} and output_head_sha set to the current PR head after remediation; every result item must also include response_text, a non-empty reviewer-facing message that Luther will post verbatim on the original review thread (do not post it yourself); fixed or changed results must include evidence.current_head_sha equal to the current PR head; already_satisfied or not_reproduced results must include evidence.current_head_sha equal to {}. already_satisfied results must also include evidence.commands with at least one command object whose status is passed and whose argv array is non-empty. Copy pr-remediation-plan.json artifact_sequence into top-level plan_artifact_sequence and retry_scope.plan_artifact_sequence; include retry_scope.run_id and retry_scope.input_head_sha. Free-form-only completion is not acceptable; pr-remediation-result.json is required. Write only the requested canonical current pr-remediation-result.json path; do not create, copy, or modify any pr-followup/history files or artifact metadata fields.{}",
         binding.repository_owner,
         binding.repository_name,
         binding.pr_number,
@@ -1564,7 +1574,6 @@ fn read_json_file(path: &Path) -> Result<Value, EngineError> {
         .map_err(|err| pr_remediation_error(format!("parse artifact {}: {err}", path.display())))
 }
 
-// Pre-existing artifact repair helper shape.
 #[allow(clippy::too_many_arguments)]
 fn repair_timeout_wrapper_failure_result_if_needed(
     store: &PrFollowupArtifactStore,
@@ -1917,9 +1926,7 @@ fn validate_remediation_result(
     let artifact_root = artifact_root(context, params)?;
     let store =
         PrFollowupArtifactStore::with_filesystem(&artifact_root, &SystemPrFollowupFilesystem)?;
-    let fallback = binding_from_params(context, params);
-    let pr = store.read_current_json(&fallback, "pr")?;
-    let binding = binding_from_value(&pr)?;
+    let binding = binding_for_context(context, params, &store, clock)?;
     let plan = store.read_current_json(&binding, "pr-remediation-plan")?;
     let result = read_remediation_result_for_validation(&store, &binding, &plan)?;
     let step_id = current_step_id(context, "validate_remediation_result");
@@ -2501,10 +2508,7 @@ fn run_post_pr_tests(
     let artifact_root = artifact_root(context, params)?;
     let store =
         PrFollowupArtifactStore::with_filesystem(&artifact_root, &SystemPrFollowupFilesystem)?;
-    let fallback = binding_from_params(context, params);
-    ensure_legacy_harness_inputs(&store, &fallback, clock)?;
-    let pr = store.read_current_json(&fallback, "pr")?;
-    let binding = binding_from_value(&pr)?;
+    let binding = binding_for_context(context, params, &store, clock)?;
     let plan = store.read_current_json(&binding, "pr-remediation-plan")?;
     let result = store.read_current_json(&binding, "pr-remediation-result")?;
     let step_id = current_step_id(context, "run_post_pr_tests");
@@ -3196,10 +3200,7 @@ fn push_remediation_changes(
     let artifact_root = artifact_root(context, params)?;
     let store =
         PrFollowupArtifactStore::with_filesystem(&artifact_root, &SystemPrFollowupFilesystem)?;
-    let fallback = binding_from_params(context, params);
-    ensure_legacy_harness_inputs(&store, &fallback, clock)?;
-    let pr = store.read_current_json(&fallback, "pr")?;
-    let binding = binding_from_value(&pr)?;
+    let binding = binding_for_context(context, params, &store, clock)?;
     let plan = store.read_current_json(&binding, "pr-remediation-plan")?;
     let result = store.read_current_json(&binding, "pr-remediation-result")?;
     let step_id = current_step_id(context, "push_remediation_changes");
@@ -4448,13 +4449,7 @@ impl StepExecutor for PostPrIterationGuardExecutor {
     ) -> Result<StepOutcome, EngineError> {
         let artifact_root = artifact_root(context, params)?;
         let store = PrFollowupArtifactStore::new(artifact_root);
-        ensure_legacy_harness_inputs(
-            &store,
-            &binding_from_params(context, params),
-            &SystemClockSleeper,
-        )?;
-        let pr = store.read_current_json(&binding_from_params(context, params), "pr")?;
-        let binding = binding_from_value(&pr)?;
+        let binding = binding_for_context(context, params, &store, &SystemClockSleeper)?;
         let max_iterations = u64_param(params, "max_post_pr_remediation_iterations", 3);
         let previous = latest_guard_for_current_run(&store, &binding)?;
         let (iteration_index, previous_head_sha, reason) = match previous.as_ref() {

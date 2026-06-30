@@ -27,7 +27,7 @@ use crate::engine::transition::StepOutcome;
 pub const DEFAULT_FEEDBACK_EVALUATOR_ARGV: &[&str] = &[
     "llxprt",
     "--profile-load",
-    "opusthinking",
+    "gpt55high",
     "--set",
     "reasoning.includeInResponse=false",
     "--set",
@@ -1194,7 +1194,7 @@ fn read_or_build_binding(
     params: &Value,
     store: &PrFollowupArtifactStore,
 ) -> Result<PrFollowupBinding, EngineError> {
-    let fallback = PrFollowupBinding {
+    let requested = PrFollowupBinding {
         schema_version: PR_FOLLOWUP_SCHEMA_VERSION,
         run_id: context.run_id().to_string(),
         repository_owner: string_param(context, params, "repository_owner", "example"),
@@ -1213,12 +1213,10 @@ fn read_or_build_binding(
         base_sha: Some(string_param(context, params, "base_sha", "base-a")),
     };
 
-    let pr_path = store.canonical_path(&fallback, "pr");
-    if pr_path.exists() {
-        let value = read_json_file(&pr_path)?;
+    if let Some(value) = store.find_current_pr_artifact_for_run(context.run_id(), &requested)? {
         return binding_from_value(&value);
     }
-    Ok(fallback)
+    Ok(requested)
 }
 
 fn artifact_root(context: &StepContext, params: &Value) -> Result<PathBuf, EngineError> {
@@ -1239,13 +1237,6 @@ fn artifact_root(context: &StepContext, params: &Value) -> Result<PathBuf, Engin
     } else {
         context.work_dir().join(path)
     })
-}
-
-fn read_json_file(path: &std::path::Path) -> Result<Value, EngineError> {
-    let content = std::fs::read_to_string(path)
-        .map_err(|err| feedback_eval_error(format!("read {}: {err}", path.display())))?;
-    serde_json::from_str(&content)
-        .map_err(|err| feedback_eval_error(format!("parse {}: {err}", path.display())))
 }
 
 fn binding_from_value(value: &Value) -> Result<PrFollowupBinding, EngineError> {
