@@ -4,6 +4,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::adapters::github::{GithubCommandRunner, GithubError, SystemGithubCommandRunner};
+use crate::engine::executors::pr_check_wait::{
+    check_bucket as shared_check_bucket, classify_api_error, classify_pr_checks,
+    counters_from_value, status_payload, PrCheckObservation, PrCheckWaitConfig,
+};
+use crate::engine::executors::pr_followup_artifacts::{ClockSleeper, PrFollowupArtifactStore};
+use crate::engine::executors::pr_followup_types::{PrFollowupBinding, PR_FOLLOWUP_SCHEMA_VERSION};
 use crate::persistence::checkpoint::{set_resume_point, PersistenceError};
 use crate::persistence::leases::{update_lease_status, LeaseStatus};
 use crate::persistence::run_metadata::RunStatus;
@@ -151,11 +157,29 @@ fn poll_pr_checks(record: &WaitStateRecord, runner: &dyn GithubCommandRunner) ->
     let Some(head_sha) = record.head_sha.as_deref() else {
         return terminal_failure(record, missing_identity_state(record));
     };
-    let checks = match query_pr_checks(runner, &record.repository, pr_number, head_sha) {
-        Ok(checks) => checks,
-        Err(err) => return PollDecision::transient(record, github_error_state(err)),
+    let config = match pr_check_config(record) {
+        Ok(config) => config,
+        Err(err) => {
+            return terminal_failure(record, pr_check_config_error_state(record, head_sha, err));
+        }
     };
-    classify_terminal_or_pending(record, checks)
+    let counters = counters_from_value(&record.last_observed_state);
+    let classification = match query_pr_checks(runner, &record.repository, pr_number, head_sha) {
+        Ok(checks) => classify_pr_checks(
+            head_sha,
+            checks.into_iter().map(normalize_poll_check).collect(),
+            &config,
+            counters,
+        ),
+        Err(err) => classify_api_error(&config, counters, err.to_string()),
+    };
+    let observed_state = pr_check_observed_state(record, head_sha, &config, &classification);
+    match classification.overall_state.as_str() {
+        "passed" | "failed" => PollDecision::ready(record, observed_state),
+        "fatal" | "unknown" => terminal_failure(record, observed_state),
+        "pending_timeout" => PollDecision::still_waiting_with_state(record, observed_state),
+        _ => PollDecision::transient(record, observed_state),
+    }
 }
 
 fn query_pr_checks(
@@ -203,55 +227,188 @@ fn query_pr_checks(
     }
     Ok(checks)
 }
-
-fn classify_terminal_or_pending(record: &WaitStateRecord, rows: Vec<Value>) -> PollDecision {
-    let buckets: Vec<String> = rows.iter().map(check_bucket).collect();
-    let state = json!({
-        "classification": "polled",
-        "wait_kind": record.wait_kind,
-        "checks": rows,
-        "buckets": buckets,
-    });
-    if rows.is_empty()
-        || buckets
-            .iter()
-            .any(|bucket| bucket == "pending" || bucket == "unknown")
-    {
-        return PollDecision::still_waiting_with_state(record, state);
-    }
-    PollDecision::ready(record, state)
+fn pr_check_config(record: &WaitStateRecord) -> Result<PrCheckWaitConfig, String> {
+    let Some(value) = record
+        .wait_condition
+        .get("check_policy")
+        .or_else(|| record.wait_condition.get("pr_check_policy"))
+        .filter(|value| !value.is_null())
+    else {
+        return Ok(PrCheckWaitConfig::default());
+    };
+    serde_json::from_value(value.clone()).map_err(|err| format!("invalid PR check policy: {err}"))
 }
 
-fn check_bucket(row: &Value) -> String {
-    let fields = ["bucket", "state", "status", "conclusion"];
-    let words = fields
-        .iter()
-        .filter_map(|field| row.get(field).and_then(Value::as_str))
-        .map(str::to_ascii_lowercase)
-        .collect::<Vec<_>>()
-        .join(" ");
-    let words = words.split_whitespace().collect::<Vec<_>>();
-    if words
-        .iter()
-        .any(|word| matches!(*word, "pass" | "passed" | "success" | "neutral" | "skipped"))
-    {
-        "passed".to_string()
-    } else if words.iter().any(|word| {
-        matches!(
-            *word,
-            "fail" | "failed" | "failure" | "startup_failure" | "timed_out" | "cancelled"
-        )
-    }) {
-        "failed".to_string()
-    } else if words.iter().any(|word| {
-        matches!(
-            *word,
-            "queued" | "requested" | "waiting" | "pending" | "in_progress" | "action_required"
-        )
-    }) {
-        "pending".to_string()
-    } else {
-        "unknown".to_string()
+fn pr_check_observed_state(
+    record: &WaitStateRecord,
+    head_sha: &str,
+    config: &PrCheckWaitConfig,
+    classification: &crate::engine::executors::pr_check_wait::PrCheckWaitClassification,
+) -> Value {
+    let mut state = status_payload(classification, config, head_sha, &Utc::now().to_rfc3339());
+    state["classification"] = json!(classification.overall_state.as_str());
+    state["wait_kind"] = json!(record.wait_kind);
+    state
+}
+
+fn write_pr_check_status_snapshot(
+    record: &WaitStateRecord,
+    state: &Value,
+) -> Result<(), crate::engine::runner::EngineError> {
+    let artifact_root = record
+        .wait_condition
+        .get("artifact_root")
+        .and_then(Value::as_str)
+        .map(std::path::PathBuf::from);
+    let Some(artifact_root) = artifact_root else {
+        return Ok(());
+    };
+    let Some(pr_number) = record.pr_number else {
+        return Ok(());
+    };
+    let Some(head_sha) = record.head_sha.as_deref() else {
+        return Ok(());
+    };
+    let Some((owner, repo)) = record_repo_parts(&record.repository) else {
+        return Ok(());
+    };
+    let binding = PrFollowupBinding {
+        schema_version: PR_FOLLOWUP_SCHEMA_VERSION,
+        run_id: record.run_id.clone(),
+        repository_owner: owner.to_string(),
+        repository_name: repo.to_string(),
+        pr_number,
+        head_ref: record
+            .wait_condition
+            .get("head_ref")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        head_sha: head_sha.to_string(),
+        base_ref: record
+            .wait_condition
+            .get("base_ref")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        base_sha: record
+            .wait_condition
+            .get("base_sha")
+            .and_then(Value::as_str)
+            .map(ToString::to_string),
+    };
+    let store = PrFollowupArtifactStore::new(artifact_root);
+    let clock = PollerClock;
+    store.write_json_artifact(
+        &binding,
+        "pr-check-status",
+        "poll_pr_checks",
+        3,
+        state,
+        None,
+        &clock,
+    )?;
+    Ok(())
+}
+
+struct PollerClock;
+
+impl ClockSleeper for PollerClock {
+    fn now_rfc3339(&self) -> String {
+        Utc::now().to_rfc3339()
+    }
+
+    fn sleep(&self, _duration: std::time::Duration) {}
+}
+
+fn normalize_poll_check(row: Value) -> PrCheckObservation {
+    let name = row
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown")
+        .to_string();
+    let state = row
+        .get("state")
+        .or_else(|| row.get("status"))
+        .or_else(|| row.get("conclusion"))
+        .and_then(Value::as_str)
+        .unwrap_or("unknown")
+        .to_string();
+    let status = row
+        .get("status")
+        .or_else(|| row.get("state"))
+        .and_then(Value::as_str);
+    let conclusion = row
+        .get("conclusion")
+        .or_else(|| row.get("state"))
+        .and_then(Value::as_str);
+    let bucket_raw = row.get("bucket").and_then(Value::as_str).unwrap_or(&state);
+    PrCheckObservation {
+        check_id: row
+            .get("id")
+            .and_then(Value::as_u64)
+            .map_or_else(|| name.clone(), |id| id.to_string()),
+        name,
+        status: status.map(ToString::to_string),
+        conclusion: conclusion.map(ToString::to_string),
+        state: state.clone(),
+        bucket: shared_check_bucket(status, conclusion, bucket_raw, &state),
+        url: row
+            .get("link")
+            .or_else(|| row.get("html_url"))
+            .or_else(|| row.get("details_url"))
+            .and_then(Value::as_str)
+            .map(ToString::to_string),
+        workflow_name: row
+            .get("workflow")
+            .and_then(Value::as_str)
+            .map(ToString::to_string),
+        run_id: extract_actions_run_id(
+            row.get("html_url")
+                .or_else(|| row.get("details_url"))
+                .or_else(|| row.get("link"))
+                .and_then(Value::as_str),
+        ),
+        job_id: None,
+        started_at: row
+            .get("startedAt")
+            .or_else(|| row.get("started_at"))
+            .and_then(Value::as_str)
+            .map(ToString::to_string),
+        completed_at: row
+            .get("completedAt")
+            .or_else(|| row.get("completed_at"))
+            .and_then(Value::as_str)
+            .map(ToString::to_string),
+        head_sha: row
+            .get("head_sha")
+            .and_then(Value::as_str)
+            .map(ToString::to_string),
+        app_slug: row
+            .pointer("/app/slug")
+            .and_then(Value::as_str)
+            .map(ToString::to_string),
+        source: "daemon_poll".to_string(),
+    }
+}
+
+#[cfg(test)]
+fn classify_terminal_or_pending(record: &WaitStateRecord, rows: Vec<Value>) -> PollDecision {
+    let head_sha = record.head_sha.as_deref().unwrap_or_default();
+    let config = pr_check_config(record)
+        .unwrap_or_else(|err| panic!("test PR check config should be valid: {err}"));
+    let classification = classify_pr_checks(
+        head_sha,
+        rows.into_iter().map(normalize_poll_check).collect(),
+        &config,
+        counters_from_value(&record.last_observed_state),
+    );
+    let state = pr_check_observed_state(record, head_sha, &config, &classification);
+    match classification.overall_state.as_str() {
+        "passed" | "failed" => PollDecision::ready(record, state),
+        "fatal" | "unknown" => terminal_failure(record, state),
+        "pending_timeout" => PollDecision::still_waiting_with_state(record, state),
+        _ => PollDecision::transient(record, state),
     }
 }
 
@@ -479,6 +636,13 @@ fn parse_json_or_null(text: &str) -> Value {
     serde_json::from_str(text).unwrap_or(Value::Null)
 }
 
+fn extract_actions_run_id(url: Option<&str>) -> Option<u64> {
+    let url = url?;
+    let marker = "/actions/runs/";
+    let (_, after) = url.split_once(marker)?;
+    after.split('/').next()?.parse().ok()
+}
+
 fn missing_identity_state(record: &WaitStateRecord) -> Value {
     json!({
         "classification": "still_waiting",
@@ -500,6 +664,16 @@ fn terminal_failure(record: &WaitStateRecord, observed_state: Value) -> PollDeci
 
 fn github_error_state(err: GithubError) -> Value {
     json!({ "classification": "transient_failure", "error": err.to_string() })
+}
+
+fn pr_check_config_error_state(record: &WaitStateRecord, head_sha: &str, err: String) -> Value {
+    json!({
+        "classification": "fatal",
+        "reason": "invalid_pr_check_policy",
+        "wait_kind": record.wait_kind,
+        "head_sha": head_sha,
+        "error": err
+    })
 }
 
 fn contains_any(text: &str, needles: &[&str]) -> bool {
@@ -568,7 +742,11 @@ pub fn apply_poll_decision(
         }
     }
     tx.commit()?;
-    if let Err(e) = persist_poll_artifacts(record, decision) {
+    let mut decision = decision.clone();
+    if let Err(err) = write_committed_pr_check_snapshot(record, &decision.observed_state) {
+        decision.observed_state["artifact_error"] = json!(err.to_string());
+    }
+    if let Err(e) = persist_poll_artifacts(record, &decision) {
         eprintln!(
             "Warning: failed to persist poll artifact for run {}: {e}",
             record.run_id
@@ -587,6 +765,16 @@ fn persist_poll_artifacts(
         write_resume_decision_artifact(&record.run_id, decision).map_err(persistence_to_sqlite)?;
     }
     Ok(())
+}
+
+fn write_committed_pr_check_snapshot(
+    record: &WaitStateRecord,
+    observed_state: &Value,
+) -> Result<(), crate::engine::runner::EngineError> {
+    if record.wait_kind != WaitKind::PrChecks {
+        return Ok(());
+    }
+    write_pr_check_status_snapshot(record, observed_state)
 }
 
 fn persistence_to_sqlite(error: PersistenceError) -> rusqlite::Error {
@@ -621,310 +809,4 @@ fn next_poll_time(record: &WaitStateRecord) -> DateTime<Utc> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::persistence::leases::{get_lease_for_issue, init_leases_table, try_claim};
-    use crate::persistence::wait_state::{
-        get_wait_state, init_wait_states_table, upsert_wait_state,
-    };
-    use serde_json::json;
-
-    fn conn() -> Connection {
-        let c = Connection::open_in_memory().unwrap();
-        crate::persistence::sqlite::init_runs_schema(&c).unwrap();
-        init_leases_table(&c).unwrap();
-        init_wait_states_table(&c).unwrap();
-        c
-    }
-
-    fn wait_record(c: &Connection) -> WaitStateRecord {
-        let lease = try_claim(c, "o/r", 62, "cfg").unwrap().unwrap();
-        let mut record = WaitStateRecord::new("run-62", "cfg");
-        record.lease_id = Some(lease.lease_id);
-        record.repository = "o/r".to_string();
-        record.issue_number = 62;
-        record.poll_interval_seconds = 1;
-        record.resume_step = "watch_pr_checks".to_string();
-        crate::persistence::checkpoint::save_checkpoint_with_conn(
-            c,
-            &crate::persistence::checkpoint::Checkpoint::new(&record.run_id, &record.resume_step),
-        )
-        .unwrap();
-        let mut metadata = crate::persistence::RunMetadata::new(&record.run_id, "wf", "cfg");
-        metadata.set_current_step(record.resume_step.clone());
-        crate::persistence::persist_run_with_conn(c, &metadata).unwrap();
-        record
-    }
-
-    static ARTIFACT_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    fn restore_artifact_root(old_root: Option<std::ffi::OsString>) {
-        match old_root {
-            Some(value) => std::env::set_var("LUTHER_ARTIFACTS_ROOT", value),
-            None => std::env::remove_var("LUTHER_ARTIFACTS_ROOT"),
-        }
-    }
-
-    #[test]
-    fn still_waiting_updates_backoff_without_active_lease() {
-        let c = conn();
-        let record = wait_record(&c);
-        upsert_wait_state(&c, &record).unwrap();
-        crate::persistence::leases::update_lease_status(
-            &c,
-            record.lease_id.as_deref().unwrap(),
-            LeaseStatus::WaitingExternal,
-            Some(&record.run_id),
-        )
-        .unwrap();
-        let decision = PollDecision::still_waiting(&record);
-        apply_poll_decision(&c, &record, &decision).unwrap();
-        let updated = get_wait_state(&c, "run-62").unwrap().unwrap();
-        assert_eq!(updated.poll_count, 1);
-        let lease = get_lease_for_issue(&c, "o/r", 62).unwrap().unwrap();
-        assert_eq!(lease.status, LeaseStatus::WaitingExternal);
-    }
-
-    #[test]
-    fn ready_decision_marks_lease_ready_to_resume() {
-        let c = conn();
-        let record = wait_record(&c);
-        upsert_wait_state(&c, &record).unwrap();
-        let decision = PollDecision::ready(&record, json!({ "checks": "success" }));
-        apply_poll_decision(&c, &record, &decision).unwrap();
-        let lease = get_lease_for_issue(&c, "o/r", 62).unwrap().unwrap();
-        assert_eq!(lease.status, LeaseStatus::ReadyToResume);
-        assert!(get_wait_state(&c, "run-62").unwrap().is_none());
-    }
-
-    #[test]
-    fn terminal_failure_marks_lease_failed_and_cleans_up_wait_state() {
-        let c = conn();
-        let record = wait_record(&c);
-        upsert_wait_state(&c, &record).unwrap();
-        let decision = PollDecision {
-            run_id: record.run_id.clone(),
-            classification: PollClassification::TerminalFailure,
-            next_poll_at: None,
-            observed_state: json!({ "state": "closed" }),
-        };
-
-        apply_poll_decision(&c, &record, &decision).unwrap();
-
-        let lease = get_lease_for_issue(&c, "o/r", 62).unwrap().unwrap();
-        assert_eq!(lease.status, LeaseStatus::Failed);
-        assert!(get_wait_state(&c, "run-62").unwrap().is_none());
-    }
-
-    #[test]
-    fn timed_out_marks_lease_failed_and_cleans_up_wait_state() {
-        let c = conn();
-        let record = wait_record(&c);
-        upsert_wait_state(&c, &record).unwrap();
-        let decision = PollDecision {
-            run_id: record.run_id.clone(),
-            classification: PollClassification::TimedOut,
-            next_poll_at: None,
-            observed_state: json!({ "state": "timed_out" }),
-        };
-
-        apply_poll_decision(&c, &record, &decision).unwrap();
-
-        let lease = get_lease_for_issue(&c, "o/r", 62).unwrap().unwrap();
-        assert_eq!(lease.status, LeaseStatus::Failed);
-        assert!(get_wait_state(&c, "run-62").unwrap().is_none());
-    }
-
-    #[test]
-    fn transient_failure_requires_existing_wait_state() {
-        let c = conn();
-        let record = wait_record(&c);
-        let decision = PollDecision {
-            run_id: record.run_id.clone(),
-            classification: PollClassification::TransientFailure,
-            next_poll_at: None,
-            observed_state: json!({ "state": "api_error" }),
-        };
-
-        let err = apply_poll_decision(&c, &record, &decision).unwrap_err();
-        assert!(format!("{err}").contains("Query returned no rows"));
-    }
-    #[test]
-    fn still_waiting_missing_wait_state_does_not_write_poll_artifact() {
-        let _guard = ARTIFACT_ENV_LOCK.lock().unwrap();
-        let c = conn();
-        let mut record = wait_record(&c);
-        record.run_id = "run-no-artifact".to_string();
-        let artifact_root = tempfile::tempdir().unwrap();
-        let old_root = std::env::var_os("LUTHER_ARTIFACTS_ROOT");
-        std::env::set_var("LUTHER_ARTIFACTS_ROOT", artifact_root.path());
-        let decision = PollDecision::still_waiting(&record);
-
-        let err = apply_poll_decision(&c, &record, &decision).unwrap_err();
-
-        restore_artifact_root(old_root);
-        assert!(format!("{err}").contains("Query returned no rows"));
-
-        let run_dir = artifact_root.path().join(&record.run_id);
-        assert!(
-            !run_dir.exists(),
-            "poll artifacts should not be written before the wait-state update succeeds"
-        );
-    }
-
-    #[test]
-    fn action_required_pr_check_keeps_waiting() {
-        let record = wait_record(&conn());
-        let decision = classify_terminal_or_pending(
-            &record,
-            vec![json!({ "name": "ci", "conclusion": "action_required" })],
-        );
-        assert_eq!(decision.classification, PollClassification::StillWaiting);
-    }
-
-    #[test]
-    fn terminal_pr_checks_are_ready_to_resume() {
-        let record = wait_record(&conn());
-        let decision = classify_terminal_or_pending(
-            &record,
-            vec![json!({ "name": "ci", "state": "success", "bucket": "pass" })],
-        );
-        assert_eq!(decision.classification, PollClassification::ReadyToResume);
-    }
-
-    #[test]
-    fn failed_pr_checks_are_ready_to_resume_for_remediation() {
-        let record = wait_record(&conn());
-        let decision = classify_terminal_or_pending(
-            &record,
-            vec![json!({ "name": "ci", "state": "failure", "bucket": "fail" })],
-        );
-        assert_eq!(decision.classification, PollClassification::ReadyToResume);
-    }
-
-    #[test]
-    fn pending_pr_checks_keep_waiting() {
-        let record = wait_record(&conn());
-        let decision = classify_terminal_or_pending(
-            &record,
-            vec![json!({ "name": "ci", "state": "in_progress", "bucket": "pending" })],
-        );
-        assert_eq!(decision.classification, PollClassification::StillWaiting);
-    }
-
-    #[test]
-    fn timed_out_wait_returns_timeout_decision_before_polling() {
-        let mut record = wait_record(&conn());
-        record.max_wait_seconds = Some(1);
-        record.created_at = Utc::now() - Duration::seconds(5);
-
-        let decision = timeout_decision(&record).expect("expired wait should time out");
-
-        assert_eq!(decision.classification, PollClassification::TimedOut);
-        assert_eq!(
-            decision
-                .observed_state
-                .get("classification")
-                .and_then(Value::as_str),
-            Some("timed_out")
-        );
-    }
-
-    #[test]
-    fn pr_merge_closed_without_merge_is_terminal_failure() {
-        let record = wait_record(&conn());
-
-        let decision = classify_pr_merge_state(&record, json!({ "state": "CLOSED" }));
-
-        assert_eq!(decision.classification, PollClassification::TerminalFailure);
-    }
-
-    #[test]
-    fn coderabbit_completion_notice_is_ready() {
-        let state = json!({
-            "issue_comments": [{
-                "user": {"login": "coderabbitai[bot]"},
-                "body": "CodeRabbit finished reviewing this pull request"
-            }],
-            "review_comments": []
-        });
-        assert!(coderabbit_is_ready(&state));
-    }
-
-    #[test]
-    fn coderabbit_rate_limit_notice_is_not_ready() {
-        let state = json!({
-            "issue_comments": [{
-                "user": {"login": "coderabbitai[bot]"},
-                "body": "CodeRabbit review limit reached for this repository"
-            }],
-            "review_comments": []
-        });
-        assert!(!coderabbit_is_ready(&state));
-    }
-
-    #[test]
-    fn coderabbit_error_notice_with_completion_text_is_not_ready() {
-        let state = json!({
-            "issue_comments": [{
-                "user": {"login": "coderabbitai[bot]"},
-                "body": "Summary by CodeRabbit\nCodeRabbit finished reviewing this pull request, but the review failed due to quota limits."
-            }],
-            "review_comments": []
-        });
-        assert!(!coderabbit_is_ready(&state));
-    }
-
-    #[test]
-    fn coderabbit_error_words_from_human_comments_do_not_block_readiness() {
-        let state = json!({
-            "issue_comments": [
-                {
-                    "user": {"login": "coderabbitai[bot]"},
-                    "body": "CodeRabbit finished reviewing this pull request"
-                },
-                {
-                    "user": {"login": "human-reviewer"},
-                    "body": "I saw an error in a previous failed run."
-                }
-            ],
-            "review_comments": []
-        });
-        assert!(coderabbit_is_ready(&state));
-    }
-
-    #[test]
-    fn nested_comment_bodies_are_collected_when_parent_has_body() {
-        let state = json!({
-            "issue_comments": [{
-                "body": "wrapper",
-                "children": [{"body": "CodeRabbit finished reviewing"}]
-            }],
-            "review_comments": []
-        });
-
-        assert!(comments_text(&state).contains("coderabbit finished reviewing"));
-    }
-
-    #[test]
-    fn coderabbit_readiness_ignores_non_body_json_fields() {
-        let state = json!({
-            "issue_comments": [{"metadata": "CodeRabbit finished reviewing"}],
-            "review_comments": []
-        });
-        assert!(!coderabbit_is_ready(&state));
-    }
-
-    #[test]
-    fn only_approved_human_review_is_ready() {
-        assert!(review_decision_ready(
-            &json!({ "reviewDecision": "APPROVED" })
-        ));
-        assert!(!review_decision_ready(
-            &json!({ "reviewDecision": "REVIEW_REQUIRED" })
-        ));
-        assert!(!review_decision_ready(
-            &json!({ "reviewDecision": "CHANGES_REQUESTED" })
-        ));
-    }
-}
+mod tests;

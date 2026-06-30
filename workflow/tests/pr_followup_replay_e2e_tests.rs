@@ -114,8 +114,8 @@ impl CheckObservation {
     fn all_passed() -> Self {
         Self {
             gh_pr_checks: json!([
-                { "name": "build", "state": "SUCCESS", "bucket": "pass" },
-                { "name": "test", "state": "SUCCESS", "bucket": "pass" }
+                { "name": "CI / build", "state": "SUCCESS", "bucket": "pass" },
+                { "name": "CI / test", "state": "SUCCESS", "bucket": "pass" }
             ]),
             rest_check_runs: json!({ "total_count": 0, "check_runs": [] }),
         }
@@ -124,9 +124,9 @@ impl CheckObservation {
     fn one_failed() -> Self {
         Self {
             gh_pr_checks: json!([
-                { "name": "build", "state": "FAILURE", "bucket": "fail",
+                { "name": "CI / build", "state": "FAILURE", "bucket": "fail",
                   "link": "https://github.com/example/workflow/actions/runs/9001" },
-                { "name": "test", "state": "SUCCESS", "bucket": "pass" }
+                { "name": "CI / test", "state": "SUCCESS", "bucket": "pass" }
             ]),
             rest_check_runs: json!({ "total_count": 0, "check_runs": [] }),
         }
@@ -135,7 +135,7 @@ impl CheckObservation {
     fn pending() -> Self {
         Self {
             gh_pr_checks: json!([
-                { "name": "build", "state": "IN_PROGRESS", "bucket": "pending" }
+                { "name": "CI / build", "state": "IN_PROGRESS", "bucket": "pending" }
             ]),
             rest_check_runs: json!({ "total_count": 0, "check_runs": [] }),
         }
@@ -794,7 +794,7 @@ fn build_replay_registry(scenario: &ScenarioFixtures) -> (ExecutorRegistry, Repl
 /// post-PR steps interpolate.
 fn load_tail_workflow(temp: &TempDir) -> (WorkflowType, WorkflowConfig) {
     let fixture_root = std::path::PathBuf::from("tests/fixtures");
-    let workflow_type =
+    let mut workflow_type =
         resolve_workflow_type("llxprt-issue-fix-v1", &fixture_root).expect("resolve workflow type");
     let mut config =
         resolve_workflow_config("llxprt-code", &fixture_root).expect("resolve workflow config");
@@ -826,6 +826,17 @@ fn load_tail_workflow(temp: &TempDir) -> (WorkflowType, WorkflowConfig) {
         "target_repo".to_string(),
         format!("{REPO_OWNER}/{REPO_NAME}"),
     );
+
+    if let Some(step) = workflow_type
+        .steps
+        .iter_mut()
+        .find(|step| step.step_id == "watch_pr_checks")
+    {
+        if let Some(params) = step.parameters.as_mut() {
+            params["check_policy"]["missing_retry_attempts"] = json!(0);
+            params["check_policy"]["api_error_retry_attempts"] = json!(0);
+        }
+    }
 
     (workflow_type, config)
 }
@@ -1295,8 +1306,9 @@ fn replay_coderabbit_invalid_feedback_rejected_without_remediation() {
 fn replay_terminal_fatal_propagates_fatal_source() {
     let temp = tempfile::tempdir().expect("tempdir");
     let scenario = ScenarioFixtures {
-        // Stale-only checks on the current head => fatal classification with a
-        // non-null fatal_source (the regression class this issue targets).
+        // Required checks never appear on the current head and retry state is
+        // exhausted, so the short observation classifies as fatal with a
+        // non-null fatal_source.
         check_observations: vec![CheckObservation::stale_only_fatal()],
         review_thread_pages: vec![empty_review_threads()],
         review_comment_pages: vec![json!([])],

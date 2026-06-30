@@ -544,6 +544,23 @@ max_duration_seconds = 3600
 max_check_watch_duration_seconds = 3600
 check_status_result_path = "{artifact_dir}/pr-followup/current/pr-check-status.json"
 
+[steps.parameters.check_policy]
+allow_unmatched_success = true
+default_allow_skipped = true
+missing_retry_attempts = 12
+api_error_retry_attempts = 5
+max_wait_seconds = 3600
+poll_interval_seconds = 300
+
+[[steps.parameters.check_policy.ignored]]
+mode = "prefix"
+pattern = "CodeRabbit"
+
+[[steps.parameters.check_policy.required]]
+mode = "prefix"
+pattern = "CI"
+allow_skipped = false
+
 # @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P17
 # @requirement:REQ-PRFU-001,REQ-PRFU-007,REQ-PRFU-018,REQ-PRFU-020A
 # @pseudocode lines 1-21

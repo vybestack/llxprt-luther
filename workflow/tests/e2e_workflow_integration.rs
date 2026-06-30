@@ -1033,6 +1033,70 @@ fn load_workflow_toml(path: &str) -> WorkflowType {
     parse_workflow_type_toml(&content).unwrap_or_else(|err| panic!("parse {path}: {err}"))
 }
 
+fn assert_pr_check_policy(watch_params: &serde_json::Value) {
+    let policy = watch_params
+        .get("check_policy")
+        .expect("watch_pr_checks must declare a structured check_policy");
+    assert_eq!(
+        policy
+            .get("allow_unmatched_success")
+            .and_then(serde_json::Value::as_bool),
+        Some(true),
+        "unmatched successful checks may coexist with configured required checks",
+    );
+    assert_eq!(
+        policy
+            .get("default_allow_skipped")
+            .and_then(serde_json::Value::as_bool),
+        Some(true),
+        "skipped optional/unmatched checks are allowed by default for target repos",
+    );
+    assert_eq!(
+        policy
+            .get("missing_retry_attempts")
+            .and_then(serde_json::Value::as_u64),
+        Some(12),
+        "missing required checks must remain retryable across daemon polls",
+    );
+    assert_eq!(
+        policy
+            .get("api_error_retry_attempts")
+            .and_then(serde_json::Value::as_u64),
+        Some(5),
+        "transient GitHub API failures must not terminate on the first poll",
+    );
+    assert_eq!(
+        policy
+            .get("poll_interval_seconds")
+            .and_then(serde_json::Value::as_u64),
+        Some(300),
+        "daemon polling should happen in bounded chunks",
+    );
+    let required = policy
+        .get("required")
+        .and_then(serde_json::Value::as_array)
+        .expect("check_policy.required");
+    assert!(
+        required.iter().any(|entry| {
+            entry.get("mode").and_then(serde_json::Value::as_str) == Some("prefix")
+                && entry.get("pattern").and_then(serde_json::Value::as_str) == Some("CI")
+                && entry.get("allow_skipped").and_then(serde_json::Value::as_bool) == Some(false)
+        }),
+        "watch_pr_checks must require the target repository CI checks and disallow skipped required CI",
+    );
+    let ignored = policy
+        .get("ignored")
+        .and_then(serde_json::Value::as_array)
+        .expect("check_policy.ignored");
+    assert!(
+        ignored.iter().any(|entry| {
+            entry.get("mode").and_then(serde_json::Value::as_str) == Some("prefix")
+                && entry.get("pattern").and_then(serde_json::Value::as_str) == Some("CodeRabbit")
+        }),
+        "CodeRabbit status checks must be ignored by the PR-check wait policy",
+    );
+}
+
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P16
 /// @requirement:REQ-PRFU-018,REQ-PRFU-020
 /// @pseudocode lines 1-53
@@ -1327,6 +1391,7 @@ fn post_pr_exact_p17_routing_contract_is_present() {
         Some("{artifact_dir}/pr-followup/current/pr-check-status.json"),
         "suspended PR check waits must retain artifact-backed poll identity",
     );
+    assert_pr_check_policy(watch_params);
     assert_eq!(
         coderabbit_params
             .get("coderabbit_feedback_result_path")
@@ -2700,6 +2765,7 @@ fn llxprt_issue_fix_workflow_loads_with_two_target_profiles() {
         "alternate profile should inject distinct planning, test, and diff scope"
     );
     assert_ne!(llxprt_code_plan, alt_plan);
+
     assert_ne!(llxprt_code_test_command, alt_test_command);
     assert_ne!(llxprt_code_diff_command, alt_diff_command);
 }
@@ -2729,11 +2795,12 @@ fn create_pr_reuses_existing_issue_branch_pr_when_present() {
         "repeatable smoke runs should reuse an existing PR for the issue branch before creating a new one: {command}"
     );
     assert!(
-        command.contains("PR_URL=$(gh pr create")
-            && command.contains("gh pr view \"$PR_URL\"")
-            && !command.contains("--head issue{issue_number} --json"),
-        "create_pr should create with gh pr create output and fetch JSON via gh pr view for CLI compatibility: {command}"
-    );
+            command.contains("PR_URL=$(gh pr create")
+                && command.contains("gh pr view \"$PR_URL\"")
+
+                && !command.contains("--head issue{issue_number} --json"),
+            "create_pr should create with gh pr create output and fetch JSON via gh pr view for CLI compatibility: {command}"
+        );
 
     assert!(
         command.contains("jq -r '.state'")
@@ -2769,6 +2836,35 @@ fn production_and_fixture_llxprt_issue_fix_v1_are_equivalent() {
 // ============================================================================
 // Issue #12: Loop limits and terminal routing as a workflow-level contract
 // ============================================================================
+
+#[test]
+fn dogfood_pr_check_wait_policy_matches_issue_fix_policy() {
+    let issue_fix = load_workflow_toml("config/workflows/llxprt-issue-fix-v1.toml");
+    let dogfood = load_workflow_toml("config/workflows/llxprt-luther-dogfood-v1.toml");
+    let issue_policy = watch_pr_check_policy(&issue_fix);
+    let dogfood_policy = watch_pr_check_policy(&dogfood);
+
+    assert_eq!(
+        issue_policy, dogfood_policy,
+        "dogfood and issue-fix workflows must use the same durable PR check wait policy",
+    );
+    assert_pr_check_policy(watch_pr_check_params(&dogfood));
+}
+
+fn watch_pr_check_params(workflow_type: &WorkflowType) -> &serde_json::Value {
+    workflow_type
+        .steps
+        .iter()
+        .find(|step| step.step_id == "watch_pr_checks")
+        .and_then(|step| step.parameters.as_ref())
+        .expect("watch_pr_checks params")
+}
+
+fn watch_pr_check_policy(workflow_type: &WorkflowType) -> &serde_json::Value {
+    watch_pr_check_params(workflow_type)
+        .get("check_policy")
+        .expect("watch_pr_checks check_policy")
+}
 
 /// Issue #12: the shipped llxprt-issue-fix-v1 workflow must satisfy the new
 /// loop-limit, terminal-routing, and PR-remediation-cap invariants enforced by

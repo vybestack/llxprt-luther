@@ -246,6 +246,27 @@
       "description": "Watch GitHub PR checks and classify current-head status",
       "parameters": {
         "artifact_root": "{artifact_dir}",
+        "check_policy": {
+          "allow_unmatched_success": true,
+          "api_error_retry_attempts": 5,
+          "default_allow_skipped": true,
+          "ignored": [
+            {
+              "mode": "prefix",
+              "pattern": "CodeRabbit"
+            }
+          ],
+          "max_wait_seconds": 3600,
+          "missing_retry_attempts": 12,
+          "poll_interval_seconds": 300,
+          "required": [
+            {
+              "allow_skipped": false,
+              "mode": "prefix",
+              "pattern": "CI"
+            }
+          ]
+        },
         "check_status_result_path": "{artifact_dir}/pr-followup/current/pr-check-status.json",
         "check_watch_interval_seconds": 300,
         "max_attempts": 1,
