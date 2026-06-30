@@ -161,6 +161,7 @@ impl EngineRunner {
     ) -> Result<Self, EngineError> {
         let max_retries = instance.config.runtime.max_retries;
         let max_loops = instance.config.guard_limits.max_iterations.unwrap_or(10);
+        let context = build_step_context(&instance)?;
 
         // Create an in-memory SQLite connection for persistence
         let conn = Connection::open_in_memory().map_err(|e| {
@@ -171,32 +172,6 @@ impl EngineRunner {
         crate::persistence::checkpoint::init_checkpoint_table(&conn).map_err(|e| {
             EngineError::PersistenceError(format!("Failed to initialize checkpoint schema: {e}"))
         })?;
-
-        // Create working directory path: tempdir/run_id
-        let work_dir = std::env::temp_dir().join(&instance.run_id);
-
-        // Initialize StepContext with work_dir and run_id
-        let mut context = StepContext::new(work_dir, instance.run_id.clone());
-
-        // Load config variables into context
-        // @plan:PLAN-20260408-LLXPRT-FIRST.P15
-        // @requirement:REQ-LF-PROF-003
-        for (key, value) in &instance.config.variables {
-            context.set(key, value);
-        }
-
-        // If work_dir is specified in config variables, create it and set it
-        // @plan:PLAN-20260408-LLXPRT-FIRST.P15
-        // @requirement:REQ-LF-WS-001
-        if let Some(work_dir_str) = instance.config.variables.get("work_dir") {
-            let path = std::path::PathBuf::from(work_dir_str);
-            std::fs::create_dir_all(&path).map_err(|e| {
-                EngineError::InvalidState(format!(
-                    "Failed to create work_dir '{work_dir_str}': {e}"
-                ))
-            })?;
-            context.set_work_dir(path);
-        }
 
         Ok(Self {
             instance,
@@ -242,58 +217,9 @@ impl EngineRunner {
     ) -> Result<Self, EngineError> {
         let max_retries = instance.config.runtime.max_retries;
         let max_loops = instance.config.guard_limits.max_iterations.unwrap_or(10);
-
-        let conn = Connection::open(db_path).map_err(|e| {
-            EngineError::PersistenceError(format!("Failed to open database: {}", e))
-        })?;
-
-        // Initialize checkpoint schema
-        crate::persistence::checkpoint::init_checkpoint_table(&conn).map_err(|e| {
-            EngineError::PersistenceError(format!("Failed to initialize checkpoint schema: {e}"))
-        })?;
-
-        // Initialize runs table schema for metadata
-        crate::persistence::run_metadata::init_runs_table(&conn).map_err(|e| {
-            EngineError::PersistenceError(format!("Failed to initialize runs schema: {e}"))
-        })?;
-
-        // Try to load existing checkpoint for resume
-        let (retry_count, edge_loop_counts) =
-            if let Ok(Some(checkpoint)) = load_checkpoint_with_conn(&conn, &instance.run_id) {
-                (
-                    checkpoint.state_snapshot.retry_count,
-                    checkpoint.state_snapshot.edge_loop_counts.clone(),
-                )
-            } else {
-                (0, HashMap::new())
-            };
-
-        // Create working directory path: tempdir/run_id
-        let work_dir = std::env::temp_dir().join(&instance.run_id);
-
-        // Initialize StepContext with work_dir and run_id
-        let mut context = StepContext::new(work_dir, instance.run_id.clone());
-
-        // Load config variables into context
-        // @plan:PLAN-20260408-LLXPRT-FIRST.P15
-        // @requirement:REQ-LF-PROF-003
-        for (key, value) in &instance.config.variables {
-            context.set(key, value);
-        }
-
-        // If work_dir is specified in config variables, create it and set it
-        // @plan:PLAN-20260408-LLXPRT-FIRST.P15
-        // @requirement:REQ-LF-WS-001
-        if let Some(work_dir_str) = instance.config.variables.get("work_dir") {
-            let path = std::path::PathBuf::from(work_dir_str);
-            std::fs::create_dir_all(&path).map_err(|e| {
-                EngineError::InvalidState(format!(
-                    "Failed to create work_dir '{}': {}",
-                    work_dir_str, e
-                ))
-            })?;
-            context.set_work_dir(path);
-        }
+        let conn = open_initialized_connection(db_path.as_ref())?;
+        let (retry_count, edge_loop_counts) = load_checkpoint_state(&conn, &instance.run_id);
+        let context = build_step_context(&instance)?;
 
         let mut runner = Self {
             instance,
@@ -450,203 +376,215 @@ impl EngineRunner {
     /// @plan:PLAN-20260408-LLXPRT-FIRST.P14
     /// @plan:PLAN-20260408-LLXPRT-FIRST.P15
     /// @requirement:REQ-EARS-ENG-002,REQ-EARS-ENG-003,REQ-EARS-ROUTE-001,REQ-LF-LOOP-001,REQ-LF-LOOP-002,REQ-LF-LOOP-003,REQ-LF-LOOP-004,REQ-LF-FAIL-001,REQ-LF-FAIL-005
-    // Pre-existing engine orchestration flow; split in a dedicated refactor stage.
-    #[allow(clippy::too_many_lines)]
     pub fn run(&mut self) -> Result<RunOutcome, EngineError> {
-        // Check if we should resume from a checkpoint
+        self.resume_from_checkpoint()?;
+        self.mark_run_started();
+
+        let mut current_step_id = self.instance.current_state.clone();
+
+        loop {
+            if self.interrupted.load(std::sync::atomic::Ordering::SeqCst) {
+                return self.interrupt_at_step(&current_step_id);
+            }
+
+            self.prepare_step_start(&current_step_id);
+            let outcome = self.execute_current_step(&current_step_id)?;
+            self.persist_step_outcome(&current_step_id, &outcome)?;
+            self.update_previous_step_metadata(&current_step_id, &outcome);
+
+            if outcome == StepOutcome::Abandon {
+                return Ok(self.abandon_at_step(&current_step_id));
+            }
+
+            match self.resolve_next_step(&current_step_id, &outcome)? {
+                Some(next_step_id) => {
+                    if let Some(run_outcome) =
+                        self.advance_to_next_step(&mut current_step_id, next_step_id, &outcome)
+                    {
+                        return Ok(run_outcome);
+                    }
+                }
+                None => return self.finish_without_transition(&current_step_id, &outcome),
+            }
+        }
+    }
+
+    fn resume_from_checkpoint(&mut self) -> Result<(), EngineError> {
         let conn = self.conn.borrow();
         if let Some(checkpoint) = load_checkpoint_with_conn(&conn, &self.instance.run_id)? {
-            // Resume from checkpoint
             self.instance.transition_to(&checkpoint.step_id);
             self.retry_count = checkpoint.state_snapshot.retry_count;
             self.edge_loop_counts = checkpoint.state_snapshot.edge_loop_counts.clone();
         }
-        drop(conn);
+        Ok(())
+    }
 
-        // Flip the run record to Running now that execution has begun.
-        // @plan:PLAN-20260404-INITIAL-RUNTIME.P05
+    fn mark_run_started(&self) {
         if self.persist_registry {
             if let Some(mut md) = self.load_metadata() {
                 md.mark_started();
                 self.persist_metadata(&md);
             }
         }
+    }
 
-        let mut current_step_id = self.instance.current_state.clone();
+    fn interrupt_at_step(&self, current_step_id: &str) -> Result<RunOutcome, EngineError> {
+        let checkpoint = self.create_checkpoint(current_step_id, "interrupted");
+        let conn = self.conn.borrow();
+        save_checkpoint_with_conn(&conn, &checkpoint)?;
+        drop(conn);
 
-        loop {
-            // Check for interrupt
-            if self.interrupted.load(std::sync::atomic::Ordering::SeqCst) {
-                let checkpoint = self.create_checkpoint(&current_step_id, "interrupted");
-                let conn = self.conn.borrow();
-                save_checkpoint_with_conn(&conn, &checkpoint)?;
-                let run_outcome = RunOutcome::Interrupted {
-                    step_id: current_step_id.clone(),
-                };
-                let _ = self.record_run_completion(&run_outcome, &current_step_id);
-                return Ok(run_outcome);
+        let run_outcome = RunOutcome::Interrupted {
+            step_id: current_step_id.to_string(),
+        };
+        let _ = self.record_run_completion(&run_outcome, current_step_id);
+        Ok(run_outcome)
+    }
+
+    fn prepare_step_start(&mut self, current_step_id: &str) {
+        self.context.set_current_step_id(current_step_id);
+        if self.persist_registry {
+            if let Some(mut md) = self.load_metadata() {
+                md.set_current_step(current_step_id);
+                md.set_next_step_candidates(self.compute_next_step_candidates(current_step_id));
+                self.persist_metadata(&md);
             }
+            self.record_event(EventType::StepStart, current_step_id, "started", None);
+        }
+    }
 
-            // Set current step on context for namespaced storage
-            self.context.set_current_step_id(&current_step_id);
-
-            // Update the run registry with the current step and emit StepStart.
-            // @plan:PLAN-20260404-INITIAL-RUNTIME.P05
+    fn execute_current_step(&mut self, current_step_id: &str) -> Result<StepOutcome, EngineError> {
+        eprintln!("[engine] Executing step: {}", current_step_id);
+        let outcome = self.execute_step(current_step_id).inspect_err(|e| {
             if self.persist_registry {
-                if let Some(mut md) = self.load_metadata() {
-                    md.set_current_step(&current_step_id);
-                    md.set_next_step_candidates(
-                        self.compute_next_step_candidates(&current_step_id),
-                    );
-                    self.persist_metadata(&md);
-                }
-                self.record_event(EventType::StepStart, &current_step_id, "started", None);
-            }
-
-            eprintln!("[engine] Executing step: {}", current_step_id);
-
-            // Execute the current step
-            let outcome = match self.execute_step(&current_step_id) {
-                Ok(o) => o,
-                Err(e) => {
-                    if self.persist_registry {
-                        self.record_event(
-                            EventType::Error,
-                            &current_step_id,
-                            "error",
-                            Some(&e.to_string()),
-                        );
-                    }
-                    return Err(e);
-                }
-            };
-
-            eprintln!("[engine] Step '{}' outcome: {}", current_step_id, outcome);
-            if outcome != StepOutcome::Success {
-                if let Some(stderr) = self.context.get("stderr") {
-                    if !stderr.is_empty() {
-                        eprintln!("[engine] stderr: {}", &stderr[..stderr.len().min(500)]);
-                    }
-                }
-                if let Some(stdout) = self.context.get("stdout") {
-                    if !stdout.is_empty() {
-                        eprintln!("[engine] stdout: {}", &stdout[..stdout.len().min(500)]);
-                    }
-                }
-            }
-
-            // Persist checkpoint and event
-            let checkpoint = self.create_checkpoint(&current_step_id, "completed");
-            {
-                let conn = self.conn.borrow();
-                save_checkpoint_with_conn(&conn, &checkpoint)?;
-                // Best-effort event append, consistent with `record_event`: an
-                // event-persistence failure after a successful checkpoint save
-                // must not abort the run.
-                let _ = append_typed_event_with_conn(
-                    &conn,
-                    &self.instance.run_id,
-                    &current_step_id,
-                    &outcome.to_string(),
-                    EventType::StepOutcome,
-                    None,
-                    chrono::Utc::now(),
+                self.record_event(
+                    EventType::Error,
+                    current_step_id,
+                    "error",
+                    Some(&e.to_string()),
                 );
             }
+        })?;
 
-            // Record the previous step + outcome and refresh next-step
-            // candidates in the run registry.
-            // @plan:PLAN-20260404-INITIAL-RUNTIME.P05
-            if self.persist_registry {
-                if let Some(mut md) = self.load_metadata() {
-                    md.set_previous_step_and_outcome(&current_step_id, outcome.to_string());
-                    md.set_next_step_candidates(
-                        self.compute_next_step_candidates(&current_step_id),
-                    );
-                    self.persist_metadata(&md);
-                }
-            }
+        eprintln!("[engine] Step '{}' outcome: {}", current_step_id, outcome);
+        self.log_non_success_output(&outcome);
+        Ok(outcome)
+    }
 
-            // Check for Abandon outcome (early return - terminal)
-            // @plan:PLAN-20260408-LLXPRT-FIRST.P15
-            // @requirement:REQ-LF-FAIL-001
-            if outcome == StepOutcome::Abandon {
-                let run_outcome = RunOutcome::Abandoned {
-                    step_id: current_step_id.clone(),
-                    reason: "Loop limit exceeded".to_string(),
-                };
-                let _ = self.record_run_completion(&run_outcome, &current_step_id);
-                return Ok(run_outcome);
-            }
+    fn log_non_success_output(&self, outcome: &StepOutcome) {
+        if *outcome == StepOutcome::Success {
+            return;
+        }
+        self.log_context_preview("stderr");
+        self.log_context_preview("stdout");
+    }
 
-            // Resolve the next step based on outcome
-            // @plan:PLAN-20260408-LLXPRT-FIRST.P15
-            // @requirement:REQ-LF-FAIL-001
-            let next_step = self.resolve_next_step(&current_step_id, &outcome)?;
-
-            match next_step {
-                Some(next_step_id) => {
-                    // Compute edge key and find transition definition for per-edge limit
-                    let edge_key = format!("{}:{}", current_step_id, next_step_id);
-                    let transition_def = self.find_transition(&current_step_id, &outcome);
-                    let edge_limit = transition_def
-                        .and_then(|t| t.max_iterations)
-                        .unwrap_or(self.max_loops);
-
-                    if self.is_limited_transition(&current_step_id, &next_step_id, transition_def) {
-                        let current_count =
-                            self.edge_loop_counts.get(&edge_key).copied().unwrap_or(0);
-                        if current_count >= edge_limit {
-                            // Per-edge loop limit exceeded
-                            let run_outcome = RunOutcome::Abandoned {
-                                step_id: current_step_id.clone(),
-                                reason: format!(
-                                    "Per-edge loop limit ({}) exceeded on edge {}",
-                                    edge_limit, edge_key
-                                ),
-                            };
-                            let _ = self.record_run_completion(&run_outcome, &current_step_id);
-                            return Ok(run_outcome);
-                        }
-                        self.edge_loop_counts.insert(edge_key, current_count + 1);
-                    }
-
-                    current_step_id = next_step_id;
-                    self.instance.transition_to(&current_step_id);
-                }
-                None => {
-                    // Recoverable external wait with no `wait` transition: pause
-                    // at the current step with a resumable checkpoint instead of
-                    // routing to a terminal failure sink.
-                    // @plan:PLAN-20260623-LUTHER-CONTINUATION
-                    if outcome == StepOutcome::Wait {
-                        let run_outcome = self.pause_for_external_wait(&current_step_id)?;
-                        return Ok(run_outcome);
-                    }
-
-                    // No transition found - determine outcome based on step outcome
-                    // @plan:PLAN-20260408-LLXPRT-FIRST.P15
-                    // @requirement:REQ-LF-FAIL-001
-                    let run_outcome = match outcome {
-                        StepOutcome::Success => RunOutcome::Success,
-                        StepOutcome::Fatal => RunOutcome::Failure {
-                            step_id: current_step_id.clone(),
-                            reason: "Fatal error occurred".to_string(),
-                        },
-                        StepOutcome::Fixable => RunOutcome::Failure {
-                            step_id: current_step_id.clone(),
-                            reason: "Fixable error with no recovery transition".to_string(),
-                        },
-                        _ => RunOutcome::Failure {
-                            step_id: current_step_id.clone(),
-                            reason: "Unexpected outcome".to_string(),
-                        },
-                    };
-                    let _ = self.record_run_completion(&run_outcome, &current_step_id);
-                    return Ok(run_outcome);
-                }
+    fn log_context_preview(&self, key: &str) {
+        if let Some(value) = self.context.get(key) {
+            if !value.is_empty() {
+                eprintln!("[engine] {}: {}", key, preview_for_log(value, 500));
             }
         }
+    }
+
+    fn persist_step_outcome(
+        &self,
+        current_step_id: &str,
+        outcome: &StepOutcome,
+    ) -> Result<(), EngineError> {
+        let checkpoint = self.create_checkpoint(current_step_id, "completed");
+        let conn = self.conn.borrow();
+        save_checkpoint_with_conn(&conn, &checkpoint)?;
+        let _ = append_typed_event_with_conn(
+            &conn,
+            &self.instance.run_id,
+            current_step_id,
+            &outcome.to_string(),
+            EventType::StepOutcome,
+            None,
+            chrono::Utc::now(),
+        );
+        Ok(())
+    }
+
+    fn update_previous_step_metadata(&self, current_step_id: &str, outcome: &StepOutcome) {
+        if self.persist_registry {
+            if let Some(mut md) = self.load_metadata() {
+                md.set_previous_step_and_outcome(current_step_id, outcome.to_string());
+                md.set_next_step_candidates(self.compute_next_step_candidates(current_step_id));
+                self.persist_metadata(&md);
+            }
+        }
+    }
+
+    fn abandon_at_step(&self, current_step_id: &str) -> RunOutcome {
+        let run_outcome = RunOutcome::Abandoned {
+            step_id: current_step_id.to_string(),
+            reason: "Loop limit exceeded".to_string(),
+        };
+        let _ = self.record_run_completion(&run_outcome, current_step_id);
+        run_outcome
+    }
+
+    fn advance_to_next_step(
+        &mut self,
+        current_step_id: &mut String,
+        next_step_id: String,
+        outcome: &StepOutcome,
+    ) -> Option<RunOutcome> {
+        if let Some(run_outcome) = self.enforce_edge_limit(current_step_id, &next_step_id, outcome)
+        {
+            return Some(run_outcome);
+        }
+        *current_step_id = next_step_id;
+        self.instance.transition_to(current_step_id.as_str());
+        None
+    }
+
+    fn enforce_edge_limit(
+        &mut self,
+        current_step_id: &str,
+        next_step_id: &str,
+        outcome: &StepOutcome,
+    ) -> Option<RunOutcome> {
+        let transition_def = self.find_transition(current_step_id, outcome);
+        if !self.is_limited_transition(current_step_id, next_step_id, transition_def) {
+            return None;
+        }
+
+        let edge_key = format!("{}:{}", current_step_id, next_step_id);
+        let edge_limit = transition_def
+            .and_then(|t| t.max_iterations)
+            .unwrap_or(self.max_loops);
+        let current_count = self.edge_loop_counts.get(&edge_key).copied().unwrap_or(0);
+        if current_count >= edge_limit {
+            let run_outcome = RunOutcome::Abandoned {
+                step_id: current_step_id.to_string(),
+                reason: format!(
+                    "Per-edge loop limit ({}) exceeded on edge {}",
+                    edge_limit, edge_key
+                ),
+            };
+            let _ = self.record_run_completion(&run_outcome, current_step_id);
+            return Some(run_outcome);
+        }
+
+        self.edge_loop_counts.insert(edge_key, current_count + 1);
+        None
+    }
+
+    fn finish_without_transition(
+        &self,
+        current_step_id: &str,
+        outcome: &StepOutcome,
+    ) -> Result<RunOutcome, EngineError> {
+        if *outcome == StepOutcome::Wait {
+            return self.pause_for_external_wait(current_step_id);
+        }
+
+        let run_outcome = run_outcome_without_transition(current_step_id, outcome);
+        let _ = self.record_run_completion(&run_outcome, current_step_id);
+        Ok(run_outcome)
     }
 
     /// Persist a resumable `waiting` checkpoint at the current step and return
@@ -917,208 +855,82 @@ impl EngineRunner {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn llxprt_engine_error_variants_render() {
-        let not_found = EngineError::LlxprtBinaryNotFound {
-            path: "/opt/llxprt".to_string(),
-        };
-        assert_eq!(
-            not_found.to_string(),
-            "llxprt binary not found at `/opt/llxprt`"
-        );
-        let version = EngineError::LlxprtVersionError {
-            path: "llxprt".to_string(),
-            message: "boom".to_string(),
-        };
-        assert_eq!(
-            version.to_string(),
-            "llxprt binary at `llxprt` failed version check: boom"
-        );
-        let profile = EngineError::LlxprtProfileError {
-            profile: "fast".to_string(),
-            message: "missing".to_string(),
-        };
-        assert_eq!(
-            profile.to_string(),
-            "llxprt profile `fast` could not be resolved: missing"
-        );
+fn preview_for_log(value: &str, max_bytes: usize) -> &str {
+    if value.len() <= max_bytes {
+        return value;
     }
 
-    #[test]
-    fn llxprt_error_maps_to_engine_error() {
-        use crate::adapters::llxprt::LlxprtError;
-        let mapped: EngineError = LlxprtError::BinaryNotFound {
-            path: "llxprt".to_string(),
-        }
-        .into();
-        assert!(matches!(mapped, EngineError::LlxprtBinaryNotFound { .. }));
-        let mapped: EngineError = LlxprtError::VersionCheckFailed {
-            path: "llxprt".to_string(),
-            message: "x".to_string(),
-        }
-        .into();
-        assert!(matches!(mapped, EngineError::LlxprtVersionError { .. }));
-        let mapped: EngineError = LlxprtError::NotExecutable {
-            path: "llxprt".to_string(),
-            message: "x".to_string(),
-        }
-        .into();
-        assert!(matches!(mapped, EngineError::LlxprtVersionError { .. }));
+    let mut boundary = max_bytes;
+    while !value.is_char_boundary(boundary) {
+        boundary -= 1;
     }
+    &value[..boundary]
+}
 
-    #[test]
-    fn engine_error_display_formats_correctly() {
-        // @plan:PLAN-20260404-INITIAL-RUNTIME.P08
-        let err = EngineError::StepExecutionError {
-            step_id: "test_step".to_string(),
-            message: "something failed".to_string(),
-        };
-        assert!(err.to_string().contains("test_step"));
-    }
+fn open_initialized_connection(db_path: &Path) -> Result<Connection, EngineError> {
+    let conn = Connection::open(db_path)
+        .map_err(|e| EngineError::PersistenceError(format!("Failed to open database: {}", e)))?;
 
-    #[test]
-    fn run_outcome_variants_exist() {
-        // @plan:PLAN-20260404-INITIAL-RUNTIME.P08
-        let _success = RunOutcome::Success;
-        let _failure = RunOutcome::Failure {
-            step_id: "s1".to_string(),
-            reason: "test".to_string(),
-        };
-        let _abandoned = RunOutcome::Abandoned {
-            step_id: "s2".to_string(),
-            reason: "loop".to_string(),
-        };
-        let _interrupted = RunOutcome::Interrupted {
-            step_id: "s3".to_string(),
-        };
-    }
+    crate::persistence::checkpoint::init_checkpoint_table(&conn).map_err(|e| {
+        EngineError::PersistenceError(format!("Failed to initialize checkpoint schema: {e}"))
+    })?;
+    crate::persistence::run_metadata::init_runs_table(&conn).map_err(|e| {
+        EngineError::PersistenceError(format!("Failed to initialize runs schema: {e}"))
+    })?;
 
-    #[test]
-    fn engine_runner_can_be_created() {
-        // @plan:PLAN-20260404-INITIAL-RUNTIME.P08
-        // @plan:PLAN-20260408-STEP-EXEC.P06
-        use crate::workflow::schema::{
-            GuardLimits, RepoConfig, RuntimeConfig, WorkflowConfig, WorkflowType,
-        };
+    Ok(conn)
+}
 
-        let workflow_type = WorkflowType {
-            workflow_type_id: "test".to_string(),
-            steps: vec![],
-            transitions: vec![],
-            guards: Default::default(),
-        };
-
-        let config = WorkflowConfig {
-            config_id: "test-config".to_string(),
-            workflow_type_id: "test".to_string(),
-            runtime: RuntimeConfig {
-                timeout_seconds: 3600,
-                max_retries: 3,
-                parallel_steps: None,
-                log_level: None,
-            },
-            repo: RepoConfig {
-                workspace_strategy: "temp".to_string(),
-                branch_template: "test-{run_id}".to_string(),
-                base_branch: Some("main".to_string()),
-                workspace_root: None,
-            },
-            guard_limits: GuardLimits {
-                max_iterations: Some(3),
-                max_file_changes: Some(50),
-                max_tokens: Some(10000),
-                max_cost: Some(10.0),
-            },
-            variables: std::collections::HashMap::new(),
-            discovery: None,
-        };
-
-        let instance = WorkflowInstance::create(workflow_type, config);
-        let registry = crate::engine::executor::ExecutorRegistry::with_defaults();
-        let runner = EngineRunner::new(instance, registry).expect("Failed to create EngineRunner");
-        assert!(!runner.run_id().is_empty());
-    }
-
-    /// Build a minimal two-step noop workflow (step1 -> step2, both terminal-ish)
-    /// for exercising the trace export seam without network or `gh`.
-    /// @plan:PLAN-LUTHER-ISSUE-19-SMOKE-REPLAY
-    fn seam_test_instance() -> WorkflowInstance {
-        use crate::workflow::schema::{
-            GuardLimits, RepoConfig, RuntimeConfig, StepDef, TransitionDef, WorkflowConfig,
-            WorkflowType,
-        };
-        let step = |id: &str| StepDef {
-            step_id: id.to_string(),
-            step_type: "noop".to_string(),
-            description: None,
-            parameters: None,
-            produces: None,
-            consumes: None,
-            terminal: None,
-        };
-        let workflow_type = WorkflowType {
-            workflow_type_id: "seam-test".to_string(),
-            steps: vec![step("step1"), step("step2")],
-            transitions: vec![TransitionDef {
-                from: "step1".to_string(),
-                to: "step2".to_string(),
-                condition: None,
-                max_iterations: None,
-            }],
-            guards: Default::default(),
-        };
-        let config = WorkflowConfig {
-            config_id: "seam-config".to_string(),
-            workflow_type_id: "seam-test".to_string(),
-            runtime: RuntimeConfig {
-                timeout_seconds: 3600,
-                max_retries: 3,
-                parallel_steps: None,
-                log_level: None,
-            },
-            repo: RepoConfig {
-                workspace_strategy: "temp".to_string(),
-                branch_template: "test-{run_id}".to_string(),
-                base_branch: Some("main".to_string()),
-                workspace_root: None,
-            },
-            guard_limits: GuardLimits {
-                max_iterations: Some(3),
-                max_file_changes: Some(50),
-                max_tokens: Some(10000),
-                max_cost: Some(10.0),
-            },
-            variables: std::collections::HashMap::new(),
-            discovery: None,
-        };
-        WorkflowInstance::create(workflow_type, config)
-    }
-
-    #[test]
-    fn export_trace_matches_executed_sequence_and_outcome() {
-        // @plan:PLAN-LUTHER-ISSUE-19-SMOKE-REPLAY
-        // @requirement:REQ-SMOKE-REPLAY-001
-        let instance = seam_test_instance();
-        let registry = crate::engine::executor::ExecutorRegistry::with_defaults();
-        let mut runner =
-            EngineRunner::new(instance, registry).expect("Failed to create EngineRunner");
-
-        let outcome = runner.run().expect("run should succeed");
-        assert!(matches!(outcome, RunOutcome::Success));
-
-        let trace = runner
-            .export_trace(&outcome)
-            .expect("export_trace should succeed");
-        assert_eq!(trace.workflow_type_id, "seam-test");
-        assert_eq!(trace.config_id, "seam-config");
-        assert_eq!(trace.run_id, runner.run_id());
-        let steps: Vec<&str> = trace.events.iter().map(|e| e.step_id.as_str()).collect();
-        assert_eq!(steps, vec!["step1", "step2"]);
-        assert!(trace.events.iter().all(|e| e.outcome == "success"));
-        assert!(trace.final_outcome.matches_run_outcome(&outcome));
+fn load_checkpoint_state(conn: &Connection, run_id: &str) -> (u32, HashMap<String, u32>) {
+    if let Ok(Some(checkpoint)) = load_checkpoint_with_conn(conn, run_id) {
+        (
+            checkpoint.state_snapshot.retry_count,
+            checkpoint.state_snapshot.edge_loop_counts.clone(),
+        )
+    } else {
+        (0, HashMap::new())
     }
 }
+
+fn build_step_context(instance: &WorkflowInstance) -> Result<StepContext, EngineError> {
+    let work_dir = std::env::temp_dir().join(&instance.run_id);
+    let mut context = StepContext::new(work_dir, instance.run_id.clone());
+
+    for (key, value) in &instance.config.variables {
+        context.set(key, value);
+    }
+
+    if let Some(work_dir_str) = instance.config.variables.get("work_dir") {
+        let path = std::path::PathBuf::from(work_dir_str);
+        std::fs::create_dir_all(&path).map_err(|e| {
+            EngineError::InvalidState(format!(
+                "Failed to create work_dir '{}': {}",
+                work_dir_str, e
+            ))
+        })?;
+        context.set_work_dir(path);
+    }
+
+    Ok(context)
+}
+
+fn run_outcome_without_transition(step_id: &str, outcome: &StepOutcome) -> RunOutcome {
+    match outcome {
+        StepOutcome::Success => RunOutcome::Success,
+        StepOutcome::Fatal => RunOutcome::Failure {
+            step_id: step_id.to_string(),
+            reason: "Fatal error occurred".to_string(),
+        },
+        StepOutcome::Fixable => RunOutcome::Failure {
+            step_id: step_id.to_string(),
+            reason: "Fixable error with no recovery transition".to_string(),
+        },
+        _ => RunOutcome::Failure {
+            step_id: step_id.to_string(),
+            reason: "Unexpected outcome".to_string(),
+        },
+    }
+}
+
+#[cfg(test)]
+mod runner_tests;
