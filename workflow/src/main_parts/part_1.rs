@@ -987,39 +987,3 @@ fn set_optional_wait_parameter(payload: &mut Value, step_params: &Value, key: &s
     payload[key] = step_params.get(key).cloned().unwrap_or(Value::Null);
 }
 
-fn wait_kind_for_step(step_id: &str) -> WaitKind {
-    match step_id {
-        "watch_pr_checks" => WaitKind::PrChecks,
-        "collect_coderabbit_feedback" => WaitKind::CoderabbitReview,
-        "merge_pr" | "wait_for_merge" => WaitKind::PrMerge,
-        "dependency_child_merge" | "wait_for_child_merge" => WaitKind::DependencyChildMerge,
-        "rate_limit_backoff" | "github_rate_limit_backoff" => WaitKind::RateLimitBackoff,
-        other => {
-            eprintln!("Warning: unmapped wait step '{other}' defaulting to human_review");
-            WaitKind::HumanReview
-        }
-    }
-}
-
-fn install_interrupt_handlers(interrupted: std::sync::Arc<std::sync::atomic::AtomicBool>) {
-    let sigint_flag = interrupted.clone();
-    tokio::spawn(async move {
-        if tokio::signal::ctrl_c().await.is_ok() {
-            sigint_flag.store(true, std::sync::atomic::Ordering::SeqCst);
-        }
-    });
-
-    #[cfg(unix)]
-    {
-        let sigterm_flag = interrupted;
-        tokio::spawn(async move {
-            if let Ok(mut stream) =
-                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-            {
-                stream.recv().await;
-                sigterm_flag.store(true, std::sync::atomic::Ordering::SeqCst);
-            }
-        });
-    }
-}
-
