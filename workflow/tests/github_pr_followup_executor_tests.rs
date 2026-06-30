@@ -1849,38 +1849,30 @@ fn pr_checks_default_watch_budget_is_twelve_observations_without_real_sleep() {
         .execute(&mut context, &p06_check_params(&temp, 12))
         .expect("watch pr checks");
     let artifact = read_json(&p06_pr_check_status_path(&temp));
-    let observations = artifact
-        .get("poll_observations")
-        .and_then(serde_json::Value::as_array)
-        .expect("observations");
     let state = clock.state();
 
     assert_expected_outcome(
         outcome,
         StepOutcome::Wait,
-        "pr_checks watcher must record exactly 12 observations, 11 sleeps, no t=60 observation, and pause on a recoverable wait rather than success",
+        "pr_checks watcher must take one bounded observation and pause on a recoverable wait rather than success",
     );
     assert_eq!(
-        observations.len(),
-        12,
-        "watcher must record exactly 12 observations"
+        artifact
+            .get("poll_attempts")
+            .and_then(serde_json::Value::as_u64),
+        Some(1),
+        "pr-check-status artifact must record one short activation attempt"
     );
     assert_eq!(
         artifact
             .get("write_sequence")
             .and_then(serde_json::Value::as_u64),
-        Some(12),
-        "pr-check-status artifact must be written after every poll"
+        Some(1),
+        "pr-check-status artifact must be written for the short observation"
     );
-    assert_eq!(
-        state.sleeps,
-        vec![std::time::Duration::from_secs(300); 11],
-        "watcher must sleep exactly eleven 300s intervals"
-    );
-    assert_eq!(
-        observations.iter().map(|obs| obs.get("observed_at").and_then(serde_json::Value::as_str).unwrap_or_default()).collect::<Vec<_>>(),
-        (0..12).map(|attempt| format!("2026-04-30T00:{:02}:00Z", 2 + attempt * 4)).collect::<Vec<_>>(),
-        "observation timestamps must come from the immediate poll cadence and not from obsolete t=60 requests"
+    assert!(
+        state.sleeps.is_empty(),
+        "watcher must not sleep inside a workflow activation"
     );
     assert!(
         !runner.calls().iter().flatten().any(|arg| arg == "60"),
@@ -1907,25 +1899,22 @@ fn pr_checks_non_fail_fast_continues_after_early_failure_while_pending_remains()
         .execute(&mut context, &p06_check_params(&temp, 3))
         .expect("watch pr checks");
     let artifact = read_json(&p06_pr_check_status_path(&temp));
-    let observations = artifact
-        .get("poll_observations")
-        .and_then(serde_json::Value::as_array)
-        .expect("observations");
 
     assert_expected_outcome(
         outcome,
         StepOutcome::Wait,
-        "pr_checks watcher must continue after early failure while another current-head check remains pending",
+        "pr_checks watcher must not fail fast while another current-head check remains pending",
     );
     assert_eq!(
-        observations.len(),
-        3,
-        "pending checks must prevent fail-fast on concrete failures"
+        artifact
+            .get("poll_attempts")
+            .and_then(serde_json::Value::as_u64),
+        Some(1),
+        "pending checks must produce one short observation before daemon polling resumes"
     );
-    assert_eq!(
-        clock.state().sleeps,
-        vec![std::time::Duration::from_secs(300); 2],
-        "three pending observations require two sleeps"
+    assert!(
+        clock.state().sleeps.is_empty(),
+        "pending checks must not sleep inside a workflow activation"
     );
     assert_eq!(
         artifact
@@ -2096,8 +2085,8 @@ fn check_classification_unknown_current_head_evidence_is_fatal() {
         artifact
             .get("poll_attempts")
             .and_then(serde_json::Value::as_u64),
-        Some(12),
-        "unknown evidence should exhaust the observation budget"
+        Some(1),
+        "unknown evidence should be recorded in a single bounded observation"
     );
 }
 
@@ -2105,7 +2094,7 @@ fn check_classification_unknown_current_head_evidence_is_fatal() {
 /// @requirement:REQ-PRFU-004,REQ-PRFU-007
 /// @pseudocode lines 16-33
 #[test]
-fn pr_checks_clears_previous_api_fatal_source_after_green_retry() {
+fn pr_checks_api_error_is_retryable_without_in_process_retry_loop() {
     let temp = tempfile::tempdir().expect("tempdir");
     let runner = FlakyThenGreenGithubRunner::new();
     let mut context = p06_context(&temp);
@@ -2116,19 +2105,21 @@ fn pr_checks_clears_previous_api_fatal_source_after_green_retry() {
 
     assert_expected_outcome(
         outcome,
-        StepOutcome::Success,
-        "watcher must not preserve an earlier transient api fatal once a later poll passes",
+        StepOutcome::Wait,
+        "transient API errors should pause for daemon retry instead of looping in-process",
     );
     assert_eq!(
         artifact
             .get("overall_state")
             .and_then(serde_json::Value::as_str),
-        Some("passed")
+        Some("pending_timeout")
     );
     assert_eq!(
-        artifact.get("fatal_source"),
-        Some(&serde_json::Value::Null),
-        "passed check artifacts must not retain a stale fatal_source"
+        artifact
+            .get("poll_attempts")
+            .and_then(serde_json::Value::as_u64),
+        Some(1),
+        "API errors must be recorded as one short activation"
     );
 }
 

@@ -6,11 +6,14 @@
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
-use std::time::Duration;
 
 use serde_json::{json, Value};
 
 use crate::engine::executor::{interpolate_string, StepContext, StepExecutor};
+use crate::engine::executors::pr_check_wait::{
+    check_bucket as shared_check_bucket, classify_api_error, classify_pr_checks, config_from_value,
+    counters_from_value, status_payload, PrCheckObservation, PrCheckWaitClassification,
+};
 use crate::engine::executors::pr_followup_artifacts::{
     ArtifactWriter, ClockSleeper, PrFollowupArtifactStore,
 };
@@ -224,21 +227,6 @@ struct NormalizedCheck {
     source: String,
 }
 
-/// Classification result for one observation or final aggregate state.
-/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P06
-/// @requirement:REQ-PRFU-004,REQ-PRFU-005,REQ-PRFU-006
-/// @pseudocode lines 19-33
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct CheckClassification {
-    overall_state: OverallState,
-    current_checks: Vec<NormalizedCheck>,
-    stale_checks: Vec<NormalizedCheck>,
-    pending_count: usize,
-    unknown_count: usize,
-    failed_count: usize,
-    passed_count: usize,
-}
-
 /// Collected CI failure and uncertainty artifact fragments.
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P07
 /// @requirement:REQ-PRFU-007
@@ -340,56 +328,33 @@ fn watch_pr_checks(
         .and_then(Value::as_str)
         .unwrap_or_default()
         .to_string();
-    let max_attempts = u64_param(params, "max_attempts", 12);
-    let interval_seconds = u64_param(params, "poll_interval_seconds", 300);
-    let max_duration_seconds = u64_param(params, "max_duration_seconds", 3600);
-    let mut observations = Vec::new();
-    let mut final_classification = CheckClassification::empty(OverallState::Unknown);
-
-    for attempt in 1..=max_attempts {
-        let observed_at = clock.now_rfc3339();
-        let checks_result = query_checks(&binding, runner);
-        let (classification, fatal_source) = match checks_result {
-            Ok(checks) => (classify_checks(&binding.head_sha, checks), Value::Null),
-            Err(err) => (
-                CheckClassification::fatal(err.to_string()),
-                Value::String("api".to_string()),
-            ),
-        };
-        final_classification = classification.clone();
-        observations.push(observation_json(
-            attempt,
-            &observed_at,
+    let config = config_from_value(params);
+    let counters = counters_from_value(&pr_value);
+    let observed_at = clock.now_rfc3339();
+    let classification = match query_checks(&binding, runner) {
+        Ok(checks) => classify_pr_checks(
             &binding.head_sha,
-            &classification,
-        ));
-        write_check_status_artifact(
-            &store,
-            &binding,
-            &pr_url,
-            max_attempts,
-            interval_seconds,
-            max_duration_seconds,
-            &observations,
-            &classification,
-            fatal_source.clone(),
-            clock,
-            step_order_index(params, 3),
-        )?;
-        if classification_is_terminal(&classification) || attempt == max_attempts {
-            break;
-        }
-        clock.sleep(Duration::from_secs(interval_seconds));
-    }
+            checks.into_iter().map(Into::into).collect(),
+            &config,
+            counters,
+        ),
+        Err(err) => classify_api_error(&config, counters, err.to_string()),
+    };
+    let status_artifact = CheckStatusArtifactWrite {
+        store: &store,
+        binding: &binding,
+        pr_url: &pr_url,
+        classification: &classification,
+        config: &config,
+        observed_at: &observed_at,
+        clock,
+        step_order_index: step_order_index(params, 3),
+    };
+    write_check_status_artifact(status_artifact)?;
 
-    Ok(match final_classification.overall_state {
+    Ok(match classification.overall_state {
         OverallState::Passed => StepOutcome::Success,
         OverallState::Failed => StepOutcome::Fixable,
-        // CI still running when the watch window closed is an inherently
-        // recoverable condition: pause on a resumable wait state instead of
-        // routing to the terminal failure sink. The persisted check-status
-        // artifact still records overall_state = pending_timeout.
-        // @plan:PLAN-20260623-LUTHER-CONTINUATION
         OverallState::PendingTimeout => StepOutcome::Wait,
         OverallState::Unknown | OverallState::Fatal => StepOutcome::Fatal,
     })
@@ -684,216 +649,88 @@ fn normalize_rest_check_runs(value: &Value) -> Result<Vec<NormalizedCheck>, Engi
         .collect())
 }
 
-/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P06
-/// @requirement:REQ-PRFU-004,REQ-PRFU-005,REQ-PRFU-006
-/// @pseudocode lines 19-33
-fn classify_checks(head_sha: &str, checks: Vec<NormalizedCheck>) -> CheckClassification {
-    let (current_checks, stale_checks): (Vec<_>, Vec<_>) = checks
-        .into_iter()
-        .partition(|check| check.head_sha.as_deref().unwrap_or(head_sha) == head_sha);
-    if current_checks.is_empty() {
-        return CheckClassification {
-            overall_state: if stale_checks.is_empty() {
-                OverallState::Unknown
-            } else {
-                OverallState::Fatal
-            },
-            current_checks,
-            stale_checks,
-            pending_count: 0,
-            unknown_count: 1,
-            failed_count: 0,
-            passed_count: 0,
-        };
-    }
-    let mut pending_count = 0;
-    let mut unknown_count = 0;
-    let mut failed_count = 0;
-    let mut passed_count = 0;
-    for check in &current_checks {
-        match check_bucket(check).as_str() {
-            "passed" => passed_count += 1,
-            "failed" => failed_count += 1,
-            "pending" => pending_count += 1,
-            _ => unknown_count += 1,
+fn check_bucket(check: &NormalizedCheck) -> String {
+    shared_check_bucket(
+        check.status.as_deref(),
+        check.conclusion.as_deref(),
+        &check.bucket,
+        &check.state,
+    )
+}
+
+impl From<NormalizedCheck> for PrCheckObservation {
+    fn from(check: NormalizedCheck) -> Self {
+        let bucket = check_bucket(&check);
+        Self {
+            check_id: check.check_id,
+            name: check.name,
+            status: check.status,
+            conclusion: check.conclusion,
+            state: check.state,
+            bucket,
+            url: check.url,
+            workflow_name: check.workflow_name,
+            run_id: check.run_id,
+            job_id: check.job_id,
+            started_at: check.started_at,
+            completed_at: check.completed_at,
+            head_sha: check.head_sha,
+            app_slug: check.app_slug,
+            source: check.source,
         }
-    }
-    let overall_state = if pending_count > 0 {
-        OverallState::PendingTimeout
-    } else if unknown_count > 0 {
-        OverallState::Unknown
-    } else if failed_count > 0 {
-        OverallState::Failed
-    } else {
-        OverallState::Passed
-    };
-    CheckClassification {
-        overall_state,
-        current_checks,
-        stale_checks,
-        pending_count,
-        unknown_count,
-        failed_count,
-        passed_count,
     }
 }
 
-/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P06
-/// @requirement:REQ-PRFU-004,REQ-PRFU-005,REQ-PRFU-006
-/// @pseudocode lines 20-23,29-32
-fn check_bucket(check: &NormalizedCheck) -> String {
-    let status = check
-        .status
-        .as_deref()
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    let conclusion = check
-        .conclusion
-        .as_deref()
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    let bucket = check.bucket.to_ascii_lowercase();
-    let state = check.state.to_ascii_lowercase();
-    if matches!(bucket.as_str(), "pass" | "passed")
-        || matches!(conclusion.as_str(), "success" | "neutral" | "skipped")
-        || matches!(state.as_str(), "success" | "neutral" | "skipped")
-    {
-        "passed".to_string()
-    } else if matches!(
-        conclusion.as_str(),
-        "failure" | "startup_failure" | "timed_out" | "action_required" | "cancelled"
-    ) || matches!(
-        state.as_str(),
-        "failure" | "failed" | "startup_failure" | "timed_out" | "action_required" | "cancelled"
-    ) || matches!(bucket.as_str(), "fail" | "failed")
-    {
-        "failed".to_string()
-    } else if matches!(
-        status.as_str(),
-        "queued" | "requested" | "waiting" | "pending" | "in_progress"
-    ) || matches!(
-        state.as_str(),
-        "queued" | "requested" | "waiting" | "pending" | "in_progress"
-    ) || matches!(bucket.as_str(), "pending")
-    {
-        "pending".to_string()
-    } else {
-        "unknown".to_string()
-    }
+struct CheckStatusArtifactWrite<'a> {
+    store: &'a PrFollowupArtifactStore,
+    binding: &'a PrFollowupBinding,
+    pr_url: &'a str,
+    classification: &'a PrCheckWaitClassification,
+    config: &'a crate::engine::executors::pr_check_wait::PrCheckWaitConfig,
+    observed_at: &'a str,
+    clock: &'a dyn ClockSleeper,
+    step_order_index: u64,
 }
 
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P06
 /// @requirement:REQ-PRFU-002,REQ-PRFU-004
 /// @pseudocode lines 25,31-32
 // Pre-existing check status artifact shape; split in a dedicated refactor stage.
-#[allow(clippy::too_many_arguments)]
-fn write_check_status_artifact(
-    store: &PrFollowupArtifactStore,
-    binding: &PrFollowupBinding,
-    pr_url: &str,
-    max_attempts: u64,
-    interval_seconds: u64,
-    max_duration_seconds: u64,
-    observations: &[Value],
-    classification: &CheckClassification,
-    fatal_source: Value,
-    clock: &dyn ClockSleeper,
-    step_order_index: u64,
-) -> Result<(), EngineError> {
-    let payload = json!({
-        "pr_url": pr_url,
-        "poll_attempts": observations.len(),
-        "max_attempts": max_attempts,
-        "poll_interval_seconds": interval_seconds,
-        "max_duration_seconds": max_duration_seconds,
-        "overall_state": classification.overall_state,
-        "poll_observations": observations,
-        "checks": checks_json(&classification.current_checks),
-        "stale_checks": checks_json(&classification.stale_checks),
-        "observed_at": clock.now_rfc3339(),
-        "fatal_source": fatal_source,
-        "terminal_counts": terminal_counts_json(classification)
-    });
-    let failure = match classification.overall_state {
+fn write_check_status_artifact(write: CheckStatusArtifactWrite<'_>) -> Result<(), EngineError> {
+    let mut payload = status_payload(
+        write.classification,
+        write.config,
+        &write.binding.head_sha,
+        write.observed_at,
+    );
+    payload["pr_url"] = Value::String(write.pr_url.to_string());
+    payload["poll_attempts"] = json!(write.classification.counters.poll_attempts);
+    payload["max_attempts"] = json!(1);
+    payload["poll_interval_seconds"] = json!(write.config.poll_interval_seconds);
+    payload["max_duration_seconds"] = json!(write.config.max_wait_seconds);
+    payload["fatal_source"] = if write.classification.overall_state == OverallState::Fatal {
+        Value::String(write.classification.reason.clone())
+    } else {
+        Value::Null
+    };
+    let failure = match write.classification.overall_state {
         OverallState::Passed => None,
         other => Some((
             other.as_str(),
             other.as_str(),
-            json!({ "terminal_counts": terminal_counts_json(classification) }),
+            json!({ "terminal_counts": write.classification.terminal_counts }),
         )),
     };
-    store.write_json_artifact(
-        binding,
+    write.store.write_json_artifact(
+        write.binding,
         "pr-check-status",
         "watch_pr_checks",
-        step_order_index,
+        write.step_order_index,
         &payload,
         failure,
-        clock,
+        write.clock,
     )?;
     Ok(())
-}
-
-/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P06
-/// @requirement:REQ-PRFU-004
-/// @pseudocode lines 25,31
-fn observation_json(
-    attempt: u64,
-    observed_at: &str,
-    head_sha: &str,
-    classification: &CheckClassification,
-) -> Value {
-    json!({
-        "attempt_number": attempt,
-        "observed_at": observed_at,
-        "head_sha": head_sha,
-        "current_head_checks": checks_json(&classification.current_checks),
-        "stale_checks": checks_json(&classification.stale_checks),
-        "classification": classification.overall_state,
-        "terminal_counts": terminal_counts_json(classification),
-        "write_sequence": attempt
-    })
-}
-
-/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P06
-/// @requirement:REQ-PRFU-004
-/// @pseudocode lines 18,31
-fn checks_json(checks: &[NormalizedCheck]) -> Vec<Value> {
-    checks
-        .iter()
-        .map(|check| {
-            json!({
-                "check_id": check.check_id,
-                "name": check.name,
-                "status": check.status,
-                "conclusion": check.conclusion,
-                "state": check.state,
-                "bucket": check_bucket(check),
-                "url": check.url,
-                "workflow_name": check.workflow_name,
-                "run_id": check.run_id,
-                "job_id": check.job_id,
-                "started_at": check.started_at,
-                "completed_at": check.completed_at,
-                "head_sha": check.head_sha,
-                "app_slug": check.app_slug,
-                "source": check.source
-            })
-        })
-        .collect()
-}
-
-/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P06
-/// @requirement:REQ-PRFU-004
-/// @pseudocode lines 31
-fn terminal_counts_json(classification: &CheckClassification) -> Value {
-    json!({
-        "passed": classification.passed_count,
-        "failed": classification.failed_count,
-        "pending": classification.pending_count,
-        "unknown": classification.unknown_count,
-        "stale": classification.stale_checks.len()
-    })
 }
 
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P07
@@ -919,9 +756,6 @@ fn collect_ci_failures(
         }
     };
     let source_sequence = require_u64(&check_status, "artifact_sequence")?;
-    // Route from the invariant-validated typed view of the artifact so a stale
-    // or contradictory raw field cannot drive the decision.
-    // @requirement:REQ-PRFU-007
     let typed_check_status: PrCheckStatus =
         serde_json::from_value(check_status.clone()).map_err(|err| {
             EngineError::StepExecutionError {
@@ -1388,55 +1222,6 @@ fn write_bounded_log_artifact(path: &PathBuf, text: &str) -> Result<(), EngineEr
 }
 
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P06
-/// @requirement:REQ-PRFU-004
-/// @pseudocode lines 26-30
-fn classification_is_terminal(classification: &CheckClassification) -> bool {
-    classification.pending_count == 0
-        && classification.unknown_count == 0
-        && !classification.current_checks.is_empty()
-}
-
-/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P06
-/// @requirement:REQ-PRFU-004
-/// @pseudocode lines 24,29
-impl CheckClassification {
-    fn empty(overall_state: OverallState) -> Self {
-        Self {
-            overall_state,
-            current_checks: Vec::new(),
-            stale_checks: Vec::new(),
-            pending_count: 0,
-            unknown_count: 0,
-            failed_count: 0,
-            passed_count: 0,
-        }
-    }
-
-    fn fatal(reason: String) -> Self {
-        let mut fatal = Self::empty(OverallState::Fatal);
-        fatal.unknown_count = 1;
-        fatal.current_checks.push(NormalizedCheck {
-            check_id: "fatal".to_string(),
-            name: reason,
-            status: None,
-            conclusion: None,
-            state: "fatal".to_string(),
-            bucket: "unknown".to_string(),
-            url: None,
-            workflow_name: None,
-            run_id: None,
-            job_id: None,
-            started_at: None,
-            completed_at: None,
-            head_sha: None,
-            app_slug: None,
-            source: "api".to_string(),
-        });
-        fatal
-    }
-}
-
-/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P06
 /// @requirement:REQ-PRFU-001,REQ-PRFU-004
 /// @pseudocode lines 2,16
 fn artifact_root(context: &StepContext, params: &Value) -> Result<std::path::PathBuf, EngineError> {
@@ -1484,13 +1269,6 @@ fn required_param_or_context(
         .or_else(|| context.get(name).cloned())
         .filter(|value| !has_unresolved_template(value))
         .unwrap_or_else(|| fallback.to_string())
-}
-
-/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P06
-/// @requirement:REQ-PRFU-001,REQ-PRFU-004
-/// @pseudocode lines 1,16
-fn u64_param(params: &Value, name: &str, fallback: u64) -> u64 {
-    params.get(name).and_then(Value::as_u64).unwrap_or(fallback)
 }
 
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P06
@@ -1578,7 +1356,10 @@ fn current_step_id(context: &StepContext, fallback: &str) -> String {
 /// @requirement:REQ-PRFU-001,REQ-PRFU-004
 /// @pseudocode lines 1,16
 fn step_order_index(params: &Value, fallback: u64) -> u64 {
-    u64_param(params, "step_order_index", fallback)
+    params
+        .get("step_order_index")
+        .and_then(Value::as_u64)
+        .unwrap_or(fallback)
 }
 
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P06

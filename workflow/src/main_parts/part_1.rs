@@ -41,6 +41,7 @@ use luther_workflow::workflow::config_loader::{
     validate_workflow_tokens,
 };
 use luther_workflow::workflow::schema::{WorkflowConfig, WorkflowType};
+use serde_json::Value;
 use luther_workflow::workflow::target_profile::{
     apply_target_profile_overrides, target_profile_validation_required, validate_target_profile,
     TargetProfileOverrides,
@@ -601,11 +602,18 @@ fn persist_external_wait_state(
     record.pr_number = identity.pr_number;
     record.head_sha = identity.head_sha;
     record.wait_kind = wait_kind;
+    let step_params = wait_step_parameters(config, step_id);
     record.wait_condition = serde_json::json!({
         "step_id": step_id,
         "reason": reason,
         "repository": request.repo,
-        "issue_number": request.issue_number
+        "issue_number": request.issue_number,
+        "artifact_root": step_params.get("artifact_root").cloned().unwrap_or(serde_json::Value::Null),
+        "check_policy": step_params.get("check_policy").cloned().unwrap_or(serde_json::Value::Null),
+        "pr_check_policy": step_params.get("pr_check_policy").cloned().unwrap_or(serde_json::Value::Null),
+        "head_ref": step_params.get("head_ref").cloned().unwrap_or(serde_json::Value::Null),
+        "base_ref": step_params.get("base_ref").cloned().unwrap_or(serde_json::Value::Null),
+        "base_sha": step_params.get("base_sha").cloned().unwrap_or(serde_json::Value::Null)
     });
     record.last_observed_state = serde_json::json!({
         "classification": "suspended",
@@ -873,6 +881,20 @@ fn lookup_lease_id(
     .map(|lease| lease.map(|lease| lease.lease_id))
     .map_err(|e| e.to_string())
 }
+fn wait_step_parameters(config: &WorkflowConfig, step_id: &str) -> Value {
+    let config_root = std::path::PathBuf::from("config");
+    let workflow_type = match resolve_workflow_type(&config.workflow_type_id, &config_root) {
+        Ok(workflow_type) => workflow_type,
+        Err(_) => return Value::Null,
+    };
+    workflow_type
+        .steps
+        .iter()
+        .find(|step| step.step_id == step_id)
+        .and_then(|step| step.parameters.clone())
+        .unwrap_or(Value::Null)
+}
+
 
 fn wait_kind_for_step(step_id: &str) -> WaitKind {
     match step_id {

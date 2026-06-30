@@ -21,6 +21,7 @@ pub mod github_feedback;
 pub mod github_pr;
 pub mod llxprt;
 pub mod noop;
+pub mod pr_check_wait;
 pub mod pr_followup_artifacts;
 pub mod pr_followup_types;
 pub mod pr_remediation;

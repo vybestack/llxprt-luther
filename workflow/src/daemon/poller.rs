@@ -4,6 +4,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::adapters::github::{GithubCommandRunner, GithubError, SystemGithubCommandRunner};
+use crate::engine::executors::pr_check_wait::{
+    check_bucket as shared_check_bucket, classify_api_error, classify_pr_checks,
+    counters_from_value, status_payload, PrCheckObservation, PrCheckWaitConfig,
+};
+use crate::engine::executors::pr_followup_artifacts::{ClockSleeper, PrFollowupArtifactStore};
+use crate::engine::executors::pr_followup_types::{PrFollowupBinding, PR_FOLLOWUP_SCHEMA_VERSION};
 use crate::persistence::checkpoint::{set_resume_point, PersistenceError};
 use crate::persistence::leases::{update_lease_status, LeaseStatus};
 use crate::persistence::run_metadata::RunStatus;
@@ -151,11 +157,24 @@ fn poll_pr_checks(record: &WaitStateRecord, runner: &dyn GithubCommandRunner) ->
     let Some(head_sha) = record.head_sha.as_deref() else {
         return terminal_failure(record, missing_identity_state(record));
     };
-    let checks = match query_pr_checks(runner, &record.repository, pr_number, head_sha) {
-        Ok(checks) => checks,
-        Err(err) => return PollDecision::transient(record, github_error_state(err)),
+    let config = pr_check_config(record);
+    let counters = counters_from_value(&record.last_observed_state);
+    let classification = match query_pr_checks(runner, &record.repository, pr_number, head_sha) {
+        Ok(checks) => classify_pr_checks(
+            head_sha,
+            checks.into_iter().map(normalize_poll_check).collect(),
+            &config,
+            counters,
+        ),
+        Err(err) => classify_api_error(&config, counters, err.to_string()),
     };
-    classify_terminal_or_pending(record, checks)
+    let observed_state = pr_check_observed_state(record, head_sha, &config, &classification);
+    match classification.overall_state.as_str() {
+        "passed" => PollDecision::ready(record, observed_state),
+        "failed" | "fatal" => terminal_failure(record, observed_state),
+        "pending_timeout" => PollDecision::still_waiting_with_state(record, observed_state),
+        _ => PollDecision::transient(record, observed_state),
+    }
 }
 
 fn query_pr_checks(
@@ -203,55 +222,182 @@ fn query_pr_checks(
     }
     Ok(checks)
 }
-
-fn classify_terminal_or_pending(record: &WaitStateRecord, rows: Vec<Value>) -> PollDecision {
-    let buckets: Vec<String> = rows.iter().map(check_bucket).collect();
-    let state = json!({
-        "classification": "polled",
-        "wait_kind": record.wait_kind,
-        "checks": rows,
-        "buckets": buckets,
-    });
-    if rows.is_empty()
-        || buckets
-            .iter()
-            .any(|bucket| bucket == "pending" || bucket == "unknown")
-    {
-        return PollDecision::still_waiting_with_state(record, state);
-    }
-    PollDecision::ready(record, state)
+fn pr_check_config(record: &WaitStateRecord) -> PrCheckWaitConfig {
+    record
+        .wait_condition
+        .get("check_policy")
+        .or_else(|| record.wait_condition.get("pr_check_policy"))
+        .and_then(|value| serde_json::from_value(value.clone()).ok())
+        .unwrap_or_default()
 }
 
-fn check_bucket(row: &Value) -> String {
-    let fields = ["bucket", "state", "status", "conclusion"];
-    let words = fields
-        .iter()
-        .filter_map(|field| row.get(field).and_then(Value::as_str))
-        .map(str::to_ascii_lowercase)
-        .collect::<Vec<_>>()
-        .join(" ");
-    let words = words.split_whitespace().collect::<Vec<_>>();
-    if words
-        .iter()
-        .any(|word| matches!(*word, "pass" | "passed" | "success" | "neutral" | "skipped"))
-    {
-        "passed".to_string()
-    } else if words.iter().any(|word| {
-        matches!(
-            *word,
-            "fail" | "failed" | "failure" | "startup_failure" | "timed_out" | "cancelled"
-        )
-    }) {
-        "failed".to_string()
-    } else if words.iter().any(|word| {
-        matches!(
-            *word,
-            "queued" | "requested" | "waiting" | "pending" | "in_progress" | "action_required"
-        )
-    }) {
-        "pending".to_string()
-    } else {
-        "unknown".to_string()
+fn pr_check_observed_state(
+    record: &WaitStateRecord,
+    head_sha: &str,
+    config: &PrCheckWaitConfig,
+    classification: &crate::engine::executors::pr_check_wait::PrCheckWaitClassification,
+) -> Value {
+    let mut state = status_payload(classification, config, head_sha, &Utc::now().to_rfc3339());
+    state["classification"] = json!(classification.overall_state.as_str());
+    state["wait_kind"] = json!(record.wait_kind);
+    if let Err(err) = write_pr_check_status_snapshot(record, &state) {
+        state["artifact_error"] = json!(err.to_string());
+    }
+    state
+}
+
+fn write_pr_check_status_snapshot(
+    record: &WaitStateRecord,
+    state: &Value,
+) -> Result<(), crate::engine::runner::EngineError> {
+    let artifact_root = record
+        .wait_condition
+        .get("artifact_root")
+        .and_then(Value::as_str)
+        .map(std::path::PathBuf::from);
+    let Some(artifact_root) = artifact_root else {
+        return Ok(());
+    };
+    let Some(pr_number) = record.pr_number else {
+        return Ok(());
+    };
+    let Some(head_sha) = record.head_sha.as_deref() else {
+        return Ok(());
+    };
+    let Some((owner, repo)) = record_repo_parts(&record.repository) else {
+        return Ok(());
+    };
+    let binding = PrFollowupBinding {
+        schema_version: PR_FOLLOWUP_SCHEMA_VERSION,
+        run_id: record.run_id.clone(),
+        repository_owner: owner.to_string(),
+        repository_name: repo.to_string(),
+        pr_number,
+        head_ref: record
+            .wait_condition
+            .get("head_ref")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        head_sha: head_sha.to_string(),
+        base_ref: record
+            .wait_condition
+            .get("base_ref")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        base_sha: record
+            .wait_condition
+            .get("base_sha")
+            .and_then(Value::as_str)
+            .map(ToString::to_string),
+    };
+    let store = PrFollowupArtifactStore::new(artifact_root);
+    let clock = PollerClock;
+    store.write_json_artifact(
+        &binding,
+        "pr-check-status",
+        "poll_pr_checks",
+        3,
+        state,
+        None,
+        &clock,
+    )?;
+    Ok(())
+}
+
+struct PollerClock;
+
+impl ClockSleeper for PollerClock {
+    fn now_rfc3339(&self) -> String {
+        Utc::now().to_rfc3339()
+    }
+
+    fn sleep(&self, _duration: std::time::Duration) {}
+}
+
+fn normalize_poll_check(row: Value) -> PrCheckObservation {
+    let name = row
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown")
+        .to_string();
+    let state = row
+        .get("state")
+        .or_else(|| row.get("status"))
+        .or_else(|| row.get("conclusion"))
+        .and_then(Value::as_str)
+        .unwrap_or("unknown")
+        .to_string();
+    let status = row
+        .get("status")
+        .or_else(|| row.get("state"))
+        .and_then(Value::as_str);
+    let conclusion = row
+        .get("conclusion")
+        .or_else(|| row.get("state"))
+        .and_then(Value::as_str);
+    let bucket_raw = row.get("bucket").and_then(Value::as_str).unwrap_or(&state);
+    PrCheckObservation {
+        check_id: row
+            .get("id")
+            .and_then(Value::as_u64)
+            .map_or_else(|| name.clone(), |id| id.to_string()),
+        name,
+        status: status.map(ToString::to_string),
+        conclusion: conclusion.map(ToString::to_string),
+        state: state.clone(),
+        bucket: shared_check_bucket(status, conclusion, bucket_raw, &state),
+        url: row
+            .get("link")
+            .or_else(|| row.get("html_url"))
+            .or_else(|| row.get("details_url"))
+            .and_then(Value::as_str)
+            .map(ToString::to_string),
+        workflow_name: row
+            .get("workflow")
+            .and_then(Value::as_str)
+            .map(ToString::to_string),
+        run_id: row.pointer("/check_suite/id").and_then(Value::as_u64),
+        job_id: None,
+        started_at: row
+            .get("startedAt")
+            .or_else(|| row.get("started_at"))
+            .and_then(Value::as_str)
+            .map(ToString::to_string),
+        completed_at: row
+            .get("completedAt")
+            .or_else(|| row.get("completed_at"))
+            .and_then(Value::as_str)
+            .map(ToString::to_string),
+        head_sha: row
+            .get("head_sha")
+            .and_then(Value::as_str)
+            .map(ToString::to_string),
+        app_slug: row
+            .pointer("/app/slug")
+            .and_then(Value::as_str)
+            .map(ToString::to_string),
+        source: "daemon_poll".to_string(),
+    }
+}
+
+#[cfg(test)]
+fn classify_terminal_or_pending(record: &WaitStateRecord, rows: Vec<Value>) -> PollDecision {
+    let config = pr_check_config(record);
+    let head_sha = record.head_sha.as_deref().unwrap_or_default();
+    let classification = classify_pr_checks(
+        head_sha,
+        rows.into_iter().map(normalize_poll_check).collect(),
+        &config,
+        counters_from_value(&record.last_observed_state),
+    );
+    let state = pr_check_observed_state(record, head_sha, &config, &classification);
+    match classification.overall_state.as_str() {
+        "passed" => PollDecision::ready(record, state),
+        "failed" | "fatal" => terminal_failure(record, state),
+        "pending_timeout" => PollDecision::still_waiting_with_state(record, state),
+        _ => PollDecision::transient(record, state),
     }
 }
 
@@ -643,6 +789,16 @@ mod tests {
         record.lease_id = Some(lease.lease_id);
         record.repository = "o/r".to_string();
         record.issue_number = 62;
+        record.pr_number = Some(7);
+        record.head_sha = Some("head-a".to_string());
+        record.wait_condition = json!({
+            "check_policy": {
+                "required": [{ "mode": "exact", "pattern": "ci" }],
+                "missing_retry_attempts": 1,
+                "api_error_retry_attempts": 1,
+                "poll_interval_seconds": 1
+            }
+        });
         record.poll_interval_seconds = 1;
         record.resume_step = "watch_pr_checks".to_string();
         crate::persistence::checkpoint::save_checkpoint_with_conn(
@@ -654,6 +810,24 @@ mod tests {
         metadata.set_current_step(record.resume_step.clone());
         crate::persistence::persist_run_with_conn(c, &metadata).unwrap();
         record
+    }
+
+    struct ScriptedPrCheckRunner {
+        responses: std::sync::Mutex<Vec<Result<String, GithubError>>>,
+    }
+
+    impl ScriptedPrCheckRunner {
+        fn new(responses: Vec<Result<String, GithubError>>) -> Self {
+            Self {
+                responses: std::sync::Mutex::new(responses),
+            }
+        }
+    }
+
+    impl GithubCommandRunner for ScriptedPrCheckRunner {
+        fn run(&self, _argv: &[String]) -> Result<String, GithubError> {
+            self.responses.lock().unwrap().remove(0)
+        }
     }
 
     static ARTIFACT_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -793,13 +967,13 @@ mod tests {
     }
 
     #[test]
-    fn failed_pr_checks_are_ready_to_resume_for_remediation() {
+    fn failed_pr_checks_are_terminal_failure() {
         let record = wait_record(&conn());
         let decision = classify_terminal_or_pending(
             &record,
             vec![json!({ "name": "ci", "state": "failure", "bucket": "fail" })],
         );
-        assert_eq!(decision.classification, PollClassification::ReadyToResume);
+        assert_eq!(decision.classification, PollClassification::TerminalFailure);
     }
 
     #[test]
@@ -810,6 +984,61 @@ mod tests {
             vec![json!({ "name": "ci", "state": "in_progress", "bucket": "pending" })],
         );
         assert_eq!(decision.classification, PollClassification::StillWaiting);
+    }
+
+    #[test]
+    fn later_passing_public_checks_resume_after_pending_snapshot() {
+        let c = conn();
+        let mut record = wait_record(&c);
+        record.last_observed_state = json!({
+            "overall_state": "pending_timeout",
+            "poll_state": {
+                "missing_attempts": 0,
+                "api_error_attempts": 0,
+                "poll_attempts": 1
+            },
+            "checks": [{
+                "name": "ci",
+                "state": "in_progress",
+                "bucket": "pending",
+                "head_sha": "head-a"
+            }]
+        });
+        upsert_wait_state(&c, &record).unwrap();
+        let runner = ScriptedPrCheckRunner::new(vec![
+            Ok(json!([{ "name": "ci", "state": "SUCCESS", "bucket": "pass" }]).to_string()),
+            Ok(json!({ "total_count": 0, "check_runs": [] }).to_string()),
+        ]);
+        let poller = SystemExternalWaitPoller::with_runner(runner);
+
+        let decision = poller.poll(&record);
+        apply_poll_decision(&c, &record, &decision).unwrap();
+
+        assert_eq!(decision.classification, PollClassification::ReadyToResume);
+        assert_eq!(
+            decision
+                .observed_state
+                .get("overall_state")
+                .and_then(Value::as_str),
+            Some("passed"),
+            "a later passing public check snapshot must override an earlier pending_timeout",
+        );
+        assert_eq!(
+            decision
+                .observed_state
+                .pointer("/poll_state/poll_attempts")
+                .and_then(Value::as_u64),
+            Some(2),
+            "daemon polls must carry the durable poll counter forward",
+        );
+        assert!(
+            get_wait_state(&c, &record.run_id).unwrap().is_none(),
+            "ready PR checks should delete the durable wait state",
+        );
+        let lease = get_lease_for_issue(&c, &record.repository, record.issue_number)
+            .unwrap()
+            .expect("lease");
+        assert_eq!(lease.status, LeaseStatus::ReadyToResume);
     }
 
     #[test]
