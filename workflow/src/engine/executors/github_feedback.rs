@@ -6,6 +6,7 @@
 //! @pseudocode lines 1-49
 include!("github_feedback/part_1.rs");
 include!("github_feedback/part_2.rs");
+include!("github_feedback/part_2b.rs");
 include!("github_feedback/part_3.rs");
 include!("github_feedback/part_4.rs");
 include!("github_feedback/part_5.rs");

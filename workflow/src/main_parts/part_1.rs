@@ -761,24 +761,40 @@ fn has_unresolved_config_token(value: &str) -> bool {
     let bytes = value.as_bytes();
     let mut index = 0;
     while index < bytes.len() {
-        if bytes[index] == b'{' {
-            let Some(close) = value[index + 1..].find('}') else {
-                return true;
-            };
-            let token = &value[index + 1..index + 1 + close];
-            if !token.is_empty()
-                && token
-                    .chars()
-                    .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '.')
-            {
-                return true;
-            }
-            index += close + 2;
-        } else {
+        if bytes[index] != b'{' {
             index += 1;
+            continue;
         }
+        let close = match value[index + 1..].find('}') {
+            Some(close) => close,
+            None => return true,
+        };
+        let token = &value[index + 1..index + 1 + close];
+        if is_config_token_name(token) {
+            return true;
+        }
+        index += close + 2;
     }
     false
+}
+
+fn is_config_token_name(token: &str) -> bool {
+    if token.is_empty() {
+        return false;
+    }
+    for byte in token.bytes() {
+        if !is_config_token_byte(byte) {
+            return false;
+        }
+    }
+    true
+}
+
+const CONFIG_TOKEN_UNDERSCORE: u8 = 95;
+const CONFIG_TOKEN_DOT: u8 = 46;
+
+fn is_config_token_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == CONFIG_TOKEN_UNDERSCORE || byte == CONFIG_TOKEN_DOT
 }
 
 fn read_pr_identity_artifact(
