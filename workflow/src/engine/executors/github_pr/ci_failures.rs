@@ -79,6 +79,7 @@ impl LogCollectionResult {
 struct CiFailureCollection {
     failures: Vec<Value>,
     pending_or_unknown: Vec<Value>,
+    stale_checks: Vec<Value>,
     log_artifacts: Vec<Value>,
 }
 
@@ -198,7 +199,7 @@ fn collect_ci_failure_fragments(
     collect_stale_check_fragments(
         input.check_status,
         input.source_sequence,
-        &mut collection.pending_or_unknown,
+        &mut collection.stale_checks,
     );
     add_watcher_fatal_fragment(input.check_status, input.source_sequence, &mut collection);
     Ok(collection)
@@ -314,6 +315,7 @@ fn ci_failures_payload(
         "collection_state": collection_state,
         "failures": collection.failures,
         "pending_or_unknown": collection.pending_or_unknown,
+        "stale_checks": collection.stale_checks,
         "watcher_fatal_source": watcher_fatal_source,
         "fatal_source": fatal_source,
         "log_artifacts": collection.log_artifacts,
@@ -539,7 +541,8 @@ fn resolve_job_id(
         return Ok(None);
     };
     let mut jobs_seen = 0_u64;
-    for page in 1..=2 {
+    let mut page = 1_u64;
+    loop {
         let argv = vec![
             "gh".to_string(),
             "api".to_string(),
@@ -566,9 +569,10 @@ fn resolve_job_id(
             .get("total_count")
             .and_then(Value::as_u64)
             .unwrap_or(jobs_seen);
-        if jobs_len == 0 || (jobs_seen >= total_count && jobs_len >= 100) {
+        if jobs_len == 0 || jobs_seen >= total_count {
             break;
         }
+        page = page.saturating_add(1);
     }
     Ok(None)
 }

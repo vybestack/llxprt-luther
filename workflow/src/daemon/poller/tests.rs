@@ -195,11 +195,21 @@ fn terminal_pr_checks_are_ready_to_resume() {
 }
 
 #[test]
-fn failed_pr_checks_are_terminal_failure() {
+fn failed_pr_checks_are_ready_to_resume() {
     let record = wait_record(&conn());
     let decision = classify_terminal_or_pending(
         &record,
         vec![json!({ "name": "ci", "state": "failure", "bucket": "fail" })],
+    );
+    assert_eq!(decision.classification, PollClassification::ReadyToResume);
+}
+
+#[test]
+fn unknown_pr_checks_are_terminal_failure() {
+    let record = wait_record(&conn());
+    let decision = classify_terminal_or_pending(
+        &record,
+        vec![json!({ "name": "ci", "state": "mystery", "bucket": "unknown" })],
     );
     assert_eq!(decision.classification, PollClassification::TerminalFailure);
 }
@@ -218,6 +228,12 @@ fn pending_pr_checks_keep_waiting() {
 fn later_passing_public_checks_resume_after_pending_snapshot() {
     let c = conn();
     let mut record = wait_record(&c);
+    let artifact_root = tempfile::tempdir().unwrap();
+    record.wait_condition["artifact_root"] =
+        json!(artifact_root.path().to_string_lossy().to_string());
+    record.wait_condition["head_ref"] = json!("feature");
+    record.wait_condition["base_ref"] = json!("main");
+    record.wait_condition["base_sha"] = json!("base-a");
     record.last_observed_state = json!({
         "overall_state": "pending_timeout",
         "poll_state": {
@@ -267,6 +283,19 @@ fn later_passing_public_checks_resume_after_pending_snapshot() {
         .unwrap()
         .expect("lease");
     assert_eq!(lease.status, LeaseStatus::ReadyToResume);
+    let status_path = artifact_root
+        .path()
+        .join("pr-followup")
+        .join("current")
+        .join(&record.run_id)
+        .join("o")
+        .join("r")
+        .join("7")
+        .join("pr-check-status.json");
+    assert!(
+        status_path.exists(),
+        "ready PR check polling should persist a pr-check-status snapshot"
+    );
 }
 
 #[test]

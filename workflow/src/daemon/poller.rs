@@ -157,7 +157,12 @@ fn poll_pr_checks(record: &WaitStateRecord, runner: &dyn GithubCommandRunner) ->
     let Some(head_sha) = record.head_sha.as_deref() else {
         return terminal_failure(record, missing_identity_state(record));
     };
-    let config = pr_check_config(record);
+    let config = match pr_check_config(record) {
+        Ok(config) => config,
+        Err(err) => {
+            return terminal_failure(record, pr_check_config_error_state(record, head_sha, err));
+        }
+    };
     let counters = counters_from_value(&record.last_observed_state);
     let classification = match query_pr_checks(runner, &record.repository, pr_number, head_sha) {
         Ok(checks) => classify_pr_checks(
@@ -170,8 +175,8 @@ fn poll_pr_checks(record: &WaitStateRecord, runner: &dyn GithubCommandRunner) ->
     };
     let observed_state = pr_check_observed_state(record, head_sha, &config, &classification);
     match classification.overall_state.as_str() {
-        "passed" => PollDecision::ready(record, observed_state),
-        "failed" | "fatal" => terminal_failure(record, observed_state),
+        "passed" | "failed" => PollDecision::ready(record, observed_state),
+        "fatal" | "unknown" => terminal_failure(record, observed_state),
         "pending_timeout" => PollDecision::still_waiting_with_state(record, observed_state),
         _ => PollDecision::transient(record, observed_state),
     }
@@ -222,13 +227,16 @@ fn query_pr_checks(
     }
     Ok(checks)
 }
-fn pr_check_config(record: &WaitStateRecord) -> PrCheckWaitConfig {
-    record
+fn pr_check_config(record: &WaitStateRecord) -> Result<PrCheckWaitConfig, String> {
+    let Some(value) = record
         .wait_condition
         .get("check_policy")
         .or_else(|| record.wait_condition.get("pr_check_policy"))
-        .and_then(|value| serde_json::from_value(value.clone()).ok())
-        .unwrap_or_default()
+        .filter(|value| !value.is_null())
+    else {
+        return Ok(PrCheckWaitConfig::default());
+    };
+    serde_json::from_value(value.clone()).map_err(|err| format!("invalid PR check policy: {err}"))
 }
 
 fn pr_check_observed_state(
@@ -240,9 +248,6 @@ fn pr_check_observed_state(
     let mut state = status_payload(classification, config, head_sha, &Utc::now().to_rfc3339());
     state["classification"] = json!(classification.overall_state.as_str());
     state["wait_kind"] = json!(record.wait_kind);
-    if let Err(err) = write_pr_check_status_snapshot(record, &state) {
-        state["artifact_error"] = json!(err.to_string());
-    }
     state
 }
 
@@ -358,7 +363,12 @@ fn normalize_poll_check(row: Value) -> PrCheckObservation {
             .get("workflow")
             .and_then(Value::as_str)
             .map(ToString::to_string),
-        run_id: row.pointer("/check_suite/id").and_then(Value::as_u64),
+        run_id: extract_actions_run_id(
+            row.get("html_url")
+                .or_else(|| row.get("details_url"))
+                .or_else(|| row.get("link"))
+                .and_then(Value::as_str),
+        ),
         job_id: None,
         started_at: row
             .get("startedAt")
@@ -384,8 +394,9 @@ fn normalize_poll_check(row: Value) -> PrCheckObservation {
 
 #[cfg(test)]
 fn classify_terminal_or_pending(record: &WaitStateRecord, rows: Vec<Value>) -> PollDecision {
-    let config = pr_check_config(record);
     let head_sha = record.head_sha.as_deref().unwrap_or_default();
+    let config = pr_check_config(record)
+        .unwrap_or_else(|err| panic!("test PR check config should be valid: {err}"));
     let classification = classify_pr_checks(
         head_sha,
         rows.into_iter().map(normalize_poll_check).collect(),
@@ -394,8 +405,8 @@ fn classify_terminal_or_pending(record: &WaitStateRecord, rows: Vec<Value>) -> P
     );
     let state = pr_check_observed_state(record, head_sha, &config, &classification);
     match classification.overall_state.as_str() {
-        "passed" => PollDecision::ready(record, state),
-        "failed" | "fatal" => terminal_failure(record, state),
+        "passed" | "failed" => PollDecision::ready(record, state),
+        "fatal" | "unknown" => terminal_failure(record, state),
         "pending_timeout" => PollDecision::still_waiting_with_state(record, state),
         _ => PollDecision::transient(record, state),
     }
@@ -625,6 +636,13 @@ fn parse_json_or_null(text: &str) -> Value {
     serde_json::from_str(text).unwrap_or(Value::Null)
 }
 
+fn extract_actions_run_id(url: Option<&str>) -> Option<u64> {
+    let url = url?;
+    let marker = "/actions/runs/";
+    let (_, after) = url.split_once(marker)?;
+    after.split('/').next()?.parse().ok()
+}
+
 fn missing_identity_state(record: &WaitStateRecord) -> Value {
     json!({
         "classification": "still_waiting",
@@ -646,6 +664,16 @@ fn terminal_failure(record: &WaitStateRecord, observed_state: Value) -> PollDeci
 
 fn github_error_state(err: GithubError) -> Value {
     json!({ "classification": "transient_failure", "error": err.to_string() })
+}
+
+fn pr_check_config_error_state(record: &WaitStateRecord, head_sha: &str, err: String) -> Value {
+    json!({
+        "classification": "fatal",
+        "reason": "invalid_pr_check_policy",
+        "wait_kind": record.wait_kind,
+        "head_sha": head_sha,
+        "error": err
+    })
 }
 
 fn contains_any(text: &str, needles: &[&str]) -> bool {
@@ -714,7 +742,11 @@ pub fn apply_poll_decision(
         }
     }
     tx.commit()?;
-    if let Err(e) = persist_poll_artifacts(record, decision) {
+    let mut decision = decision.clone();
+    if let Err(err) = write_committed_pr_check_snapshot(record, &decision.observed_state) {
+        decision.observed_state["artifact_error"] = json!(err.to_string());
+    }
+    if let Err(e) = persist_poll_artifacts(record, &decision) {
         eprintln!(
             "Warning: failed to persist poll artifact for run {}: {e}",
             record.run_id
@@ -733,6 +765,16 @@ fn persist_poll_artifacts(
         write_resume_decision_artifact(&record.run_id, decision).map_err(persistence_to_sqlite)?;
     }
     Ok(())
+}
+
+fn write_committed_pr_check_snapshot(
+    record: &WaitStateRecord,
+    observed_state: &Value,
+) -> Result<(), crate::engine::runner::EngineError> {
+    if record.wait_kind != WaitKind::PrChecks {
+        return Ok(());
+    }
+    write_pr_check_status_snapshot(record, observed_state)
 }
 
 fn persistence_to_sqlite(error: PersistenceError) -> rusqlite::Error {

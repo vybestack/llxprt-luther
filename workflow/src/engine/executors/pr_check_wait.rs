@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -29,7 +31,7 @@ pub struct PrCheckWaitConfig {
     pub optional: Vec<PrCheckDefinition>,
     #[serde(default)]
     pub ignored: Vec<PrCheckDefinition>,
-    #[serde(default)]
+    #[serde(default = "default_allow_unmatched_success")]
     pub allow_unmatched_success: bool,
     #[serde(default)]
     pub default_allow_skipped: bool,
@@ -131,6 +133,12 @@ pub fn classify_pr_checks(
         .collect::<Vec<_>>();
     let required = match_definitions(&considered, &config.required, config.default_allow_skipped);
     let optional = match_definitions(&considered, &config.optional, config.default_allow_skipped);
+    let matched_check_ids = matched_check_ids(&required, &optional);
+    let unmatched = considered
+        .iter()
+        .copied()
+        .filter(|check| !matched_check_ids.contains(&check.check_id))
+        .collect::<Vec<_>>();
     let missing_required = required
         .iter()
         .filter(|result| result.matched_check_ids.is_empty())
@@ -145,7 +153,7 @@ pub fn classify_pr_checks(
     let (overall_state, reason) = classify_state(
         &required,
         &optional,
-        &considered,
+        &unmatched,
         &missing_required,
         config,
         &counters,
@@ -223,13 +231,15 @@ pub fn status_payload(
     })
 }
 
-#[must_use]
-pub fn config_from_value(params: &Value) -> PrCheckWaitConfig {
-    params
+pub fn config_from_value(params: &Value) -> Result<PrCheckWaitConfig, String> {
+    let Some(value) = params
         .get("check_policy")
         .or_else(|| params.get("pr_check_policy"))
-        .and_then(|value| serde_json::from_value(value.clone()).ok())
-        .unwrap_or_default()
+        .filter(|value| !value.is_null())
+    else {
+        return Ok(PrCheckWaitConfig::default());
+    };
+    serde_json::from_value(value.clone()).map_err(|err| format!("invalid PR check policy: {err}"))
 }
 
 #[must_use]
@@ -285,16 +295,16 @@ pub fn check_bucket(
 fn classify_state(
     required: &[PrCheckMatchResult],
     optional: &[PrCheckMatchResult],
-    considered: &[&PrCheckObservation],
+    unmatched: &[&PrCheckObservation],
     missing_required: &[String],
     config: &PrCheckWaitConfig,
     counters: &PrCheckWaitCounters,
 ) -> (OverallState, String) {
-    if !missing_required.is_empty() {
-        return missing_state(config, counters);
-    }
     if required.iter().any(|result| result.state == "failed") {
         return (OverallState::Failed, "required_check_failed".to_string());
+    }
+    if !missing_required.is_empty() {
+        return missing_state(config, counters);
     }
     if required.iter().any(|result| result.state == "pending") {
         return (
@@ -305,7 +315,7 @@ fn classify_state(
     if config.block_optional_failures && optional.iter().any(|result| result.state == "failed") {
         return (OverallState::Failed, "optional_check_failed".to_string());
     }
-    if considered.iter().any(|check| check.bucket == "pending") {
+    if unmatched.iter().any(|check| check.bucket == "pending") {
         return (
             OverallState::PendingTimeout,
             "unmatched_check_pending".to_string(),
@@ -314,13 +324,13 @@ fn classify_state(
     if required.iter().any(|result| result.state == "unknown") {
         return (OverallState::Unknown, "required_check_unknown".to_string());
     }
-    if considered
+    if unmatched
         .iter()
         .any(|check| classify_check(check, config.default_allow_skipped) == "failed")
     {
         return (OverallState::Failed, "unmatched_check_failed".to_string());
     }
-    if considered.iter().any(|check| check.bucket == "unknown") {
+    if unmatched.iter().any(|check| check.bucket == "unknown") {
         return (OverallState::Unknown, "unmatched_check_unknown".to_string());
     }
     if required.is_empty() && !config.allow_unmatched_success {
@@ -329,10 +339,18 @@ fn classify_state(
             "no_required_checks_configured".to_string(),
         );
     }
-    if considered.is_empty() && !required.is_empty() {
-        return missing_state(config, counters);
-    }
     (OverallState::Passed, "configured_checks_passed".to_string())
+}
+
+fn matched_check_ids(
+    required: &[PrCheckMatchResult],
+    optional: &[PrCheckMatchResult],
+) -> BTreeSet<String> {
+    required
+        .iter()
+        .chain(optional.iter())
+        .flat_map(|result| result.matched_check_ids.iter().cloned())
+        .collect()
 }
 
 fn missing_state(
@@ -456,6 +474,10 @@ fn terminal_counts(
 
 const fn default_match_mode() -> PrCheckMatchMode {
     PrCheckMatchMode::Exact
+}
+
+const fn default_allow_unmatched_success() -> bool {
+    true
 }
 
 const fn default_missing_retry_attempts() -> u32 {

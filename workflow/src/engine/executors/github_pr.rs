@@ -303,8 +303,8 @@ fn watch_pr_checks(
         .and_then(Value::as_str)
         .unwrap_or_default()
         .to_string();
-    let config = config_from_value(params);
-    let counters = counters_from_value(&pr_value);
+    let config = config_from_value(params).map_err(github_pr_error)?;
+    let counters = read_matching_check_status_counters(&store, &binding);
     let observed_at = clock.now_rfc3339();
     let classification = match query_checks(&binding, runner) {
         Ok(checks) => classify_pr_checks(
@@ -600,7 +600,11 @@ fn normalize_rest_check_runs(value: &Value) -> Result<Vec<NormalizedCheck>, Engi
                     .pointer("/check_suite/id")
                     .and_then(Value::as_u64)
                     .map(|id| format!("suite-{id}")),
-                run_id: row.pointer("/check_suite/id").and_then(Value::as_u64),
+                run_id: extract_run_id(
+                    row.get("html_url")
+                        .or_else(|| row.get("details_url"))
+                        .and_then(Value::as_str),
+                ),
                 job_id: extract_job_id(row.get("details_url").and_then(Value::as_str)),
                 started_at: row
                     .get("started_at")
@@ -706,6 +710,20 @@ fn write_check_status_artifact(write: CheckStatusArtifactWrite<'_>) -> Result<()
         write.clock,
     )?;
     Ok(())
+}
+
+fn read_matching_check_status_counters(
+    store: &PrFollowupArtifactStore,
+    binding: &PrFollowupBinding,
+) -> crate::engine::executors::pr_check_wait::PrCheckWaitCounters {
+    store
+        .read_current_json(binding, "pr-check-status")
+        .ok()
+        .filter(|value| {
+            value.get("head_sha").and_then(Value::as_str) == Some(binding.head_sha.as_str())
+        })
+        .map(|value| counters_from_value(&value))
+        .unwrap_or_default()
 }
 
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P06
@@ -827,6 +845,13 @@ fn extract_job_id(url: Option<&str>) -> Option<u64> {
         return None;
     }
     url.rsplit('/').next()?.parse().ok()
+}
+
+fn extract_run_id(url: Option<&str>) -> Option<u64> {
+    let url = url?;
+    let marker = "/actions/runs/";
+    let (_, after) = url.split_once(marker)?;
+    after.split('/').next()?.parse().ok()
 }
 
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P06
