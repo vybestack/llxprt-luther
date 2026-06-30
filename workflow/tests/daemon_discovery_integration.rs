@@ -62,6 +62,9 @@ fn discovery_cfg() -> DiscoveryConfig {
         milestone_order: Some("semver".to_string()),
         max_concurrent_runs: Some(5),
         poll_interval_secs: Some(300),
+        max_concurrent_active_runs: None,
+        max_concurrent_runs_per_repository: None,
+        max_concurrent_runs_per_config: None,
     }
 }
 

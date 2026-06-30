@@ -189,4 +189,41 @@ pub struct DiscoveryConfig {
     /// Discovery poll interval in seconds. Defaults to 300.
     #[serde(default)]
     pub poll_interval_secs: Option<u64>,
+    /// Global active run ceiling used by supervisor schedulers.
+    #[serde(default)]
+    pub max_concurrent_active_runs: Option<u32>,
+    /// Per-repository active run ceiling for multi-target daemons.
+    #[serde(default)]
+    pub max_concurrent_runs_per_repository: Option<u32>,
+    /// Per-config active run ceiling for supervisor schedulers; when set, it
+    /// takes precedence over legacy `max_concurrent_runs`.
+    #[serde(default)]
+    pub max_concurrent_runs_per_config: Option<u32>,
+}
+
+/// Supervisor-level configuration for the multi-target daemon scheduler.
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, Default, PartialEq, Eq)]
+pub struct DaemonSchedulerConfig {
+    /// Global ceiling for active, non-waiting workflow runs.
+    #[serde(default)]
+    pub max_concurrent_active_runs: Option<u32>,
+    /// Per-workflow-config ceiling for active, non-waiting runs.
+    #[serde(default)]
+    pub max_concurrent_runs_per_config: Option<u32>,
+    /// Per-repository ceiling for active, non-waiting runs.
+    #[serde(default)]
+    pub max_concurrent_runs_per_repository: Option<u32>,
+    /// Daemon scheduler poll interval in seconds. Defaults to 300.
+    #[serde(default, alias = "poll_interval_secs")]
+    pub poll_interval_seconds: Option<u64>,
+    /// Workflow config targets supervised by this scheduler.
+    #[serde(default)]
+    pub targets: Vec<DaemonTargetConfig>,
+}
+
+/// A single workflow-config target inside [`DaemonSchedulerConfig::targets`].
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, Default, PartialEq, Eq)]
+pub struct DaemonTargetConfig {
+    /// The workflow config id to supervise.
+    pub config_id: String,
 }

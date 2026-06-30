@@ -496,8 +496,8 @@ description = "Watch GitHub PR checks and classify current-head status"
 [steps.parameters]
 artifact_root = "{artifact_dir}"
 step_order_index = 3
-max_attempts = 12
-max_check_watch_attempts = 12
+max_attempts = 1
+max_check_watch_attempts = 1
 poll_interval_seconds = 300
 check_watch_interval_seconds = 300
 max_duration_seconds = 3600
@@ -537,10 +537,10 @@ repository_owner = "{repository_owner}"
 repository_name = "{repository_name}"
 pr_number = "{pr_number}"
 
-max_observations = 6
-max_readiness_observations = 6
-required_stable_observations = 2
-stable_observation_count_required = 2
+max_observations = 1
+max_readiness_observations = 1
+required_stable_observations = 1
+stable_observation_count_required = 1
 coderabbit_readiness_observation_interval_seconds = 300
 coderabbit_bot_identities = ["coderabbitai[bot]", "coderabbit[bot]"]
 additional_coderabbit_bot_identities = []
@@ -916,6 +916,10 @@ condition = "success"
 from = "collect_coderabbit_feedback"
 to = "post_pr_failure_terminal"
 condition = "fatal"
+
+# collect_coderabbit_feedback yields `wait` when CodeRabbit is still reviewing;
+# with no `wait` transition edge, the daemon checkpoints the run as
+# waiting_external and releases active worker capacity.
 
 [[transitions]]
 from = "evaluate_coderabbit_feedback"

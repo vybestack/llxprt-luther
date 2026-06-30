@@ -55,28 +55,32 @@ pub struct RunCounts {
 impl RunCounts {
     /// Derive counts from a slice of run metadata.
     ///
-    /// - active: running/starting/remediating/waiting_for_checks
-    /// - queued: queued/initialized
+    /// - active: running/starting/remediating
+    /// - queued: queued/initialized/ready_to_resume
     /// - completed: completed/merged
     /// - failed: failed/abandoned/cancelled
     ///
-    /// Blocked/Paused are intentionally not counted in any bucket as they are
-    /// neither making progress nor terminal.
+    /// WaitingExternal/WaitingForChecks and Blocked/Paused are intentionally not
+    /// counted in any bucket as they are neither active slots nor terminal.
     /// @plan:issue-52
     pub fn from_runs(runs: &[RunMetadata]) -> Self {
         let mut counts = RunCounts::default();
         for md in runs {
             match md.status {
-                RunStatus::Running
-                | RunStatus::Starting
-                | RunStatus::Remediating
-                | RunStatus::WaitingForChecks => counts.active += 1,
-                RunStatus::Queued | RunStatus::Initialized => counts.queued += 1,
+                RunStatus::Running | RunStatus::Starting | RunStatus::Remediating => {
+                    counts.active += 1
+                }
+                RunStatus::Queued | RunStatus::Initialized | RunStatus::ReadyToResume => {
+                    counts.queued += 1
+                }
                 RunStatus::Completed | RunStatus::Merged => counts.completed += 1,
                 RunStatus::Failed | RunStatus::Abandoned | RunStatus::Cancelled => {
                     counts.failed += 1
                 }
-                RunStatus::Blocked | RunStatus::Paused => {}
+                RunStatus::WaitingForChecks
+                | RunStatus::WaitingExternal
+                | RunStatus::Blocked
+                | RunStatus::Paused => {}
             }
         }
         counts
@@ -396,10 +400,12 @@ mod tests {
             run_with_status("h", RunStatus::Abandoned),
             run_with_status("i", RunStatus::Cancelled),
             run_with_status("j", RunStatus::Blocked),
+            run_with_status("k", RunStatus::WaitingExternal),
+            run_with_status("l", RunStatus::ReadyToResume),
         ];
         let counts = RunCounts::from_runs(&runs);
         assert_eq!(counts.active, 2);
-        assert_eq!(counts.queued, 2);
+        assert_eq!(counts.queued, 3);
         assert_eq!(counts.completed, 2);
         assert_eq!(counts.failed, 3);
     }

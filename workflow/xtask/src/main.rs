@@ -764,6 +764,7 @@ fn coverage_ignore_regex() -> String {
     [
         // Ignore binaries and generated/build content.
         "src/main\\.rs$",
+        "src/main_parts/",
         "target/",
         "junk/",
     ]

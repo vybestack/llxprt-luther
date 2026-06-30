@@ -383,7 +383,7 @@ fn wait_outcome_pauses_run_as_waiting_external() {
     let md = get_run_with_conn(&conn, &run_id)
         .expect("query run")
         .expect("run row");
-    assert_eq!(md.status, RunStatus::WaitingForChecks);
+    assert_eq!(md.status, RunStatus::WaitingExternal);
     assert!(
         !md.status.is_terminal(),
         "waiting status must be non-terminal"
