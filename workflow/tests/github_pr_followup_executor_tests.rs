@@ -259,9 +259,23 @@ struct ScriptedGithubRunner {
 /// @pseudocode lines 3-4,17-18
 impl ScriptedGithubRunner {
     fn new(checks_json: serde_json::Value, rest_json: serde_json::Value) -> Self {
+        Self::with_pr_json(
+            serde_json::from_str(include_str!(
+                "fixtures/github_api_contract/pr_identity_gh_pr_view.json"
+            ))
+            .expect("pr fixture"),
+            checks_json,
+            rest_json,
+        )
+    }
+
+    fn with_pr_json(
+        pr_json: serde_json::Value,
+        checks_json: serde_json::Value,
+        rest_json: serde_json::Value,
+    ) -> Self {
         Self {
-            pr_json: include_str!("fixtures/github_api_contract/pr_identity_gh_pr_view.json")
-                .to_string(),
+            pr_json: serde_json::to_string(&pr_json).expect("pr fixture"),
             checks_json: serde_json::to_string(&checks_json).expect("checks fixture"),
             rest_json: serde_json::to_string(&rest_json).expect("rest fixture"),
             calls: Arc::new(Mutex::new(Vec::new())),
@@ -1761,6 +1775,7 @@ fn github_pr_identity_interpolates_repository_params_from_context() {
         "PR identity capture should succeed with interpolated repository params",
     );
     let calls = runner.calls();
+
     assert!(
         calls
             .iter()
@@ -1772,6 +1787,125 @@ fn github_pr_identity_interpolates_repository_params_from_context() {
             .iter()
             .any(|argv| argv.iter().any(|arg| arg == "1911")),
         "identity capture must call gh with interpolated PR number, got {calls:?}"
+    );
+}
+/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P06
+/// @requirement:REQ-PRFU-001,REQ-PRFU-004,REQ-PRFU-020A
+/// @pseudocode lines 1-33
+#[test]
+fn github_pr_identity_recovers_captured_pr_when_resume_context_lacks_identity() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let runner = scripted_pr90_runner();
+    let mut context = StepContext::new(temp.path().to_path_buf(), "run-p06-resume".to_string());
+    context.set(
+        "artifact_dir",
+        temp.path().join("artifacts").to_string_lossy().as_ref(),
+    );
+    write_p06_resume_pr_identities(&temp);
+
+    let outcome =
+        GithubPrIdentityExecutorWithRunner::new(runner.clone(), RecordingClock::default())
+            .execute(&mut context, &p06_resume_identity_params())
+            .expect("capture pr identity with discovered PR context");
+
+    assert_expected_outcome(
+        outcome,
+        StepOutcome::Success,
+        "capture_pr_identity must rediscover the captured open PR when resume context omits PR metadata",
+    );
+    assert_p06_resume_identity_recovered(&runner, &context);
+}
+
+fn scripted_pr90_runner() -> ScriptedGithubRunner {
+    ScriptedGithubRunner::with_pr_json(
+        serde_json::json!({
+            "number": 90,
+            "url": "https://github.com/vybestack/llxprt-luther/pull/90",
+            "headRefName": "issue82",
+            "headRefOid": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "baseRefName": "main",
+            "baseRefOid": "cccccccccccccccccccccccccccccccccccccccc",
+            "state": "OPEN",
+            "isDraft": false,
+            "id": "PR_kwDOIssue82"
+        }),
+        serde_json::json!([]),
+        serde_json::json!({ "total_count": 0, "check_runs": [] }),
+    )
+}
+
+fn write_p06_resume_pr_identities(temp: &tempfile::TempDir) {
+    let store = PrFollowupArtifactStore::new(temp.path().join("artifacts"));
+    let real_binding = PrFollowupBinding {
+        run_id: "run-p06-resume".to_string(),
+        repository_owner: "vybestack".to_string(),
+        repository_name: "llxprt-luther".to_string(),
+        pr_number: 90,
+        head_ref: "issue82".to_string(),
+        head_sha: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+        base_ref: "main".to_string(),
+        base_sha: Some("cccccccccccccccccccccccccccccccccccccccc".to_string()),
+        ..sample_binding()
+    };
+    let legacy_binding = PrFollowupBinding {
+        run_id: "run-p06-resume".to_string(),
+        repository_owner: "vybestack".to_string(),
+        repository_name: "llxprt-luther".to_string(),
+        pr_number: 42,
+        ..sample_binding()
+    };
+    write_p06_pr_identity(&store, &legacy_binding, 42, "legacy_harness");
+    write_p06_pr_identity(&store, &real_binding, 90, "gh_pr_view");
+}
+
+fn write_p06_pr_identity(
+    store: &PrFollowupArtifactStore,
+    binding: &PrFollowupBinding,
+    pr_number: u64,
+    source: &str,
+) {
+    store
+        .write_json_artifact(
+            binding,
+            "pr",
+            "capture_pr_identity",
+            1,
+            &serde_json::json!({
+                "pr_url": format!("https://github.com/vybestack/llxprt-luther/pull/{pr_number}"),
+                "capture_state": "captured",
+                "captured_at": "2026-04-30T00:00:00Z",
+                "source": source
+            }),
+            None,
+            &FixedClock,
+        )
+        .expect("write PR identity");
+}
+
+fn p06_resume_identity_params() -> serde_json::Value {
+    serde_json::json!({
+        "artifact_root": "{artifact_dir}",
+        "repository_owner": "{repository_owner}",
+        "repository_name": "{repository_name}",
+        "pr_number": "{pr_number}",
+        "step_order_index": 1
+    })
+}
+
+fn assert_p06_resume_identity_recovered(runner: &ScriptedGithubRunner, context: &StepContext) {
+    let calls = runner.calls();
+    assert!(
+        calls.iter().any(|argv| argv.iter().any(|arg| arg == "90")),
+        "identity capture must rediscover PR 90 instead of falling back to PR 42, got {calls:?}"
+    );
+    assert!(
+        !calls.iter().any(|argv| argv.iter().any(|arg| arg == "42")),
+        "legacy harness artifacts must not drive resumed identity capture: {calls:?}"
+    );
+    assert_eq!(context.get("pr_number").map(String::as_str), Some("90"));
+    assert_eq!(
+        context.get("head_sha").map(String::as_str),
+        Some("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
     );
 }
 
@@ -3260,6 +3394,158 @@ fn feedback_evaluation_ignores_unresolved_identity_params_and_uses_context() {
 }
 
 #[test]
+fn feedback_evaluation_discovers_captured_pr_when_resume_context_lacks_identity() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let binding = recovered_p09_binding();
+    write_p09_legacy_and_real_pr_identities(&temp, &binding);
+    write_p09_recovered_feedback_inputs(&temp, &binding);
+    let adapter = p09_recovered_feedback_adapter();
+    let mut params = p09_params(&temp);
+    set_unresolved_p09_identity_params(&mut params);
+
+    let outcome = FeedbackEvaluatorExecutor::new(adapter, FixedClock)
+        .execute(&mut p09_context(&temp), &params)
+        .expect("feedback evaluation discovers captured PR");
+
+    assert_expected_outcome(
+        outcome,
+        StepOutcome::Success,
+        "feedback evaluator must recover captured PR identity when resume context omits PR metadata",
+    );
+    assert!(p09_recovered_evaluations_path(&temp).exists());
+    assert!(
+        !p09_evaluations_path(&temp).exists(),
+        "resume fallback must not write feedback evaluations under example/workflow/1910"
+    );
+}
+
+fn recovered_p09_binding() -> PrFollowupBinding {
+    PrFollowupBinding {
+        schema_version: 1,
+        run_id: "run-p09".to_string(),
+        repository_owner: "vybestack".to_string(),
+        repository_name: "llxprt-code".to_string(),
+        pr_number: 1911,
+        head_ref: "issue1803".to_string(),
+        head_sha: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string(),
+        base_ref: "main".to_string(),
+        base_sha: Some("base-b".to_string()),
+    }
+}
+
+fn write_p09_legacy_and_real_pr_identities(temp: &tempfile::TempDir, binding: &PrFollowupBinding) {
+    let store = PrFollowupArtifactStore::new(temp.path().join("artifacts"));
+    write_pr_identity_artifact(
+        &store,
+        &p09_binding(),
+        "example/workflow",
+        1910,
+        "legacy_harness",
+    );
+    write_pr_identity_artifact(&store, binding, "vybestack/llxprt-code", 1911, "fixture");
+}
+
+fn write_pr_identity_artifact(
+    store: &PrFollowupArtifactStore,
+    binding: &PrFollowupBinding,
+    repository: &str,
+    pr_number: u64,
+    source: &str,
+) {
+    store
+        .write_json_artifact(
+            binding,
+            "pr",
+            "capture_pr_identity",
+            1,
+            &serde_json::json!({
+                "pr_url": format!("https://github.com/{repository}/pull/{pr_number}"),
+                "capture_state": "captured",
+                "captured_at": "2026-04-30T00:00:00Z",
+                "source": source
+            }),
+            None,
+            &FixedClock,
+        )
+        .expect("write p09 pr identity");
+}
+
+fn write_p09_recovered_feedback_inputs(temp: &tempfile::TempDir, binding: &PrFollowupBinding) {
+    let store = PrFollowupArtifactStore::new(temp.path().join("artifacts"));
+    let mut item = p09_feedback_item("item-1", "thread-1", "hash-a");
+    item["commit_sha"] = serde_json::json!("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+    store
+        .write_json_artifact(
+            binding,
+            "coderabbit-feedback",
+            "collect_coderabbit_feedback",
+            5,
+            &serde_json::json!({
+                "readiness_state": "ready",
+                "stable_observation_count": 2,
+                "required_stable_observations": 2,
+                "max_observations": 6,
+                "observation_interval_seconds": 300,
+                "observations": [],
+                "items": [item],
+                "included_bot_identities": ["coderabbitai[bot]"],
+                "feedback_item_set_hash": "fnv64:p09"
+            }),
+            None,
+            &FixedClock,
+        )
+        .expect("write feedback");
+    store
+        .write_json_artifact(
+            binding,
+            "coderabbit-feedback-state",
+            "collect_coderabbit_feedback",
+            5,
+            &serde_json::json!({
+                "state_entries": [],
+                "state_index_hash": "fnv64:p09-state",
+                "superseded_entries": []
+            }),
+            None,
+            &FixedClock,
+        )
+        .expect("write feedback state");
+}
+
+fn p09_recovered_feedback_adapter() -> ScriptedFeedbackEvaluationAdapter {
+    ScriptedFeedbackEvaluationAdapter::with_responses(vec![serde_json::json!({
+        "item_id": "item-1",
+        "stable_marker_key": "thread-1",
+        "body_hash": "hash-a",
+        "head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "decision": "valid",
+        "reason": "valid feedback",
+        "recommended_action": "fix",
+        "response_text": "Luther will address this valid feedback on the thread."
+    })
+    .to_string()])
+}
+
+fn set_unresolved_p09_identity_params(params: &mut serde_json::Value) {
+    params["repository_owner"] = serde_json::json!("{repository_owner}");
+    params["repository_name"] = serde_json::json!("{repository_name}");
+    params["pr_number"] = serde_json::json!("{pr_number}");
+    params["head_sha"] = serde_json::json!("{head_sha}");
+}
+
+fn p09_recovered_evaluations_path(temp: &tempfile::TempDir) -> PathBuf {
+    temp.path()
+        .join("artifacts")
+        .join("pr-followup")
+        .join("current")
+        .join("run-p09")
+        .join("vybestack")
+        .join("llxprt-code")
+        .join("1911")
+        .join("feedback-evaluations.json")
+}
+
+#[test]
 fn feedback_evaluation_ignores_max_attempts_param_override() {
     let temp = tempfile::tempdir().expect("tempdir");
     write_p09_feedback(
@@ -3814,6 +4100,146 @@ fn write_p10_inputs(
             &FixedClock,
         )
         .expect("write p10 evaluations");
+}
+
+#[test]
+fn remediation_plan_discovers_captured_pr_when_resume_context_lacks_identity() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let binding = recovered_p10_binding();
+    write_p10_legacy_and_real_pr_identities(&temp, &binding);
+    write_p10_recovered_plan_inputs(&temp, &binding);
+    let mut params = p10_params(&temp);
+    set_unresolved_p10_identity_params(&mut params);
+    let mut context = p10_context(&temp);
+
+    let outcome = PrRemediationPlanExecutor
+        .execute(&mut context, &params)
+        .expect("remediation plan discovers captured PR");
+
+    assert_expected_outcome(
+        outcome,
+        StepOutcome::Fixable,
+        "remediation plan should target the captured PR after a resumed activation loses PR params",
+    );
+    assert!(p10_recovered_plan_path(&temp).exists());
+    assert!(
+        !p10_plan_path(&temp).exists(),
+        "resume fallback must not write remediation plans under example/workflow/1910"
+    );
+}
+
+fn recovered_p10_binding() -> PrFollowupBinding {
+    PrFollowupBinding {
+        schema_version: 1,
+        run_id: "run-p10".to_string(),
+        repository_owner: "vybestack".to_string(),
+        repository_name: "llxprt-code".to_string(),
+        pr_number: 1911,
+        head_ref: "issue1803".to_string(),
+        head_sha: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string(),
+        base_ref: "main".to_string(),
+        base_sha: Some("base-b".to_string()),
+    }
+}
+
+fn write_p10_legacy_and_real_pr_identities(temp: &tempfile::TempDir, binding: &PrFollowupBinding) {
+    let store = PrFollowupArtifactStore::new(temp.path().join("artifacts"));
+    write_pr_identity_artifact(
+        &store,
+        &p10_binding(),
+        "example/workflow",
+        1910,
+        "legacy_harness",
+    );
+    write_pr_identity_artifact(&store, binding, "vybestack/llxprt-code", 1911, "fixture");
+}
+
+fn write_p10_recovered_plan_inputs(temp: &tempfile::TempDir, binding: &PrFollowupBinding) {
+    let store = PrFollowupArtifactStore::new(temp.path().join("artifacts"));
+    write_p10_recovered_json(&store, binding, "ci-failures", ci_failures_payload());
+    write_p10_recovered_json(
+        &store,
+        binding,
+        "coderabbit-feedback",
+        p10_empty_feedback_payload(),
+    );
+    write_p10_recovered_json(
+        &store,
+        binding,
+        "feedback-evaluations",
+        p10_empty_evaluations_payload(),
+    );
+}
+
+fn write_p10_recovered_json(
+    store: &PrFollowupArtifactStore,
+    binding: &PrFollowupBinding,
+    family: &str,
+    payload: serde_json::Value,
+) {
+    store
+        .write_json_artifact(
+            binding,
+            family,
+            "recovered_test_input",
+            6,
+            &payload,
+            None,
+            &FixedClock,
+        )
+        .expect("write recovered p10 input");
+}
+
+fn ci_failures_payload() -> serde_json::Value {
+    serde_json::json!({
+        "collection_state": "collected",
+        "failures": [{ "failure_id": "ci-1", "check_name": "build", "conclusion": "failure" }],
+        "pending_or_unknown": [],
+        "watcher_fatal_source": null,
+        "fatal_source": null,
+        "log_artifacts": []
+    })
+}
+
+fn p10_empty_feedback_payload() -> serde_json::Value {
+    serde_json::json!({
+        "readiness_state": "ready",
+        "items": [],
+        "included_bot_identities": ["coderabbitai[bot]"],
+        "feedback_item_set_hash": "fnv64:p10"
+    })
+}
+
+fn p10_empty_evaluations_payload() -> serde_json::Value {
+    serde_json::json!({
+        "evaluation_state": "complete",
+        "items_seen": 0,
+        "accepted_results": [],
+        "rejected_attempts": [],
+        "unevaluated_items": [],
+        "budget_exhausted_items": [],
+        "max_attempts_per_item": 3,
+        "reused_results_count": 0
+    })
+}
+
+fn set_unresolved_p10_identity_params(params: &mut serde_json::Value) {
+    params["repository_owner"] = serde_json::json!("{repository_owner}");
+    params["repository_name"] = serde_json::json!("{repository_name}");
+    params["pr_number"] = serde_json::json!("{pr_number}");
+    params["head_sha"] = serde_json::json!("{head_sha}");
+}
+
+fn p10_recovered_plan_path(temp: &tempfile::TempDir) -> PathBuf {
+    temp.path()
+        .join("artifacts")
+        .join("pr-followup")
+        .join("current")
+        .join("run-p10")
+        .join("vybestack")
+        .join("llxprt-code")
+        .join("1911")
+        .join("pr-remediation-plan.json")
 }
 
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P04
@@ -5034,6 +5460,7 @@ fn remediation_validator_writes_pending_marker_action_for_fixed_valid_feedback_b
 #[derive(Clone, Debug)]
 struct P12FakeLlxprtRunner {
     result: LlxprtInvocationResult,
+    result_payload: Option<serde_json::Value>,
     requests: Arc<Mutex<Vec<LlxprtInvocationRequest>>>,
 }
 
@@ -5044,6 +5471,18 @@ impl P12FakeLlxprtRunner {
     fn new(result: LlxprtInvocationResult) -> Self {
         Self {
             result,
+            result_payload: None,
+            requests: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    fn with_result_payload(
+        result: LlxprtInvocationResult,
+        result_payload: serde_json::Value,
+    ) -> Self {
+        Self {
+            result,
+            result_payload: Some(result_payload),
             requests: Arc::new(Mutex::new(Vec::new())),
         }
     }
@@ -5058,6 +5497,13 @@ impl P12FakeLlxprtRunner {
 /// @pseudocode lines 14-16
 impl PrFollowupLlxprtCommandRunner for P12FakeLlxprtRunner {
     fn invoke(&self, request: LlxprtInvocationRequest) -> LlxprtInvocationResult {
+        if let Some(payload) = &self.result_payload {
+            std::fs::write(
+                &request.remediation_result_path,
+                serde_json::to_vec_pretty(payload).expect("result payload json"),
+            )
+            .expect("write fake remediation result");
+        }
         self.requests.lock().expect("requests").push(request);
         self.result.clone()
     }
@@ -5171,30 +5617,21 @@ fn pr_followup_remediation_timeout_with_result_is_validator_success_candidate() 
     let mut owned = p12_result("timeout");
     owned.result_file_present = true;
     owned.result_file_size = Some(256);
-    let runner = P12FakeLlxprtRunner::new(owned);
-    let mut context = p12_context(&temp);
     let binding = p10_binding();
-    let store = PrFollowupArtifactStore::new(temp.path().join("artifacts"));
-    store
-        .write_json_artifact(
-            &binding,
-            "pr-remediation-result",
-            "remediate_pr_followup",
-            8,
-            &serde_json::json!({
-                "input_head_sha": binding.head_sha,
-                "output_head_sha": binding.head_sha,
-                "overall_status": "success",
-                "results": [{
-                    "source_id": "ci-linux",
-                    "action": "fixed",
-                    "evidence": { "summary": "result written before timeout" }
-                }]
-            }),
-            None,
-            &FixedClock,
-        )
-        .expect("seed result artifact");
+    let runner = P12FakeLlxprtRunner::with_result_payload(
+        owned,
+        serde_json::json!({
+            "input_head_sha": binding.head_sha,
+            "output_head_sha": binding.head_sha,
+            "overall_status": "success",
+            "results": [{
+                "source_id": "ci-linux",
+                "action": "fixed",
+                "evidence": { "summary": "result written before timeout" }
+            }]
+        }),
+    );
+    let mut context = p12_context(&temp);
 
     let outcome = PrFollowupRemediationExecutorWithRunner::new(runner, FixedClock)
         .execute(&mut context, &p12_params(&temp))
@@ -5224,12 +5661,60 @@ fn pr_followup_remediation_timeout_with_result_is_validator_success_candidate() 
 }
 
 #[test]
-fn pr_followup_remediation_timeout_repairs_stale_wrapper_failure_result() {
+fn pr_followup_remediation_timeout_accepts_identical_rewritten_result() {
     let temp = tempfile::tempdir().expect("tempdir");
+    let binding = p10_binding();
+    let payload = serde_json::json!({
+        "input_head_sha": binding.head_sha,
+        "output_head_sha": binding.head_sha,
+        "overall_status": "success",
+        "results": [{
+            "source_id": "ci-linux",
+            "action": "fixed",
+            "evidence": { "summary": "identical result rewritten before timeout" }
+        }]
+    });
+    let result_path = p10_current_artifact_path(&temp, "pr-remediation-result");
+    std::fs::create_dir_all(result_path.parent().expect("result parent"))
+        .expect("create result parent");
+    std::fs::write(
+        &result_path,
+        serde_json::to_vec_pretty(&payload).expect("seed result json"),
+    )
+    .expect("seed previous result");
+    std::thread::sleep(Duration::from_secs(1));
+
     let mut owned = p12_result("timeout");
     owned.result_file_present = true;
     owned.result_file_size = Some(256);
-    let runner = P12FakeLlxprtRunner::new(owned);
+    let runner = P12FakeLlxprtRunner::with_result_payload(owned, payload);
+    let mut context = p12_context(&temp);
+
+    let outcome = PrFollowupRemediationExecutorWithRunner::new(runner, FixedClock)
+        .execute(&mut context, &p12_params(&temp))
+        .expect("p12 timeout with identical rewritten result");
+    let run_artifact = read_json(&p10_current_artifact_path(
+        &temp,
+        "pr-remediation-llxprt-run",
+    ));
+
+    assert_expected_outcome(
+        outcome,
+        StepOutcome::Success,
+        "rewriting the same validator-readable result before timeout must still be treated as fresh",
+    );
+    assert_eq!(
+        run_artifact
+            .get("remediation_invocation_state")
+            .and_then(serde_json::Value::as_str),
+        Some("success")
+    );
+}
+
+#[test]
+fn pr_followup_remediation_timeout_repairs_stale_wrapper_failure_result() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let runner = P12FakeLlxprtRunner::new(p12_result("timeout"));
     let mut context = p12_context(&temp);
     let binding = p10_binding();
     let store = PrFollowupArtifactStore::new(temp.path().join("artifacts"));
@@ -5269,13 +5754,79 @@ fn pr_followup_remediation_timeout_repairs_stale_wrapper_failure_result() {
             .and_then(|item| item.get("evidence"))
             .and_then(|evidence| evidence.get("process_class"))
             .and_then(serde_json::Value::as_str),
-        Some("success")
+        Some("timeout")
     );
     assert_eq!(
         repaired_result
             .pointer("/results/0/action")
             .and_then(serde_json::Value::as_str),
         Some("llxprt_invocation_failed_before_result")
+    );
+}
+
+#[test]
+fn pr_followup_remediation_timeout_does_not_reuse_stale_success_result() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut owned = p12_result("timeout");
+    owned.result_file_present = true;
+    owned.result_file_size = Some(256);
+    let runner = P12FakeLlxprtRunner::new(owned);
+    let mut context = p12_context(&temp);
+    let binding = p10_binding();
+    let store = PrFollowupArtifactStore::new(temp.path().join("artifacts"));
+    store
+        .write_json_artifact(
+            &binding,
+            "pr-remediation-result",
+            "validate_remediation_result",
+            10,
+            &serde_json::json!({
+                "input_head_sha": "old-head",
+                "output_head_sha": "old-head",
+                "overall_status": "fixed",
+                "plan_artifact_sequence": 1,
+                "results": [{
+                    "source_type": "ci_failure",
+                    "source_id": "old-ci-build",
+                    "status": "fixed",
+                    "action": "fixed",
+                    "evidence": { "current_head_sha": "old-head" },
+                    "response_text": "old stale success"
+                }]
+            }),
+            None,
+            &FixedClock,
+        )
+        .expect("seed stale success artifact");
+
+    let outcome = PrFollowupRemediationExecutorWithRunner::new(runner, FixedClock)
+        .execute(&mut context, &p12_params(&temp))
+        .expect("p12 timeout with stale success result");
+    let repaired_result = read_json(&p10_current_artifact_path(&temp, "pr-remediation-result"));
+
+    assert_expected_outcome(
+        outcome,
+        StepOutcome::Success,
+        "a timeout without a fresh result must synthesize validator-readable failed items instead of preserving stale success",
+    );
+    assert_eq!(
+        repaired_result
+            .pointer("/results/0/action")
+            .and_then(serde_json::Value::as_str),
+        Some("llxprt_invocation_failed_before_result")
+    );
+    assert_eq!(
+        repaired_result
+            .pointer("/results/0/evidence/process_class")
+            .and_then(serde_json::Value::as_str),
+        Some("timeout")
+    );
+    assert_ne!(
+        repaired_result
+            .pointer("/results/0/source_id")
+            .and_then(serde_json::Value::as_str),
+        Some("old-ci-build"),
+        "stale prior result items must not be reused when the current invocation fails before writing a result"
     );
 }
 
@@ -5308,6 +5859,10 @@ fn assert_remediation_prompt_result_schema(prompt: &str) {
     assert!(prompt.contains(
         "fixed | changed | already_satisfied | not_reproduced | not_fixed | skipped | failed"
     ));
+    assert!(
+        prompt.contains("copy source_type, source_id, stable_marker_key, and body_hash exactly")
+    );
+    assert!(prompt.contains("pr-remediation-plan.json.must_fix item"));
     assert!(prompt.contains("input_head_sha set to aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"));
     assert!(prompt.contains("evidence.current_head_sha equal to the current PR head"));
     assert!(prompt
@@ -7534,8 +8089,8 @@ fn feedback_evaluator_default_argv_loads_noninteractive_profile() {
     let argv = luther_workflow::engine::executors::default_feedback_evaluator_argv();
     assert!(
         argv.windows(2)
-            .any(|window| window[0] == "--profile-load" && window[1] == "opusthinking"),
-        "production feedback evaluator should use the same noninteractive llxprt profile shape as other dogfood LLM steps: {argv:?}"
+            .any(|window| window[0] == "--profile-load" && window[1] == "gpt55high"),
+        "production feedback evaluator should use the current dogfood llxprt profile shape as other noninteractive LLM steps: {argv:?}"
     );
 }
 

@@ -2,6 +2,7 @@ mod ocr_review;
 
 use anyhow::{bail, Context, Result};
 use serde_json::Value;
+use std::collections::HashMap;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -207,8 +208,9 @@ fn complexity(args: &[String]) -> Result<()> {
             eprintln!("No changed Rust source files under src/; skipping lizard complexity gate.");
         }
         Some(paths) => {
-            run_lizard(&venv_python, paths.iter())?;
-            enforce_file_line_limits_for_files(paths.iter())?;
+            let base = changed_base(args)?;
+            run_changed_lizard(&workspace_root, &venv_python, base, &paths)?;
+            enforce_changed_file_line_limits(&workspace_root, base, &paths)?;
         }
         None => {
             run_lizard(&venv_python, [workspace_root.join("src")].iter())?;
@@ -232,6 +234,188 @@ fn complexity_paths(args: &[String], workspace_root: &Path) -> Result<Option<Vec
         }
         _ => bail!(COMPLEXITY_USAGE),
     }
+}
+
+fn changed_base(args: &[String]) -> Result<&str> {
+    match args {
+        [flag, base, _head] if flag == "--changed" => Ok(base),
+        _ => bail!(COMPLEXITY_USAGE),
+    }
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct LizardWarningKey {
+    path: String,
+    function: String,
+}
+
+#[derive(Clone, Debug)]
+struct LizardWarning {
+    key: LizardWarningKey,
+    nloc: u32,
+    ccn: u32,
+    length: u32,
+    line: String,
+}
+
+fn run_changed_lizard(
+    workspace_root: &Path,
+    venv_python: &Path,
+    base: &str,
+    paths: &[PathBuf],
+) -> Result<()> {
+    let head_warnings = lizard_warnings(venv_python, workspace_root, paths.iter())?;
+    let base_root = workspace_root.join(format!(
+        "target/xtask-complexity-baseline-{}",
+        std::process::id()
+    ));
+    let base_warnings = (|| {
+        let base_paths = materialize_base_sources(workspace_root, &base_root, base, paths)?;
+        lizard_warnings(venv_python, &base_root, base_paths.iter())
+    })();
+    let _ = fs::remove_dir_all(&base_root);
+    let base_warnings = base_warnings?;
+
+    let mut baseline = HashMap::new();
+    for warning in base_warnings {
+        baseline.insert(warning.key.clone(), warning);
+    }
+
+    let regressions = head_warnings
+        .into_iter()
+        .filter(|warning| lizard_warning_regressed(warning, baseline.get(&warning.key)))
+        .map(|warning| warning.line)
+        .collect::<Vec<_>>();
+
+    if regressions.is_empty() {
+        eprintln!("Changed-file lizard gate passed without new or worsened warnings.");
+        Ok(())
+    } else {
+        for regression in &regressions {
+            eprintln!("{regression}");
+        }
+        bail!(
+            "changed-file lizard gate found {} new or worsened warning(s)",
+            regressions.len()
+        )
+    }
+}
+
+fn materialize_base_sources(
+    workspace_root: &Path,
+    base_root: &Path,
+    base: &str,
+    paths: &[PathBuf],
+) -> Result<Vec<PathBuf>> {
+    let git_prefix = capture_in_dir(workspace_root, "git", ["rev-parse", "--show-prefix"])?;
+    let git_prefix = git_prefix.trim();
+    fs::create_dir_all(base_root).with_context(|| format!("create {}", base_root.display()))?;
+    let mut base_paths = Vec::new();
+    for path in paths {
+        let rel_path = path
+            .strip_prefix(workspace_root)
+            .with_context(|| format!("relativize {}", path.display()))?;
+        let blob_path = format!("{git_prefix}{}", rel_path.to_string_lossy());
+        let output = command_in_dir(
+            workspace_root,
+            "git",
+            ["show", format!("{base}:{blob_path}").as_str()],
+        )
+        .output()
+        .with_context(|| format!("spawn git show {base}:{blob_path}"))?;
+        if !output.status.success() {
+            continue;
+        }
+        let base_path = base_root.join(rel_path);
+        if let Some(parent) = base_path.parent() {
+            fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+        }
+        fs::write(&base_path, output.stdout)
+            .with_context(|| format!("write {}", base_path.display()))?;
+        base_paths.push(base_path);
+    }
+    Ok(base_paths)
+}
+
+fn lizard_warnings<'a, I>(venv_python: &Path, root: &Path, paths: I) -> Result<Vec<LizardWarning>>
+where
+    I: IntoIterator<Item = &'a PathBuf>,
+{
+    let mut args = vec![
+        "-m".to_string(),
+        "lizard".to_string(),
+        "-C".to_string(),
+        LIZARD_COMPLEXITY_MAX.to_string(),
+        "-L".to_string(),
+        LIZARD_FUNCTION_LINES_MAX.to_string(),
+        "-w".to_string(),
+    ];
+    args.extend(
+        paths
+            .into_iter()
+            .map(|path| path.to_string_lossy().into_owned()),
+    );
+    let output = command(venv_python.to_string_lossy().as_ref(), args)
+        .output()
+        .context("spawn lizard complexity gate")?;
+    let stdout = String::from_utf8(output.stdout).context("decode lizard stdout")?;
+    let mut warnings = Vec::new();
+    for line in stdout.lines() {
+        if let Some(warning) = parse_lizard_warning(line, root) {
+            warnings.push(warning);
+        } else if line.contains(": warning: ") {
+            bail!("unparseable lizard warning output: {line}");
+        }
+    }
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stderr = stderr.trim();
+        if warnings.is_empty() || !stderr.is_empty() {
+            bail!("lizard complexity gate failed: {stderr}");
+        }
+    }
+    Ok(warnings)
+}
+
+fn parse_lizard_warning(line: &str, root: &Path) -> Option<LizardWarning> {
+    let (location, details) = line.split_once(": warning: ")?;
+    let (path, _) = location.rsplit_once(':')?;
+    let (function, metrics) = details.split_once(" has ")?;
+    let mut fields = metrics.split(',').map(str::trim);
+    let nloc = parse_metric(fields.next()?, "NLOC")?;
+    let ccn = parse_metric(fields.next()?, "CCN")?;
+    let _tokens = fields.next()?;
+    let _params = fields.next()?;
+    let length = parse_metric(fields.next()?, "length")?;
+    let path = normalize_lizard_path(path, root);
+    Some(LizardWarning {
+        key: LizardWarningKey {
+            path,
+            function: function.to_string(),
+        },
+        nloc,
+        ccn,
+        length,
+        line: line.to_string(),
+    })
+}
+
+fn parse_metric(value: &str, suffix: &str) -> Option<u32> {
+    value.strip_suffix(suffix)?.trim().parse().ok()
+}
+
+fn normalize_lizard_path(path: &str, root: &Path) -> String {
+    let path = PathBuf::from(path);
+    path.strip_prefix(root)
+        .unwrap_or(path.as_path())
+        .to_string_lossy()
+        .into_owned()
+}
+
+fn lizard_warning_regressed(warning: &LizardWarning, base: Option<&LizardWarning>) -> bool {
+    base.is_none_or(|base| {
+        warning.nloc > base.nloc || warning.ccn > base.ccn || warning.length > base.length
+    })
 }
 
 fn changed_rust_source_files(
@@ -655,6 +839,75 @@ fn enforce_file_line_limits(src_dir: &Path) -> Result<()> {
     enforce_file_line_limits_for_files(files.iter())
 }
 
+fn enforce_changed_file_line_limits(
+    workspace_root: &Path,
+    base: &str,
+    paths: &[PathBuf],
+) -> Result<()> {
+    let git_prefix = capture_in_dir(workspace_root, "git", ["rev-parse", "--show-prefix"])?;
+    let git_prefix = git_prefix.trim();
+    let mut error_exit = false;
+    for path in paths {
+        let lines = file_line_count(path)?;
+        let base_lines = base_file_line_count(workspace_root, base, git_prefix, path)?;
+        if lines > FILE_LINES_MAX && base_lines.is_none_or(|base| lines > base) {
+            eprintln!(
+                "ERROR: {} has {} lines (max {}, base {})",
+                path.display(),
+                lines,
+                FILE_LINES_MAX,
+                base_lines
+                    .map(|count| count.to_string())
+                    .unwrap_or_else(|| "missing".to_string())
+            );
+            error_exit = true;
+        } else if lines > FILE_LINES_WARN {
+            eprintln!(
+                "WARNING: {} has {} lines (recommended max {})",
+                path.display(),
+                lines,
+                FILE_LINES_WARN
+            );
+        }
+    }
+
+    if error_exit {
+        bail!("file line limit exceeded");
+    }
+    Ok(())
+}
+
+fn base_file_line_count(
+    workspace_root: &Path,
+    base: &str,
+    git_prefix: &str,
+    path: &Path,
+) -> Result<Option<usize>> {
+    let rel_path = path
+        .strip_prefix(workspace_root)
+        .with_context(|| format!("relativize {}", path.display()))?;
+    let blob_path = format!("{git_prefix}{}", rel_path.to_string_lossy());
+    let output = command_in_dir(
+        workspace_root,
+        "git",
+        ["show", format!("{base}:{blob_path}").as_str()],
+    )
+    .output()
+    .with_context(|| format!("spawn git show {base}:{blob_path}"))?;
+    if output.status.success() {
+        let content = String::from_utf8(output.stdout).context("decode base source")?;
+        Ok(Some(content.lines().count()))
+    } else {
+        Ok(None)
+    }
+}
+
+fn file_line_count(path: &Path) -> Result<usize> {
+    let content =
+        fs::read_to_string(path).with_context(|| format!("read source file {}", path.display()))?;
+    Ok(content.lines().count())
+}
+
 fn enforce_file_line_limits_for_files<'a, I>(paths: I) -> Result<()>
 where
     I: IntoIterator<Item = &'a PathBuf>,
@@ -880,6 +1133,7 @@ where
     S: AsRef<std::ffi::OsStr>,
 {
     let mut cmd = Command::new(program);
+
     cmd.current_dir(dir);
     cmd.args(args);
     cmd
@@ -941,5 +1195,60 @@ where
             program,
             String::from_utf8_lossy(&output.stderr).trim()
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lizard_warning_regression_detects_new_or_worse_metrics() {
+        let base = warning("src/lib.rs", "large", 80, 20, 90);
+        assert!(!lizard_warning_regressed(
+            &warning("src/lib.rs", "large", 80, 20, 90),
+            Some(&base)
+        ));
+        assert!(!lizard_warning_regressed(
+            &warning("src/lib.rs", "large", 70, 19, 80),
+            Some(&base)
+        ));
+        assert!(lizard_warning_regressed(
+            &warning("src/lib.rs", "large", 81, 20, 90),
+            Some(&base)
+        ));
+        assert!(lizard_warning_regressed(
+            &warning("src/lib.rs", "new_large", 81, 20, 90),
+            None
+        ));
+    }
+
+    #[test]
+    fn parse_lizard_warning_uses_relative_path_and_metrics() {
+        let root = Path::new("/repo/workflow");
+        let parsed = parse_lizard_warning(
+            "/repo/workflow/src/lib.rs:42: warning: parse_me has 81 NLOC, 26 CCN, 100 token, 2 PARAM, 90 length, 0 ND",
+            root,
+        )
+        .expect("warning parses");
+
+        assert_eq!(parsed.key.path, "src/lib.rs");
+        assert_eq!(parsed.key.function, "parse_me");
+        assert_eq!(parsed.nloc, 81);
+        assert_eq!(parsed.ccn, 26);
+        assert_eq!(parsed.length, 90);
+    }
+
+    fn warning(path: &str, function: &str, nloc: u32, ccn: u32, length: u32) -> LizardWarning {
+        LizardWarning {
+            key: LizardWarningKey {
+                path: path.to_string(),
+                function: function.to_string(),
+            },
+            nloc,
+            ccn,
+            length,
+            line: String::new(),
+        }
     }
 }

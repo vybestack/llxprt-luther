@@ -227,6 +227,13 @@ struct NormalizedCheck {
     source: String,
 }
 
+#[derive(Clone, Debug)]
+struct PrViewTarget {
+    owner: String,
+    repo: String,
+    selector: String,
+}
+
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P06
 /// @requirement:REQ-PRFU-001,REQ-PRFU-002
 /// @pseudocode lines 1-7
@@ -237,24 +244,36 @@ fn capture_pr_identity(
     clock: &dyn ClockSleeper,
 ) -> Result<StepOutcome, EngineError> {
     let artifact_root = artifact_root(context, params)?;
-    let owner = required_param_or_context(context, params, "repository_owner", "owner");
-    let repo = required_param_or_context(context, params, "repository_name", "repo");
-    let pr_selector = required_param_or_context(context, params, "pr_number", "42");
     let store = PrFollowupArtifactStore::new(artifact_root);
+    let target = resolve_pr_view_target(context, params, &store)?;
+    let identity = capture_pr_identity_via_gh(&target, context, params, runner, clock, &store)?;
+    set_pr_identity_context(context, &identity.binding);
+    Ok(StepOutcome::Success)
+}
+
+/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P06
+fn capture_pr_identity_via_gh(
+    target: &PrViewTarget,
+    context: &StepContext,
+    params: &Value,
+    runner: &dyn GithubPrCommandRunner,
+    clock: &dyn ClockSleeper,
+    store: &PrFollowupArtifactStore,
+) -> Result<CapturedPrIdentity, EngineError> {
     let argv = vec![
         "gh".to_string(),
         "pr".to_string(),
         "view".to_string(),
-        pr_selector,
+        target.selector.clone(),
         "--repo".to_string(),
-        format!("{owner}/{repo}"),
+        format!("{}/{}", target.owner, target.repo),
         "--json".to_string(),
         "number,url,headRefName,headRefOid,baseRefName,baseRefOid,state,isDraft,id".to_string(),
     ];
     let output = runner.run_github_command(&argv)?;
     let value = serde_json::from_str::<Value>(&output)
         .map_err(|err| github_pr_error(format!("parse pr identity json: {err}")))?;
-    let identity = parse_pr_identity(&value, context.run_id(), &owner, &repo)?;
+    let identity = parse_pr_identity(&value, context.run_id(), &target.owner, &target.repo)?;
     let payload = json!({
         "pr_url": identity.pr_url,
         "capture_state": "captured",
@@ -273,19 +292,9 @@ fn capture_pr_identity(
         None,
         clock,
     )?;
-    context.set("repository_owner", &identity.binding.repository_owner);
-    context.set("repository_name", &identity.binding.repository_name);
-    context.set("pr_number", &identity.binding.pr_number.to_string());
-    context.set("head_ref", &identity.binding.head_ref);
-    context.set("head_sha", &identity.binding.head_sha);
-    context.set("base_ref", &identity.binding.base_ref);
-    if let Some(base_sha) = identity.binding.base_sha.as_deref() {
-        context.set("base_sha", base_sha);
-    }
-    Ok(StepOutcome::Success)
+    Ok(identity)
 }
 
-/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P06
 /// @requirement:REQ-PRFU-004,REQ-PRFU-005,REQ-PRFU-006
 /// @pseudocode lines 16-33
 fn watch_pr_checks(
@@ -394,65 +403,107 @@ fn read_or_capture_pr_identity(
     clock: &dyn ClockSleeper,
     store: &PrFollowupArtifactStore,
 ) -> Result<Value, EngineError> {
-    let owner = required_param_or_context(context, params, "repository_owner", "owner");
-    let repo = required_param_or_context(context, params, "repository_name", "repo");
-    let pr_selector = required_param_or_context(context, params, "pr_number", "42");
-    let binding = PrFollowupBinding {
+    let target = resolve_pr_view_target(context, params, store)?;
+    if let Ok(pr_number) = target.selector.parse::<u64>() {
+        let binding = build_lookup_binding(
+            context,
+            params,
+            target.owner.clone(),
+            target.repo.clone(),
+            pr_number,
+        );
+        if let Some(value) = store.find_current_pr_artifact_for_run(context.run_id(), &binding)? {
+            return Ok(value);
+        }
+    }
+
+    let identity = capture_pr_identity_via_gh(&target, context, params, runner, clock, store)?;
+    read_json_without_store_validation(&store.canonical_path(&identity.binding, "pr"))
+}
+
+/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P06
+fn resolve_pr_view_target(
+    context: &StepContext,
+    params: &Value,
+    store: &PrFollowupArtifactStore,
+) -> Result<PrViewTarget, EngineError> {
+    let owner = param_or_context(context, params, "repository_owner");
+    let repo = param_or_context(context, params, "repository_name");
+    let selector = param_or_context(context, params, "pr_number");
+    if let (Some(owner), Some(repo), Some(selector)) = (owner, repo, selector) {
+        return Ok(PrViewTarget {
+            owner,
+            repo,
+            selector,
+        });
+    }
+
+    let fallback = fallback_pr_followup_binding(context, params);
+    if let Some(value) = store.find_current_pr_artifact_for_run(context.run_id(), &fallback)? {
+        let binding = binding_from_artifact(&value)?;
+        return Ok(pr_view_target_from_binding(&binding));
+    }
+
+    Err(github_pr_error(
+        "unable to resolve PR view target from params, context, or current PR artifacts",
+    ))
+}
+
+fn pr_view_target_from_binding(binding: &PrFollowupBinding) -> PrViewTarget {
+    PrViewTarget {
+        owner: binding.repository_owner.clone(),
+        repo: binding.repository_name.clone(),
+        selector: binding.pr_number.to_string(),
+    }
+}
+
+fn build_lookup_binding(
+    context: &StepContext,
+    params: &Value,
+    owner: String,
+    repo: String,
+    pr_number: u64,
+) -> PrFollowupBinding {
+    PrFollowupBinding {
         schema_version: PR_FOLLOWUP_SCHEMA_VERSION,
         run_id: context.run_id().to_string(),
-        repository_owner: owner.clone(),
-        repository_name: repo.clone(),
-        pr_number: pr_selector.parse().unwrap_or(42),
+        repository_owner: owner,
+        repository_name: repo,
+        pr_number,
         head_ref: required_param_or_context(context, params, "head_ref", "feature"),
         head_sha: required_param_or_context(context, params, "head_sha", "head-a"),
         base_ref: required_param_or_context(context, params, "base_ref", "main"),
         base_sha: Some(required_param_or_context(
             context, params, "base_sha", "base-a",
         )),
-    };
-    let canonical_pr_path = store.canonical_path(&binding, "pr");
-    match read_json_without_store_validation(&canonical_pr_path) {
-        Ok(value) => Ok(value),
-        Err(_) => {
-            let argv = vec![
-                "gh".to_string(),
-                "pr".to_string(),
-                "view".to_string(),
-                pr_selector,
-                "--repo".to_string(),
-                format!("{owner}/{repo}"),
-                "--json".to_string(),
-                "number,url,headRefName,headRefOid,baseRefName,baseRefOid,state,isDraft,id"
-                    .to_string(),
-            ];
-            let output = runner.run_github_command(&argv)?;
-            let value = serde_json::from_str::<Value>(&output)
-                .map_err(|err| github_pr_error(format!("parse pr identity json: {err}")))?;
-            let identity = parse_pr_identity(&value, context.run_id(), &owner, &repo)?;
-            let payload = json!({
-                "pr_url": identity.pr_url,
-                "capture_state": "captured",
-                "captured_at": clock.now_rfc3339(),
-                "source": "gh_pr_view",
-                "source_pr_node_id": identity.source_pr_node_id,
-                "source_head_repository_owner": identity.source_head_repository_owner,
-                "source_head_repository_name": identity.source_head_repository_name
-            });
-            store.write_json_artifact(
-                &identity.binding,
-                "pr",
-                "capture_pr_identity",
-                1,
-                &payload,
-                None,
-                clock,
-            )?;
-            read_json_without_store_validation(&store.canonical_path(&identity.binding, "pr"))
-        }
     }
 }
 
-/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P06
+fn fallback_pr_followup_binding(context: &StepContext, params: &Value) -> PrFollowupBinding {
+    let pr_number = param_or_context(context, params, "pr_number")
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(0);
+    build_lookup_binding(
+        context,
+        params,
+        required_param_or_context(context, params, "repository_owner", "owner"),
+        required_param_or_context(context, params, "repository_name", "repo"),
+        pr_number,
+    )
+}
+
+fn set_pr_identity_context(context: &mut StepContext, binding: &PrFollowupBinding) {
+    context.set("repository_owner", &binding.repository_owner);
+    context.set("repository_name", &binding.repository_name);
+    context.set("pr_number", &binding.pr_number.to_string());
+    context.set("head_ref", &binding.head_ref);
+    context.set("head_sha", &binding.head_sha);
+    context.set("base_ref", &binding.base_ref);
+    if let Some(base_sha) = binding.base_sha.as_deref() {
+        context.set("base_sha", base_sha);
+    }
+}
+
 /// @requirement:REQ-PRFU-004,REQ-PRFU-006
 /// @pseudocode lines 17-18
 fn query_checks(
@@ -755,6 +806,15 @@ fn artifact_root(context: &StepContext, params: &Value) -> Result<std::path::Pat
 
 fn has_unresolved_template(value: &str) -> bool {
     value.contains('{') || value.contains('}')
+}
+fn param_or_context(context: &StepContext, params: &Value, name: &str) -> Option<String> {
+    params
+        .get(name)
+        .and_then(Value::as_str)
+        .map(|template| interpolate_string(template, context))
+        .filter(|value| !value.is_empty() && !has_unresolved_template(value))
+        .or_else(|| context.get(name).cloned())
+        .filter(|value| !value.is_empty() && !has_unresolved_template(value))
 }
 
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P06

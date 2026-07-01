@@ -1,10 +1,11 @@
 //! PR follow-through artifact store and writer implementation.
 //! @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P03
-
 //! @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P05
 //! @requirement:REQ-PRFU-002,REQ-PRFU-004,REQ-PRFU-020
 //! @pseudocode lines 5-7
+mod identity_discovery;
 
+use self::identity_discovery::{discover_current_pr_artifact, is_current_pr_identity};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -165,6 +166,38 @@ impl PrFollowupArtifactStore {
     #[must_use]
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    pub fn find_current_pr_artifact_for_run(
+        &self,
+        run_id: &str,
+        requested: &PrFollowupBinding,
+    ) -> Result<Option<Value>, EngineError> {
+        let requested_value = if requested.pr_number == 0 {
+            None
+        } else {
+            let requested_path = self.canonical_path(requested, "pr");
+            requested_path
+                .exists()
+                .then(|| read_json_file(&requested_path))
+                .transpose()?
+        };
+
+        if requested_value
+            .as_ref()
+            .filter(|value| value.get("run_id").and_then(Value::as_str) == Some(run_id))
+            .is_some_and(is_current_pr_identity)
+        {
+            return Ok(requested_value);
+        }
+
+        let current_root = self.root.join("pr-followup").join("current").join(run_id);
+        let discovered = discover_current_pr_artifact(&current_root, run_id)?;
+        if discovered.is_some() {
+            return Ok(discovered);
+        }
+
+        Ok(None)
     }
 
     pub fn next_sequence_for_step(
