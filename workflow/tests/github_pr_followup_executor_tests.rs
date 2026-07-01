@@ -4792,16 +4792,343 @@ fn write_p11_plan_and_result(temp: &tempfile::TempDir, results: serde_json::Valu
         "max_validation_retries": 2,
         "remediation_attempt_index": 0,
         "max_remediation_attempts": 2,
-        "retry_scope": { "run_id": binding.run_id, "input_head_sha": binding.head_sha, "plan_artifact_sequence": plan.get("artifact_sequence") },
+        "retry_scope": { "scope_kind": "remediation_result_validation", "run_id": binding.run_id, "repository_owner": binding.repository_owner, "repository_name": binding.repository_name, "pr_number": binding.pr_number, "input_head_sha": binding.head_sha, "output_head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "plan_artifact_sequence": plan.get("artifact_sequence"), "remediation_attempt_index": 0, "max_remediation_attempts": 2, "validation_retry_index": 0, "max_validation_retries": 2 },
         "plan_artifact_sequence": plan.get("artifact_sequence"),
         "unsuccessful_statuses": [],
         "no_change_after_remediation": false
     }), None, &FixedClock).expect("write p11 result");
 }
 
+fn rewrite_p11_result(temp: &tempfile::TempDir, mut update: impl FnMut(&mut serde_json::Value)) {
+    let path = p11_result_path(temp);
+    let mut result = read_json(&path);
+    update(&mut result);
+    std::fs::write(
+        path,
+        serde_json::to_vec_pretty(&result).expect("result json"),
+    )
+    .expect("rewrite p11 result");
+}
+
+fn assert_stale_artifact_without_attempt_burn(temp: &tempfile::TempDir, outcome: StepOutcome) {
+    let artifact = read_json(&p11_result_path(temp));
+    assert_expected_outcome(
+        outcome,
+        StepOutcome::Fixable,
+        "stale remediation result scope should be retryable infrastructure state",
+    );
+    assert_eq!(
+        artifact
+            .get("validation_state")
+            .and_then(serde_json::Value::as_str),
+        Some("stale_artifact")
+    );
+    assert_eq!(
+        artifact
+            .get("failure_reason")
+            .and_then(serde_json::Value::as_str),
+        Some("stale_remediation_result_scope")
+    );
+    assert_eq!(
+        artifact.get("remediation_attempt_index"),
+        Some(&serde_json::json!(1))
+    );
+    assert_eq!(
+        artifact.get("validation_retry_index"),
+        Some(&serde_json::json!(0))
+    );
+    assert!(artifact
+        .get("stale_scope_errors")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|errors| !errors.is_empty()));
+}
+
+#[test]
+fn remediation_validator_rejects_missing_top_level_identity_without_backfill() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_p11_plan_and_result(&temp, serde_json::json!([]));
+    rewrite_p11_result(&temp, |result| {
+        let object = result.as_object_mut().expect("result object");
+        object.remove("run_id");
+        object.remove("repository_owner");
+        object.remove("repository_name");
+        object.remove("pr_number");
+        result["remediation_attempt_index"] = serde_json::json!(1);
+        result["stale_artifact_retry_index"] = serde_json::json!(0);
+        result["max_stale_artifact_retries"] = serde_json::json!(2);
+    });
+    let mut context = p11_context(&temp);
+    let outcome = PrRemediationResultExecutor
+        .execute(&mut context, &p11_params(&temp))
+        .expect("validate missing identity result");
+    let artifact = read_json(&p11_result_path(&temp));
+    assert_expected_outcome(
+        outcome,
+        StepOutcome::Fixable,
+        "missing top-level identity should reject the result without retry_scope backfill",
+    );
+    assert_eq!(
+        artifact
+            .get("validation_state")
+            .and_then(serde_json::Value::as_str),
+        Some("fixable_malformed")
+    );
+    assert!(
+        artifact
+            .get("validation_errors")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|errors| errors.iter().any(|error| error
+                .as_str()
+                .is_some_and(|text| text.contains("run_id mismatch")))),
+        "missing top-level identity should not be backfilled as current: {artifact:?}"
+    );
+}
+
+#[test]
+fn remediation_validator_rejects_stale_input_head_without_burning_model_attempts() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_p11_plan_and_result(
+        &temp,
+        serde_json::json!([
+            { "source_type": "ci_failure", "source_id": "ci-build", "status": "not_fixed", "input_head_sha": "old-head", "action": "attempted", "evidence": { "kind": "test", "current_head_sha": "old-head", "commands": [] }, "response_text": "stale result", "evidence_paths": [] },
+            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "thread-valid", "body_hash": "hash-valid", "status": "not_fixed", "input_head_sha": "old-head", "action": "attempted", "evidence": { "kind": "test", "current_head_sha": "old-head", "commands": [] }, "response_text": "stale result", "evidence_paths": [] }
+        ]),
+    );
+    rewrite_p11_result(&temp, |result| {
+        result["input_head_sha"] = serde_json::json!("old-head");
+        result["remediation_attempt_index"] = serde_json::json!(1);
+        result["retry_scope"]["input_head_sha"] = serde_json::json!("old-head");
+        result["retry_scope"]["remediation_attempt_index"] = serde_json::json!(1);
+        result["retry_scope"]["stale_artifact_retry_index"] = serde_json::json!(0);
+        result["retry_scope"]["max_stale_artifact_retries"] = serde_json::json!(2);
+    });
+    let mut context = p11_context(&temp);
+    let outcome = PrRemediationResultExecutor
+        .execute(&mut context, &p11_params(&temp))
+        .expect("validate stale input head");
+    assert_stale_artifact_without_attempt_burn(&temp, outcome);
+}
+
+#[test]
+fn remediation_validator_rejects_stale_plan_sequence_without_burning_model_attempts() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_p11_plan_and_result(&temp, serde_json::json!([]));
+    rewrite_p11_result(&temp, |result| {
+        result["plan_artifact_sequence"] = serde_json::json!(1);
+        result["retry_scope"]["plan_artifact_sequence"] = serde_json::json!(1);
+        result["remediation_attempt_index"] = serde_json::json!(1);
+        result["retry_scope"]["remediation_attempt_index"] = serde_json::json!(1);
+        result["retry_scope"]["stale_artifact_retry_index"] = serde_json::json!(0);
+        result["retry_scope"]["max_stale_artifact_retries"] = serde_json::json!(2);
+    });
+    let mut context = p11_context(&temp);
+    let outcome = PrRemediationResultExecutor
+        .execute(&mut context, &p11_params(&temp))
+        .expect("validate stale plan sequence");
+    assert_stale_artifact_without_attempt_burn(&temp, outcome);
+}
+
+#[test]
+fn remediation_validator_prefers_retry_scope_attempt_metadata() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_p11_plan_and_result(&temp, serde_json::json!([]));
+    rewrite_p11_result(&temp, |result| {
+        result["remediation_attempt_index"] = serde_json::json!(1);
+        result["retry_scope"]["remediation_attempt_index"] = serde_json::json!(0);
+        result["retry_scope"]["stale_artifact_retry_index"] = serde_json::json!(0);
+        result["retry_scope"]["max_stale_artifact_retries"] = serde_json::json!(2);
+    });
+    let mut context = p11_context(&temp);
+    let outcome = PrRemediationResultExecutor
+        .execute(&mut context, &p11_params(&temp))
+        .expect("validate retry scope attempt metadata");
+    let artifact = read_json(&p11_result_path(&temp));
+
+    assert_expected_outcome(
+        outcome,
+        StepOutcome::Fixable,
+        "retry_scope normal counters should be used consistently before semantic validation",
+    );
+    assert_eq!(
+        artifact
+            .get("validation_state")
+            .and_then(serde_json::Value::as_str),
+        Some("fixable_malformed")
+    );
+    assert_eq!(
+        artifact.get("validation_retry_index"),
+        Some(&serde_json::json!(1))
+    );
+    assert_eq!(
+        artifact.get("remediation_attempt_index"),
+        Some(&serde_json::json!(1))
+    );
+}
+
+#[test]
+fn remediation_validator_exhausts_stale_artifact_cap_from_retry_scope_without_attempt_burn() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_p11_plan_and_result(&temp, serde_json::json!([]));
+    rewrite_p11_result(&temp, |result| {
+        result["input_head_sha"] = serde_json::json!("old-head");
+        result["remediation_attempt_index"] = serde_json::json!(1);
+        result
+            .as_object_mut()
+            .expect("result object")
+            .remove("stale_artifact_retry_index");
+        result
+            .as_object_mut()
+            .expect("result object")
+            .remove("max_stale_artifact_retries");
+        result["retry_scope"]["input_head_sha"] = serde_json::json!("old-head");
+        result["retry_scope"]["remediation_attempt_index"] = serde_json::json!(1);
+        result["retry_scope"]["stale_artifact_retry_index"] = serde_json::json!(1);
+        result["retry_scope"]["max_stale_artifact_retries"] = serde_json::json!(2);
+    });
+
+    let mut context = p11_context(&temp);
+    let outcome = PrRemediationResultExecutor
+        .execute(&mut context, &p11_params(&temp))
+        .expect("validate stale cap exhaustion");
+    let artifact = read_json(&p11_result_path(&temp));
+
+    assert_expected_outcome(
+        outcome,
+        StepOutcome::Fatal,
+        "stale artifact retry cap should be exhausted from retry_scope counters",
+    );
+    assert_eq!(
+        artifact
+            .get("validation_state")
+            .and_then(serde_json::Value::as_str),
+        Some("stale_artifact_cap_exhausted")
+    );
+    assert_eq!(
+        artifact
+            .get("classified_as")
+            .and_then(serde_json::Value::as_str),
+        Some("stale_artifact_cap_exhausted")
+    );
+    assert_eq!(
+        artifact.get("remediation_attempt_index"),
+        Some(&serde_json::json!(1))
+    );
+    assert_eq!(
+        artifact.get("validation_retry_index"),
+        Some(&serde_json::json!(0))
+    );
+    assert_eq!(
+        artifact.get("stale_artifact_retry_index"),
+        Some(&serde_json::json!(2))
+    );
+    assert_eq!(
+        artifact.pointer("/retry_scope/stale_artifact_retry_index"),
+        Some(&serde_json::json!(2))
+    );
+    assert_eq!(
+        artifact.pointer("/retry_scope/max_stale_artifact_retries"),
+        Some(&serde_json::json!(2))
+    );
+}
+
+#[test]
+fn remediation_validator_accepts_retry_scope_only_normal_counters() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_p11_plan_and_result(
+        &temp,
+        serde_json::json!([
+            { "source_type": "ci_failure", "source_id": "ci-build", "status": "fixed", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "fixed", "evidence": { "kind": "change", "current_head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "paths": ["src/lib.rs"] }, "response_text": "Luther addressed this CI failure and will post the remediation evidence on the original thread.", "evidence_paths": ["src/lib.rs"] },
+            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "thread-valid", "body_hash": "hash-valid", "status": "fixed", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "fixed", "evidence": { "kind": "change", "current_head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "paths": ["src/lib.rs"] }, "response_text": "Luther addressed this CodeRabbit item and will post the remediation evidence on the original thread.", "evidence_paths": ["src/lib.rs"] }
+        ]),
+    );
+    rewrite_p11_result(&temp, |result| {
+        let object = result.as_object_mut().expect("result object");
+        object.remove("validation_retry_index");
+        object.remove("max_validation_retries");
+        object.remove("remediation_attempt_index");
+        object.remove("max_remediation_attempts");
+        result["retry_scope"]["validation_retry_index"] = serde_json::json!(1);
+        result["retry_scope"]["max_validation_retries"] = serde_json::json!(3);
+        result["retry_scope"]["remediation_attempt_index"] = serde_json::json!(1);
+        result["retry_scope"]["max_remediation_attempts"] = serde_json::json!(4);
+    });
+
+    let mut context = p11_context(&temp);
+    let outcome = PrRemediationResultExecutor
+        .execute(&mut context, &p11_params(&temp))
+        .expect("validate retry-scope-only normal counters");
+    let artifact = read_json(&p11_result_path(&temp));
+
+    assert_expected_outcome(
+        outcome,
+        StepOutcome::Success,
+        "retry_scope-only normal counters should not be classified as stale",
+    );
+    assert_eq!(
+        artifact
+            .get("validation_state")
+            .and_then(serde_json::Value::as_str),
+        Some("valid")
+    );
+    assert!(
+        artifact
+            .get("stale_scope_errors")
+            .and_then(serde_json::Value::as_array)
+            .is_none_or(Vec::is_empty),
+        "retry_scope-only normal counters should not produce stale scope errors: {artifact:?}"
+    );
+}
+
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P11
 /// @requirement:REQ-PRFU-012,REQ-PRFU-014
 /// @pseudocode lines 18-28
+#[test]
+fn remediation_validator_waits_for_correctly_scoped_artifact_after_stale_result() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_p11_plan_and_result(
+        &temp,
+        serde_json::json!([
+            { "source_type": "ci_failure", "source_id": "ci-build", "status": "fixed", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "fixed", "evidence": { "kind": "change", "current_head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "paths": ["src/lib.rs"] }, "response_text": "Luther addressed this CI failure and will post the remediation evidence on the original thread.", "evidence_paths": ["src/lib.rs"] },
+            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "thread-valid", "body_hash": "hash-valid", "status": "fixed", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "fixed", "evidence": { "kind": "change", "current_head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "paths": ["src/lib.rs"] }, "response_text": "Luther addressed this CodeRabbit item and will post the remediation evidence on the original thread.", "evidence_paths": ["src/lib.rs"] }
+        ]),
+    );
+    let correct_result = read_json(&p11_result_path(&temp));
+    rewrite_p11_result(&temp, |result| {
+        result["input_head_sha"] = serde_json::json!("old-head");
+        result["retry_scope"]["input_head_sha"] = serde_json::json!("old-head");
+    });
+    let mut stale_context = p11_context(&temp);
+    let stale_outcome = PrRemediationResultExecutor
+        .execute(&mut stale_context, &p11_params(&temp))
+        .expect("validate stale scoped result");
+    assert_expected_outcome(
+        stale_outcome,
+        StepOutcome::Fixable,
+        "stale artifact should ask wrapper to retry",
+    );
+    std::fs::write(
+        p11_result_path(&temp),
+        serde_json::to_vec_pretty(&correct_result).expect("result json"),
+    )
+    .expect("write current result");
+    let mut current_context = p11_context(&temp);
+    let current_outcome = PrRemediationResultExecutor
+        .execute(&mut current_context, &p11_params(&temp))
+        .expect("validate correctly scoped result");
+    let artifact = read_json(&p11_result_path(&temp));
+    assert_expected_outcome(
+        current_outcome,
+        StepOutcome::Success,
+        "correctly scoped artifact should validate after stale artifact retry",
+    );
+    assert_eq!(
+        artifact
+            .get("validation_state")
+            .and_then(serde_json::Value::as_str),
+        Some("valid")
+    );
+}
+
 #[test]
 fn remediation_validator_restores_engine_known_plan_sequence_for_agent_result() {
     let temp = tempfile::tempdir().expect("tempdir");
@@ -5083,7 +5410,10 @@ fn remediation_validator_same_head_no_change_attempt_cap_reaches_post_pr_failure
     );
     let mut result = read_json(&p11_result_path(&temp));
     result["output_head_sha"] = serde_json::json!("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    result["retry_scope"]["output_head_sha"] =
+        serde_json::json!("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
     result["max_remediation_attempts"] = serde_json::json!(1);
+    result["retry_scope"]["max_remediation_attempts"] = serde_json::json!(1);
     std::fs::write(
         p11_result_path(&temp),
         serde_json::to_vec_pretty(&result).expect("result json"),
@@ -5124,6 +5454,10 @@ fn remediation_validator_wraps_raw_llxprt_result_without_store_metadata() {
     std::fs::write(
         p11_result_path(&temp),
         serde_json::to_vec_pretty(&serde_json::json!({
+            "run_id": "run-p11",
+            "repository_owner": "example",
+            "repository_name": "workflow",
+            "pr_number": 1910,
             "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             "output_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             "overall_status": "failed",
@@ -5132,7 +5466,7 @@ fn remediation_validator_wraps_raw_llxprt_result_without_store_metadata() {
                 { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "thread-valid", "body_hash": "hash-valid", "status": "not_fixed", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "attempted", "evidence": { "kind": "test", "current_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "commands": [{ "id": "cargo-test", "status": "failed" }] }, "response_text": "Luther addressed this review item and posted the remediation evidence on the original thread.", "evidence_paths": [] }
             ],
             "plan_artifact_sequence": plan.get("artifact_sequence"),
-            "retry_scope": { "run_id": "run-p11", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "plan_artifact_sequence": plan.get("artifact_sequence") },
+            "retry_scope": { "scope_kind": "remediation_result_validation", "run_id": "run-p11", "repository_owner": "example", "repository_name": "workflow", "pr_number": 1910, "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "output_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "plan_artifact_sequence": plan.get("artifact_sequence"), "remediation_attempt_index": 1, "max_remediation_attempts": 2, "validation_retry_index": 0, "max_validation_retries": 2 },
             "remediation_attempt_index": 1,
             "max_remediation_attempts": 2
         }))
@@ -5546,6 +5880,255 @@ fn p12_context(temp: &tempfile::TempDir) -> StepContext {
 /// @pseudocode lines 12-17
 fn p12_params(temp: &tempfile::TempDir) -> serde_json::Value {
     p10_params(temp)
+}
+
+fn write_p12_plan(temp: &tempfile::TempDir) {
+    write_p10_inputs(
+        temp,
+        serde_json::json!([]),
+        serde_json::json!([p10_accepted(
+            "cr-valid",
+            "thread-valid",
+            "hash-valid",
+            "valid"
+        )]),
+        serde_json::json!([]),
+        serde_json::json!([]),
+        serde_json::json!([]),
+    );
+    let mut plan_context = p10_context(temp);
+    PrRemediationPlanExecutor
+        .execute(&mut plan_context, &p10_params(temp))
+        .expect("build p10 plan");
+}
+
+#[test]
+fn pr_followup_remediation_prompt_requires_complete_retry_scope() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_p12_plan(&temp);
+    let runner = P12FakeLlxprtRunner::new(p12_result("success"));
+    let mut context = p12_context(&temp);
+    let outcome = PrFollowupRemediationExecutorWithRunner::new(runner.clone(), FixedClock)
+        .execute(&mut context, &p12_params(&temp))
+        .expect("run remediation prompt");
+    assert_expected_outcome(
+        outcome,
+        StepOutcome::Success,
+        "wrapper writes failure result",
+    );
+    let request = runner.requests().pop().expect("llxprt request");
+    for expected in [
+        "run_id",
+        "repository_owner",
+        "repository_name",
+        "pr_number",
+        "input_head_sha",
+        "output_head_sha after remediation",
+        "plan_artifact_sequence",
+        "remediation_attempt_index",
+        "validation_retry_index",
+        "stale_artifact_retry_index",
+        "max_stale_artifact_retries",
+        "scope_kind remediation_result_validation",
+    ] {
+        assert!(
+            request.argv.iter().any(|arg| arg.contains(expected)),
+            "prompt should mention {expected}: {:?}",
+            request.argv
+        );
+    }
+}
+
+#[test]
+fn pr_followup_remediation_wrapper_writes_complete_retry_scope_on_failure() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_p12_plan(&temp);
+    let runner = P12FakeLlxprtRunner::new(p12_result("timeout"));
+    let mut context = p12_context(&temp);
+    let outcome = PrFollowupRemediationExecutorWithRunner::new(runner, FixedClock)
+        .execute(&mut context, &p12_params(&temp))
+        .expect("run remediation wrapper failure");
+    assert_expected_outcome(
+        outcome,
+        StepOutcome::Success,
+        "wrapper writes validator-readable result",
+    );
+    let artifact = read_json(&p10_current_artifact_path(&temp, "pr-remediation-result"));
+    assert_eq!(
+        artifact.pointer("/retry_scope/scope_kind"),
+        Some(&serde_json::json!("remediation_result_validation"))
+    );
+    for pointer in [
+        "/retry_scope/run_id",
+        "/retry_scope/repository_owner",
+        "/retry_scope/repository_name",
+        "/retry_scope/pr_number",
+        "/retry_scope/input_head_sha",
+        "/retry_scope/output_head_sha",
+        "/retry_scope/plan_artifact_sequence",
+        "/retry_scope/remediation_attempt_index",
+        "/retry_scope/max_remediation_attempts",
+        "/retry_scope/validation_retry_index",
+        "/retry_scope/max_validation_retries",
+        "/retry_scope/stale_artifact_retry_index",
+        "/retry_scope/max_stale_artifact_retries",
+        "/retry_scope/scope_kind",
+    ] {
+        assert!(artifact.pointer(pointer).is_some(), "missing {pointer}");
+    }
+}
+
+#[test]
+fn pr_followup_remediation_wrapper_carries_stale_retry_scope_on_failure() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_p12_plan(&temp);
+    let previous_path = p10_current_artifact_path(&temp, "pr-remediation-result");
+    write_previous_p12_stale_retry_result(&previous_path);
+
+    let runner = P12FakeLlxprtRunner::new(p12_result("timeout"));
+    let mut context = p12_context(&temp);
+    let outcome = PrFollowupRemediationExecutorWithRunner::new(runner, FixedClock)
+        .execute(&mut context, &p12_params(&temp))
+        .expect("run remediation wrapper failure");
+    let artifact = read_json(&previous_path);
+
+    assert_expected_outcome(
+        outcome,
+        StepOutcome::Success,
+        "wrapper should preserve retry metadata when writing failure result",
+    );
+    assert_p12_stale_retry_counters(&artifact);
+    assert_p12_stale_retry_scope_identity(&artifact);
+    assert_p12_stale_retry_scope_heads(&artifact);
+    assert_p12_normal_retry_counters(&artifact);
+}
+fn write_previous_p12_stale_retry_result(previous_path: &std::path::Path) {
+    std::fs::write(
+        previous_path,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "validation_errors": ["stale scope"],
+            "stale_artifact_retry_index": 0,
+            "max_stale_artifact_retries": 9,
+            "validation_retry_index": 3,
+            "max_validation_retries": 5,
+            "remediation_attempt_index": 4,
+            "max_remediation_attempts": 6,
+            "retry_scope": {
+                "scope_kind": "remediation_result_validation",
+                "run_id": "run-p10",
+                "repository_owner": "example",
+                "repository_name": "workflow",
+                "pr_number": 1910,
+                "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "output_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "plan_artifact_sequence": 5,
+                "stale_artifact_retry_index": 1,
+                "max_stale_artifact_retries": 2,
+                "validation_retry_index": 7,
+                "max_validation_retries": 8,
+                "remediation_attempt_index": 9,
+                "max_remediation_attempts": 10
+            }
+        }))
+        .expect("previous result json"),
+    )
+    .expect("write previous result");
+}
+
+fn assert_p12_stale_retry_counters(artifact: &serde_json::Value) {
+    assert_eq!(
+        artifact.pointer("/retry_scope/stale_artifact_retry_index"),
+        Some(&serde_json::json!(1))
+    );
+    assert_eq!(
+        artifact.pointer("/retry_scope/max_stale_artifact_retries"),
+        Some(&serde_json::json!(2))
+    );
+    assert_eq!(
+        artifact.get("stale_artifact_retry_index"),
+        Some(&serde_json::json!(1))
+    );
+    assert_eq!(
+        artifact.get("max_stale_artifact_retries"),
+        Some(&serde_json::json!(2))
+    );
+}
+
+fn assert_p12_stale_retry_scope_identity(artifact: &serde_json::Value) {
+    assert_eq!(
+        artifact.pointer("/retry_scope/scope_kind"),
+        Some(&serde_json::json!("remediation_result_validation"))
+    );
+    assert_eq!(
+        artifact.pointer("/retry_scope/run_id"),
+        Some(&serde_json::json!("run-p10"))
+    );
+    assert_eq!(
+        artifact.pointer("/retry_scope/repository_owner"),
+        Some(&serde_json::json!("example"))
+    );
+    assert_eq!(
+        artifact.pointer("/retry_scope/repository_name"),
+        Some(&serde_json::json!("workflow"))
+    );
+    assert_eq!(
+        artifact.pointer("/retry_scope/pr_number"),
+        Some(&serde_json::json!(1910))
+    );
+}
+
+fn assert_p12_stale_retry_scope_heads(artifact: &serde_json::Value) {
+    assert_eq!(
+        artifact.pointer("/retry_scope/input_head_sha"),
+        Some(&serde_json::json!(
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        ))
+    );
+    assert_eq!(
+        artifact.pointer("/retry_scope/output_head_sha"),
+        Some(&serde_json::json!(
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        ))
+    );
+    assert_eq!(
+        artifact.pointer("/retry_scope/plan_artifact_sequence"),
+        Some(&serde_json::json!(5))
+    );
+}
+
+fn assert_p12_normal_retry_counters(artifact: &serde_json::Value) {
+    assert_eq!(
+        artifact.pointer("/retry_scope/validation_retry_index"),
+        Some(&serde_json::json!(7))
+    );
+    assert_eq!(
+        artifact.pointer("/retry_scope/max_validation_retries"),
+        Some(&serde_json::json!(8))
+    );
+    assert_eq!(
+        artifact.pointer("/retry_scope/remediation_attempt_index"),
+        Some(&serde_json::json!(9))
+    );
+    assert_eq!(
+        artifact.pointer("/retry_scope/max_remediation_attempts"),
+        Some(&serde_json::json!(10))
+    );
+    assert_eq!(
+        artifact.get("validation_retry_index"),
+        Some(&serde_json::json!(7))
+    );
+    assert_eq!(
+        artifact.get("max_validation_retries"),
+        Some(&serde_json::json!(8))
+    );
+    assert_eq!(
+        artifact.get("remediation_attempt_index"),
+        Some(&serde_json::json!(9))
+    );
+    assert_eq!(
+        artifact.get("max_remediation_attempts"),
+        Some(&serde_json::json!(10))
+    );
 }
 
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P12
@@ -6213,6 +6796,7 @@ struct P14RecordingPushRunner {
     local_after: String,
     remote_before: String,
     remote_after: String,
+    remote_after_status: String,
     status_output: String,
 }
 
@@ -6227,6 +6811,7 @@ impl P14RecordingPushRunner {
             local_after: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string(),
             remote_before: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
             remote_after: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string(),
+            remote_after_status: "passed".to_string(),
             status_output: " M src/lib.rs\0?? .llxprt/session.json\0?? GENERATED_NOTICE.md\0"
                 .to_string(),
         }
@@ -6242,8 +6827,14 @@ impl P14RecordingPushRunner {
 /// @pseudocode lines 34-40
 impl PushRemediationCommandRunner for P14RecordingPushRunner {
     fn run(&self, request: PushRemediationCommandRequest) -> PushRemediationCommandResult {
-        self.calls.lock().expect("p14 calls").push(request.clone());
-        let calls = self.calls.lock().expect("p14 calls count").len();
+        let (calls, push_seen) = {
+            let mut guard = self.calls.lock().expect("p14 calls");
+            guard.push(request.clone());
+            let len = guard.len();
+            let seen = guard.iter().any(|call| call.command_id == "push");
+            (len, seen)
+        };
+        let after_remote_head = push_seen && request.command_id == "remote-head";
         let stdout = match request.command_id.as_str() {
             "local-head" if calls <= 1 => self.local_before.clone(),
             "local-head" => self.local_after.clone(),
@@ -6252,13 +6843,26 @@ impl PushRemediationCommandRunner for P14RecordingPushRunner {
             "status-porcelain" => self.status_output.clone(),
             _ => String::new(),
         };
+        std::fs::create_dir_all(
+            request
+                .stdout_log_path
+                .parent()
+                .expect("p14 stdout log parent"),
+        )
+        .expect("p14 stdout log dir");
+        std::fs::write(&request.stdout_log_path, &stdout).expect("p14 stdout log");
+        std::fs::write(&request.stderr_log_path, "").expect("p14 stderr log");
         PushRemediationCommandResult {
             command_id: request.command_id,
             argv: request.argv,
             working_directory: request.working_directory,
             exit_code: Some(0),
             signal: None,
-            status: "passed".to_string(),
+            status: if after_remote_head {
+                self.remote_after_status.clone()
+            } else {
+                "passed".to_string()
+            },
             bounded_stdout: stdout,
             bounded_stderr: String::new(),
             stdout_log_path: Some(request.stdout_log_path),
@@ -6290,7 +6894,8 @@ fn write_p14_post_pr_test_result(temp: &tempfile::TempDir, test_state: &str) {
                     "repository_name": binding.repository_name,
                     "pr_number": binding.pr_number,
                     "head_sha": binding.head_sha,
-                    "plan_artifact_sequence": plan.get("artifact_sequence")
+                    "plan_artifact_sequence": plan.get("artifact_sequence"),
+                    "remediation_result_artifact_sequence": result.get("artifact_sequence")
                 },
                 "plan_artifact_sequence": plan.get("artifact_sequence"),
                 "remediation_result_artifact_sequence": result.get("artifact_sequence"),
@@ -6401,6 +7006,291 @@ fn push_remediation_changes_records_safe_staging_remote_heads_and_verified_push_
             && !call.argv.join(" ").contains("`uname`")));
 }
 
+#[test]
+fn push_remediation_retry_scope_includes_source_sequences_and_full_binding() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_p11_plan_and_result(
+        &temp,
+        serde_json::json!([
+            { "source_type": "ci_failure", "source_id": "ci-build", "status": "changed", "evidence": { "kind": "current_repository_test", "current_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } },
+            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "thread-valid", "body_hash": "hash-valid", "status": "changed", "evidence": { "kind": "current_repository_test", "current_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } }
+        ]),
+    );
+    write_p14_post_pr_test_result(&temp, "passed");
+    let mut runner = P14RecordingPushRunner::new();
+    runner.remote_after = "cccccccccccccccccccccccccccccccccccccccc".to_string();
+    let mut context = p11_context(&temp);
+    let outcome = PushRemediationChangesExecutorWithRunner::new(runner, FixedClock)
+        .execute(&mut context, &p11_params(&temp))
+        .expect("first push remediation changes");
+    let artifact = read_json(&p11_current_artifact_path(&temp, "push-remediation-result"));
+    let plan = read_json(&p11_current_artifact_path(&temp, "pr-remediation-plan"));
+    let result = read_json(&p11_current_artifact_path(&temp, "pr-remediation-result"));
+
+    assert_expected_outcome(
+        outcome,
+        StepOutcome::Retryable,
+        "remote mismatch after push should be retryable before the push retry cap is exhausted",
+    );
+    assert_eq!(
+        artifact.pointer("/retry_scope/run_id"),
+        Some(&serde_json::json!("run-p11"))
+    );
+    assert_eq!(
+        artifact.pointer("/retry_scope/repository_owner"),
+        Some(&serde_json::json!("example"))
+    );
+    assert_eq!(
+        artifact.pointer("/retry_scope/repository_name"),
+        Some(&serde_json::json!("workflow"))
+    );
+    assert_eq!(
+        artifact.pointer("/retry_scope/pr_number"),
+        Some(&serde_json::json!(1910))
+    );
+    assert_eq!(
+        artifact.pointer("/retry_scope/head_sha"),
+        Some(&serde_json::json!(
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        ))
+    );
+    assert_eq!(
+        artifact.pointer("/retry_scope/remote_ref"),
+        Some(&serde_json::json!("refs/heads/feature"))
+    );
+    assert_eq!(
+        artifact.pointer("/retry_scope/plan_artifact_sequence"),
+        plan.get("artifact_sequence")
+    );
+    assert_eq!(
+        artifact.pointer("/retry_scope/remediation_result_artifact_sequence"),
+        result.get("artifact_sequence")
+    );
+}
+
+fn p11_push_source_artifact_sequences(
+    temp: &tempfile::TempDir,
+) -> (serde_json::Value, serde_json::Value) {
+    let plan = read_json(&p11_current_artifact_path(temp, "pr-remediation-plan"));
+    let result = read_json(&p11_current_artifact_path(temp, "pr-remediation-result"));
+    (
+        plan.get("artifact_sequence")
+            .expect("plan artifact sequence")
+            .clone(),
+        result
+            .get("artifact_sequence")
+            .expect("result artifact sequence")
+            .clone(),
+    )
+}
+
+fn write_prior_p11_push_retry_artifact(
+    temp: &tempfile::TempDir,
+    plan_artifact_sequence: serde_json::Value,
+    remediation_result_artifact_sequence: serde_json::Value,
+    push_retry_index: u64,
+) {
+    write_prior_p11_push_retry_artifact_for_head(
+        temp,
+        plan_artifact_sequence,
+        remediation_result_artifact_sequence,
+        push_retry_index,
+        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    );
+}
+
+fn write_prior_p11_push_retry_artifact_for_head(
+    temp: &tempfile::TempDir,
+    plan_artifact_sequence: serde_json::Value,
+    remediation_result_artifact_sequence: serde_json::Value,
+    push_retry_index: u64,
+    head_sha: &str,
+) {
+    let binding = p11_binding();
+    let store = PrFollowupArtifactStore::new(temp.path().join("artifacts"));
+    store
+        .write_json_artifact(
+            &binding,
+            "push-remediation-result",
+            "push_remediation_changes",
+            9,
+            &serde_json::json!({
+                "push_state": "retryable_failed",
+                "push_retry_index": push_retry_index,
+                "max_push_retries": 1,
+                "retry_scope": {
+                    "run_id": binding.run_id,
+                    "repository_owner": binding.repository_owner,
+                    "repository_name": binding.repository_name,
+                    "pr_number": binding.pr_number,
+                    "head_sha": head_sha,
+                    "remote_ref": "refs/heads/feature",
+                    "plan_artifact_sequence": plan_artifact_sequence,
+                    "remediation_result_artifact_sequence": remediation_result_artifact_sequence
+                }
+            }),
+            None,
+            &FixedClock,
+        )
+        .expect("write prior push remediation result");
+}
+
+fn execute_retryable_p11_push(temp: &tempfile::TempDir) -> (StepOutcome, serde_json::Value) {
+    let mut runner = P14RecordingPushRunner::new();
+    runner.remote_after = "cccccccccccccccccccccccccccccccccccccccc".to_string();
+    let mut context = p11_context(temp);
+    let outcome = PushRemediationChangesExecutorWithRunner::new(runner, FixedClock)
+        .execute(&mut context, &p11_params(temp))
+        .expect("push remediation changes");
+    let artifact = read_json(&p11_current_artifact_path(temp, "push-remediation-result"));
+    (outcome, artifact)
+}
+
+#[test]
+fn push_remediation_retry_scope_matching_sequences_exhausts_retry_cap() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_p11_plan_and_result(
+        &temp,
+        serde_json::json!([
+            { "source_type": "ci_failure", "source_id": "ci-build", "status": "changed", "evidence": { "kind": "current_repository_test", "current_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } },
+            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "thread-valid", "body_hash": "hash-valid", "status": "changed", "evidence": { "kind": "current_repository_test", "current_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } }
+        ]),
+    );
+    write_p14_post_pr_test_result(&temp, "passed");
+    let (plan_sequence, result_sequence) = p11_push_source_artifact_sequences(&temp);
+    write_prior_p11_push_retry_artifact(&temp, plan_sequence, result_sequence, 0);
+    let (outcome, artifact) = execute_retryable_p11_push(&temp);
+
+    assert_expected_outcome(
+        outcome,
+        StepOutcome::Fatal,
+        "matching push retry scope must increment the stored retry index and exhaust the push retry cap",
+    );
+    assert_eq!(
+        artifact
+            .get("push_retry_index")
+            .and_then(serde_json::Value::as_u64),
+        Some(1)
+    );
+}
+
+#[test]
+fn push_remediation_retry_scope_ignores_stale_plan_artifact_sequence() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_p11_plan_and_result(
+        &temp,
+        serde_json::json!([
+            { "source_type": "ci_failure", "source_id": "ci-build", "status": "changed", "evidence": { "kind": "current_repository_test", "current_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } },
+            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "thread-valid", "body_hash": "hash-valid", "status": "changed", "evidence": { "kind": "current_repository_test", "current_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } }
+        ]),
+    );
+    write_p14_post_pr_test_result(&temp, "passed");
+    let (_, result_sequence) = p11_push_source_artifact_sequences(&temp);
+    write_prior_p11_push_retry_artifact(&temp, serde_json::json!(0), result_sequence, 1);
+    let (outcome, artifact) = execute_retryable_p11_push(&temp);
+
+    assert_expected_outcome(
+        outcome,
+        StepOutcome::Retryable,
+        "stale push artifacts with a different plan sequence must not exhaust the current retry scope",
+    );
+    assert_eq!(
+        artifact
+            .get("push_retry_index")
+            .and_then(serde_json::Value::as_u64),
+        Some(0)
+    );
+}
+
+#[test]
+fn push_remediation_retry_scope_ignores_stale_remediation_result_artifact_sequence() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_p11_plan_and_result(
+        &temp,
+        serde_json::json!([
+            { "source_type": "ci_failure", "source_id": "ci-build", "status": "changed", "evidence": { "kind": "current_repository_test", "current_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } },
+            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "thread-valid", "body_hash": "hash-valid", "status": "changed", "evidence": { "kind": "current_repository_test", "current_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } }
+        ]),
+    );
+    write_p14_post_pr_test_result(&temp, "passed");
+    let (plan_sequence, _) = p11_push_source_artifact_sequences(&temp);
+    write_prior_p11_push_retry_artifact(&temp, plan_sequence, serde_json::json!(0), 1);
+    let (outcome, artifact) = execute_retryable_p11_push(&temp);
+
+    assert_expected_outcome(
+        outcome,
+        StepOutcome::Retryable,
+        "stale push artifacts with a different remediation result sequence must not exhaust the current retry scope",
+    );
+    assert_eq!(
+        artifact
+            .get("push_retry_index")
+            .and_then(serde_json::Value::as_u64),
+        Some(0)
+    );
+}
+
+#[test]
+fn push_remediation_observation_failures_use_matching_retry_scope_for_cap() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_p11_plan_and_result(
+        &temp,
+        serde_json::json!([
+            { "source_type": "ci_failure", "source_id": "ci-build", "status": "changed", "evidence": { "kind": "current_repository_test", "current_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } },
+            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "thread-valid", "body_hash": "hash-valid", "status": "changed", "evidence": { "kind": "current_repository_test", "current_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } }
+        ]),
+    );
+    write_p14_post_pr_test_result(&temp, "passed");
+    let (plan_sequence, result_sequence) = p11_push_source_artifact_sequences(&temp);
+    write_prior_p11_push_retry_artifact_for_head(
+        &temp,
+        plan_sequence,
+        result_sequence,
+        0,
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    );
+    let mut runner = P14RecordingPushRunner::new();
+    runner.status_output = String::new();
+    runner.remote_before = "cccccccccccccccccccccccccccccccccccccccc".to_string();
+    runner.remote_after_status = "failed".to_string();
+    let mut context = p11_context(&temp);
+
+    let outcome = PushRemediationChangesExecutorWithRunner::new(runner, FixedClock)
+        .execute(&mut context, &p11_params(&temp))
+        .expect("push remediation observation failure");
+    let artifact = read_json(&p11_current_artifact_path(&temp, "push-remediation-result"));
+
+    assert_expected_outcome(
+        outcome,
+        StepOutcome::Fatal,
+        "matching prior push scope must exhaust the retry cap for post-push observation failures",
+    );
+    assert_eq!(
+        artifact.pointer("/retry_scope/head_sha"),
+        Some(&serde_json::json!(
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        ))
+    );
+    assert_eq!(
+        artifact
+            .get("push_state")
+            .and_then(serde_json::Value::as_str),
+        Some("retry_exhausted")
+    );
+    assert_eq!(
+        artifact
+            .get("push_retry_index")
+            .and_then(serde_json::Value::as_u64),
+        Some(1)
+    );
+    assert_eq!(
+        artifact
+            .get("semantic_state")
+            .and_then(serde_json::Value::as_str),
+        Some("retry_exhausted")
+    );
+}
+
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P14
 /// @requirement:REQ-PRFU-015,REQ-PRFU-016,REQ-PRFU-018
 /// @pseudocode lines 34-49
@@ -6441,6 +7331,78 @@ fn push_remediation_changes_no_change_routes_fixable_for_marker_handling() {
             .get("verified_remote_matches_expected")
             .and_then(serde_json::Value::as_bool),
         Some(true)
+    );
+}
+
+#[test]
+fn push_remediation_changes_rejects_false_validator_success_evidence() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_p11_plan_and_result(
+        &temp,
+        serde_json::json!([
+            { "source_type": "ci_failure", "source_id": "ci-build", "status": "changed", "evidence": false },
+            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "thread-valid", "body_hash": "hash-valid", "status": "changed", "evidence": { "kind": "change", "current_head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" } }
+        ]),
+    );
+    write_p14_post_pr_test_result(&temp, "passed");
+    let runner = P14RecordingPushRunner::new();
+    let mut context = p11_context(&temp);
+
+    let outcome = PushRemediationChangesExecutorWithRunner::new(runner.clone(), FixedClock)
+        .execute(&mut context, &p11_params(&temp))
+        .expect("reject false validator evidence before push");
+    let artifact = read_json(&p11_current_artifact_path(&temp, "push-remediation-result"));
+
+    assert_expected_outcome(
+        outcome,
+        StepOutcome::Fatal,
+        "false evidence must not satisfy validator success evidence gate",
+    );
+    assert_eq!(
+        artifact
+            .get("push_error_class")
+            .and_then(serde_json::Value::as_str),
+        Some("missing_validator_success_evidence")
+    );
+    assert!(
+        runner.calls().is_empty(),
+        "invalid success evidence must be rejected before git inspection"
+    );
+}
+
+#[test]
+fn push_remediation_changes_rejects_zero_numeric_validator_success_evidence() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_p11_plan_and_result(
+        &temp,
+        serde_json::json!([
+            { "source_type": "ci_failure", "source_id": "ci-build", "status": "changed", "evidence": 0 },
+            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "thread-valid", "body_hash": "hash-valid", "status": "changed", "evidence": { "kind": "change", "current_head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" } }
+        ]),
+    );
+    write_p14_post_pr_test_result(&temp, "passed");
+    let runner = P14RecordingPushRunner::new();
+    let mut context = p11_context(&temp);
+
+    let outcome = PushRemediationChangesExecutorWithRunner::new(runner.clone(), FixedClock)
+        .execute(&mut context, &p11_params(&temp))
+        .expect("reject zero numeric validator evidence before push");
+    let artifact = read_json(&p11_current_artifact_path(&temp, "push-remediation-result"));
+
+    assert_expected_outcome(
+        outcome,
+        StepOutcome::Fatal,
+        "zero numeric evidence must not satisfy validator success evidence gate",
+    );
+    assert_eq!(
+        artifact
+            .get("push_error_class")
+            .and_then(serde_json::Value::as_str),
+        Some("missing_validator_success_evidence")
+    );
+    assert!(
+        runner.calls().is_empty(),
+        "invalid success evidence must be rejected before git inspection"
     );
 }
 

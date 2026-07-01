@@ -492,6 +492,96 @@ impl FeedbackEvaluationAdapter for ReplayFeedbackAdapter {
 #[derive(Clone)]
 struct ReplayLlxprtRunner;
 
+fn replay_run_id_from_result_path(path: &std::path::Path) -> &str {
+    path.parent()
+        .and_then(|pr_dir| pr_dir.parent())
+        .and_then(|repo_dir| repo_dir.parent())
+        .and_then(|owner_dir| owner_dir.parent())
+        .and_then(|run_dir| run_dir.file_name())
+        .and_then(|name| name.to_str())
+        .unwrap_or("unknown-run")
+}
+
+fn replay_remediation_result(plan: &Value, run_id: &str) -> Value {
+    let plan_sequence = plan
+        .get("artifact_sequence")
+        .cloned()
+        .unwrap_or(Value::Null);
+    json!({
+        "run_id": run_id,
+        "repository_owner": REPO_OWNER,
+        "repository_name": REPO_NAME,
+        "pr_number": PR_NUMBER.parse::<u64>().expect("PR_NUMBER is numeric"),
+        "input_head_sha": HEAD_SHA,
+        "output_head_sha": NEXT_HEAD_SHA,
+        "overall_status": "success",
+        "plan_artifact_sequence": plan_sequence,
+        "results": replay_remediation_results(plan),
+        "verification_commands": [],
+        "retry_scope": replay_retry_scope(run_id, plan_sequence)
+    })
+}
+
+fn replay_retry_scope(run_id: &str, plan_sequence: Value) -> Value {
+    json!({
+        "scope_kind": "remediation_result_validation",
+        "run_id": run_id,
+        "repository_owner": REPO_OWNER,
+        "repository_name": REPO_NAME,
+        "pr_number": PR_NUMBER.parse::<u64>().expect("PR_NUMBER is numeric"),
+        "input_head_sha": HEAD_SHA,
+        "output_head_sha": NEXT_HEAD_SHA,
+        "plan_artifact_sequence": plan_sequence,
+        "remediation_attempt_index": 0,
+        "max_remediation_attempts": 2,
+        "validation_retry_index": 0,
+        "max_validation_retries": 2,
+        "stale_artifact_retry_index": 0,
+        "max_stale_artifact_retries": 2
+    })
+}
+
+fn replay_remediation_results(plan: &Value) -> Vec<Value> {
+    plan.get("must_fix")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default()
+        .iter()
+        .map(replay_remediation_item_result)
+        .collect()
+}
+
+fn replay_remediation_item_result(item: &Value) -> Value {
+    let source_type = item
+        .get("source_type")
+        .and_then(Value::as_str)
+        .unwrap_or("ci_failure")
+        .to_string();
+    let source_id = item
+        .get("source_id")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown")
+        .to_string();
+    let mut entry = json!({
+        "source_type": source_type,
+        "source_id": source_id,
+        "stable_marker_key": item.get("stable_marker_key").cloned().unwrap_or(Value::Null),
+        "input_head_sha": HEAD_SHA,
+        "output_head_sha": NEXT_HEAD_SHA,
+        "status": "fixed",
+        "action": "scripted remediation",
+        "response_text": "Luther fixed this item and posted the remediation evidence on the original review thread.",
+        "evidence": { "kind": "current_repository_test", "current_head_sha": NEXT_HEAD_SHA },
+        "evidence_paths": ["src/lib.rs"]
+    });
+    if let Some(key) = item.get("stable_marker_key").and_then(Value::as_str) {
+        entry["thread_id"] = json!(key);
+        entry["body_hash"] = item.get("body_hash").cloned().unwrap_or(Value::Null);
+        entry["comment_database_id"] = json!(7001);
+    }
+    entry
+}
+
 impl PrFollowupLlxprtCommandRunner for ReplayLlxprtRunner {
     fn invoke(&self, request: LlxprtInvocationRequest) -> LlxprtInvocationResult {
         // Read the plan to mirror its must_fix items into the result.
@@ -499,55 +589,10 @@ impl PrFollowupLlxprtCommandRunner for ReplayLlxprtRunner {
             .ok()
             .and_then(|raw| serde_json::from_str(&raw).ok())
             .unwrap_or_else(|| json!({}));
-        let plan_sequence = plan
-            .get("artifact_sequence")
-            .cloned()
-            .unwrap_or(Value::Null);
-        let results: Vec<Value> = plan
-            .get("must_fix")
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default()
-            .iter()
-            .map(|item| {
-                let source_type = item
-                    .get("source_type")
-                    .and_then(Value::as_str)
-                    .unwrap_or("ci_failure")
-                    .to_string();
-                let source_id = item
-                    .get("source_id")
-                    .and_then(Value::as_str)
-                    .unwrap_or("unknown")
-                    .to_string();
-                let mut entry = json!({
-                    "source_type": source_type,
-                    "source_id": source_id,
-                    "stable_marker_key": item.get("stable_marker_key").cloned().unwrap_or(Value::Null),
-                    "input_head_sha": HEAD_SHA,
-                    "output_head_sha": NEXT_HEAD_SHA,
-                    "status": "fixed",
-                    "action": "scripted remediation",
-                    "response_text": "Luther fixed this item and posted the remediation evidence on the original review thread.",
-                    "evidence": { "kind": "current_repository_test", "current_head_sha": NEXT_HEAD_SHA },
-                    "evidence_paths": ["src/lib.rs"]
-                });
-                if let Some(key) = item.get("stable_marker_key").and_then(Value::as_str) {
-                    entry["thread_id"] = json!(key);
-                    entry["body_hash"] = item.get("body_hash").cloned().unwrap_or(Value::Null);
-                    entry["comment_database_id"] = json!(7001);
-                }
-                entry
-            })
-            .collect();
-        let result = json!({
-            "input_head_sha": HEAD_SHA,
-            "output_head_sha": NEXT_HEAD_SHA,
-            "overall_status": "success",
-            "plan_artifact_sequence": plan_sequence,
-            "results": results,
-            "verification_commands": []
-        });
+        let result = replay_remediation_result(
+            &plan,
+            replay_run_id_from_result_path(&request.remediation_result_path),
+        );
         std::fs::write(
             &request.remediation_result_path,
             serde_json::to_vec_pretty(&result).expect("serialize remediation result"),

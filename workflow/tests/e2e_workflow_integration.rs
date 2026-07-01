@@ -1439,6 +1439,19 @@ fn post_pr_exact_p17_routing_contract_is_present() {
         "fixable",
         "remediate_pr_followup",
     );
+    let validator_params = workflow_type
+        .steps
+        .iter()
+        .find(|step| step.step_id == "validate_remediation_result")
+        .and_then(|step| step.parameters.as_ref())
+        .expect("validate_remediation_result params");
+    assert_eq!(
+        validator_params
+            .get("max_stale_artifact_retries")
+            .and_then(serde_json::Value::as_u64),
+        Some(2),
+        "stale pr-remediation-result scope must use a dedicated infrastructure retry budget",
+    );
     assert_single_target(
         &workflow_type,
         "run_post_pr_tests",

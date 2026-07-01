@@ -192,6 +192,10 @@ pub enum ValidationState {
     ValidButUnsuccessful,
     /// The unsuccessful-remediation attempt cap was exhausted.
     UnsuccessfulRemediationCapExhausted,
+    /// The artifact belongs to a different remediation retry scope.
+    StaleArtifact,
+    /// The stale-artifact infrastructure retry cap was exhausted.
+    StaleArtifactCapExhausted,
 }
 
 impl ValidationState {
@@ -207,6 +211,8 @@ impl ValidationState {
             ValidationState::UnsuccessfulRemediationCapExhausted => {
                 "unsuccessful_remediation_cap_exhausted"
             }
+            ValidationState::StaleArtifact => "stale_artifact",
+            ValidationState::StaleArtifactCapExhausted => "stale_artifact_cap_exhausted",
         }
     }
 }
