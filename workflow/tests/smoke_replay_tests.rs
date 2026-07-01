@@ -93,6 +93,7 @@ const STEP_TYPES: &[&str] = &[
     "shell",
     "verify",
     "llxprt",
+    "workflow_auth_preflight",
     "github_pr_identity",
     "post_pr_iteration_guard",
     "github_pr_checks",

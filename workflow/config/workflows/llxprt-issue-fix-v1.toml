@@ -250,6 +250,19 @@ PLAN_NEEDS_REVISION = "fixable"
 1 = "fatal"
 
 [[steps]]
+step_id = "workflow_auth_preflight_plan"
+step_type = "workflow_auth_preflight"
+description = "Preflight workflow-file authorization from plan scope"
+
+[steps.parameters]
+artifact_dir = "{artifact_dir}"
+artifact_path = "{artifact_dir}/workflow-auth-preflight-plan.json"
+include_git_status = false
+text_artifacts = ["plan.md"]
+workflow_path_patterns = [".github/workflows/**"]
+required_scopes = ["workflow"]
+
+[[steps]]
 step_id = "implement"
 step_type = "llxprt"
 description = "Invoke llxprt to implement the plan"
@@ -388,6 +401,19 @@ Do not output shell snippets with unmatched quotes.
 
 [steps.parameters.exit_code_map]
 1 = "fatal"
+
+[[steps]]
+step_id = "workflow_auth_preflight_pre_push"
+step_type = "workflow_auth_preflight"
+description = "Preflight workflow-file authorization for pending push diff"
+
+[steps.parameters]
+artifact_dir = "{artifact_dir}"
+artifact_path = "{artifact_dir}/workflow-auth-preflight-pre-push.json"
+include_git_status = true
+text_artifacts = []
+workflow_path_patterns = [".github/workflows/**"]
+required_scopes = ["workflow"]
 
 [[steps]]
 step_id = "push_changes"
@@ -690,6 +716,8 @@ step_order_index = 12
 max_push_retries = 1
 push_timeout_seconds = 900
 push_remediation_result_path = "{artifact_dir}/pr-followup/current/push-remediation-result.json"
+workflow_path_patterns = [".github/workflows/**"]
+required_scopes = ["workflow"]
 remote_ref = "refs/heads/issue{issue_number}"
 commit_message = "Apply PR follow-up remediation for issue #{issue_number}"
 staging_exclusions = [".llxprt", ".llxprt/**", "LLXPRT.md", "**/LLXPRT.md", "**/.generated-notice", "**/.generated-notice.md", "**/GENERATED_NOTICE.md", "**/generated-notice/**"]
@@ -781,10 +809,10 @@ to = "create_plan"
 from = "create_plan"
 to = "evaluate_plan"
 
-# Plan evaluation: approved → implement, needs revision → loop back to create_plan
+# Plan evaluation: approved → workflow_auth_preflight_plan → implement, needs revision → loop back to create_plan
 [[transitions]]
 from = "evaluate_plan"
-to = "implement"
+to = "workflow_auth_preflight_plan"
 condition = "success"
 
 [[transitions]]
@@ -792,6 +820,11 @@ from = "evaluate_plan"
 to = "create_plan"
 condition = "fixable"
 max_iterations = 5
+
+[[transitions]]
+from = "workflow_auth_preflight_plan"
+to = "implement"
+condition = "success"
 
 # Implementation → deterministic verification first
 [[transitions]]
@@ -848,7 +881,7 @@ condition = "fatal"
 # Subjective review happens AFTER deterministic checks pass
 [[transitions]]
 from = "evaluate_impl"
-to = "push_changes"
+to = "workflow_auth_preflight_pre_push"
 condition = "success"
 
 [[transitions]]
@@ -856,6 +889,11 @@ from = "evaluate_impl"
 to = "remediate"
 condition = "fixable"
 max_iterations = 2
+
+[[transitions]]
+from = "workflow_auth_preflight_pre_push"
+to = "push_changes"
+condition = "success"
 
 # Post-test success flow
 [[transitions]]
@@ -1035,6 +1073,16 @@ condition = "success"
 [[transitions]]
 from = "mark_coderabbit_feedback"
 to = "post_pr_failure_terminal"
+condition = "fatal"
+
+[[transitions]]
+from = "workflow_auth_preflight_plan"
+to = "abandon_and_log"
+condition = "fatal"
+
+[[transitions]]
+from = "workflow_auth_preflight_pre_push"
+to = "abandon_and_log"
 condition = "fatal"
 
 # =============================================================================

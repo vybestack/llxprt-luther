@@ -1,5 +1,7 @@
+use super::push_auth_preflight::workflow_auth_preflight_for_push;
 use super::push_support::*;
 use super::*;
+use crate::adapters::workflow_auth_preflight::WorkflowAuthPreflightConfig;
 
 /// Dedicated remediation push executor for `push_remediation_changes`.
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P03
@@ -167,6 +169,16 @@ fn push_remediation_changes(
         &setup.remote_ref,
     )?;
     let exec = PushExecution::new(&setup, &test_result, runner, clock);
+    let auth_config = push_workflow_auth_preflight_config(params)?;
+    if let Some(outcome) = workflow_auth_preflight_for_push(
+        &exec,
+        &mut commands,
+        &inspection,
+        retry_index,
+        auth_config,
+    )? {
+        return Ok(outcome);
+    }
     if inspection.included_paths.is_empty() {
         handle_no_included_push_paths(&exec, commands, inspection, retry_index)
     } else {
@@ -174,26 +186,35 @@ fn push_remediation_changes(
     }
 }
 
-struct PushRunSetup {
-    store: PrFollowupArtifactStore,
-    binding: PrFollowupBinding,
-    plan: Value,
-    result: Value,
-    step_id: String,
-    step_order: u64,
-    max_push_retries: u64,
-    timeout_seconds: u64,
-    working_directory: PathBuf,
-    remote_ref: String,
-    remote_name: String,
-    log_dir: PathBuf,
+fn push_workflow_auth_preflight_config(
+    params: &serde_json::Value,
+) -> Result<WorkflowAuthPreflightConfig, EngineError> {
+    serde_json::from_value(params.clone()).map_err(|err| EngineError::StepExecutionError {
+        step_id: "push_remediation_changes".to_string(),
+        message: format!("invalid workflow auth preflight parameters: {err}"),
+    })
 }
 
-struct PushExecution<'a> {
-    setup: &'a PushRunSetup,
-    test_result: &'a Value,
-    runner: &'a dyn PushRemediationCommandRunner,
-    clock: &'a dyn ClockSleeper,
+pub(super) struct PushRunSetup {
+    pub(super) store: PrFollowupArtifactStore,
+    pub(super) binding: PrFollowupBinding,
+    pub(super) plan: Value,
+    pub(super) result: Value,
+    pub(super) step_id: String,
+    pub(super) step_order: u64,
+    pub(super) max_push_retries: u64,
+    pub(super) timeout_seconds: u64,
+    pub(super) working_directory: PathBuf,
+    pub(super) remote_ref: String,
+    pub(super) remote_name: String,
+    pub(super) log_dir: PathBuf,
+}
+
+pub(super) struct PushExecution<'a> {
+    pub(super) setup: &'a PushRunSetup,
+    pub(super) test_result: &'a Value,
+    pub(super) runner: &'a dyn PushRemediationCommandRunner,
+    pub(super) clock: &'a dyn ClockSleeper,
 }
 
 impl<'a> PushExecution<'a> {
@@ -487,6 +508,7 @@ fn write_no_change_push_result(
         )
     });
     write_push_result_for_exec(exec, payload, failure)?;
+
     Ok(if verified {
         StepOutcome::Fixable
     } else {
@@ -810,7 +832,7 @@ fn write_push_failure_from_exec(
     )
 }
 
-fn write_push_result_for_exec(
+pub(super) fn write_push_result_for_exec(
     exec: &PushExecution<'_>,
     payload: Value,
     failure: Option<(&str, &str, Value)>,

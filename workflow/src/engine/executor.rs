@@ -355,27 +355,23 @@ impl ExecutorRegistry {
         )
     }
 
-    /// Create a registry with default executors pre-registered.
-    ///
-    /// Registers: `shell`, `write_file`, `verify`, and `noop` executors.
-    /// @plan:PLAN-20260408-STEP-EXEC.P05
-    /// @plan:PLAN-20260408-LLXPRT-FIRST.P15
-    /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P03
-    /// @requirement:REQ-LF-SEP-001,REQ-PRFU-020
-    /// @pseudocode lines 1-53
-    #[must_use]
-    pub fn with_defaults() -> Self {
-        let mut registry = Self::new();
-        registry.register("shell", Box::new(crate::engine::executors::ShellExecutor));
-        registry.register(
+    fn register_core_executors(&mut self) {
+        self.register("shell", Box::new(crate::engine::executors::ShellExecutor));
+        self.register(
             "write_file",
             Box::new(crate::engine::executors::WriteFileExecutor),
         );
-        registry.register("verify", Box::new(crate::engine::executors::VerifyExecutor));
-        registry.register("llxprt", Box::new(crate::engine::executors::LlxprtExecutor));
+        self.register("verify", Box::new(crate::engine::executors::VerifyExecutor));
+        self.register("llxprt", Box::new(crate::engine::executors::LlxprtExecutor));
+        self.register(
+            "workflow_auth_preflight",
+            Box::new(crate::engine::executors::WorkflowAuthPreflightExecutor),
+        );
+        self.register("noop", Box::new(crate::engine::executors::NoOpExecutor));
+    }
 
-        registry.register("noop", Box::new(crate::engine::executors::NoOpExecutor));
-        registry.register(
+    fn register_github_followup_executors(&mut self) {
+        self.register(
             "github_pr_identity",
             Box::new(
                 crate::engine::executors::GithubPrIdentityExecutorWithRunner::new(
@@ -384,11 +380,11 @@ impl ExecutorRegistry {
                 ),
             ),
         );
-        registry.register(
+        self.register(
             "post_pr_iteration_guard",
             Box::new(crate::engine::executors::PostPrIterationGuardExecutor),
         );
-        registry.register(
+        self.register(
             "github_pr_checks",
             Box::new(
                 crate::engine::executors::GithubPrChecksExecutorWithRunner::new(
@@ -397,7 +393,7 @@ impl ExecutorRegistry {
                 ),
             ),
         );
-        registry.register(
+        self.register(
             "github_check_failures",
             Box::new(
                 crate::engine::executors::GithubCheckFailuresExecutorWithRunner::new(
@@ -406,7 +402,7 @@ impl ExecutorRegistry {
                 ),
             ),
         );
-        registry.register(
+        self.register(
             "github_coderabbit_feedback",
             Box::new(
                 crate::engine::executors::GithubCodeRabbitFeedbackExecutorWithRunner::new(
@@ -415,7 +411,10 @@ impl ExecutorRegistry {
                 ),
             ),
         );
-        registry.register(
+    }
+
+    fn register_feedback_and_remediation_executors(&mut self) {
+        self.register(
             "feedback_evaluator",
             Box::new(crate::engine::executors::FeedbackEvaluatorExecutor::new(
                 crate::engine::executors::CommandFeedbackEvaluationAdapter::new(
@@ -425,11 +424,11 @@ impl ExecutorRegistry {
                 crate::engine::executors::SystemClockSleeper,
             )),
         );
-        registry.register(
+        self.register(
             "pr_remediation_plan",
             Box::new(crate::engine::executors::PrRemediationPlanExecutor),
         );
-        registry.register(
+        self.register(
             "pr_followup_remediation",
             Box::new(
                 crate::engine::executors::PrFollowupRemediationExecutorWithRunner::new(
@@ -438,19 +437,19 @@ impl ExecutorRegistry {
                 ),
             ),
         );
-        registry.register(
+        self.register(
             "pr_remediation_result",
             Box::new(crate::engine::executors::PrRemediationResultExecutor),
         );
-        registry.register(
+        self.register(
             "run_post_pr_tests",
             Box::new(crate::engine::executors::RunPostPrTestsExecutor),
         );
-        registry.register(
+        self.register(
             "push_remediation_changes",
             Box::new(crate::engine::executors::PushRemediationChangesExecutor),
         );
-        registry.register(
+        self.register(
             "github_feedback_marker",
             Box::new(
                 crate::engine::executors::GithubFeedbackMarkerExecutorWithRunner::new(
@@ -459,10 +458,27 @@ impl ExecutorRegistry {
                 ),
             ),
         );
-        registry.register(
+        self.register(
             "post_pr_failure_terminal",
             Box::new(crate::engine::executors::PostPrFailureTerminalExecutor),
         );
+    }
+
+    /// Create a registry with default executors pre-registered.
+    ///
+    /// Registers core shell, write-file, verification, llxprt, workflow auth preflight,
+    /// GitHub PR follow-up, feedback, and PR remediation executors.
+    /// @plan:PLAN-20260408-STEP-EXEC.P05
+    /// @plan:PLAN-20260408-LLXPRT-FIRST.P15
+    /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P03
+    /// @requirement:REQ-LF-SEP-001,REQ-PRFU-020
+    /// @pseudocode lines 1-53
+    #[must_use]
+    pub fn with_defaults() -> Self {
+        let mut registry = Self::new();
+        registry.register_core_executors();
+        registry.register_github_followup_executors();
+        registry.register_feedback_and_remediation_executors();
         registry
     }
 }
