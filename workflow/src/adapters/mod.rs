@@ -5,3 +5,4 @@ pub mod git;
 pub mod github;
 pub mod github_issues;
 pub mod llxprt;
+pub mod workflow_auth_preflight;

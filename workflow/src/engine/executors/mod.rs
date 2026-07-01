@@ -27,6 +27,7 @@ pub mod pr_followup_types;
 pub mod pr_remediation;
 pub mod shell;
 pub mod verify;
+pub mod workflow_auth_preflight;
 pub mod write_file;
 
 // Re-export executor implementations for tests
@@ -72,4 +73,5 @@ pub use pr_remediation::{
 };
 pub use shell::ShellExecutor;
 pub use verify::VerifyExecutor;
+pub use workflow_auth_preflight::WorkflowAuthPreflightExecutor;
 pub use write_file::WriteFileExecutor;

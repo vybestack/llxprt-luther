@@ -1,146 +1,159 @@
 {
+  "workflow_type_id": "llxprt-issue-fix-v1",
   "steps": [
     {
+      "step_id": "select_issue",
+      "step_type": "shell",
       "description": "Select lowest-numbered unassigned issue in lowest-versioned milestone",
       "parameters": {
-        "command": "set -euo pipefail\n\nif [ -n \"{primary_issue_number}\" ] && [ \"{primary_issue_number}\" != \"0\" ]; then\n  ISSUE_JSON=$(gh issue view {primary_issue_number} --repo {target_repo} --json number,title,state --jq 'select(.state == \"OPEN\") | {number, title}')\n  if [ -n \"$ISSUE_JSON\" ]; then\n    ISSUE_NUMBER=$(echo \"$ISSUE_JSON\" | jq -r '.number')\n    ISSUE_TITLE=$(echo \"$ISSUE_JSON\" | jq -r '.title')\n    gh issue edit \"$ISSUE_NUMBER\" --repo {target_repo} --add-assignee {assignee} --add-label \"{luther_label}\" > /dev/null\n    jq -n --argjson num \"$ISSUE_NUMBER\" --arg title \"$ISSUE_TITLE\" '{number: $num, title: $title}'\n    exit 0\n  fi\nfi\n\n\n# Query milestones sorted by semver (sort -V)\nMILESTONES=$(gh api repos/{target_repo}/milestones --jq '.[].title' | sort -V)\n\nSELECTED_ISSUE=\"\"\nFOUND=0\nfor MILESTONE in $MILESTONES; do\n  # List open issues: unassigned, labeled \"{ok_label}\", not already \"{luther_label}\"\n  ISSUES=$(gh issue list --repo {target_repo} --milestone \"$MILESTONE\" --state open --assignee \"\" --label \"{ok_label}\" --json number,title,labels --limit 50 --jq '[.[] | select(all(.labels[].name; . != \"{luther_label}\")) | {number, title}] | sort_by(.number)')\n\n  COUNT=$(echo \"$ISSUES\" | jq 'length')\n  if [ \"$COUNT\" -eq 0 ]; then\n    continue\n  fi\n\n  for i in $(seq 0 $((COUNT - 1))); do\n    NUM=$(echo \"$ISSUES\" | jq -r \".[$i].number\")\n    # Skip issues that already have an open PR (REQ-LF-ISSUE-004)\n    PR_COUNT=$(gh pr list --repo {target_repo} --search \"issue:$NUM\" --state open --json number --jq 'length')\n    if [ \"$PR_COUNT\" = \"0\" ]; then\n      SELECTED_ISSUE=$(echo \"$ISSUES\" | jq -c \".[$i]\")\n      FOUND=1\n      break 2\n    fi\n  done\ndone\n\nif [ \"$FOUND\" = \"0\" ]; then\n  echo \"FATAL: No eligible unassigned issues found in any milestone\" >&2\n  exit 1\nfi\n\nISSUE_NUMBER=$(echo \"$SELECTED_ISSUE\" | jq -r '.number')\nISSUE_TITLE=$(echo \"$SELECTED_ISSUE\" | jq -r '.title')\n\n# Claim the issue: assign and label (redirect stdout to avoid polluting JSON output)\ngh issue edit \"$ISSUE_NUMBER\" --repo {target_repo} --add-assignee {assignee} --add-label \"{luther_label}\" > /dev/null\n\n# Output JSON for context_map extraction (only on success path)\njq -n --argjson num \"$ISSUE_NUMBER\" --arg title \"$ISSUE_TITLE\" '{number: $num, title: $title}'\nexit 0\n",
-        "context_map": {
-          "issue_number": ".number",
-          "issue_title": ".title"
-        },
+        "command": "set -euo pipefail\n\nif [ -n \"{primary_issue_number}\" ] && [ \"{primary_issue_number}\" != \"0\" ]; then\n  ISSUE_JSON=$(gh issue view {primary_issue_number} --repo {target_repo} --json number,title,state --jq 'select(.state == \"OPEN\") | {number, title}')\n  if [ -n \"$ISSUE_JSON\" ]; then\n    ISSUE_NUMBER=$(echo \"$ISSUE_JSON\" | jq -r '.number')\n    ISSUE_TITLE=$(echo \"$ISSUE_JSON\" | jq -r '.title')\n    gh issue edit \"$ISSUE_NUMBER\" --repo {target_repo} --add-assignee {assignee} --add-label \"{luther_label}\" > /dev/null\n    jq -n --argjson num \"$ISSUE_NUMBER\" --arg title \"$ISSUE_TITLE\" '{number: $num, title: $title}'\n    exit 0\n  fi\nfi\n\n\n\n# Query milestones sorted by semver (sort -V)\nMILESTONES=$(gh api repos/{target_repo}/milestones --jq '.[].title' | sort -V)\n\nSELECTED_ISSUE=\"\"\nFOUND=0\nfor MILESTONE in $MILESTONES; do\n  # List open issues: unassigned, labeled \"{ok_label}\", not already \"{luther_label}\"\n  ISSUES=$(gh issue list --repo {target_repo} --milestone \"$MILESTONE\" --state open --assignee \"\" --label \"{ok_label}\" --json number,title,labels --limit 50 --jq '[.[] | select(all(.labels[].name; . != \"{luther_label}\")) | {number, title}] | sort_by(.number)')\n\n  COUNT=$(echo \"$ISSUES\" | jq 'length')\n  if [ \"$COUNT\" -eq 0 ]; then\n    continue\n  fi\n\n  for i in $(seq 0 $((COUNT - 1))); do\n    NUM=$(echo \"$ISSUES\" | jq -r \".[$i].number\")\n    # Skip issues that already have an open PR (REQ-LF-ISSUE-004)\n    PR_COUNT=$(gh pr list --repo {target_repo} --search \"issue:$NUM\" --state open --json number --jq 'length')\n    if [ \"$PR_COUNT\" = \"0\" ]; then\n      SELECTED_ISSUE=$(echo \"$ISSUES\" | jq -c \".[$i]\")\n      FOUND=1\n      break 2\n    fi\n  done\ndone\n\nif [ \"$FOUND\" = \"0\" ]; then\n  echo \"FATAL: No eligible unassigned issues found in any milestone\" >&2\n  exit 1\nfi\n\nISSUE_NUMBER=$(echo \"$SELECTED_ISSUE\" | jq -r '.number')\nISSUE_TITLE=$(echo \"$SELECTED_ISSUE\" | jq -r '.title')\n\n# Claim the issue: assign and label (redirect stdout to avoid polluting JSON output)\ngh issue edit \"$ISSUE_NUMBER\" --repo {target_repo} --add-assignee {assignee} --add-label \"{luther_label}\" > /dev/null\n\n# Output JSON for context_map extraction (only on success path)\njq -n --argjson num \"$ISSUE_NUMBER\" --arg title \"$ISSUE_TITLE\" '{number: $num, title: $title}'\nexit 0\n",
+        "output_format": "json",
         "exit_code_map": {
           "1": "fatal"
         },
-        "output_format": "json"
-      },
-      "step_id": "select_issue",
-      "step_type": "shell"
+        "context_map": {
+          "issue_number": ".number",
+          "issue_title": ".title"
+        }
+      }
     },
     {
+      "step_id": "setup_workspace",
+      "step_type": "shell",
       "description": "Ensure repo is checked out, create issue branch, create artifact dir",
       "parameters": {
-        "command": "set -euo pipefail\n\nif [ ! -d \"{work_dir}/.git\" ]; then\n  git clone https://github.com/{target_repo}.git {work_dir}\nfi\n\ncd {work_dir}\nif ! git fsck --connectivity-only >/dev/null 2>&1; then\n  cd \"$(dirname \"{work_dir}\")\"\n  rm -rf \"{work_dir}\"\n  git clone https://github.com/{target_repo}.git \"{work_dir}\"\n  cd \"{work_dir}\"\nfi\n\ngit fetch --prune origin\nEXISTING_PR_JSON=$(gh pr view issue{issue_number} --repo {target_repo} --json number,url,state,isDraft 2>/dev/null || true)\nif [ -n \"$EXISTING_PR_JSON\" ] && [ \"$(echo \"$EXISTING_PR_JSON\" | jq -r '.state')\" = \"OPEN\" ] && [ \"$(echo \"$EXISTING_PR_JSON\" | jq -r '.isDraft')\" = \"false\" ]; then\n  EXISTING_PR_NUMBER=$(echo \"$EXISTING_PR_JSON\" | jq -r '.number')\n  EXISTING_PR_URL=$(echo \"$EXISTING_PR_JSON\" | jq -r '.url')\nelse\n  EXISTING_PR_NUMBER=\"0\"\n  EXISTING_PR_URL=\"\"\nfi\ngit reset --hard 1>&2\nif [ \"$EXISTING_PR_NUMBER\" != \"0\" ] && git rev-parse --verify origin/issue{issue_number} >/dev/null 2>&1; then\n  git checkout -B issue{issue_number} origin/issue{issue_number} 1>&2\nelse\n  git checkout {base_branch} 1>&2\n  git reset --hard origin/{base_branch} 1>&2\n  git checkout -B issue{issue_number} 1>&2\nfi\n\nif [ ! -d node_modules ]; then\n  npm ci --ignore-scripts 1>&2\nelif [ ! -f node_modules/esbuild/index.js ] || [ ! -f node_modules/jsdom/lib/jsdom/living/xhr/xhr-sync-worker.js ] || [ ! -d node_modules/@ast-grep/lang-python ] || [ ! -d node_modules/@lvce-editor/ripgrep ]; then\n  rm -rf node_modules\n\n  npm ci --ignore-scripts 1>&2\nfi\nif [ -d node_modules/.bin ]; then\n  chmod +x node_modules/.bin/* 2>/dev/null || true\nfi\n\n\nmkdir -p {artifact_dir}\nrm -f {artifact_dir}/plan.md {artifact_dir}/plan-evaluation.md {artifact_dir}/implement-stdout.txt {artifact_dir}/implement-stderr.txt {artifact_dir}/implementation-evaluation.md {artifact_dir}/implementation-evaluation-stdout.txt {artifact_dir}/implementation-evaluation-stderr.txt {artifact_dir}/remediate-output.txt {artifact_dir}/remediate-stdout.txt {artifact_dir}/remediate-stderr.txt {artifact_dir}/verify-report.json {artifact_dir}/pr-description.md\nrm -f implementation-evaluation.tmp.md .tmp-implementation-evaluation.md\njq -n --argjson existing_pr_number \"$EXISTING_PR_NUMBER\" --arg existing_pr_url \"$EXISTING_PR_URL\" '{existing_pr_number: $existing_pr_number, existing_pr_url: $existing_pr_url}'\n",
+        "output_format": "json",
         "context_map": {
           "existing_pr_number": "existing_pr_number",
           "existing_pr_url": "existing_pr_url"
         },
+        "command": "set -euo pipefail\n\nif [ ! -d \"{work_dir}/.git\" ]; then\n  git clone https://github.com/{target_repo}.git {work_dir}\nfi\n\ncd {work_dir}\nif ! git fsck --connectivity-only >/dev/null 2>&1; then\n  cd \"$(dirname \"{work_dir}\")\"\n  rm -rf \"{work_dir}\"\n  git clone https://github.com/{target_repo}.git \"{work_dir}\"\n  cd \"{work_dir}\"\nfi\n\ngit fetch --prune origin\nEXISTING_PR_JSON=$(gh pr view issue{issue_number} --repo {target_repo} --json number,url,state,isDraft 2>/dev/null || true)\nif [ -n \"$EXISTING_PR_JSON\" ] && [ \"$(echo \"$EXISTING_PR_JSON\" | jq -r '.state')\" = \"OPEN\" ] && [ \"$(echo \"$EXISTING_PR_JSON\" | jq -r '.isDraft')\" = \"false\" ]; then\n  EXISTING_PR_NUMBER=$(echo \"$EXISTING_PR_JSON\" | jq -r '.number')\n  EXISTING_PR_URL=$(echo \"$EXISTING_PR_JSON\" | jq -r '.url')\nelse\n  EXISTING_PR_NUMBER=\"0\"\n  EXISTING_PR_URL=\"\"\nfi\ngit reset --hard 1>&2\nif [ \"$EXISTING_PR_NUMBER\" != \"0\" ] && git rev-parse --verify origin/issue{issue_number} >/dev/null 2>&1; then\n  git checkout -B issue{issue_number} origin/issue{issue_number} 1>&2\nelse\n  git checkout {base_branch} 1>&2\n  git reset --hard origin/{base_branch} 1>&2\n  git checkout -B issue{issue_number} 1>&2\nfi\n\nif [ ! -d node_modules ]; then\n  npm ci --ignore-scripts 1>&2\nelif [ ! -f node_modules/esbuild/index.js ] || [ ! -f node_modules/jsdom/lib/jsdom/living/xhr/xhr-sync-worker.js ] || [ ! -d node_modules/@ast-grep/lang-python ] || [ ! -d node_modules/@lvce-editor/ripgrep ]; then\n  rm -rf node_modules\n\n  npm ci --ignore-scripts 1>&2\nfi\nif [ -d node_modules/.bin ]; then\n  chmod +x node_modules/.bin/* 2>/dev/null || true\nfi\n\n\nmkdir -p {artifact_dir}\nrm -f {artifact_dir}/plan.md {artifact_dir}/plan-evaluation.md {artifact_dir}/implement-stdout.txt {artifact_dir}/implement-stderr.txt {artifact_dir}/implementation-evaluation.md {artifact_dir}/implementation-evaluation-stdout.txt {artifact_dir}/implementation-evaluation-stderr.txt {artifact_dir}/remediate-output.txt {artifact_dir}/remediate-stdout.txt {artifact_dir}/remediate-stderr.txt {artifact_dir}/verify-report.json {artifact_dir}/pr-description.md\nrm -f implementation-evaluation.tmp.md .tmp-implementation-evaluation.md\njq -n --argjson existing_pr_number \"$EXISTING_PR_NUMBER\" --arg existing_pr_url \"$EXISTING_PR_URL\" '{existing_pr_number: $existing_pr_number, existing_pr_url: $existing_pr_url}'\n",
         "exit_code_map": {
           "1": "fatal",
           "128": "fatal"
-        },
-        "output_format": "json"
-      },
-      "step_id": "setup_workspace",
-      "step_type": "shell"
+        }
+      }
     },
     {
+      "step_id": "fetch_issue",
+      "step_type": "shell",
       "description": "Fetch issue body and comments, write to artifact files, extract metadata to context",
       "parameters": {
         "command": "set -euo pipefail\n\n# Fetch full issue data as JSON\ngh issue view {issue_number} --repo {target_repo} --json title,body,comments,url > {artifact_dir}/issue-raw.json\n\n# Write issue body to file\njq -r '.body // \"\"' {artifact_dir}/issue-raw.json > {artifact_dir}/issue.md\n\n# Write comments with thread structure preserved (REQ-LF-FETCH-003)\njq -r '.comments[] | \"## Comment by \\(.author.login) at \\(.createdAt)\\n\\n\\(.body)\\n\\n---\\n\"' {artifact_dir}/issue-raw.json > {artifact_dir}/comments.md\n\n# Emit short metadata as JSON for context_map\njq '{title: .title, url: .url}' {artifact_dir}/issue-raw.json\n",
+        "output_format": "json",
+        "exit_code_map": {
+          "1": "fatal"
+        },
         "context_map": {
           "issue_title": ".title",
           "issue_url": ".url"
-        },
-        "exit_code_map": {
-          "1": "fatal"
-        },
-        "output_format": "json"
-      },
-      "step_id": "fetch_issue",
-      "step_type": "shell"
+        }
+      }
     },
     {
+      "step_id": "create_plan",
+      "step_type": "llxprt",
       "description": "Invoke llxprt to create a plan for the issue",
       "parameters": {
+        "profile": "{profile_planning}",
+        "timeout_seconds": 900,
+        "success_file": "{artifact_dir}/plan.md",
+        "static_content": "{plan_static_content}",
+        "prompt": "Do not use subagents. Do not ask questions. Read {artifact_dir}/issue.md and {artifact_dir}/comments.md. Inspect the repository as needed.\nWrite a concise implementation plan to {artifact_dir}/plan.md. The plan MUST be specific to issue #{issue_number} and the current issue text, must identify the relevant source/test files, must describe the code bug from the issue, and must list the intended tests.\nDo not implement the fix in this step. Exit after writing {artifact_dir}/plan.md.\n",
         "exit_code_map": {
           "1": "fatal"
-        },
-        "profile": "{profile_planning}",
-        "prompt": "Do not use subagents. Do not ask questions. Read {artifact_dir}/issue.md and {artifact_dir}/comments.md. Inspect the repository as needed.\nWrite a concise implementation plan to {artifact_dir}/plan.md. The plan MUST be specific to issue #{issue_number} and the current issue text, must identify the relevant source/test files, must describe the code bug from the issue, and must list the intended tests.\nDo not implement the fix in this step. Exit after writing {artifact_dir}/plan.md.\n",
-        "static_content": "{plan_static_content}",
-        "success_file": "{artifact_dir}/plan.md",
-        "timeout_seconds": 900
-      },
-      "step_id": "create_plan",
-      "step_type": "llxprt"
+        }
+      }
     },
     {
+      "step_id": "evaluate_plan",
+      "step_type": "llxprt",
       "description": "Invoke llxprt to evaluate the plan",
       "parameters": {
-        "exit_code_map": {
-          "1": "fatal"
-        },
+        "profile": "{profile_evaluating}",
+        "timeout_seconds": 600,
+        "prompt": "Do not use subagents. Do not ask questions. Read the issue in {artifact_dir}/issue.md and the plan in {artifact_dir}/plan.md. Evaluate whether the plan adequately addresses the issue and is narrowly scoped. Reject placeholder, generic, or underspecified plans. If the plan is ready, respond with exactly PLAN_APPROVED on its own line. If it needs revision, respond with exactly PLAN_NEEDS_REVISION on its own line, followed by your feedback. Write any detailed feedback to {artifact_dir}/plan-evaluation.md, then exit.\n",
         "outcome_on_stdout": {
           "PLAN_APPROVED": "success",
           "PLAN_NEEDS_REVISION": "fixable"
         },
-        "profile": "{profile_evaluating}",
-        "prompt": "Do not use subagents. Do not ask questions. Read the issue in {artifact_dir}/issue.md and the plan in {artifact_dir}/plan.md. Evaluate whether the plan adequately addresses the issue and is narrowly scoped. Reject placeholder, generic, or underspecified plans. If the plan is ready, respond with exactly PLAN_APPROVED on its own line. If it needs revision, respond with exactly PLAN_NEEDS_REVISION on its own line, followed by your feedback. Write any detailed feedback to {artifact_dir}/plan-evaluation.md, then exit.\n",
-        "timeout_seconds": 600
-      },
-      "step_id": "evaluate_plan",
-      "step_type": "llxprt"
-    },
-    {
-      "description": "Invoke llxprt to implement the plan",
-      "parameters": {
-        "continue_on_empty_diff": false,
         "exit_code_map": {
           "1": "fatal"
-        },
-        "min_runtime_before_success_seconds": 120,
-        "outcome_on_stdout": {
-          "IMPLEMENTATION_COMPLETE": "success",
-          "IMPLEMENTATION_SYSTEM_ERROR": "fatal",
-          "REMEDIATION_SYSTEM_ERROR": "fatal"
-        },
+        }
+      }
+    },
+    {
+      "step_id": "workflow_auth_preflight_plan",
+      "step_type": "workflow_auth_preflight",
+      "description": "Preflight workflow-file push capability from plan scope",
+      "parameters": {
+        "artifact_dir": "{artifact_dir}",
+        "include_git_status": false,
+        "text_artifacts": [
+          "plan.md"
+        ],
+        "workflow_path_patterns": [
+          ".github/workflows/**"
+        ],
+        "required_scopes": [
+          "workflow"
+        ],
+        "artifact_path": "{artifact_dir}/workflow-auth-preflight-plan.json"
+      }
+    },
+    {
+      "step_id": "implement",
+      "step_type": "llxprt",
+      "description": "Invoke llxprt to implement the plan",
+      "parameters": {
         "profile": "{profile_implementing}",
-        "prompt": "Do not use subagents. Do not ask questions. Read the current issue in {artifact_dir}/issue.md and the approved plan in {artifact_dir}/plan.md, then implement that plan.\nMake the smallest code/test changes needed to fix issue #{issue_number}. You MUST leave a non-empty git diff in {work_dir}; if no files are changed, this step is not complete. Do not modify package lockfiles, generated notice files, .luther files, or unrelated files.\nThe required source and test scope is whatever the approved plan identifies for this issue. If the plan and issue disagree, follow the issue text and update only files directly relevant to the current issue.\nAdd or update focused tests when practical. If focused tests require broad UI harness work, still implement the source fix and explain the targeted/manual verification you performed. You are not finished unless git diff shows intentional changes related to issue #{issue_number}.\nDo not run full project verification commands such as npm run test, npm run build, npm run lint, npm run typecheck, or npm run format:check. The workflow runs configured checks after this step. You may run narrowly targeted tests/checks related to the files you changed.\nIf {artifact_dir}/implementation-evaluation.md exists, treat it as a required remediation checklist and address every unresolved item before finishing this step. Do not stop after partially addressing the feedback.\nBefore responding, inspect git diff --stat and git diff. If the diff does not match the current issue and approved plan, continue working or remove the unrelated changes before finishing. Remove any accidental temporary files in {work_dir} before finishing.\nFinish as soon as source/test edits are present and you have inspected the diff. Do not keep iterating on targeted tests after making a scoped diff; the workflow will run deterministic verification and remediation steps. Finish with exactly IMPLEMENTATION_COMPLETE on its own line, followed by a concise truthful summary of the changes and verification you performed, then exit.\n",
+        "timeout_seconds": 900,
+        "success_on_diff": true,
+        "success_on_existing_diff": true,
+        "change_detection_mode": "include_untracked",
+        "continue_on_empty_diff": false,
         "required_changed_path_patterns": [
           "{required_changed_path_pattern}"
         ],
-        "change_detection_mode": "include_untracked",
-        "stderr_file": "{artifact_dir}/implement-stderr.txt",
+        "min_runtime_before_success_seconds": 120,
         "stdout_file": "{artifact_dir}/implement-stdout.txt",
-        "success_on_diff": true,
-        "success_on_existing_diff": true,
-        "timeout_seconds": 900
-      },
-      "step_id": "implement",
-      "step_type": "llxprt"
-    },
-    {
-      "description": "Subjective review: does the implementation actually solve the issue per plan? (runs AFTER lint/typecheck/test/build pass)",
-      "parameters": {
+        "stderr_file": "{artifact_dir}/implement-stderr.txt",
+        "prompt": "Do not ask questions. You may use subagents to inspect context or propose focused edits, but you are responsible for applying the final source/test changes directly. Read the current issue in {artifact_dir}/issue.md and the approved plan in {artifact_dir}/plan.md, then implement that plan.\nMake the smallest source/config/test changes needed to fix issue #{issue_number}. You MUST leave a non-empty git diff in {work_dir}; if no files are changed, this step is not complete. Do not modify package lockfiles, generated notice files, .luther files, or unrelated files.\nApply edits directly to files with available file-writing/editing tools. Do not print unified diffs, replacement snippets, or patch text as a substitute for modifying files. A patch shown only in stdout is a failed implementation.\nAfter reading the issue and plan, inspect only the minimal source/test context needed, then make the first source/test edit before doing broader investigation. Sustained read-only analysis is forbidden; only actual file modifications count as implementation progress.\nThe required source and test scope is whatever the approved plan identifies for this issue. If the plan and issue disagree, follow the issue text and update only files directly relevant to the current issue.\nAdd or update focused tests and fixtures when practical. You are not finished unless git diff shows intentional changes related to issue #{issue_number}.\nDo not run full project verification commands for the target repository. The workflow runs configured checks after this step. You may run narrowly targeted tests/checks related to the files you changed.\nIf {artifact_dir}/implementation-evaluation.md exists, treat it as a required remediation checklist and address every unresolved item before finishing this step. Do not stop after partially addressing the feedback.\nBefore responding, inspect git diff --stat and git diff. If the diff does not match the current issue and approved plan, continue working or remove the unrelated changes before finishing. Remove any accidental temporary files in {work_dir} before finishing.\nFinish as soon as source/test edits are present and you have inspected the diff. Do not keep iterating on targeted tests after making a scoped diff; the workflow will run deterministic verification and remediation steps. Finish with exactly IMPLEMENTATION_COMPLETE on its own line, followed by a concise truthful summary of the changes and verification you performed, then exit.\n",
+        "outcome_on_stdout": {
+          "IMPLEMENTATION_COMPLETE": "success",
+          "REMEDIATION_SYSTEM_ERROR": "fatal",
+          "IMPLEMENTATION_SYSTEM_ERROR": "fatal"
+        },
         "exit_code_map": {
           "1": "fatal"
-        },
-        "outcome_on_stdout": {
-          "IMPL_APPROVED": "success",
-          "IMPL_EVALUATION_BLOCKED": "fatal",
-          "IMPL_NEEDS_WORK": "fixable"
-        },
-        "profile": "{profile_evaluating}",
-        "prompt": "Do not use subagents. Do not ask questions. All deterministic checks (lint, typecheck, test, format, build) have already passed.\nThis workflow step is not a broad audit or design review. It is a narrow issue-acceptance gate for the current branch diff.\nYour job is ONLY subjective correctness: read the issue in {artifact_dir}/issue.md and the plan in {artifact_dir}/plan.md, then inspect git diff against origin/{base_branch}.\nJudge only: does this implementation materially solve the current issue text and approved plan? Verify the diff is scoped to issue #{issue_number}. Do not require the exact approach from the plan if the behavior is correct, tested, and narrowly scoped.\nDo NOT re-flag style, formatting, or test issues - those are handled elsewhere.\nIf the implementation correctly addresses the issue and plan, respond with exactly IMPL_APPROVED on its own line.\nIf the implementation does not actually solve the issue or materially diverges from the plan, respond with exactly IMPL_NEEDS_WORK on its own line, followed by concise feedback, and also write detailed actionable feedback to {artifact_dir}/implementation-evaluation.md.\nIf you cannot perform this narrow acceptance gate because of instruction conflict or tool/runtime limitations, respond with exactly IMPL_EVALUATION_BLOCKED on its own line followed by the blocker; do not write implementation-evaluation.md in that case.\n\n",
-        "stderr_file": "{artifact_dir}/implementation-evaluation-stderr.txt",
-        "stdout_file": "{artifact_dir}/implementation-evaluation-stdout.txt",
-        "timeout_seconds": 420
-      },
-      "step_id": "evaluate_impl",
-      "step_type": "llxprt"
+        }
+      }
     },
     {
+      "step_id": "evaluate_impl",
+      "step_type": "llxprt",
+      "description": "Subjective review: does the implementation actually solve the issue per plan? (runs AFTER lint/typecheck/test/build pass)",
+      "parameters": {
+        "profile": "{profile_evaluating}",
+        "timeout_seconds": 420,
+        "stdout_file": "{artifact_dir}/implementation-evaluation-stdout.txt",
+        "stderr_file": "{artifact_dir}/implementation-evaluation-stderr.txt",
+        "prompt": "Do not use subagents. Do not ask questions. All deterministic checks (lint, typecheck, test, format, build) have already passed.\nThis workflow step is not a broad audit or design review. It is a narrow issue-acceptance gate for the current branch diff.\nYour job is ONLY subjective correctness: read the issue in {artifact_dir}/issue.md and the plan in {artifact_dir}/plan.md, then inspect git diff against origin/{base_branch}.\nJudge only: does this implementation materially solve the current issue text and approved plan? Verify the diff is scoped to issue #{issue_number}. Do not require the exact approach from the plan if the behavior is correct, tested, and narrowly scoped.\nDo NOT re-flag style, formatting, or test issues - those are handled elsewhere.\nIf the implementation correctly addresses the issue and plan, respond with exactly IMPL_APPROVED on its own line.\nIf the implementation does not actually solve the issue or materially diverges from the plan, respond with exactly IMPL_NEEDS_WORK on its own line, followed by concise feedback, and also write detailed actionable feedback to {artifact_dir}/implementation-evaluation.md.\nIf you cannot perform this narrow acceptance gate because of instruction conflict or tool/runtime limitations, respond with exactly IMPL_EVALUATION_BLOCKED on its own line followed by the blocker; do not write implementation-evaluation.md in that case.\n\n",
+        "outcome_on_stdout": {
+          "IMPL_APPROVED": "success",
+          "IMPL_NEEDS_WORK": "fixable",
+          "IMPL_EVALUATION_BLOCKED": "fatal"
+        },
+        "exit_code_map": {
+          "1": "fatal"
+        }
+      }
+    },
+    {
+      "step_id": "run_tests",
+      "step_type": "verify",
       "description": "Run lint, typecheck, test, format, build checks",
       "parameters": {
-        "artifact_root": "{artifact_dir}",
-        "check_commands": {
-          "build": "{build_command}",
-          "diff_or_existing_pr": "CHANGED=$(git status --porcelain --untracked-files=all | sed 's/^...//' | grep -E '{diff_required_path_regex}' || true)\nif [ -n \"$CHANGED\" ]; then\n  exit 0\nfi\nif [ \"{setup_workspace.existing_pr_number}\" != \"0\" ]; then\n  exit 0\nfi\necho '{diff_failure_message}'\nexit 1\n",
-          "format": "{format_command}",
-          "lint": "{lint_command}",
-          "test": "{test_command}",
-          "typecheck": "{typecheck_command}"
-        },
         "checks": [
           "diff_or_existing_pr",
           "lint",
@@ -148,37 +161,65 @@
           "build",
           "test",
           "format",
+          "ocr_review",
           "diff_or_existing_pr"
         ],
-        "timeout_seconds": 2400
-      },
-      "step_id": "run_tests",
-      "step_type": "verify"
+        "timeout_seconds": 2400,
+        "artifact_root": "{artifact_dir}",
+        "check_commands": {
+          "diff_or_existing_pr": "CHANGED=$(git status --porcelain --untracked-files=all | sed 's/^...//' | grep -E '{diff_required_path_regex}' || true)\nif [ -n \"$CHANGED\" ]; then\n  exit 0\nfi\nif [ \"{setup_workspace.existing_pr_number}\" != \"0\" ]; then\n  exit 0\nfi\necho '{diff_failure_message}'\nexit 1\n",
+          "lint": "{lint_command}",
+          "typecheck": "{typecheck_command}",
+          "build": "{build_command}",
+          "test": "{test_command}",
+          "format": "{format_command}",
+          "ocr_review": "{ocr_review_command}"
+        }
+      }
     },
     {
+      "step_id": "remediate",
+      "step_type": "llxprt",
       "description": "Invoke llxprt to remediate verification or evaluator feedback",
       "parameters": {
-        "exit_code_map": {
-          "1": "fatal"
-        },
-        "idle_timeout_seconds": 180,
-        "max_runtime_after_required_diff_seconds": 30,
-        "min_runtime_before_success_seconds": 30,
+        "profile": "{profile_remediating}",
+        "timeout_seconds": 900,
+        "stdout_file": "{artifact_dir}/remediate-stdout.txt",
+        "stderr_file": "{artifact_dir}/remediate-stderr.txt",
         "outcome_on_stdout": {
           "REMEDIATION_COMPLETE": "success",
           "REMEDIATION_SYSTEM_ERROR": "fatal"
         },
-        "profile": "{profile_remediating}",
-        "prompt": "Do not use subagents. Do not ask questions. Read the current issue in {artifact_dir}/issue.md, the approved plan in {artifact_dir}/plan.md, the verification report in {artifact_dir}/verify-report.json if present, and {artifact_dir}/implementation-evaluation.md if present.\nThese artifact paths are intentionally outside the target repository. If file-reading tools cannot read an absolute artifact path, inspect it with shell commands such as cat, sed, or python3 instead; do not report an artifact-path access constraint while shell access works. Missing optional artifacts such as implementation-evaluation.md are not blockers.\n\nIf implementation-evaluation.md exists, treat it as the primary remediation checklist and address every unresolved evaluator item before finishing. If verify-report.json contains failed checks, also fix only those failures caused by the current branch diff.\nStart by inspecting git diff --stat origin/{base_branch}...HEAD, git diff origin/{base_branch}...HEAD, git status --porcelain --untracked-files=all, and any failing check messages. Focus only on errors or evaluator feedback caused by the current branch diff and issue #{issue_number}; do not try to fix pre-existing repository-wide warnings unrelated to the current diff.\nFix the current branch so it both materially solves the issue and lets the configured checks pass. Do not modify package lockfiles, generated notice files, .luther files, or unrelated files unless required by the issue. If implementation-evaluation.md reports unrelated committed branch artifacts, remove those artifacts from the branch even if plain git diff is otherwise empty.\nBefore responding, inspect git diff --stat origin/{base_branch}...HEAD, git diff origin/{base_branch}...HEAD, and git status --porcelain --untracked-files=all again. You are not complete if the branch diff is empty, if unrelated files remain in the branch diff, or if implementation-evaluation.md still lists unresolved required actions.\nIf there is no current branch diff, first make the minimal issue-specific source/test edit from the plan instead of only inspecting files; do not emit REMEDIATION_SYSTEM_ERROR merely because the previous implementation step stopped early without changes.\n\nIf the current branch already contains the issue-specific diff and there are no verification/evaluation failure artifacts to address, inspect git diff and respond with exactly REMEDIATION_COMPLETE on its own line as the final output.\n\nIf you successfully fix all current verification/evaluation issues, respond with exactly REMEDIATION_COMPLETE on its own line as the final output.\nIf you encounter a system/workflow/tooling problem (shell parse failure, malformed command, missing profile/tool, etc.), respond with exactly REMEDIATION_SYSTEM_ERROR on its own line, followed by a brief reason.\nDo not output shell snippets with unmatched quotes.\n",
-        "stderr_file": "{artifact_dir}/remediate-stderr.txt",
-        "stdout_file": "{artifact_dir}/remediate-stdout.txt",
         "success_on_diff": true,
-        "timeout_seconds": 900
-      },
-      "step_id": "remediate",
-      "step_type": "llxprt"
+        "min_runtime_before_success_seconds": 30,
+        "max_runtime_after_required_diff_seconds": 30,
+        "idle_timeout_seconds": 180,
+        "prompt": "Do not ask questions. You may use subagents to inspect context or propose focused remediation, but you are responsible for applying the final source/test changes directly. Read the current issue in {artifact_dir}/issue.md, the approved plan in {artifact_dir}/plan.md, the verification report in {artifact_dir}/verify-report.json if present, and {artifact_dir}/implementation-evaluation.md if present.\nThese artifact paths are intentionally outside the target repository. If file-reading tools cannot read an absolute artifact path, inspect it with shell commands such as cat, sed, or python3 instead; do not report an artifact-path access constraint while shell access works. Missing optional artifacts such as implementation-evaluation.md are not blockers.\n\nIf implementation-evaluation.md exists, treat it as the primary remediation checklist and address every unresolved evaluator item before finishing. If verify-report.json contains failed checks, also fix only those failures caused by the current branch diff.\nStart by inspecting git diff --stat origin/{base_branch}...HEAD, git diff origin/{base_branch}...HEAD, git status --porcelain --untracked-files=all, and any failing check messages. Focus only on errors or evaluator feedback caused by the current branch diff and issue #{issue_number}; do not try to fix pre-existing repository-wide warnings unrelated to the current diff.\nFix the current branch so it both materially solves the issue and lets the configured checks pass. Do not modify package lockfiles, generated notice files, .luther files, or unrelated files unless required by the issue. If implementation-evaluation.md reports unrelated committed branch artifacts, remove those artifacts from the branch even if plain git diff is otherwise empty.\nBefore responding, inspect git diff --stat origin/{base_branch}...HEAD, git diff origin/{base_branch}...HEAD, and git status --porcelain --untracked-files=all again. You are not complete if the branch diff is empty, if unrelated files remain in the branch diff, or if implementation-evaluation.md still lists unresolved required actions.\nIf there is no current branch diff, first make the minimal issue-specific source/test edit from the plan instead of only inspecting files; do not emit REMEDIATION_SYSTEM_ERROR merely because the previous implementation step stopped early without changes.\n\nIf the current branch already contains the issue-specific diff and there are no verification/evaluation failure artifacts to address, inspect git diff and respond with exactly REMEDIATION_COMPLETE on its own line as the final output.\n\nIf you successfully fix all current verification/evaluation issues, respond with exactly REMEDIATION_COMPLETE on its own line as the final output.\nIf you encounter a system/workflow/tooling problem (shell parse failure, malformed command, missing profile/tool, etc.), respond with exactly REMEDIATION_SYSTEM_ERROR on its own line, followed by a brief reason.\nDo not output shell snippets with unmatched quotes.\n",
+        "exit_code_map": {
+          "1": "fatal"
+        }
+      }
     },
     {
+      "step_id": "workflow_auth_preflight_pre_push",
+      "step_type": "workflow_auth_preflight",
+      "description": "Preflight workflow-file authorization for pending push diff",
+      "parameters": {
+        "artifact_dir": "{artifact_dir}",
+        "include_git_status": true,
+        "text_artifacts": [],
+        "workflow_path_patterns": [
+          ".github/workflows/**"
+        ],
+        "required_scopes": [
+          "workflow"
+        ],
+        "artifact_path": "{artifact_dir}/workflow-auth-preflight-pre-push.json"
+      }
+    },
+    {
+      "step_id": "push_changes",
+      "step_type": "shell",
       "description": "Stage, commit, and push changes",
       "parameters": {
         "command": "set -euo pipefail\ngit restore --worktree -- packages/vscode-ide-companion/NOTICES.txt 2>/dev/null || true\ngit add -A -- ':!.luther' ':!.luther/**' ':!packages/vscode-ide-companion/NOTICES.txt'\nif git diff --cached --quiet --exit-code; then\n  if [ \"{setup_workspace.existing_pr_number}\" != \"0\" ]; then\n    echo \"No new repository changes; existing PR #{setup_workspace.existing_pr_number} already carries issue branch changes.\"\n    exit 0\n  fi\n  echo \"No repository changes to commit\" >&2\n  exit 1\nfi\ngit commit -m \"Fix #{issue_number}: {issue_title}\"\ngit push --force-with-lease -u origin issue{issue_number}\n",
@@ -186,220 +227,226 @@
           "1": "fatal",
           "128": "fatal"
         }
-      },
-      "step_id": "push_changes",
-      "step_type": "shell"
+      }
     },
     {
+      "step_id": "generate_pr_description",
+      "step_type": "llxprt",
       "description": "Invoke llxprt to write a PR description",
       "parameters": {
+        "profile": "{profile_evaluating}",
+        "timeout_seconds": 600,
+        "success_file": "{artifact_dir}/pr-description.md",
+        "prompt": "Do not use subagents. Do not ask questions. Read the issue in {artifact_dir}/issue.md and the plan in {artifact_dir}/plan.md. Review the code changes (use git diff origin/{base_branch}). Write a PR description to {artifact_dir}/pr-description.md. The description MUST include 'Fixes #{issue_number}' to auto-close the issue, then exit.\n",
         "exit_code_map": {
           "1": "fatal"
-        },
-        "profile": "{profile_evaluating}",
-        "prompt": "Do not use subagents. Do not ask questions. Read the issue in {artifact_dir}/issue.md and the plan in {artifact_dir}/plan.md. Review the code changes (use git diff origin/{base_branch}). Write a PR description to {artifact_dir}/pr-description.md. The description MUST include 'Fixes #{issue_number}' to auto-close the issue, then exit.\n",
-        "success_file": "{artifact_dir}/pr-description.md",
-        "timeout_seconds": 600
-      },
-      "step_id": "generate_pr_description",
-      "step_type": "llxprt"
+        }
+      }
     },
     {
+      "step_id": "create_pr",
+      "step_type": "shell",
       "description": "Create a GitHub pull request",
       "parameters": {
         "command": "set -euo pipefail\nEXISTING_PR_JSON=$(gh pr view issue{issue_number} --repo {target_repo} --json number,url,title,state,isDraft 2>/dev/null || true)\nif [ -n \"$EXISTING_PR_JSON\" ] && [ \"$(echo \"$EXISTING_PR_JSON\" | jq -r '.state')\" = \"OPEN\" ] && [ \"$(echo \"$EXISTING_PR_JSON\" | jq -r '.isDraft')\" = \"false\" ]; then\n  PR_JSON=$(echo \"$EXISTING_PR_JSON\" | jq '{number,url,title,state}')\nelse\n  PR_URL=$(gh pr create --repo {target_repo} --title \"Fix #{issue_number}: {issue_title}\" --body-file {artifact_dir}/pr-description.md --base {base_branch} --head issue{issue_number})\n  PR_JSON=$(gh pr view \"$PR_URL\" --repo {target_repo} --json number,url,title,state)\nfi\nprintf '%s\n' \"$PR_JSON\"\n\n",
+        "output_format": "json",
         "context_map": {
           "pr_number": "number",
           "pr_url": "url"
-        },
-        "output_format": "json"
-      },
-      "step_id": "create_pr",
-      "step_type": "shell"
+        }
+      }
     },
     {
+      "step_id": "capture_pr_identity",
+      "step_type": "github_pr_identity",
       "description": "Capture pull request identity and current head metadata",
       "parameters": {
         "artifact_root": "{artifact_dir}",
-        "pr_number": "{pr_number}",
-        "pr_result_path": "{artifact_dir}/pr-followup/current/pr.json",
-        "repository_name": "{repository_name}",
+        "step_order_index": 1,
         "repository_owner": "{repository_owner}",
-        "step_order_index": 1
-      },
-      "step_id": "capture_pr_identity",
-      "step_type": "github_pr_identity"
+        "repository_name": "{repository_name}",
+        "pr_number": "{pr_number}",
+        "pr_result_path": "{artifact_dir}/pr-followup/current/pr.json"
+      }
     },
     {
+      "step_id": "post_pr_iteration_guard",
+      "step_type": "post_pr_iteration_guard",
       "description": "Enforce artifact-backed PR follow-up remediation iteration cap",
       "parameters": {
         "artifact_root": "{artifact_dir}",
-        "iteration_guard_result_path": "{artifact_dir}/pr-followup/current/post-pr-iteration-guard.json",
+        "step_order_index": 2,
         "max_post_pr_remediation_iterations": 3,
-        "step_order_index": 2
-      },
-      "step_id": "post_pr_iteration_guard",
-      "step_type": "post_pr_iteration_guard"
+        "iteration_guard_result_path": "{artifact_dir}/pr-followup/current/post-pr-iteration-guard.json"
+      }
     },
     {
+      "step_id": "watch_pr_checks",
+      "step_type": "github_pr_checks",
       "description": "Watch GitHub PR checks and classify current-head status",
       "parameters": {
         "artifact_root": "{artifact_dir}",
+        "step_order_index": 3,
+        "max_attempts": 1,
+        "max_check_watch_attempts": 1,
+        "poll_interval_seconds": 300,
+        "check_watch_interval_seconds": 300,
+        "max_duration_seconds": 3600,
+        "max_check_watch_duration_seconds": 3600,
+        "check_status_result_path": "{artifact_dir}/pr-followup/current/pr-check-status.json",
         "check_policy": {
           "allow_unmatched_success": true,
-          "api_error_retry_attempts": 5,
           "default_allow_skipped": true,
+          "missing_retry_attempts": 12,
+          "api_error_retry_attempts": 5,
+          "max_wait_seconds": 3600,
+          "poll_interval_seconds": 300,
           "ignored": [
             {
               "mode": "prefix",
               "pattern": "CodeRabbit"
             }
           ],
-          "max_wait_seconds": 3600,
-          "missing_retry_attempts": 12,
-          "poll_interval_seconds": 300,
           "required": [
             {
-              "allow_skipped": false,
               "mode": "prefix",
-              "pattern": "CI"
+              "pattern": "CI",
+              "allow_skipped": false
             }
           ]
-        },
-        "check_status_result_path": "{artifact_dir}/pr-followup/current/pr-check-status.json",
-        "check_watch_interval_seconds": 300,
-        "max_attempts": 1,
-        "max_check_watch_attempts": 1,
-        "max_check_watch_duration_seconds": 3600,
-        "max_duration_seconds": 3600,
-        "poll_interval_seconds": 300,
-        "step_order_index": 3
-      },
-      "step_id": "watch_pr_checks",
-      "step_type": "github_pr_checks"
+        }
+      }
     },
     {
+      "step_id": "collect_ci_failures",
+      "step_type": "github_check_failures",
       "description": "Collect concrete CI failures or route untrusted check states to terminal failure",
       "parameters": {
         "artifact_root": "{artifact_dir}",
+        "step_order_index": 4,
         "ci_failures_result_path": "{artifact_dir}/pr-followup/current/ci-failures.json",
-        "pr_number": "{pr_number}",
-        "repository_name": "{repository_name}",
         "repository_owner": "{repository_owner}",
-        "step_order_index": 4
-      },
-      "step_id": "collect_ci_failures",
-      "step_type": "github_check_failures"
+        "repository_name": "{repository_name}",
+        "pr_number": "{pr_number}"
+      }
     },
     {
+      "step_id": "collect_coderabbit_feedback",
+      "step_type": "github_coderabbit_feedback",
       "description": "Collect ready CodeRabbit feedback for deterministic evaluation",
       "parameters": {
-        "additional_coderabbit_bot_identities": [],
         "artifact_root": "{artifact_dir}",
+        "step_order_index": 5,
+        "repository_owner": "{repository_owner}",
+        "repository_name": "{repository_name}",
+        "pr_number": "{pr_number}",
+        "max_observations": 1,
+        "max_readiness_observations": 1,
+        "required_stable_observations": 1,
+        "stable_observation_count_required": 1,
+        "coderabbit_readiness_observation_interval_seconds": 300,
         "coderabbit_bot_identities": [
           "coderabbitai[bot]",
           "coderabbit[bot]"
         ],
-        "coderabbit_feedback_result_path": "{artifact_dir}/pr-followup/current/coderabbit-feedback.json",
-        "coderabbit_readiness_observation_interval_seconds": 300,
+        "additional_coderabbit_bot_identities": [],
         "include_all_reviewers": false,
-        "max_observations": 1,
-        "max_readiness_observations": 1,
-        "pr_number": "{pr_number}",
-        "repository_name": "{repository_name}",
-        "repository_owner": "{repository_owner}",
-        "required_stable_observations": 1,
-        "stable_observation_count_required": 1,
-        "step_order_index": 5
-      },
-      "step_id": "collect_coderabbit_feedback",
-      "step_type": "github_coderabbit_feedback"
+        "coderabbit_feedback_result_path": "{artifact_dir}/pr-followup/current/coderabbit-feedback.json"
+      }
     },
     {
+      "step_id": "evaluate_coderabbit_feedback",
+      "step_type": "feedback_evaluator",
       "description": "Evaluate CodeRabbit feedback with bounded validated LLM decisions",
       "parameters": {
         "artifact_root": "{artifact_dir}",
-        "base_ref": "{base_ref}",
-        "base_sha": "{base_sha}",
-        "feedback_evaluations_result_path": "{artifact_dir}/pr-followup/current/feedback-evaluations.json",
+        "repository_owner": "{repository_owner}",
+        "repository_name": "{repository_name}",
+        "pr_number": "{pr_number}",
         "head_ref": "{head_ref}",
         "head_sha": "{head_sha}",
+        "base_ref": "{base_ref}",
+        "base_sha": "{base_sha}",
+        "step_order_index": 6,
         "max_attempts_per_item": 3,
-        "pr_number": "{pr_number}",
-        "repository_name": "{repository_name}",
-        "repository_owner": "{repository_owner}",
-        "step_order_index": 6
-      },
-      "step_id": "evaluate_coderabbit_feedback",
-      "step_type": "feedback_evaluator"
+        "feedback_evaluations_result_path": "{artifact_dir}/pr-followup/current/feedback-evaluations.json"
+      }
     },
     {
+      "step_id": "build_remediation_plan",
+      "step_type": "pr_remediation_plan",
       "description": "Build deterministic remediation plan from CI failures and evaluated feedback",
       "parameters": {
-        "artifact_root": "{artifact_dir}",
-        "pr_number": "{pr_number}",
-        "remediation_plan_result_path": "{artifact_dir}/pr-followup/current/pr-remediation-plan.json",
-        "repository_name": "{repository_name}",
         "repository_owner": "{repository_owner}",
-        "step_order_index": 7
-      },
-      "step_id": "build_remediation_plan",
-      "step_type": "pr_remediation_plan"
+        "repository_name": "{repository_name}",
+        "pr_number": "{pr_number}",
+        "artifact_root": "{artifact_dir}",
+        "step_order_index": 7,
+        "remediation_plan_result_path": "{artifact_dir}/pr-followup/current/pr-remediation-plan.json"
+      }
     },
     {
+      "step_id": "remediate_pr_followup",
+      "step_type": "pr_followup_remediation",
       "description": "Invoke dedicated PR follow-up remediation wrapper",
       "parameters": {
-        "artifact_root": "{artifact_dir}",
-        "input_head_sha_param": "head_sha",
+        "repository_owner": "{repository_owner}",
+        "repository_name": "{repository_name}",
         "pr_number": "{pr_number}",
+        "artifact_root": "{artifact_dir}",
+        "step_order_index": 9,
         "profile": "{profile_remediating}",
-        "remediation_invocation_result_path": "{artifact_dir}/pr-followup/current/pr-remediation-llxprt-run.json",
+        "timeout_seconds": 1800,
         "remediation_plan_path": "{artifact_dir}/pr-followup/current/pr-remediation-plan.json",
         "remediation_prompt_path": "{artifact_dir}/pr-followup/current/pr-remediation-prompt.md",
         "remediation_result_path": "{artifact_dir}/pr-followup/current/pr-remediation-result.json",
-        "repository_name": "{repository_name}",
-        "repository_owner": "{repository_owner}",
-        "step_order_index": 9,
+        "remediation_invocation_result_path": "{artifact_dir}/pr-followup/current/pr-remediation-llxprt-run.json",
         "success_file": "{artifact_dir}/pr-followup/current/pr-remediation-result.json",
-        "timeout_seconds": 1800
-      },
-      "step_id": "remediate_pr_followup",
-      "step_type": "pr_followup_remediation"
+        "input_head_sha_param": "head_sha"
+      }
     },
     {
+      "step_id": "validate_remediation_result",
+      "step_type": "pr_remediation_result",
       "description": "Validate structured remediation result and artifact-backed retry caps",
       "parameters": {
         "artifact_root": "{artifact_dir}",
-        "max_remediation_attempts": 2,
+        "step_order_index": 10,
         "max_validation_retries": 2,
         "max_stale_artifact_retries": 2,
-        "pr_number": "{pr_number}",
-        "remediation_plan_path": "{artifact_dir}/pr-followup/current/pr-remediation-plan.json",
-        "remediation_result_path": "{artifact_dir}/pr-followup/current/pr-remediation-result.json",
-        "repository_name": "{repository_name}",
         "repository_owner": "{repository_owner}",
-        "step_order_index": 10
-      },
-      "step_id": "validate_remediation_result",
-      "step_type": "pr_remediation_result"
+        "repository_name": "{repository_name}",
+        "pr_number": "{pr_number}",
+        "max_remediation_attempts": 2,
+        "remediation_plan_path": "{artifact_dir}/pr-followup/current/pr-remediation-plan.json",
+        "remediation_result_path": "{artifact_dir}/pr-followup/current/pr-remediation-result.json"
+      }
     },
     {
+      "step_id": "run_post_pr_tests",
+      "step_type": "run_post_pr_tests",
       "description": "Run deterministic post-PR local verification after remediation",
       "parameters": {
         "artifact_root": "{artifact_dir}",
+        "step_order_index": 11,
         "max_verification_retries": 2,
+        "post_pr_test_result_path": "{artifact_dir}/pr-followup/current/post-pr-test-result.json",
+        "repository_owner": "{repository_owner}",
+        "repository_name": "{repository_name}",
+        "pr_number": "{pr_number}",
         "post_pr_test_commands": [
           {
+            "id": "core-typecheck",
             "argv": [
               "npm",
               "run",
               "typecheck",
               "--workspace",
               "@vybestack/llxprt-code-core"
-            ],
-            "id": "core-typecheck"
+            ]
           },
           {
+            "id": "core-focused-tests",
             "argv": [
               "npm",
               "run",
@@ -411,10 +458,10 @@
               "StreamProcessor",
               "geminiChat.hook-control",
               "hookAggregator"
-            ],
-            "id": "core-focused-tests"
+            ]
           },
           {
+            "id": "core-format",
             "argv": [
               "npx",
               "prettier",
@@ -424,31 +471,26 @@
               "packages/core/src/core/toolSelectionHook.allowedFunctionNames.test.ts",
               "packages/core/src/core/geminiChat.hook-control.test.ts",
               "packages/core/src/hooks/hookAggregator.test.ts"
-            ],
-            "id": "core-format"
+            ]
           }
-        ],
-        "post_pr_test_result_path": "{artifact_dir}/pr-followup/current/post-pr-test-result.json",
-        "pr_number": "{pr_number}",
-        "repository_name": "{repository_name}",
-        "repository_owner": "{repository_owner}",
-        "step_order_index": 11
-      },
-      "step_id": "run_post_pr_tests",
-      "step_type": "run_post_pr_tests"
+        ]
+      }
     },
     {
+      "step_id": "push_remediation_changes",
+      "step_type": "push_remediation_changes",
       "description": "Stage, commit, and push deterministic remediation changes",
       "parameters": {
         "artifact_root": "{artifact_dir}",
-        "commit_message": "Apply PR follow-up remediation for issue #{issue_number}",
-        "max_push_retries": 1,
-        "pr_number": "{pr_number}",
-        "push_remediation_result_path": "{artifact_dir}/pr-followup/current/push-remediation-result.json",
-        "push_timeout_seconds": 900,
-        "remote_ref": "refs/heads/issue{issue_number}",
-        "repository_name": "{repository_name}",
         "repository_owner": "{repository_owner}",
+        "repository_name": "{repository_name}",
+        "pr_number": "{pr_number}",
+        "step_order_index": 12,
+        "max_push_retries": 1,
+        "push_timeout_seconds": 900,
+        "push_remediation_result_path": "{artifact_dir}/pr-followup/current/push-remediation-result.json",
+        "remote_ref": "refs/heads/issue{issue_number}",
+        "commit_message": "Apply PR follow-up remediation for issue #{issue_number}",
         "staging_exclusions": [
           ".llxprt",
           ".llxprt/**",
@@ -459,51 +501,54 @@
           "**/GENERATED_NOTICE.md",
           "**/generated-notice/**"
         ],
-        "step_order_index": 12
-      },
-      "step_id": "push_remediation_changes",
-      "step_type": "push_remediation_changes"
+        "workflow_path_patterns": [
+          ".github/workflows/**"
+        ],
+        "required_scopes": [
+          "workflow"
+        ]
+      }
     },
     {
+      "step_id": "mark_coderabbit_feedback",
+      "step_type": "github_feedback_marker",
       "description": "Comment on and resolve CodeRabbit feedback according to deterministic marker plan",
       "parameters": {
-        "additional_coderabbit_bot_identities": [],
         "artifact_root": "{artifact_dir}",
+        "step_order_index": 8,
         "coderabbit_bot_identities": [
           "coderabbitai[bot]",
           "coderabbit[bot]"
         ],
-        "feedback_marker_result_path": "{artifact_dir}/pr-followup/current/pr-feedback-marker-report.json",
-        "step_order_index": 8
-      },
-      "step_id": "mark_coderabbit_feedback",
-      "step_type": "github_feedback_marker"
+        "additional_coderabbit_bot_identities": [],
+        "feedback_marker_result_path": "{artifact_dir}/pr-followup/current/pr-feedback-marker-report.json"
+      }
     },
     {
+      "step_id": "post_pr_failure_terminal",
+      "step_type": "post_pr_failure_terminal",
       "description": "Write terminal PR follow-up failure artifact and fail the run",
       "parameters": {
         "artifact_root": "{artifact_dir}",
-        "post_pr_failure_terminal_result_path": "{artifact_dir}/pr-followup/current/post-pr-failure-terminal.json",
-        "step_order_index": 13
-      },
-      "step_id": "post_pr_failure_terminal",
-      "step_type": "post_pr_failure_terminal"
+        "step_order_index": 13,
+        "post_pr_failure_terminal_result_path": "{artifact_dir}/pr-followup/current/post-pr-failure-terminal.json"
+      }
     },
     {
+      "step_id": "abandon_and_log",
+      "step_type": "shell",
       "description": "Comment on issue, remove label, unassign on failure",
       "parameters": {
         "command": "set -euo pipefail\n# If issue was never selected, fall back to the configured primary issue when present.\nISSUE_NUM=\"{issue_number}\"\ncase \"$ISSUE_NUM\" in\n  \"{\"*|\"\")\n    if [ -n \"{primary_issue_number}\" ] && [ \"{primary_issue_number}\" != \"0\" ]; then\n      ISSUE_NUM=\"{primary_issue_number}\"\n    else\n      echo \"No issue was selected; skipping cleanup.\"\n      exit 0\n    fi\n    ;;\nesac\nABANDON_BODY_FILE=\"$(mktemp \"${TMPDIR:-/tmp}/luther-abandon.XXXXXX\")\"\ntrap 'rm -f \"$ABANDON_BODY_FILE\"' EXIT\nprintf '%s\n' \"Luther abandoning this issue: workflow failed at step {current_step_id}.\" > \"$ABANDON_BODY_FILE\"\ngh issue comment \"$ISSUE_NUM\" --repo {target_repo} --body-file \"$ABANDON_BODY_FILE\"\ngh issue edit \"$ISSUE_NUM\" --repo {target_repo} --remove-label \"{luther_label}\"\ngh issue edit \"$ISSUE_NUM\" --repo {target_repo} --remove-assignee {assignee}\n"
-      },
-      "step_id": "abandon_and_log",
-      "step_type": "shell"
+      }
     },
     {
+      "step_id": "log_completion",
+      "step_type": "shell",
       "description": "Log successful workflow completion",
       "parameters": {
         "command": "echo \"Workflow completed successfully for issue #{issue_number}\"\n"
-      },
-      "step_id": "log_completion",
-      "step_type": "shell"
+      }
     }
   ],
   "transitions": [
@@ -524,71 +569,91 @@
       "to": "evaluate_plan"
     },
     {
+      "from": "evaluate_plan",
+      "to": "workflow_auth_preflight_plan",
+      "condition": "success"
+    },
+    {
+      "from": "evaluate_plan",
+      "to": "create_plan",
       "condition": "fixable",
+      "max_iterations": 5
+    },
+    {
+      "from": "workflow_auth_preflight_plan",
+      "to": "implement",
+      "condition": "success"
+    },
+    {
+      "from": "workflow_auth_preflight_plan",
+      "to": "abandon_and_log",
+      "condition": "fatal"
+    },
+    {
       "from": "create_plan",
-      "max_iterations": 3,
-      "to": "create_plan"
-    },
-    {
-      "condition": "success",
-      "from": "evaluate_plan",
-      "to": "implement"
-    },
-    {
+      "to": "create_plan",
       "condition": "fixable",
-      "from": "evaluate_plan",
-      "max_iterations": 5,
-      "to": "create_plan"
+      "max_iterations": 3
     },
     {
       "from": "implement",
       "to": "run_tests"
     },
     {
-      "condition": "fixable",
       "from": "implement",
-      "max_iterations": 1,
-      "to": "remediate"
+      "to": "remediate",
+      "condition": "fixable",
+      "max_iterations": 1
     },
     {
-      "condition": "success",
       "from": "run_tests",
-      "max_iterations": 50,
-      "to": "evaluate_impl"
+      "to": "evaluate_impl",
+      "condition": "success",
+      "max_iterations": 50
     },
     {
-      "condition": "fixable",
       "from": "run_tests",
-      "max_iterations": 3,
-      "to": "remediate"
-    },
-    {
-      "condition": "success",
-      "from": "remediate",
-      "max_iterations": 2,
-      "to": "run_tests"
-    },
-    {
+      "to": "remediate",
       "condition": "fixable",
-      "from": "remediate",
-      "max_iterations": 2,
-      "to": "run_tests"
+      "max_iterations": 3
     },
     {
-      "condition": "fatal",
       "from": "remediate",
-      "to": "abandon_and_log"
-    },
-    {
+      "to": "run_tests",
       "condition": "success",
-      "from": "evaluate_impl",
-      "to": "push_changes"
+      "max_iterations": 2
     },
     {
+      "from": "remediate",
+      "to": "run_tests",
       "condition": "fixable",
+      "max_iterations": 2
+    },
+    {
+      "from": "remediate",
+      "to": "abandon_and_log",
+      "condition": "fatal"
+    },
+    {
       "from": "evaluate_impl",
-      "max_iterations": 2,
-      "to": "remediate"
+      "to": "workflow_auth_preflight_pre_push",
+      "condition": "success"
+    },
+    {
+      "from": "evaluate_impl",
+      "to": "remediate",
+      "condition": "fixable",
+      "max_iterations": 2
+    },
+    {
+      "from": "workflow_auth_preflight_pre_push",
+      "to": "push_changes",
+      "condition": "success"
+    },
+    {
+      "from": "workflow_auth_preflight_pre_push",
+      "to": "abandon_and_log",
+      "condition": "fatal"
     },
     {
       "from": "push_changes",
@@ -603,218 +668,217 @@
       "to": "capture_pr_identity"
     },
     {
-      "condition": "success",
       "from": "capture_pr_identity",
-      "to": "post_pr_iteration_guard"
+      "to": "post_pr_iteration_guard",
+      "condition": "success"
     },
     {
-      "condition": "fatal",
       "from": "capture_pr_identity",
-      "to": "post_pr_failure_terminal"
+      "to": "post_pr_failure_terminal",
+      "condition": "fatal"
     },
     {
-      "condition": "success",
       "from": "post_pr_iteration_guard",
-      "to": "watch_pr_checks"
+      "to": "watch_pr_checks",
+      "condition": "success"
     },
     {
-      "condition": "fatal",
       "from": "post_pr_iteration_guard",
-      "to": "post_pr_failure_terminal"
+      "to": "post_pr_failure_terminal",
+      "condition": "fatal"
     },
     {
-      "condition": "success",
       "from": "watch_pr_checks",
-      "to": "collect_ci_failures"
+      "to": "collect_ci_failures",
+      "condition": "success"
     },
     {
-      "condition": "fixable",
       "from": "watch_pr_checks",
-      "to": "collect_ci_failures"
+      "to": "collect_ci_failures",
+      "condition": "fixable"
     },
     {
-      "condition": "fatal",
       "from": "watch_pr_checks",
-      "to": "collect_ci_failures"
+      "to": "collect_ci_failures",
+      "condition": "fatal"
     },
     {
-      "condition": "success",
       "from": "collect_ci_failures",
-      "to": "collect_coderabbit_feedback"
+      "to": "collect_coderabbit_feedback",
+      "condition": "success"
     },
     {
-      "condition": "fatal",
       "from": "collect_ci_failures",
-      "to": "post_pr_failure_terminal"
+      "to": "post_pr_failure_terminal",
+      "condition": "fatal"
     },
     {
-      "condition": "success",
       "from": "collect_coderabbit_feedback",
-      "to": "evaluate_coderabbit_feedback"
+      "to": "evaluate_coderabbit_feedback",
+      "condition": "success"
     },
     {
-      "condition": "fatal",
       "from": "collect_coderabbit_feedback",
-      "to": "post_pr_failure_terminal"
+      "to": "post_pr_failure_terminal",
+      "condition": "fatal"
     },
     {
-      "condition": "success",
       "from": "evaluate_coderabbit_feedback",
-      "to": "build_remediation_plan"
+      "to": "build_remediation_plan",
+      "condition": "success"
     },
     {
-      "condition": "fatal",
       "from": "evaluate_coderabbit_feedback",
-      "to": "post_pr_failure_terminal"
+      "to": "post_pr_failure_terminal",
+      "condition": "fatal"
     },
     {
-      "condition": "success",
       "from": "build_remediation_plan",
-      "to": "mark_coderabbit_feedback"
+      "to": "mark_coderabbit_feedback",
+      "condition": "success"
     },
     {
-      "condition": "fixable",
       "from": "build_remediation_plan",
-      "to": "remediate_pr_followup"
+      "to": "remediate_pr_followup",
+      "condition": "fixable"
     },
     {
-      "condition": "fatal",
       "from": "build_remediation_plan",
-      "to": "post_pr_failure_terminal"
+      "to": "post_pr_failure_terminal",
+      "condition": "fatal"
     },
     {
-      "condition": "success",
       "from": "remediate_pr_followup",
-      "to": "validate_remediation_result"
+      "to": "validate_remediation_result",
+      "condition": "success"
     },
     {
-      "condition": "fatal",
       "from": "remediate_pr_followup",
-      "to": "post_pr_failure_terminal"
+      "to": "post_pr_failure_terminal",
+      "condition": "fatal"
     },
     {
-      "condition": "success",
       "from": "validate_remediation_result",
-      "to": "run_post_pr_tests"
+      "to": "run_post_pr_tests",
+      "condition": "success"
     },
     {
-      "condition": "fixable",
       "from": "validate_remediation_result",
-      "max_iterations": 50,
-      "to": "remediate_pr_followup"
+      "to": "remediate_pr_followup",
+      "condition": "fixable",
+      "max_iterations": 50
     },
     {
-      "condition": "fatal",
       "from": "validate_remediation_result",
-      "to": "post_pr_failure_terminal"
+      "to": "post_pr_failure_terminal",
+      "condition": "fatal"
     },
     {
-      "condition": "success",
       "from": "run_post_pr_tests",
-      "to": "push_remediation_changes"
+      "to": "push_remediation_changes",
+      "condition": "success"
     },
     {
+      "from": "run_post_pr_tests",
+      "to": "remediate_pr_followup",
       "condition": "fixable",
+      "max_iterations": 50
+    },
+    {
       "from": "run_post_pr_tests",
-      "max_iterations": 50,
-      "to": "remediate_pr_followup"
+      "to": "post_pr_failure_terminal",
+      "condition": "fatal"
     },
     {
-      "condition": "fatal",
-      "from": "run_post_pr_tests",
-      "to": "post_pr_failure_terminal"
-    },
-    {
+      "from": "push_remediation_changes",
+      "to": "capture_pr_identity",
       "condition": "success",
-      "from": "push_remediation_changes",
-      "max_iterations": 50,
-      "to": "capture_pr_identity"
+      "max_iterations": 50
     },
     {
-      "condition": "fixable",
       "from": "push_remediation_changes",
-      "to": "mark_coderabbit_feedback"
+      "to": "mark_coderabbit_feedback",
+      "condition": "fixable"
     },
     {
-      "condition": "retryable",
       "from": "push_remediation_changes",
-      "to": "post_pr_failure_terminal"
+      "to": "post_pr_failure_terminal",
+      "condition": "retryable"
     },
     {
-      "condition": "fatal",
       "from": "push_remediation_changes",
-      "to": "post_pr_failure_terminal"
+      "to": "post_pr_failure_terminal",
+      "condition": "fatal"
     },
     {
-      "condition": "success",
       "from": "mark_coderabbit_feedback",
-      "to": "log_completion"
+      "to": "log_completion",
+      "condition": "success"
     },
     {
-      "condition": "fatal",
       "from": "mark_coderabbit_feedback",
-      "to": "post_pr_failure_terminal"
+      "to": "post_pr_failure_terminal",
+      "condition": "fatal"
     },
     {
-      "condition": "fatal",
       "from": "select_issue",
-      "to": "abandon_and_log"
+      "to": "abandon_and_log",
+      "condition": "fatal"
     },
     {
-      "condition": "fatal",
       "from": "setup_workspace",
-      "to": "abandon_and_log"
+      "to": "abandon_and_log",
+      "condition": "fatal"
     },
     {
-      "condition": "fatal",
       "from": "fetch_issue",
-      "to": "abandon_and_log"
+      "to": "abandon_and_log",
+      "condition": "fatal"
     },
     {
-      "condition": "fatal",
       "from": "create_plan",
-      "to": "abandon_and_log"
+      "to": "abandon_and_log",
+      "condition": "fatal"
     },
     {
-      "condition": "fatal",
       "from": "evaluate_plan",
-      "to": "abandon_and_log"
+      "to": "abandon_and_log",
+      "condition": "fatal"
     },
     {
-      "condition": "fatal",
       "from": "implement",
-      "to": "abandon_and_log"
+      "to": "abandon_and_log",
+      "condition": "fatal"
     },
     {
-      "condition": "fatal",
       "from": "evaluate_impl",
-      "to": "remediate"
+      "to": "remediate",
+      "condition": "fatal"
     },
     {
-      "condition": "fatal",
       "from": "run_tests",
-      "to": "abandon_and_log"
+      "to": "abandon_and_log",
+      "condition": "fatal"
     },
     {
-      "condition": "fatal",
       "from": "remediate",
-      "to": "abandon_and_log"
+      "to": "abandon_and_log",
+      "condition": "fatal"
     },
     {
-      "condition": "fatal",
       "from": "push_changes",
-      "to": "abandon_and_log"
+      "to": "abandon_and_log",
+      "condition": "fatal"
     },
     {
-      "condition": "fatal",
       "from": "generate_pr_description",
-      "to": "abandon_and_log"
+      "to": "abandon_and_log",
+      "condition": "fatal"
     },
     {
-      "condition": "fatal",
       "from": "create_pr",
-      "to": "abandon_and_log"
+      "to": "abandon_and_log",
+      "condition": "fatal"
     }
-  ],
-  "workflow_type_id": "llxprt-issue-fix-v1"
+  ]
 }

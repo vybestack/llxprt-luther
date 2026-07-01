@@ -99,6 +99,7 @@ fn setup_registry(outcomes: HashMap<String, Vec<StepOutcome>>) -> ExecutorRegist
     registry.register("shell", Box::new(executor.clone()));
     registry.register("verify", Box::new(executor.clone()));
     registry.register("llxprt", Box::new(executor.clone()));
+    registry.register("workflow_auth_preflight", Box::new(executor.clone()));
     for step_type in [
         "github_pr_identity",
         "post_pr_iteration_guard",
@@ -127,7 +128,7 @@ fn setup_registry(outcomes: HashMap<String, Vec<StepOutcome>>) -> ExecutorRegist
 /// Test 1: Happy path — all steps succeed
 /// GIVEN: Workflow loaded from TOML with all steps returning Success
 /// WHEN: Engine runs
-/// THEN: `RunOutcome::Success`, all 14 steps visited
+/// THEN: `RunOutcome::Success`, all 29 steps visited
 /// @plan:PLAN-20260408-LLXPRT-FIRST.P18
 /// @requirement:REQ-LF-ISSUE-001,REQ-LF-ISSUE-002,REQ-LF-ISSUE-003,REQ-LF-PR-001
 #[test]
@@ -137,8 +138,8 @@ fn test_happy_path_all_steps_succeed() {
     // Count the steps
     assert_eq!(
         workflow_type.steps.len(),
-        27,
-        "Expected 27 steps in workflow after PR follow-through tail"
+        29,
+        "Expected 29 steps in workflow after workflow auth gates and PR follow-through tail"
     );
 
     // All steps succeed by default (empty outcomes map)
@@ -629,7 +630,7 @@ fn evaluate_impl_fixable_routes_to_remediation() {
 /// Test 9: Workflow type loads from TOML
 /// GIVEN: llxprt-issue-fix-v1.toml exists
 /// WHEN: `resolve_workflow_type()` is called
-/// THEN: Returns `WorkflowType` with 14 steps, transitions include per-edge limits
+/// THEN: Returns `WorkflowType` with 29 steps, transitions include per-edge limits
 /// @plan:PLAN-20260408-LLXPRT-FIRST.P18
 /// @requirement:REQ-LF-SEP-003
 #[test]
@@ -639,7 +640,7 @@ fn test_workflow_type_loads_from_toml() {
         .expect("Failed to load workflow type");
 
     // Assert base workflow plus PR follow-through tail steps
-    assert_eq!(workflow_type.steps.len(), 27, "Expected 27 steps");
+    assert_eq!(workflow_type.steps.len(), 29, "Expected 29 steps");
 
     // Assert transitions include per-edge limits
     let has_per_edge_limit = workflow_type
@@ -2008,8 +2009,16 @@ fn dogfood_plan_gate_blocks_rejected_plan_artifacts() {
         .transitions
         .iter()
         .any(|transition| transition.from == "plan_gate"
-            && transition.to == "implement"
+            && transition.to == "workflow_auth_preflight_plan"
             && transition.condition.as_deref() == Some("success")));
+    assert!(workflow_type
+        .transitions
+        .iter()
+        .any(
+            |transition| transition.from == "workflow_auth_preflight_plan"
+                && transition.to == "implement"
+                && transition.condition.as_deref() == Some("success")
+        ));
     assert!(workflow_type
         .transitions
         .iter()
