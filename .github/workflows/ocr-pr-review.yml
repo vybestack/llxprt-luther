@@ -116,7 +116,7 @@ jobs:
             git config --global --unset-all http."${server_url}".extraheader 2>/dev/null || true
             git config --global --unset-all safe.directory "$GITHUB_WORKSPACE" 2>/dev/null || true
             rm -f "${RUNNER_TEMP}/ocr-git-auth-config"
-            unset GIT_CONFIG_GLOBAL
+            unset GIT_CONFIG_GLOBAL GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0
           }
           trap cleanup_git_auth EXIT
           trap 'cleanup_git_auth; exit 130' INT TERM
@@ -139,7 +139,13 @@ jobs:
 
           # Fetch the PR head into an explicit local ref WITHOUT making it the
           # working copy, so no PR-supplied scripts become executable.
+          # The one-command env config makes auth explicit for this fetch even
+          # when the runner's Git ignores the temp global config for HTTP auth.
+          export GIT_CONFIG_COUNT=1
+          export GIT_CONFIG_KEY_0="http.${GH_SERVER_URL}.extraheader"
+          export GIT_CONFIG_VALUE_0="AUTHORIZATION: bearer ${GH_TOKEN}"
           git fetch origin "pull/${PR_NUMBER}/head:pr-head"
+          unset GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0
           if ! git cat-file -e "${BASE_SHA}^{commit}"; then
             echo "::error::Base SHA ${BASE_SHA} is missing after trusted checkout. It may no longer be reachable from origin."
             exit 1
