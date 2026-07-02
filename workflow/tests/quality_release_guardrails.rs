@@ -1360,7 +1360,7 @@ fn assert_scoped_git_auth_cleanup(content: &str) {
                 .contains("git config --file \"${HOME}/.gitconfig\" --unset-all safe.directory")
             && content.contains("rm -f \"${RUNNER_TEMP}/ocr-git-auth-config\"")
             && content.contains("chmod 600 \"${RUNNER_TEMP}/ocr-git-auth-config\"")
-            && content.contains("printf '%s\\n'")
+            && content.contains("printf '\\textraheader = AUTHORIZATION: bearer %s\\n'")
             && content.contains(r#""${GH_TOKEN}""#)
             && content.contains("if ! git cat-file -e \"${BASE_SHA}^{commit}\"; then"),
         "Fetch step must use scoped GitHub authentication and clean it up"
