@@ -139,6 +139,22 @@ pub struct RepoConfig {
     pub branch_template: String,
     pub base_branch: Option<String>,
     pub workspace_root: Option<String>,
+    #[serde(default)]
+    pub project_subdir: Option<String>,
+    #[serde(default)]
+    pub artifact_path_base: Option<String>,
+    #[serde(default)]
+    pub diff_path_base: Option<String>,
+    #[serde(default)]
+    pub diff_path_normalization: DiffPathNormalization,
+}
+
+#[derive(Debug, Clone, Default, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DiffPathNormalization {
+    #[default]
+    RepoRelative,
+    BaseRelative,
 }
 
 /// Guard limits for workflow execution.

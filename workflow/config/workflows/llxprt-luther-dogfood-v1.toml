@@ -387,18 +387,10 @@ command_manifest_group = "local"
 timeout_seconds = 2400
 artifact_root = "{artifact_dir}"
 
-[steps.parameters.check_commands]
-diff_or_existing_pr = """
-CHANGED=$(git status --porcelain --untracked-files=all | sed 's/^...//' | grep -E '^([.]github/workflows/|workflow/(config/|tests/|src/|docs/))' || true)
-if [ -n "$CHANGED" ]; then
-  exit 0
-fi
-if [ "{setup_workspace.existing_pr_number}" != "0" ]; then
-  exit 0
-fi
-echo 'No Luther workflow/config/test/doc diff found and no reusable open PR exists'
-exit 1
-"""
+[steps.parameters.diff_or_existing_pr]
+required_path_regex = "^([.]github/workflows/|workflow/(config/|tests/|src/|docs/))"
+failure_message = "No Luther workflow/config/test/doc diff found and no reusable open PR exists"
+existing_pr_number = "{setup_workspace.existing_pr_number}"
 
 
 [[steps]]

@@ -45,6 +45,7 @@ pub struct PostPrTestCommandRequest {
     pub command_id: String,
     pub argv: Vec<String>,
     pub working_directory: PathBuf,
+    pub artifact_base_directory: PathBuf,
     pub timeout_seconds: u64,
     pub stdout_log_path: PathBuf,
     pub stderr_log_path: PathBuf,
@@ -272,6 +273,7 @@ fn post_pr_test_request(
         command_id: command.command_id.clone(),
         argv: command.argv.clone(),
         working_directory: command.working_directory.clone(),
+        artifact_base_directory: command.artifact_base_directory.clone(),
         timeout_seconds: command.timeout_seconds,
         stdout_log_path: log_dir.join(format!("{log_name}-stdout.log")),
         stderr_log_path: log_dir.join(format!("{log_name}-stderr.log")),
@@ -351,10 +353,10 @@ struct PostPrTestCommandConfig {
     command_id: String,
     argv: Vec<String>,
     working_directory: PathBuf,
+    artifact_base_directory: PathBuf,
     timeout_seconds: u64,
     manifest_entry: Option<CommandEntry>,
 }
-
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P13
 /// @requirement:REQ-PRFU-014,REQ-PRFU-017
 /// @pseudocode lines 29-30
@@ -404,12 +406,14 @@ fn post_pr_test_command(
     let argv = post_pr_command_argv(params, object, manifest_entry.as_ref())?;
     let working_directory =
         post_pr_command_working_directory(context, object, manifest_entry.as_ref())?;
+    let artifact_base_directory = post_pr_command_artifact_base_directory(context);
     let timeout_seconds = post_pr_command_timeout(params, object, manifest_entry.as_ref())?;
 
     Ok(PostPrTestCommandConfig {
         command_id,
         argv,
         working_directory,
+        artifact_base_directory,
         timeout_seconds,
         manifest_entry,
     })
@@ -489,19 +493,32 @@ fn post_pr_command_working_directory(
         .get("working_directory")
         .or_else(|| object.get("work_dir"))
         .and_then(Value::as_str)
-        .map(ToString::to_string)
-        .or_else(|| manifest_entry.and_then(manifest_working_directory))
-        .map(|path| resolve_path(context.work_dir(), &path))
-        .unwrap_or_else(|| context.work_dir().clone());
+        .or_else(|| manifest_entry.and_then(explicit_manifest_working_directory))
+        .map(|path| resolve_path(context.work_dir(), path))
+        .unwrap_or_else(|| default_command_working_directory(context));
     validate_safe_working_directory(context.work_dir(), &working_directory)?;
     Ok(working_directory)
 }
 
-fn manifest_working_directory(entry: &CommandEntry) -> Option<String> {
+fn explicit_manifest_working_directory(entry: &CommandEntry) -> Option<&str> {
     entry
         .working_directory
-        .clone()
-        .or_else(|| entry.project_subdirectory.clone())
+        .as_deref()
+        .or(entry.project_subdirectory.as_deref())
+}
+
+fn default_command_working_directory(context: &StepContext) -> PathBuf {
+    context
+        .get("project_dir")
+        .filter(|value| !value.is_empty())
+        .map_or_else(|| context.work_dir().clone(), PathBuf::from)
+}
+
+fn post_pr_command_artifact_base_directory(context: &StepContext) -> PathBuf {
+    context
+        .get("artifact_base_dir")
+        .filter(|value| !value.is_empty())
+        .map_or_else(|| context.work_dir().clone(), PathBuf::from)
 }
 
 fn post_pr_command_timeout(

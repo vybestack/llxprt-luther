@@ -131,6 +131,11 @@ fn hello_world_config() -> WorkflowConfig {
             branch_template: "hello-world-{run_id}".to_string(),
             base_branch: Some("main".to_string()),
             workspace_root: None,
+            project_subdir: None,
+            artifact_path_base: None,
+            diff_path_base: None,
+            diff_path_normalization:
+                luther_workflow::workflow::schema::DiffPathNormalization::RepoRelative,
         },
         guard_limits: GuardLimits {
             max_iterations: Some(3),

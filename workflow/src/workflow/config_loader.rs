@@ -6,7 +6,8 @@ use std::path::Path;
 use crate::engine::executor::extract_tokens;
 use crate::workflow::command_manifest::{CommandEntry, CommandManifest};
 use crate::workflow::schema::{
-    DaemonSchedulerConfig, DiscoveryConfig, StepDef, WorkflowConfig, WorkflowRunRef, WorkflowType,
+    DaemonSchedulerConfig, DiffPathNormalization, DiscoveryConfig, StepDef, WorkflowConfig,
+    WorkflowRunRef, WorkflowType,
 };
 use crate::workflow::validation::validate_workflow_graph;
 
@@ -400,12 +401,55 @@ pub fn validate_workflow_config(config: &WorkflowConfig) -> Result<()> {
         });
     }
 
+    validate_repository_paths(config)?;
     validate_discovery_config(config)?;
     if let Some(manifest) = &config.command_manifest {
         validate_command_manifest(manifest)?;
     }
     validate_command_variable_shadowing(config)?;
 
+    Ok(())
+}
+fn validate_repository_paths(config: &WorkflowConfig) -> Result<()> {
+    for (field, path) in [
+        (
+            "repository.project_subdir",
+            config.repo.project_subdir.as_deref(),
+        ),
+        (
+            "repository.artifact_path_base",
+            config.repo.artifact_path_base.as_deref(),
+        ),
+        (
+            "repository.diff_path_base",
+            config.repo.diff_path_base.as_deref(),
+        ),
+    ]
+    .into_iter()
+    .filter_map(|(field, value)| value.map(|value| (field, value)))
+    {
+        validate_repo_relative_path(field, path)?;
+    }
+    if config.repo.diff_path_normalization == DiffPathNormalization::BaseRelative
+        && config.repo.diff_path_base.is_none()
+    {
+        return Err(ConfigError {
+            message: "repository.diff_path_base is required when repository.diff_path_normalization is base_relative".to_string(),
+            source_path: None,
+            kind: ConfigErrorKind::ValidationError,
+        });
+    }
+    Ok(())
+}
+
+fn validate_repo_relative_path(field: &str, path: &str) -> Result<()> {
+    if Path::new(path).is_absolute() || path.split('/').any(|part| part == "..") {
+        return Err(ConfigError {
+            message: format!("{field} must be a relative path under the repository root"),
+            source_path: None,
+            kind: ConfigErrorKind::ValidationError,
+        });
+    }
     Ok(())
 }
 
@@ -823,6 +867,13 @@ pub fn build_available_variables(wf: &WorkflowType, config: &WorkflowConfig) -> 
     let mut available: HashSet<String> = config.variables.keys().cloned().collect();
     // Built-ins always seeded into StepContext.
     available.insert("work_dir".to_string());
+    available.insert("repo_root".to_string());
+    available.insert("project_subdir".to_string());
+    available.insert("project_dir".to_string());
+    available.insert("artifact_base_dir".to_string());
+    available.insert("diff_path_base".to_string());
+    available.insert("diff_path_base_dir".to_string());
+    available.insert("diff_path_normalization".to_string());
     available.insert("run_id".to_string());
     available.insert("current_step_id".to_string());
     // Statically-declarable step outputs from context_map declarations and

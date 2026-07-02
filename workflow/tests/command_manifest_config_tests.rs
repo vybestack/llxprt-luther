@@ -1,6 +1,7 @@
 use luther_workflow::workflow::config_loader::{
     command_manifest_entry, parse_workflow_config_json, parse_workflow_config_toml,
 };
+use luther_workflow::workflow::DiffPathNormalization;
 
 fn config_with_manifest(manifest: &str) -> String {
     format!(
@@ -158,4 +159,32 @@ fn manifest_parses_json_schema() {
     }"#;
     let config = parse_workflow_config_json(json).expect("json manifest parses");
     assert_eq!(config.command_manifest.unwrap().commands[0].id, "test");
+}
+
+#[test]
+fn repository_path_fields_parse_and_validate() {
+    let toml = config_with_manifest("").replace(
+        "workspace_root = \"/tmp/luther\"",
+        "workspace_root = \"/tmp/luther\"\nproject_subdir = \"workflow\"\nartifact_path_base = \".\"\ndiff_path_base = \"workflow\"\ndiff_path_normalization = \"base_relative\"",
+    );
+    let config = parse_workflow_config_toml(&toml).expect("path fields parse");
+    assert_eq!(config.repo.project_subdir.as_deref(), Some("workflow"));
+    assert_eq!(config.repo.artifact_path_base.as_deref(), Some("."));
+    assert_eq!(config.repo.diff_path_base.as_deref(), Some("workflow"));
+    assert_eq!(
+        config.repo.diff_path_normalization,
+        DiffPathNormalization::BaseRelative
+    );
+
+    let invalid = config_with_manifest("").replace(
+        "workspace_root = \"/tmp/luther\"",
+        "workspace_root = \"/tmp/luther\"\nproject_subdir = \"../outside\"",
+    );
+    assert!(parse_workflow_config_toml(&invalid).is_err());
+
+    let invalid_base_relative = config_with_manifest("").replace(
+        "workspace_root = \"/tmp/luther\"",
+        "workspace_root = \"/tmp/luther\"\ndiff_path_normalization = \"base_relative\"",
+    );
+    assert!(parse_workflow_config_toml(&invalid_base_relative).is_err());
 }

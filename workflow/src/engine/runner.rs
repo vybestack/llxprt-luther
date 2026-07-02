@@ -17,6 +17,9 @@ use crate::persistence::{
 };
 use crate::workflow::schema::{StepDef, TransitionDef};
 
+mod target_path_context;
+use target_path_context::seed_target_paths;
+
 /// Contextual metadata for a run: paths and GitHub references.
 /// Used to populate the persistent run registry beyond the core identifiers.
 /// @plan:PLAN-20260404-INITIAL-RUNTIME.P05
@@ -942,6 +945,8 @@ fn build_step_context(instance: &WorkflowInstance) -> Result<StepContext, Engine
         })?;
         context.set_work_dir(path);
     }
+
+    seed_target_paths(&mut context, instance);
 
     Ok(context)
 }

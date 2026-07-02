@@ -17,6 +17,7 @@ use luther_workflow::persistence::{
     count_events_by_type, load_events, load_latest_event, EventType, SqliteStore,
 };
 use luther_workflow::workflow::config_loader::{resolve_workflow_config, resolve_workflow_type};
+use luther_workflow::workflow::{DiffPathNormalization, TargetPathConfig};
 
 // ============================================================================
 // SharedMockExecutor — Thread-safe mock executor
@@ -1017,6 +1018,7 @@ fn context_from_config(config: &WorkflowConfig) -> StepContext {
     for (key, value) in &config.variables {
         context.set(key, value);
     }
+    seed_target_path_context(config, &mut context);
     if let Some(issue_number) = config.variables.get("primary_issue_number") {
         context.set("issue_number", issue_number);
     }
@@ -1024,6 +1026,43 @@ fn context_from_config(config: &WorkflowConfig) -> StepContext {
     context.set("existing_pr_number", "0");
     context.set_current_step_id("run_tests");
     context
+}
+
+fn seed_target_path_context(config: &WorkflowConfig, context: &mut StepContext) {
+    let target_paths = TargetPathConfig::from_repo_config(&config.repo);
+    let repo_root = context.work_dir().clone();
+    context.set("repo_root", &repo_root.to_string_lossy());
+    context.set(
+        "project_subdir",
+        &path_value(target_paths.project_subdir.as_deref()),
+    );
+    context.set(
+        "project_dir",
+        &target_paths.project_dir(&repo_root).to_string_lossy(),
+    );
+    context.set(
+        "artifact_base_dir",
+        &target_paths.artifact_base_dir(&repo_root).to_string_lossy(),
+    );
+    context.set(
+        "diff_path_base",
+        &path_value(target_paths.diff_path_base.as_deref()),
+    );
+    context.set(
+        "diff_path_base_dir",
+        &target_paths.diff_base_dir(&repo_root).to_string_lossy(),
+    );
+    context.set(
+        "diff_path_normalization",
+        match target_paths.diff_path_normalization {
+            DiffPathNormalization::RepoRelative => "repo_relative",
+            DiffPathNormalization::BaseRelative => "base_relative",
+        },
+    );
+}
+
+fn path_value(path: Option<&std::path::Path>) -> String {
+    path.map_or_else(String::new, |path| path.to_string_lossy().into_owned())
 }
 
 fn manifest_command_argv(config: &WorkflowConfig, command_id: &str) -> Vec<String> {
@@ -2162,20 +2201,10 @@ fn reusable_issue_fix_run_tests_includes_profile_driven_ocr_review() {
         ["cargo", "xtask", "ocr-review", "--preview"],
         "llxprt-luther issue-fix profile should run the local OCR preview wrapper through argv"
     );
-    let working_directory = config
-        .command_manifest
-        .as_ref()
-        .and_then(|manifest| {
-            manifest
-                .commands
-                .iter()
-                .find(|entry| entry.id == "ocr_review")
-        })
-        .and_then(|entry| entry.working_directory.as_deref());
     assert_eq!(
-        working_directory,
+        config.repo.project_subdir.as_deref(),
         Some("workflow"),
-        "Luther OCR review should run from workflow/ so the cargo xtask alias is available"
+        "Luther OCR review should inherit the profile default project cwd so the cargo xtask alias is available"
     );
 }
 
@@ -2214,19 +2243,27 @@ fn reusable_issue_fix_scope_accepts_root_github_workflows() {
         .iter()
         .find(|step| step.step_id == "run_tests")
         .expect("run_tests step exists");
-    let diff_command = run_tests
+    let diff_gate = run_tests
         .parameters
         .as_ref()
-        .and_then(|params| params.get("check_commands"))
-        .and_then(|commands| commands.get("diff_or_existing_pr"))
-        .and_then(serde_json::Value::as_str)
-        .expect("diff_or_existing_pr command exists");
-    let diff_command = interpolate_string(diff_command, &context);
+        .and_then(|params| params.get("diff_or_existing_pr"))
+        .expect("diff_or_existing_pr parameters exist");
+    assert_eq!(
+        diff_gate
+            .get("required_path_regex")
+            .and_then(serde_json::Value::as_str),
+        Some("{diff_required_path_regex}")
+    );
     assert!(
-        diff_command.contains("[.]github/workflows/")
-            && diff_command.contains("workflow/(src/|config/|tests/|docs/)")
-            && diff_command.contains("No Luther workflow/config/test/doc diff found"),
-        "issue-fix diff gate should accept repository-root workflow YAML plus Luther source/config/test/doc changes: {diff_command}"
+        interpolate_string(
+            diff_gate
+                .get("required_path_regex")
+                .and_then(serde_json::Value::as_str)
+                .expect("diff regex exists"),
+            &context,
+        )
+        .contains("workflow/(src/|config/|tests/|docs/)"),
+        "issue-fix diff gate should accept Luther source/config/test/doc changes"
     );
 }
 
@@ -2329,6 +2366,32 @@ fn dogfood_agents_do_not_escalate_self_authored_shell_syntax_errors() {
     }
 }
 
+#[test]
+fn luther_profile_uses_nested_project_paths_without_manifest_path_prefixes() {
+    let config = workflow_config("llxprt-luther");
+    assert_eq!(config.repo.project_subdir.as_deref(), Some("workflow"));
+    assert_eq!(config.repo.artifact_path_base.as_deref(), Some("."));
+    assert_eq!(config.repo.diff_path_base.as_deref(), Some("workflow"));
+    assert_eq!(
+        config.repo.diff_path_normalization,
+        DiffPathNormalization::RepoRelative
+    );
+
+    for command_id in ["format", "check", "build", "test", "clippy"] {
+        let argv = manifest_command_argv(&config, command_id);
+        assert!(
+            !argv.iter().any(|arg| arg == "workflow/Cargo.toml"),
+            "{command_id} should run from project_subdir rather than embedding manifest path prefixes: {argv:?}"
+        );
+    }
+    assert!(
+        manifest_command_argv(&config, "ocr_review")
+            .iter()
+            .any(|arg| arg == "xtask"),
+        "ocr review should run from the default project cwd"
+    );
+}
+
 /// @plan:PLAN-20260408-LLXPRT-FIRST.P17
 /// @requirement:REQ-LF-VERIFY-002
 #[test]
@@ -2336,6 +2399,7 @@ fn run_tests_mirrors_ci_lint_typecheck_and_build_before_push() {
     let workflow_type = post_pr_workflow();
     let config = workflow_config("llxprt-code");
     let check_names = run_tests_check_names(&workflow_type);
+
     assert!(
         check_names.contains(&"command_manifest"),
         "run_tests should expand the target profile local manifest group: {check_names:?}"
@@ -2700,31 +2764,31 @@ fn run_tests_accepts_existing_pr_when_repeat_run_has_no_new_diff() {
             .any(|check| check.as_str() == Some("diff_or_existing_pr")),
         "run_tests should use a diff gate that accepts already-open PR reruns"
     );
-    let check_commands = params
-        .get("check_commands")
-        .and_then(serde_json::Value::as_object)
-        .expect("check_commands exist");
-    let diff_command = check_commands
+    let diff_gate = params
         .get("diff_or_existing_pr")
-        .and_then(serde_json::Value::as_str)
-        .expect("diff_or_existing_pr command exists");
-    assert!(
-        diff_command.contains("{setup_workspace.existing_pr_number}"),
-        "diff_or_existing_pr command should consult setup_workspace.existing_pr_number"
+        .expect("diff_or_existing_pr parameters exist");
+    assert_eq!(
+        diff_gate
+            .get("existing_pr_number")
+            .and_then(serde_json::Value::as_str),
+        Some("{setup_workspace.existing_pr_number}")
+    );
+    assert_eq!(
+        diff_gate
+            .get("required_path_regex")
+            .and_then(serde_json::Value::as_str),
+        Some("{diff_required_path_regex}")
+    );
+    let failure_message = interpolate_string(
+        diff_gate
+            .get("failure_message")
+            .and_then(serde_json::Value::as_str)
+            .expect("failure_message exists"),
+        &context,
     );
     assert!(
-        diff_command.contains("{diff_required_path_regex}")
-            && diff_command.contains("{diff_failure_message}"),
-        "diff_or_existing_pr should source target-specific diff scope and failure text from profile config: {diff_command}"
-    );
-    let diff_command = interpolate_string(diff_command, &context);
-    assert!(
-        diff_command.contains("git status --porcelain --untracked-files=all")
-            && diff_command.contains("grep -E '.'")
-            && diff_command.contains("No issue #0 source/test diff found")
-            && diff_command.contains("\"0\" != \"0\""),
-
-        "diff_or_existing_pr should fail empty branches unless setup_workspace found an open reusable PR while allowing any issue-specific changed path: {diff_command}"
+        failure_message.contains("No issue #0 source/test diff found"),
+        "diff_or_existing_pr should fail empty branches unless setup_workspace found an open reusable PR while allowing any issue-specific changed path: {failure_message}"
     );
 }
 
@@ -2748,14 +2812,15 @@ fn llxprt_issue_fix_workflow_loads_with_two_target_profiles() {
         .expect("create_plan static plan exists");
 
     let run_tests = run_tests_step(&workflow_type);
-    let diff_command_template = run_tests
+    let diff_gate = run_tests
         .parameters
         .as_ref()
-        .and_then(|params| params.get("check_commands"))
-        .and_then(serde_json::Value::as_object)
-        .and_then(|commands| commands.get("diff_or_existing_pr"))
+        .and_then(|params| params.get("diff_or_existing_pr"))
+        .expect("diff_or_existing_pr parameters exist");
+    let diff_regex_template = diff_gate
+        .get("required_path_regex")
         .and_then(serde_json::Value::as_str)
-        .expect("diff_or_existing_pr command exists");
+        .expect("diff regex exists");
 
     let llxprt_code_config = workflow_config("llxprt-code");
     let alt_config = workflow_config("llxprt-code-alt");
@@ -2771,26 +2836,26 @@ fn llxprt_issue_fix_workflow_loads_with_two_target_profiles() {
     let alt_plan = interpolate_string(static_plan_template, &alt_context);
     let llxprt_code_test_argv = manifest_command_argv(&llxprt_code_config, "test");
     let alt_test_argv = manifest_command_argv(&alt_config, "test");
-    let llxprt_code_diff_command = interpolate_string(diff_command_template, &llxprt_code_context);
-    let alt_diff_command = interpolate_string(diff_command_template, &alt_context);
+    let llxprt_code_diff_regex = interpolate_string(diff_regex_template, &llxprt_code_context);
+    let alt_diff_regex = interpolate_string(diff_regex_template, &alt_context);
 
     assert!(
         llxprt_code_plan.trim().is_empty()
             && llxprt_code_test_argv
                 == ["npm", "run", "test", "--workspace", "@vybestack/llxprt-code"]
-            && llxprt_code_diff_command.contains("grep -E '.'"),
+            && llxprt_code_diff_regex == ".",
         "generic llxprt-code profile should let planning follow the selected issue while running the package test command and allowing any changed path"
     );
     assert!(
         alt_plan.contains("StreamProcessor.ts")
             && alt_test_argv.iter().any(|arg| arg == "StreamProcessor")
-            && alt_diff_command.contains("packages/core/src/core/"),
+            && alt_diff_regex.contains("packages/core/src/core/"),
         "alternate profile should inject distinct planning, test, and diff scope"
     );
     assert_ne!(llxprt_code_plan, alt_plan);
 
     assert_ne!(llxprt_code_test_argv, alt_test_argv);
-    assert_ne!(llxprt_code_diff_command, alt_diff_command);
+    assert_ne!(llxprt_code_diff_regex, alt_diff_regex);
 }
 
 #[test]

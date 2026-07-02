@@ -9269,6 +9269,36 @@ fn post_pr_tests_and_push_shell_safety_use_configured_argv_without_shell_injecti
     );
 }
 
+/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P13
+/// @requirement:REQ-PRFU-017
+/// @pseudocode lines 29-40
+#[test]
+fn post_pr_test_requests_preserve_artifact_base_separately_from_working_directory() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_p11_plan_and_result(&temp, serde_json::json!([]));
+    let runner = P13RecordingRunner::with_results(vec![p13_result("passed")]);
+    let mut context = p11_context(&temp);
+    let project_dir = temp.path().join("workflow");
+    let artifact_base = temp.path().join("artifacts-root");
+    std::fs::create_dir(&project_dir).expect("project dir");
+    context.set("project_dir", &project_dir.to_string_lossy());
+    context.set("artifact_base_dir", &artifact_base.to_string_lossy());
+
+    let outcome = RunPostPrTestsExecutorWithRunner::new(runner.clone(), FixedClock)
+        .execute(&mut context, &p13_params(&temp))
+        .expect("post-pr test artifact base");
+    let requests = runner.requests();
+
+    assert_expected_outcome(
+        outcome,
+        StepOutcome::Success,
+        "post-PR test requests must keep artifact base separate from command cwd",
+    );
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].working_directory, project_dir);
+    assert_eq!(requests[0].artifact_base_directory, artifact_base);
+}
+
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P04
 /// @requirement:REQ-PRFU-018
 /// @pseudocode lines 50-53

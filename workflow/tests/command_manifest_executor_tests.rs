@@ -1,7 +1,7 @@
 use std::fs;
 
 use luther_workflow::engine::executors::command_manifest::{
-    request_from_entry, run_manifest_command,
+    request_from_entry, request_from_entry_with_paths, run_manifest_command, ManifestPathContext,
 };
 use luther_workflow::workflow::command_manifest::{
     ArtifactExpectation, ArtifactExpectations, ArtifactKind, CapturePolicy, CommandEntry,
@@ -50,6 +50,48 @@ fn manifest_executor_uses_argv_cwd_and_env_without_shell() {
 }
 
 #[test]
+fn manifest_executor_uses_default_project_cwd_and_repo_relative_override() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let repo = temp.path();
+    fs::create_dir_all(repo.join("workflow")).expect("workflow dir");
+    fs::create_dir_all(repo.join("other")).expect("other dir");
+    let paths = ManifestPathContext {
+        repo_root: repo.to_path_buf(),
+        default_working_directory: repo.join("workflow"),
+        artifact_base_directory: repo.to_path_buf(),
+    };
+    let default_entry = command_entry("default", &["pwd"]);
+    let request = request_from_entry_with_paths(&default_entry, &paths, 5).expect("request");
+    assert_eq!(request.working_directory, repo.join("workflow"));
+
+    let mut override_entry = command_entry("override", &["pwd"]);
+    override_entry.working_directory = Some("other".to_string());
+    let request = request_from_entry_with_paths(&override_entry, &paths, 5).expect("request");
+    assert_eq!(request.working_directory, repo.join("other"));
+}
+
+#[test]
+fn manifest_executor_checks_artifacts_against_artifact_base() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let repo = temp.path();
+    fs::create_dir_all(repo.join("workflow")).expect("workflow dir");
+    fs::write(repo.join("artifact.txt"), "ok").expect("artifact");
+    let paths = ManifestPathContext {
+        repo_root: repo.to_path_buf(),
+        default_working_directory: repo.join("workflow"),
+        artifact_base_directory: repo.to_path_buf(),
+    };
+    let mut entry = command_entry("artifact-base", &["true"]);
+    entry.artifacts.required.push(ArtifactExpectation {
+        path: "artifact.txt".to_string(),
+        kind: ArtifactKind::File,
+    });
+    let request = request_from_entry_with_paths(&entry, &paths, 5).expect("request");
+    let result = run_manifest_command(request);
+    assert!(result.passed(), "{result:?}");
+}
+
+#[test]
 fn manifest_executor_applies_output_expectations() {
     let temp = tempfile::tempdir().expect("tempdir");
     let mut entry = command_entry("patterns", &["python3", "-c", "print('ok forbidden')"]);
@@ -87,6 +129,80 @@ fn manifest_executor_checks_artifacts_even_on_zero_exit() {
     let result = run_manifest_command(request);
     assert!(!result.passed());
     assert_eq!(result.artifact_failures.len(), 2);
+}
+
+#[test]
+fn manifest_executor_rejects_artifact_paths_that_escape_base() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    fs::write(temp.path().join("outside.txt"), "outside").expect("outside artifact");
+    fs::write(temp.path().join("bad.log"), "bad").expect("bad artifact");
+    let mut entry = command_entry("artifact-containment", &["true"]);
+    entry.artifacts = ArtifactExpectations {
+        required: vec![
+            ArtifactExpectation {
+                path: "../outside.txt".to_string(),
+                kind: ArtifactKind::File,
+            },
+            ArtifactExpectation {
+                path: temp.path().join("outside.txt").display().to_string(),
+                kind: ArtifactKind::File,
+            },
+        ],
+        forbidden: vec![ArtifactExpectation {
+            path: "../bad.log".to_string(),
+            kind: ArtifactKind::File,
+        }],
+    };
+    let artifact_base = temp.path().join("artifacts");
+    fs::create_dir(&artifact_base).expect("artifact base");
+    let paths = ManifestPathContext {
+        repo_root: temp.path().to_path_buf(),
+        default_working_directory: temp.path().to_path_buf(),
+        artifact_base_directory: artifact_base,
+    };
+    let request = request_from_entry_with_paths(&entry, &paths, 5).expect("request");
+    let result = run_manifest_command(request);
+    assert!(!result.passed());
+    assert_eq!(result.artifact_failures.len(), 2);
+}
+
+#[cfg(unix)]
+#[test]
+fn manifest_executor_rejects_artifact_symlinks_that_escape_base() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let artifact_base = temp.path().join("artifacts");
+    let outside = temp.path().join("outside");
+    fs::create_dir(&artifact_base).expect("artifact base");
+    fs::create_dir(&outside).expect("outside dir");
+    fs::write(outside.join("outside.txt"), "outside").expect("outside file");
+    std::os::unix::fs::symlink(outside.join("outside.txt"), artifact_base.join("file-link"))
+        .expect("file symlink");
+    std::os::unix::fs::symlink(&outside, artifact_base.join("dir-link")).expect("dir symlink");
+
+    let mut entry = command_entry("artifact-symlink-containment", &["true"]);
+    entry.artifacts.required = vec![
+        ArtifactExpectation {
+            path: "file-link".to_string(),
+            kind: ArtifactKind::Any,
+        },
+        ArtifactExpectation {
+            path: "file-link".to_string(),
+            kind: ArtifactKind::File,
+        },
+        ArtifactExpectation {
+            path: "dir-link".to_string(),
+            kind: ArtifactKind::Directory,
+        },
+    ];
+    let paths = ManifestPathContext {
+        repo_root: temp.path().to_path_buf(),
+        default_working_directory: temp.path().to_path_buf(),
+        artifact_base_directory: artifact_base,
+    };
+    let request = request_from_entry_with_paths(&entry, &paths, 5).expect("request");
+    let result = run_manifest_command(request);
+    assert!(!result.passed());
+    assert_eq!(result.artifact_failures.len(), 3);
 }
 
 #[test]

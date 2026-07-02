@@ -8,7 +8,11 @@
   "repository": {
     "workspace_strategy": "temp_clone",
     "branch_template": "issue{issue_number}",
-    "base_branch": "main"
+    "base_branch": "main",
+    "project_subdir": "workflow",
+    "artifact_path_base": ".",
+    "diff_path_base": "workflow",
+    "diff_path_normalization": "repo_relative"
   },
   "guards": {
     "max_iterations": 4,
@@ -40,9 +44,7 @@
         "argv": [
           "cargo",
           "fmt",
-          "--check",
-          "--manifest-path",
-          "workflow/Cargo.toml"
+          "--check"
         ],
         "timeout_seconds": 300,
         "failure_outcome": "fixable"
@@ -51,9 +53,7 @@
         "id": "check",
         "argv": [
           "cargo",
-          "check",
-          "--manifest-path",
-          "workflow/Cargo.toml"
+          "check"
         ],
         "timeout_seconds": 900,
         "failure_outcome": "fixable"
@@ -62,9 +62,7 @@
         "id": "build",
         "argv": [
           "cargo",
-          "build",
-          "--manifest-path",
-          "workflow/Cargo.toml"
+          "build"
         ],
         "timeout_seconds": 900,
         "failure_outcome": "fixable"
@@ -73,9 +71,7 @@
         "id": "test",
         "argv": [
           "cargo",
-          "test",
-          "--manifest-path",
-          "workflow/Cargo.toml"
+          "test"
         ],
         "timeout_seconds": 1200,
         "failure_outcome": "fixable"
@@ -85,8 +81,6 @@
         "argv": [
           "cargo",
           "clippy",
-          "--manifest-path",
-          "workflow/Cargo.toml",
           "--all-targets",
           "--",
           "-D",
@@ -103,7 +97,6 @@
           "ocr-review",
           "--preview"
         ],
-        "working_directory": "workflow",
         "timeout_seconds": 300,
         "failure_outcome": "fatal"
       }

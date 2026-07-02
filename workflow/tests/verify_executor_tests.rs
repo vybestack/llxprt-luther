@@ -601,26 +601,36 @@ fn test_verify_drains_large_command_output_without_blocking() {
 /// @plan:PLAN-20260408-LLXPRT-FIRST.P17
 /// @requirement:REQ-LF-VERIFY-007
 #[test]
-fn test_verify_interpolates_context_in_custom_check_commands() {
+fn test_verify_interpolates_context_in_structured_diff_gate() {
     let executor = VerifyExecutor;
     let temp_dir = tempfile::tempdir().unwrap();
     let work_dir = temp_dir.path();
+    std::process::Command::new("git")
+        .args(["init"])
+        .current_dir(work_dir)
+        .output()
+        .expect("git init");
+    fs::create_dir_all(work_dir.join("workflow/src")).expect("src dir");
+    fs::write(work_dir.join("workflow/src/lib.rs"), "fn main() {}\n").expect("source file");
     let mut ctx = StepContext::new(work_dir.to_path_buf(), "run-1".to_string());
     ctx.set_current_step_id("setup_workspace");
     ctx.set("existing_pr_number", "0");
     ctx.set_current_step_id("run_tests");
+    ctx.set("diff_required_path_regex", "^workflow/src/");
 
     let params = json!({
         "checks": ["diff_or_existing_pr"],
-        "check_commands": {
-            "diff_or_existing_pr": "test \"{setup_workspace.existing_pr_number}\" != \"0\""
+        "diff_or_existing_pr": {
+            "required_path_regex": "{diff_required_path_regex}",
+            "failure_message": "No source diff for reusable PR {setup_workspace.existing_pr_number}",
+            "existing_pr_number": "{setup_workspace.existing_pr_number}"
         }
     });
 
     let result = executor.execute(&mut ctx, &params);
 
     assert!(result.is_ok());
-    assert_eq!(result.unwrap(), StepOutcome::Fixable);
+    assert_eq!(result.unwrap(), StepOutcome::Success);
 
     let report_path = work_dir.join(".luther").join("verify-report.json");
     let report_content = fs::read_to_string(&report_path).unwrap();
@@ -630,8 +640,179 @@ fn test_verify_interpolates_context_in_custom_check_commands() {
         .iter()
         .find(|check| check.check_type == "diff_or_existing_pr")
         .expect("diff_or_existing_pr check should exist");
-    assert!(!check.passed);
-    assert_eq!(check.exit_code, 1);
+    assert!(check.passed);
+    assert_eq!(check.exit_code, 0);
+    assert_eq!(check.raw_stdout, "workflow/src/lib.rs");
+}
+
+#[test]
+fn test_verify_structured_diff_gate_matches_repo_relative_path() {
+    let executor = VerifyExecutor;
+    let temp_dir = tempfile::tempdir().unwrap();
+    let work_dir = temp_dir.path();
+    std::process::Command::new("git")
+        .args(["init"])
+        .current_dir(work_dir)
+        .output()
+        .expect("git init");
+    fs::create_dir_all(work_dir.join("workflow/src")).expect("src dir");
+    fs::write(work_dir.join("workflow/src/lib.rs"), "fn main() {}\n").expect("source file");
+    let mut ctx = StepContext::new(work_dir.to_path_buf(), "run-1".to_string());
+
+    let params = json!({
+        "checks": ["diff_or_existing_pr"],
+        "diff_or_existing_pr": {
+            "required_path_regex": "^workflow/src/",
+            "failure_message": "No Luther workflow diff found",
+            "existing_pr_number": "0"
+        }
+    });
+
+    let result = executor
+        .execute(&mut ctx, &params)
+        .expect("verify executes");
+    assert_eq!(result, StepOutcome::Success);
+
+    let report_path = work_dir.join(".luther").join("verify-report.json");
+    let report_content = fs::read_to_string(&report_path).unwrap();
+    let report: VerifyReport = serde_json::from_str(&report_content).unwrap();
+    let check = report
+        .checks
+        .iter()
+        .find(|check| check.check_type == "diff_or_existing_pr")
+        .expect("diff check exists");
+    assert_eq!(check.raw_stdout, "workflow/src/lib.rs");
+}
+
+#[test]
+fn test_verify_structured_diff_gate_normalizes_base_relative_path() {
+    let executor = VerifyExecutor;
+    let temp_dir = tempfile::tempdir().unwrap();
+    let work_dir = temp_dir.path();
+    std::process::Command::new("git")
+        .args(["init"])
+        .current_dir(work_dir)
+        .output()
+        .expect("git init");
+    fs::create_dir_all(work_dir.join("workflow/tests")).expect("tests dir");
+    fs::write(
+        work_dir.join("workflow/tests/e2e.rs"),
+        "#[test] fn ok() {}\n",
+    )
+    .expect("test file");
+    let mut ctx = StepContext::new(work_dir.to_path_buf(), "run-1".to_string());
+    ctx.set("diff_path_base", "workflow");
+    ctx.set("diff_path_normalization", "base_relative");
+
+    let params = json!({
+        "checks": ["diff_or_existing_pr"],
+        "diff_or_existing_pr": {
+            "required_path_regex": "^tests/",
+            "failure_message": "No base-relative test diff found",
+            "existing_pr_number": "0"
+        }
+    });
+
+    let result = executor
+        .execute(&mut ctx, &params)
+        .expect("verify executes");
+    assert_eq!(result, StepOutcome::Success);
+
+    let report_path = work_dir.join(".luther").join("verify-report.json");
+    let report_content = fs::read_to_string(&report_path).unwrap();
+    let report: VerifyReport = serde_json::from_str(&report_content).unwrap();
+    let check = report
+        .checks
+        .iter()
+        .find(|check| check.check_type == "diff_or_existing_pr")
+        .expect("diff check exists");
+    assert_eq!(check.raw_stdout, "tests/e2e.rs");
+}
+
+#[test]
+fn test_verify_structured_diff_gate_existing_pr_fallback() {
+    let executor = VerifyExecutor;
+    let temp_dir = tempfile::tempdir().unwrap();
+    let work_dir = temp_dir.path();
+    std::process::Command::new("git")
+        .args(["init"])
+        .current_dir(work_dir)
+        .output()
+        .expect("git init");
+    let mut ctx = StepContext::new(work_dir.to_path_buf(), "run-1".to_string());
+    ctx.set_current_step_id("setup_workspace");
+    ctx.set("existing_pr_number", "42");
+    ctx.set_current_step_id("run_tests");
+
+    let params = json!({
+        "checks": ["diff_or_existing_pr"],
+        "diff_or_existing_pr": {
+            "required_path_regex": "^src/",
+            "failure_message": "No source diff found",
+            "existing_pr_number": "{setup_workspace.existing_pr_number}"
+        }
+    });
+
+    let result = executor
+        .execute(&mut ctx, &params)
+        .expect("verify executes");
+    assert_eq!(result, StepOutcome::Success);
+}
+
+#[test]
+fn test_verify_structured_diff_gate_existing_pr_fallback_skips_git_status() {
+    let executor = VerifyExecutor;
+    let temp_dir = tempfile::tempdir().unwrap();
+    let work_dir = temp_dir.path().join("not-a-git-repo");
+    fs::create_dir(&work_dir).expect("work dir");
+    let mut ctx = StepContext::new(work_dir, "run-1".to_string());
+    ctx.set_current_step_id("setup_workspace");
+    ctx.set("existing_pr_number", "42");
+    ctx.set_current_step_id("run_tests");
+
+    let params = json!({
+        "checks": ["diff_or_existing_pr"],
+        "diff_or_existing_pr": {
+            "required_path_regex": "^src/",
+            "failure_message": "No source diff found",
+            "existing_pr_number": "{setup_workspace.existing_pr_number}"
+        }
+    });
+
+    let result = executor
+        .execute(&mut ctx, &params)
+        .expect("verify executes");
+    assert_eq!(result, StepOutcome::Success);
+}
+
+#[test]
+fn test_verify_structured_diff_gate_rejects_invalid_existing_pr_fallback() {
+    let executor = VerifyExecutor;
+    let temp_dir = tempfile::tempdir().unwrap();
+    let work_dir = temp_dir.path();
+    std::process::Command::new("git")
+        .args(["init"])
+        .current_dir(work_dir)
+        .output()
+        .expect("git init");
+    let mut ctx = StepContext::new(work_dir.to_path_buf(), "run-1".to_string());
+    ctx.set_current_step_id("setup_workspace");
+    ctx.set("existing_pr_number", " not-a-pr ");
+    ctx.set_current_step_id("run_tests");
+
+    let params = json!({
+        "checks": ["diff_or_existing_pr"],
+        "diff_or_existing_pr": {
+            "required_path_regex": "^src/",
+            "failure_message": "No source diff found",
+            "existing_pr_number": "{setup_workspace.existing_pr_number}"
+        }
+    });
+
+    let result = executor
+        .execute(&mut ctx, &params)
+        .expect("verify executes");
+    assert_eq!(result, StepOutcome::Fatal);
 }
 
 #[test]

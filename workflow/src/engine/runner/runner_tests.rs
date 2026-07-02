@@ -94,6 +94,10 @@ fn test_workflow_config(workflow_type_id: &str) -> crate::workflow::schema::Work
             branch_template: "test-{run_id}".to_string(),
             base_branch: Some("main".to_string()),
             workspace_root: None,
+            project_subdir: None,
+            artifact_path_base: None,
+            diff_path_base: None,
+            diff_path_normalization: crate::workflow::schema::DiffPathNormalization::RepoRelative,
         },
         guard_limits: crate::workflow::schema::GuardLimits {
             max_iterations: Some(3),
@@ -216,6 +220,10 @@ fn engine_runner_can_be_created() {
             branch_template: "test-{run_id}".to_string(),
             base_branch: Some("main".to_string()),
             workspace_root: None,
+            project_subdir: None,
+            artifact_path_base: None,
+            diff_path_base: None,
+            diff_path_normalization: crate::workflow::schema::DiffPathNormalization::RepoRelative,
         },
         guard_limits: GuardLimits {
             max_iterations: Some(3),
@@ -276,6 +284,10 @@ fn seam_test_instance() -> WorkflowInstance {
             branch_template: "test-{run_id}".to_string(),
             base_branch: Some("main".to_string()),
             workspace_root: None,
+            project_subdir: None,
+            artifact_path_base: None,
+            diff_path_base: None,
+            diff_path_normalization: crate::workflow::schema::DiffPathNormalization::RepoRelative,
         },
         guard_limits: GuardLimits {
             max_iterations: Some(3),

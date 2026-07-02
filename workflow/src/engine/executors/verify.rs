@@ -3,7 +3,9 @@
 /// Verify executor - runs a configurable sequence of verification checks.
 /// @requirement:REQ-LF-VERIFY-001,REQ-LF-VERIFY-002,REQ-LF-VERIFY-003,REQ-LF-VERIFY-004,REQ-LF-VERIFY-005,REQ-LF-VERIFY-006,REQ-LF-VERIFY-007,REQ-LF-VERIFY-008,REQ-LF-VERIFY-009
 use crate::engine::executor::{interpolate_string, StepContext, StepExecutor};
-use crate::engine::executors::command_manifest::{request_from_entry, run_manifest_command};
+use crate::engine::executors::command_manifest::{
+    request_from_entry_with_paths, run_manifest_command, ManifestPathContext,
+};
 use crate::engine::runner::EngineError;
 use crate::engine::transition::StepOutcome;
 use crate::workflow::command_manifest::{CommandEntry, CommandManifest, FailureOutcome};
@@ -258,12 +260,155 @@ fn run_check(
     work_dir: &std::path::Path,
     timeout: Option<Duration>,
 ) -> Result<CheckExecutionOutcome, EngineError> {
+    if check_type == "diff_or_existing_pr" {
+        return run_diff_or_existing_pr_check(params, context);
+    }
     if let Some(result) = run_manifest_check(check_type, params, context, timeout)? {
         return Ok(CheckExecutionOutcome::Completed(result));
     }
 
     let command = resolve_check_command(check_type, params, context)?;
     run_legacy_check(check_type, &command, context, work_dir, timeout)
+}
+
+fn run_diff_or_existing_pr_check(
+    params: &serde_json::Value,
+    context: &StepContext,
+) -> Result<CheckExecutionOutcome, EngineError> {
+    let config = params
+        .get("diff_or_existing_pr")
+        .ok_or_else(|| diff_gate_error("missing diff_or_existing_pr parameters"))?;
+    let required_path_regex =
+        interpolate_string(&required_string(config, "required_path_regex")?, context);
+    let regex = regex::Regex::new(&required_path_regex)
+        .map_err(|err| diff_gate_error(format!("invalid required_path_regex: {err}")))?;
+    let existing_pr =
+        optional_string(config, "existing_pr_number", context).unwrap_or_else(|| "0".to_string());
+    if valid_existing_pr_number(&existing_pr) {
+        return Ok(CheckExecutionOutcome::Completed(diff_gate_result(
+            true,
+            None,
+            Vec::new(),
+            String::new(),
+        )));
+    }
+    let changed_paths = git_changed_paths(context.work_dir())?;
+    let matched_path = changed_paths
+        .iter()
+        .filter_map(|path| normalize_diff_path(context, path))
+        .find(|path| regex.is_match(path));
+    let passed = matched_path.is_some();
+    let message = optional_string(config, "failure_message", context)
+        .unwrap_or_else(|| "required changed path not found".to_string());
+    Ok(CheckExecutionOutcome::Completed(diff_gate_result(
+        passed,
+        matched_path,
+        changed_paths,
+        message,
+    )))
+}
+
+fn valid_existing_pr_number(existing_pr: &str) -> bool {
+    existing_pr
+        .trim()
+        .parse::<u64>()
+        .is_ok_and(|number| number != 0)
+}
+
+fn git_changed_paths(work_dir: &std::path::Path) -> Result<Vec<String>, EngineError> {
+    let output = Command::new("git")
+        .args(["status", "--porcelain", "--untracked-files=all"])
+        .current_dir(work_dir)
+        .output()
+        .map_err(|err| diff_gate_error(format!("failed to run git status: {err}")))?;
+    if !output.status.success() {
+        return Err(diff_gate_error(format!(
+            "git status failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        )));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(parse_git_status_path)
+        .collect())
+}
+
+fn parse_git_status_path(line: &str) -> Option<String> {
+    line.get(3..)
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .map(|path| path.split(" -> ").last().unwrap_or(path).to_string())
+}
+
+fn normalize_diff_path(context: &StepContext, path: &str) -> Option<String> {
+    if context.get("diff_path_normalization").map(String::as_str) != Some("base_relative") {
+        return Some(path.to_string());
+    }
+    let base = context.get("diff_path_base")?;
+    if base.is_empty() {
+        return Some(path.to_string());
+    }
+    path.strip_prefix(&format!("{base}/"))
+        .map(ToString::to_string)
+}
+
+fn diff_gate_result(
+    passed: bool,
+    matched_path: Option<String>,
+    changed_paths: Vec<String>,
+    failure_message: String,
+) -> CheckResult {
+    let stdout = matched_path.unwrap_or_default();
+    let errors = if passed {
+        Vec::new()
+    } else {
+        vec![ErrorRecord {
+            message: failure_message.clone(),
+            severity: Some("error".to_string()),
+            ..ErrorRecord::default()
+        }]
+    };
+    CheckResult {
+        check_type: "diff_or_existing_pr".to_string(),
+        passed,
+        exit_code: if passed { 0 } else { 1 },
+        errors,
+        raw_stdout: stdout,
+        raw_stderr: if passed {
+            String::new()
+        } else {
+            failure_message
+        },
+        command: Some(CommandEvidence {
+            command_id: "diff_or_existing_pr".to_string(),
+            argv: changed_paths,
+            failure_classification: "fatal".to_string(),
+            ..CommandEvidence::default()
+        }),
+    }
+}
+
+fn required_string(value: &serde_json::Value, key: &str) -> Result<String, EngineError> {
+    value
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+        .ok_or_else(|| diff_gate_error(format!("diff_or_existing_pr.{key} is required")))
+}
+
+fn optional_string(value: &serde_json::Value, key: &str, context: &StepContext) -> Option<String> {
+    value
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+        .map(|value| interpolate_string(value, context))
+}
+
+fn diff_gate_error(message: impl Into<String>) -> EngineError {
+    EngineError::StepExecutionError {
+        step_id: "verify".to_string(),
+        message: message.into(),
+    }
 }
 
 fn run_legacy_check(
@@ -703,13 +848,13 @@ fn run_manifest_check(
         return Ok(None);
     };
     let default_timeout = timeout.map_or(900, |duration| duration.as_secs());
-    let request =
-        request_from_entry(&entry, context.work_dir(), default_timeout).map_err(|message| {
-            EngineError::StepExecutionError {
-                step_id: "verify".to_string(),
-                message,
-            }
-        })?;
+    let path_context = manifest_path_context(context);
+    let request = request_from_entry_with_paths(&entry, &path_context, default_timeout).map_err(
+        |message| EngineError::StepExecutionError {
+            step_id: "verify".to_string(),
+            message,
+        },
+    )?;
     let result = run_manifest_command(request);
     let mut errors = parse_check_output(
         check_type,
@@ -744,6 +889,20 @@ fn run_manifest_check(
             failure_classification: failure_classification(&result.failure_outcome),
         }),
     }))
+}
+fn manifest_path_context(context: &StepContext) -> ManifestPathContext {
+    ManifestPathContext {
+        repo_root: context.work_dir().clone(),
+        default_working_directory: context_path(context, "project_dir"),
+        artifact_base_directory: context_path(context, "artifact_base_dir"),
+    }
+}
+
+fn context_path(context: &StepContext, key: &str) -> PathBuf {
+    context
+        .get(key)
+        .filter(|value| !value.is_empty())
+        .map_or_else(|| context.work_dir().clone(), PathBuf::from)
 }
 
 fn manifest_entry_for_check(

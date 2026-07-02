@@ -162,8 +162,10 @@
         "command_manifest_group": "local",
         "timeout_seconds": 2400,
         "artifact_root": "{artifact_dir}",
-        "check_commands": {
-          "diff_or_existing_pr": "CHANGED=$(git status --porcelain --untracked-files=all | sed 's/^...//' | grep -E '{diff_required_path_regex}' || true)\nif [ -n \"$CHANGED\" ]; then\n  exit 0\nfi\nif [ \"{setup_workspace.existing_pr_number}\" != \"0\" ]; then\n  exit 0\nfi\necho '{diff_failure_message}'\nexit 1\n"
+        "diff_or_existing_pr": {
+          "required_path_regex": "{diff_required_path_regex}",
+          "failure_message": "{diff_failure_message}",
+          "existing_pr_number": "{setup_workspace.existing_pr_number}"
         }
       }
     },

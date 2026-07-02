@@ -11,6 +11,10 @@ max_retries = 3
 workspace_strategy = "temp_clone"
 branch_template = "issue{issue_number}"
 base_branch = "main"
+project_subdir = "workflow"
+artifact_path_base = "."
+diff_path_base = "workflow"
+diff_path_normalization = "repo_relative"
 
 [guards]
 max_iterations = 4
@@ -50,38 +54,37 @@ diff_failure_message = "No Luther workflow/config/test/doc diff found and no reu
 
 [[command_manifest.commands]]
 id = "format"
-argv = ["cargo", "fmt", "--check", "--manifest-path", "workflow/Cargo.toml"]
+argv = ["cargo", "fmt", "--check"]
 timeout_seconds = 300
 failure_outcome = "fixable"
 
 [[command_manifest.commands]]
 id = "lint"
-argv = ["cargo", "clippy", "--manifest-path", "workflow/Cargo.toml", "--all-targets", "--", "-D", "warnings"]
+argv = ["cargo", "clippy", "--all-targets", "--", "-D", "warnings"]
 timeout_seconds = 1200
 failure_outcome = "fixable"
 
 [[command_manifest.commands]]
 id = "typecheck"
-argv = ["cargo", "check", "--manifest-path", "workflow/Cargo.toml"]
+argv = ["cargo", "check"]
 timeout_seconds = 900
 failure_outcome = "fixable"
 
 [[command_manifest.commands]]
 id = "build"
-argv = ["cargo", "build", "--manifest-path", "workflow/Cargo.toml"]
+argv = ["cargo", "build"]
 timeout_seconds = 900
 failure_outcome = "fixable"
 
 [[command_manifest.commands]]
 id = "test"
-argv = ["cargo", "test", "--manifest-path", "workflow/Cargo.toml", "target_profile", "e2e_workflow_integration"]
+argv = ["cargo", "test", "target_profile", "e2e_workflow_integration"]
 timeout_seconds = 1200
 failure_outcome = "fixable"
 
 [[command_manifest.commands]]
 id = "ocr_review"
 argv = ["cargo", "xtask", "ocr-review", "--preview"]
-working_directory = "workflow"
 timeout_seconds = 300
 failure_outcome = "fatal"
 

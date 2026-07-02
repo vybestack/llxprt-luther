@@ -3,6 +3,7 @@
 pub mod command_manifest;
 pub mod config_loader;
 pub mod schema;
+pub mod target_paths;
 pub mod target_profile;
 pub mod validation;
 
@@ -19,9 +20,10 @@ pub use config_loader::{
     Result as ConfigResult, UnresolvedToken,
 };
 pub use schema::{
-    GuardConfig, GuardLimits, RepoConfig, RuntimeConfig, StepDef, TransitionDef, WorkflowConfig,
-    WorkflowRunRef, WorkflowType,
+    DiffPathNormalization, GuardConfig, GuardLimits, RepoConfig, RuntimeConfig, StepDef,
+    TransitionDef, WorkflowConfig, WorkflowRunRef, WorkflowType,
 };
+pub use target_paths::TargetPathConfig;
 pub use target_profile::{
     apply_target_profile_overrides, target_profile_validation_required, validate_target_profile,
     TargetProfileOverrides,
