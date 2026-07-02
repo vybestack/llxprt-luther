@@ -6,19 +6,19 @@
 //! @pseudocode lines 1-53
 
 mod post_pr_stages;
+mod post_pr_test_process;
 mod push_auth_preflight;
 mod push_porcelain;
 mod push_stages;
 mod push_support;
 mod result_freshness;
-use self::post_pr_stages::{
-    apply_allowed_command_environment, sanitize_command_id, validate_safe_working_directory,
-};
+use self::post_pr_stages::{sanitize_command_id, validate_safe_working_directory};
 pub use self::post_pr_stages::{
     PostPrFailureTerminalExecutor, PostPrIterationGuardExecutor, PostPrTestCommandRequest,
     PostPrTestCommandResult, PostPrTestCommandRunner, RunPostPrTestsExecutor,
     RunPostPrTestsExecutorWithRunner, SystemPostPrTestCommandRunner,
 };
+use self::post_pr_test_process::apply_allowed_command_environment;
 pub use self::push_stages::{
     PushRemediationChangesExecutor, PushRemediationChangesExecutorWithRunner,
     PushRemediationCommandRequest, PushRemediationCommandResult, PushRemediationCommandRunner,

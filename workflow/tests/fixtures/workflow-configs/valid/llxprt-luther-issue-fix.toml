@@ -47,9 +47,45 @@ plan_static_content = """
 required_changed_path_pattern = "workflow"
 diff_required_path_regex = "^([.]github/workflows/|workflow/(src/|config/|tests/|docs/))"
 diff_failure_message = "No Luther workflow/config/test/doc diff found and no reusable open PR exists"
-lint_command = "cargo fmt --check --manifest-path workflow/Cargo.toml 2>&1"
-typecheck_command = "cargo check --manifest-path workflow/Cargo.toml 2>&1"
-build_command = "cargo build --manifest-path workflow/Cargo.toml 2>&1"
-test_command = "cargo test --manifest-path workflow/Cargo.toml target_profile e2e_workflow_integration 2>&1"
-format_command = "cargo fmt --check --manifest-path workflow/Cargo.toml 2>&1"
-ocr_review_command = "cd workflow && cargo xtask ocr-review --preview"
+
+[[command_manifest.commands]]
+id = "format"
+argv = ["cargo", "fmt", "--check", "--manifest-path", "workflow/Cargo.toml"]
+timeout_seconds = 300
+failure_outcome = "fixable"
+
+[[command_manifest.commands]]
+id = "lint"
+argv = ["cargo", "clippy", "--manifest-path", "workflow/Cargo.toml", "--all-targets", "--", "-D", "warnings"]
+timeout_seconds = 1200
+failure_outcome = "fixable"
+
+[[command_manifest.commands]]
+id = "typecheck"
+argv = ["cargo", "check", "--manifest-path", "workflow/Cargo.toml"]
+timeout_seconds = 900
+failure_outcome = "fixable"
+
+[[command_manifest.commands]]
+id = "build"
+argv = ["cargo", "build", "--manifest-path", "workflow/Cargo.toml"]
+timeout_seconds = 900
+failure_outcome = "fixable"
+
+[[command_manifest.commands]]
+id = "test"
+argv = ["cargo", "test", "--manifest-path", "workflow/Cargo.toml", "target_profile", "e2e_workflow_integration"]
+timeout_seconds = 1200
+failure_outcome = "fixable"
+
+[[command_manifest.commands]]
+id = "ocr_review"
+argv = ["cargo", "xtask", "ocr-review", "--preview"]
+working_directory = "workflow"
+timeout_seconds = 300
+failure_outcome = "fatal"
+
+[command_manifest.groups]
+local = ["format", "lint", "typecheck", "build", "test", "ocr_review"]
+post_pr = ["test"]
+review = ["ocr_review"]

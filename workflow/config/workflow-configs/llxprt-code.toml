@@ -52,28 +52,44 @@ plan_static_content = ""
 required_changed_path_pattern = ""
 diff_required_path_regex = "."
 diff_failure_message = "No issue #{issue_number} source/test diff found and no reusable open PR exists"
-lint_command = """
-CHANGED=$(git status --porcelain --untracked-files=all | sed 's/^...//' | grep -E '[.](ts|tsx|js|jsx)$' | tr '\\n' ' ')
-if [ -z "$CHANGED" ]; then
-  echo 'No changed lint-checked files'
-else
-  npx eslint $CHANGED > "/tmp/luther-artifacts/llxprt-code/lint-output.log" 2>&1
-  status=$?
-  tail -n 240 "/tmp/luther-artifacts/llxprt-code/lint-output.log"
-  exit $status
-fi
-"""
-typecheck_command = "npm run typecheck 2>&1"
-build_command = "npm run build 2>&1"
-test_command = "npm run test --workspace @vybestack/llxprt-code 2>&1"
-ocr_review_command = "echo 'Local OCR wrapper is not configured for this target profile'"
-format_command = """
-CHANGED=$(git status --porcelain --untracked-files=all | sed 's/^...//' | grep -E '[.](ts|tsx|js|jsx|json|md)$' | tr '\n' ' ')
 
-if [ -z "$CHANGED" ]; then
-  echo 'No changed format-checked files'
-else
-  npx prettier --write $CHANGED >/tmp/luther-prettier-write.log 2>&1
-  npx prettier --check $CHANGED 2>&1
-fi
-"""
+[[command_manifest.commands]]
+id = "format"
+argv = ["npm", "run", "format:check"]
+timeout_seconds = 600
+failure_outcome = "fixable"
+
+[[command_manifest.commands]]
+id = "lint"
+argv = ["npm", "run", "lint"]
+timeout_seconds = 600
+failure_outcome = "fixable"
+
+[[command_manifest.commands]]
+id = "typecheck"
+argv = ["npm", "run", "typecheck"]
+timeout_seconds = 600
+failure_outcome = "fixable"
+
+[[command_manifest.commands]]
+id = "build"
+argv = ["npm", "run", "build"]
+timeout_seconds = 900
+failure_outcome = "fixable"
+
+[[command_manifest.commands]]
+id = "test"
+argv = ["npm", "run", "test", "--workspace", "@vybestack/llxprt-code"]
+timeout_seconds = 900
+failure_outcome = "fixable"
+
+[[command_manifest.commands]]
+id = "ocr_review"
+argv = ["echo", "Local OCR wrapper is not configured for this target profile"]
+timeout_seconds = 60
+failure_outcome = "fatal"
+
+[command_manifest.groups]
+local = ["format", "lint", "typecheck", "build", "test"]
+post_pr = ["test"]
+review = ["ocr_review"]

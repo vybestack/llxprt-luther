@@ -821,6 +821,67 @@ fn test_verify_check_commands_override_profile_default() {
     );
 }
 
+#[test]
+fn test_verify_expands_manifest_group_placeholder() {
+    let executor = VerifyExecutor;
+    let temp_dir = tempfile::tempdir().unwrap();
+    let mut ctx = StepContext::new(temp_dir.path().to_path_buf(), "run-1".to_string());
+
+    let params = json!({
+        "checks": ["command_manifest"],
+        "command_manifest_group": "local",
+        "command_manifest": {
+            "commands": [
+                { "id": "alpha", "argv": ["python3", "-c", "print('alpha')"] },
+                { "id": "beta", "argv": ["python3", "-c", "print('beta')"] }
+            ],
+            "groups": { "local": ["alpha", "beta"] }
+        }
+    });
+
+    let result = executor
+        .execute(&mut ctx, &params)
+        .expect("verify executes");
+    assert_eq!(result, StepOutcome::Success);
+
+    let report_content =
+        fs::read_to_string(temp_dir.path().join(".luther/verify-report.json")).unwrap();
+    let report: VerifyReport = serde_json::from_str(&report_content).unwrap();
+    let command_ids = report
+        .checks
+        .iter()
+        .filter_map(|check| check.command.as_ref())
+        .map(|command| command.command_id.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(command_ids, ["alpha", "beta"]);
+}
+
+#[test]
+fn test_verify_manifest_group_runs_without_checks_array() {
+    let executor = VerifyExecutor;
+    let temp_dir = tempfile::tempdir().unwrap();
+    let mut ctx = StepContext::new(temp_dir.path().to_path_buf(), "run-1".to_string());
+
+    let params = json!({
+        "command_manifest": {
+            "commands": [
+                { "id": "coverage", "argv": ["python3", "-c", "print('covered')"] }
+            ],
+            "groups": { "local": ["coverage"] }
+        }
+    });
+
+    let result = executor
+        .execute(&mut ctx, &params)
+        .expect("verify executes");
+    assert_eq!(result, StepOutcome::Success);
+
+    let report_content =
+        fs::read_to_string(temp_dir.path().join(".luther/verify-report.json")).unwrap();
+    let report: VerifyReport = serde_json::from_str(&report_content).unwrap();
+    assert_eq!(report.checks[0].check_type, "coverage");
+}
+
 /// An unknown profile name is rejected with a StepExecutionError listing the
 /// valid profiles.
 /// @plan:PLAN-20260408-LLXPRT-FIRST.P08

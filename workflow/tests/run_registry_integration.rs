@@ -70,6 +70,7 @@ fn test_config() -> WorkflowConfig {
         },
         variables: HashMap::new(),
         discovery: None,
+        command_manifest: None,
     }
 }
 

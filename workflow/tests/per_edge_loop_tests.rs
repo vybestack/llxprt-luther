@@ -112,6 +112,7 @@ fn make_config(max_iterations: Option<u32>) -> WorkflowConfig {
         },
         variables: std::collections::HashMap::new(),
         discovery: None,
+        command_manifest: None,
     }
 }
 

@@ -2,6 +2,8 @@
 /// Schema definitions for workflow types, configurations, and runtime references.
 use std::collections::HashMap;
 
+use crate::workflow::command_manifest::CommandManifest;
+
 /// Declarative topology and transitions for a workflow type.
 /// @plan:PLAN-20260404-INITIAL-RUNTIME.P03
 /// @requirement:REQ-EARS-WF-001,REQ-EARS-WF-006
@@ -37,6 +39,9 @@ pub struct WorkflowConfig {
     /// @requirement:REQ-DAEMON-DISCOVERY-001
     #[serde(default)]
     pub discovery: Option<DiscoveryConfig>,
+    /// Optional argv-only command manifest for repository-specific gates.
+    #[serde(default)]
+    pub command_manifest: Option<CommandManifest>,
 }
 
 /// Bound runtime identity for a workflow run.

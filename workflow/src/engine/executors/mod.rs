@@ -16,6 +16,7 @@
 //! @pseudocode lines 1-53
 //! Executors module - concrete step executor implementations.
 pub mod change_detection;
+pub mod command_manifest;
 pub mod feedback_eval;
 pub mod github_feedback;
 pub mod github_pr;
@@ -38,6 +39,9 @@ pub use feedback_eval::{
 };
 
 pub use change_detection::{ChangeDetectionMode, ChangedPathDetector, GitChangedPathDetector};
+pub use command_manifest::{
+    request_from_entry, run_manifest_command, ManifestCommandRequest, ManifestCommandResult,
+};
 pub use github_feedback::{
     FeedbackMarkerParser, GithubCodeRabbitFeedbackExecutor,
     GithubCodeRabbitFeedbackExecutorWithRunner, GithubFeedbackMarkerExecutor,

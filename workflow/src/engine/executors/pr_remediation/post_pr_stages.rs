@@ -1,6 +1,6 @@
+use super::post_pr_test_process::{run_manifest_post_pr_test_process, run_post_pr_test_process};
 use super::*;
-#[cfg(unix)]
-use std::os::unix::process::CommandExt;
+use crate::workflow::command_manifest::{CommandEntry, CommandManifest};
 
 /// Dedicated post-PR local verification executor for `run_post_pr_tests`.
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P03
@@ -48,6 +48,7 @@ pub struct PostPrTestCommandRequest {
     pub timeout_seconds: u64,
     pub stdout_log_path: PathBuf,
     pub stderr_log_path: PathBuf,
+    pub manifest_entry: Option<CommandEntry>,
 }
 
 /// Owned post-PR test command result.
@@ -67,6 +68,9 @@ pub struct PostPrTestCommandResult {
     pub stdout_log_path: Option<PathBuf>,
     pub stderr_log_path: Option<PathBuf>,
     pub spawn_error: Option<String>,
+    pub expectation_failures: Vec<String>,
+    pub artifact_failures: Vec<String>,
+    pub failure_classification: Option<String>,
 }
 
 /// Production post-PR test command runner.
@@ -81,6 +85,9 @@ pub struct SystemPostPrTestCommandRunner;
 /// @pseudocode lines 29-30
 impl PostPrTestCommandRunner for SystemPostPrTestCommandRunner {
     fn run(&self, request: PostPrTestCommandRequest) -> PostPrTestCommandResult {
+        if request.manifest_entry.is_some() {
+            return run_manifest_post_pr_test_process(request);
+        }
         run_post_pr_test_process(request)
     }
 }
@@ -268,6 +275,7 @@ fn post_pr_test_request(
         timeout_seconds: command.timeout_seconds,
         stdout_log_path: log_dir.join(format!("{log_name}-stdout.log")),
         stderr_log_path: log_dir.join(format!("{log_name}-stderr.log")),
+        manifest_entry: command.manifest_entry.clone(),
     }
 }
 
@@ -344,6 +352,7 @@ struct PostPrTestCommandConfig {
     argv: Vec<String>,
     working_directory: PathBuf,
     timeout_seconds: u64,
+    manifest_entry: Option<CommandEntry>,
 }
 
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P13
@@ -353,13 +362,21 @@ fn post_pr_test_commands(
     context: &StepContext,
     params: &Value,
 ) -> Result<Vec<PostPrTestCommandConfig>, EngineError> {
+    let manifest_commands = manifest_group_post_pr_commands(params)?;
     let commands_value = params
         .get("commands")
-        .or_else(|| params.get("post_pr_test_commands"))
-        .ok_or_else(|| pr_remediation_error("missing post-PR test commands"))?;
-    let commands = commands_value
-        .as_array()
-        .ok_or_else(|| pr_remediation_error("post-PR test commands must be an array"))?;
+        .or_else(|| params.get("post_pr_test_commands"));
+    let owned_commands;
+    let commands = if let Some(commands_value) = commands_value {
+        commands_value
+            .as_array()
+            .ok_or_else(|| pr_remediation_error("post-PR test commands must be an array"))?
+    } else if let Some(commands) = manifest_commands {
+        owned_commands = commands;
+        &owned_commands
+    } else {
+        return Err(pr_remediation_error("missing post-PR test commands"));
+    };
     if commands.is_empty() {
         return Err(pr_remediation_error(
             "post-PR test commands must not be empty",
@@ -381,6 +398,29 @@ fn post_pr_test_command(
     value: &Value,
     index: usize,
 ) -> Result<PostPrTestCommandConfig, EngineError> {
+    let object = post_pr_command_object(value)?;
+    let command_id = post_pr_command_id(object, index);
+    let manifest_entry = post_pr_manifest_entry(params, object)?;
+    let argv = post_pr_command_argv(params, object, manifest_entry.as_ref())?;
+    let working_directory =
+        post_pr_command_working_directory(context, object, manifest_entry.as_ref())?;
+    let timeout_seconds = post_pr_command_timeout(params, object, manifest_entry.as_ref())?;
+
+    Ok(PostPrTestCommandConfig {
+        command_id,
+        argv,
+        working_directory,
+        timeout_seconds,
+        manifest_entry,
+    })
+}
+
+fn post_pr_command_object(value: &Value) -> Result<&serde_json::Map<String, Value>, EngineError> {
+    if value.as_str().is_some() {
+        return Err(pr_remediation_error(
+            "scalar shell-string post-PR commands are forbidden",
+        ));
+    }
     let object = value
         .as_object()
         .ok_or_else(|| pr_remediation_error("post-PR command entries must be objects"))?;
@@ -389,14 +429,37 @@ fn post_pr_test_command(
             "shell-string post-PR commands are forbidden",
         ));
     }
-    let command_id = object
+    Ok(object)
+}
+
+fn post_pr_command_id(object: &serde_json::Map<String, Value>, index: usize) -> String {
+    object
         .get("id")
         .or_else(|| object.get("command_id"))
         .and_then(Value::as_str)
         .filter(|id| !id.is_empty())
         .map(ToString::to_string)
-        .unwrap_or_else(|| format!("post-pr-test-{index}"));
-    let argv = if let Some(argv) = object.get("argv") {
+        .unwrap_or_else(|| format!("post-pr-test-{index}"))
+}
+
+fn post_pr_manifest_entry(
+    params: &Value,
+    object: &serde_json::Map<String, Value>,
+) -> Result<Option<CommandEntry>, EngineError> {
+    object
+        .get("command_id")
+        .and_then(Value::as_str)
+        .map_or(Ok(None), |id| manifest_command_entry(params, id))
+}
+
+fn post_pr_command_argv(
+    params: &Value,
+    object: &serde_json::Map<String, Value>,
+    manifest_entry: Option<&CommandEntry>,
+) -> Result<Vec<String>, EngineError> {
+    let argv = if let Some(entry) = manifest_entry {
+        entry.argv.clone()
+    } else if let Some(argv) = object.get("argv") {
         string_array(argv, "argv")?
     } else if let Some(id) = object.get("command_id").and_then(Value::as_str) {
         configured_command_argv(params, id)?
@@ -405,33 +468,57 @@ fn post_pr_test_command(
             "post-PR command requires argv or command_id",
         ));
     };
+    validate_post_pr_argv(argv)
+}
+
+fn validate_post_pr_argv(argv: Vec<String>) -> Result<Vec<String>, EngineError> {
     if argv.is_empty() || argv.iter().any(|arg| arg.is_empty()) {
         return Err(pr_remediation_error(
             "post-PR command argv must not be empty",
         ));
     }
+    Ok(argv)
+}
+
+fn post_pr_command_working_directory(
+    context: &StepContext,
+    object: &serde_json::Map<String, Value>,
+    manifest_entry: Option<&CommandEntry>,
+) -> Result<PathBuf, EngineError> {
     let working_directory = object
         .get("working_directory")
         .or_else(|| object.get("work_dir"))
         .and_then(Value::as_str)
-        .map(|path| resolve_path(context.work_dir(), path))
+        .map(ToString::to_string)
+        .or_else(|| manifest_entry.and_then(manifest_working_directory))
+        .map(|path| resolve_path(context.work_dir(), &path))
         .unwrap_or_else(|| context.work_dir().clone());
     validate_safe_working_directory(context.work_dir(), &working_directory)?;
-    let timeout_seconds = object
-        .get("timeout_seconds")
-        .and_then(Value::as_u64)
+    Ok(working_directory)
+}
+
+fn manifest_working_directory(entry: &CommandEntry) -> Option<String> {
+    entry
+        .working_directory
+        .clone()
+        .or_else(|| entry.project_subdirectory.clone())
+}
+
+fn post_pr_command_timeout(
+    params: &Value,
+    object: &serde_json::Map<String, Value>,
+    manifest_entry: Option<&CommandEntry>,
+) -> Result<u64, EngineError> {
+    let timeout_seconds = manifest_entry
+        .and_then(|entry| entry.timeout_seconds)
+        .or_else(|| object.get("timeout_seconds").and_then(Value::as_u64))
         .unwrap_or_else(|| u64_param(params, "test_timeout_seconds", 900));
     if timeout_seconds == 0 {
         return Err(pr_remediation_error(
             "post-PR command timeout_seconds must be positive",
         ));
     }
-    Ok(PostPrTestCommandConfig {
-        command_id,
-        argv,
-        working_directory,
-        timeout_seconds,
-    })
+    Ok(timeout_seconds)
 }
 
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P13
@@ -449,6 +536,41 @@ fn configured_command_argv(params: &Value, id: &str) -> Result<Vec<String>, Engi
         )));
     };
     string_array(value, "command_registry entry")
+}
+
+fn manifest_group_post_pr_commands(params: &Value) -> Result<Option<Vec<Value>>, EngineError> {
+    let Some(value) = params.get("command_manifest") else {
+        return Ok(None);
+    };
+    let manifest: CommandManifest = serde_json::from_value(value.clone())
+        .map_err(|err| pr_remediation_error(format!("invalid command_manifest: {err}")))?;
+    let group_id = params
+        .get("command_manifest_group")
+        .and_then(Value::as_str)
+        .unwrap_or("post_pr");
+    let Some(command_ids) = manifest.groups.get(group_id) else {
+        return Ok(None);
+    };
+    Ok(Some(
+        command_ids
+            .iter()
+            .map(|id| json!({ "command_id": id }))
+            .collect(),
+    ))
+}
+
+fn manifest_command_entry(params: &Value, id: &str) -> Result<Option<CommandEntry>, EngineError> {
+    let Some(value) = params.get("command_manifest") else {
+        return Ok(None);
+    };
+    if value.get("command").is_some() || value.get("shell").is_some() {
+        return Err(pr_remediation_error(
+            "shell-string command manifests are forbidden",
+        ));
+    }
+    let manifest: CommandManifest = serde_json::from_value(value.clone())
+        .map_err(|err| pr_remediation_error(format!("invalid command_manifest: {err}")))?;
+    Ok(manifest.commands.into_iter().find(|entry| entry.id == id))
 }
 
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P13
@@ -684,146 +806,11 @@ fn command_result_json(result: &PostPrTestCommandResult) -> Value {
         "bounded_stderr": result.bounded_stderr,
         "stdout_artifact_path": result.stdout_log_path.as_ref().map(|path| path.display().to_string()),
         "stderr_artifact_path": result.stderr_log_path.as_ref().map(|path| path.display().to_string()),
-        "spawn_error": result.spawn_error
+        "spawn_error": result.spawn_error,
+        "expectation_failures": result.expectation_failures,
+        "artifact_failures": result.artifact_failures,
+        "failure_classification": result.failure_classification
     })
-}
-
-/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P13
-/// @requirement:REQ-PRFU-017
-/// @pseudocode lines 29-30
-fn run_post_pr_test_process(request: PostPrTestCommandRequest) -> PostPrTestCommandResult {
-    let mut child = match spawn_post_pr_test_child(&request) {
-        Ok(child) => child,
-        Err(err) => return post_pr_test_spawn_error(request, err),
-    };
-    let output = match wait_for_post_pr_test_child(&mut child, request.timeout_seconds) {
-        Ok(output) => output,
-        Err(err) => return post_pr_test_spawn_error(request, err),
-    };
-    let stdout = output.stdout_text();
-    let stderr = output.stderr_text();
-    write_optional_log(&request.stdout_log_path, &stdout);
-    write_optional_log(&request.stderr_log_path, &stderr);
-    post_pr_test_process_result(request, output.exit_code, output.timed_out, stdout, stderr)
-}
-
-fn spawn_post_pr_test_child(
-    request: &PostPrTestCommandRequest,
-) -> std::io::Result<std::process::Child> {
-    let program = request.argv.first().ok_or_else(|| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "post-PR test command argv must not be empty",
-        )
-    })?;
-    let mut command = Command::new(program);
-    command.args(&request.argv[1..]);
-    command.current_dir(&request.working_directory);
-    command.env_clear();
-    apply_allowed_command_environment(&mut command);
-    command.env("PWD", &request.working_directory);
-    tracing::debug!(
-        command_id = %request.command_id,
-        "spawned post-PR test child with cleared environment and whitelisted variables"
-    );
-    command.stdout(Stdio::piped());
-    command.stderr(Stdio::piped());
-    command.stdin(Stdio::null());
-    #[cfg(unix)]
-    command.process_group(0);
-    command.spawn()
-}
-
-pub(super) fn apply_allowed_command_environment(command: &mut Command) {
-    for key in ALLOWED_COMMAND_ENVIRONMENT {
-        if let Ok(value) = std::env::var(key) {
-            command.env(key, value);
-        }
-    }
-}
-
-const ALLOWED_COMMAND_ENVIRONMENT: &[&str] = &[
-    "CARGO_HOME",
-    "GEM_HOME",
-    "GEM_PATH",
-    "GOCACHE",
-    "GOMODCACHE",
-    "GOPATH",
-    "HOME",
-    "LANG",
-    "LC_ALL",
-    "LC_CTYPE",
-    "NODE_PATH",
-    "NPM_CONFIG_CACHE",
-    "PATH",
-    "PYENV_ROOT",
-    "RUSTUP_HOME",
-    "SSL_CERT_FILE",
-    "TMPDIR",
-    "USER",
-];
-
-fn post_pr_test_spawn_error(
-    request: PostPrTestCommandRequest,
-    err: std::io::Error,
-) -> PostPrTestCommandResult {
-    write_optional_log(&request.stdout_log_path, "");
-    write_optional_log(&request.stderr_log_path, &err.to_string());
-    PostPrTestCommandResult {
-        command_id: request.command_id,
-        argv: request.argv,
-        working_directory: request.working_directory,
-        exit_code: None,
-        signal: None,
-        status: "fatal".to_string(),
-        bounded_stdout: String::new(),
-        bounded_stderr: bounded_excerpt(&err.to_string(), 4096),
-        stdout_log_path: Some(request.stdout_log_path),
-        stderr_log_path: Some(request.stderr_log_path),
-        spawn_error: Some(err.to_string()),
-    }
-}
-
-fn wait_for_post_pr_test_child(
-    child: &mut std::process::Child,
-    timeout_seconds: u64,
-) -> std::io::Result<ProcessOutputCapture> {
-    let stdout_buffer = Arc::new(Mutex::new(String::new()));
-    let stderr_buffer = Arc::new(Mutex::new(String::new()));
-    let stdout_reader = spawn_reader(child.stdout.take(), &stdout_buffer);
-    let stderr_reader = spawn_reader(child.stderr.take(), &stderr_buffer);
-    let wait_result = wait_for_child_exit(child, timeout_seconds);
-    join_reader(stdout_reader);
-    join_reader(stderr_reader);
-    let (exit_code, timed_out) = wait_result?;
-    Ok(ProcessOutputCapture {
-        stdout_buffer,
-        stderr_buffer,
-        exit_code,
-        timed_out,
-    })
-}
-
-fn post_pr_test_process_result(
-    request: PostPrTestCommandRequest,
-    exit_code: Option<i32>,
-    timed_out: bool,
-    stdout: String,
-    stderr: String,
-) -> PostPrTestCommandResult {
-    PostPrTestCommandResult {
-        command_id: request.command_id,
-        argv: request.argv,
-        working_directory: request.working_directory,
-        exit_code,
-        signal: None,
-        status: process_status(timed_out, exit_code).to_string(),
-        bounded_stdout: bounded_excerpt(&stdout, 4096),
-        bounded_stderr: bounded_excerpt(&stderr, 4096),
-        stdout_log_path: Some(request.stdout_log_path),
-        stderr_log_path: Some(request.stderr_log_path),
-        spawn_error: timed_out.then(|| "post-PR test command timed out".to_string()),
-    }
 }
 
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P13
