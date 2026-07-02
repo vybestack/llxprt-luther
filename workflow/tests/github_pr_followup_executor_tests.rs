@@ -6678,6 +6678,9 @@ fn p13_result(status: &str) -> PostPrTestCommandResult {
         stdout_log_path: None,
         stderr_log_path: None,
         spawn_error: None,
+        expectation_failures: Vec::new(),
+        artifact_failures: Vec::new(),
+        failure_classification: None,
     }
 }
 

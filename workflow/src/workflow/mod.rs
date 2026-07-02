@@ -1,10 +1,15 @@
 /// @plan:PLAN-20260404-INITIAL-RUNTIME.P03
 /// Workflow module - schema definitions and config loading.
+pub mod command_manifest;
 pub mod config_loader;
 pub mod schema;
 pub mod target_profile;
 pub mod validation;
 
+pub use command_manifest::{
+    ArtifactExpectation, ArtifactExpectations, ArtifactKind, CapturePolicy, CommandEntry,
+    CommandManifest, FailureOutcome, RetryPolicy, StreamExpectations,
+};
 pub use config_loader::{
     build_available_variables, parse_workflow_config_json, parse_workflow_config_toml,
     parse_workflow_type_json, parse_workflow_type_toml, resolve_workflow, resolve_workflow_config,

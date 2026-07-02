@@ -15,7 +15,7 @@ use crate::persistence::{
     save_checkpoint_with_conn, Checkpoint, EventType, PersistenceError, RunMetadata, RunStatus,
     StateSnapshot, CHECKPOINT_STATUS_WAITING,
 };
-use crate::workflow::schema::TransitionDef;
+use crate::workflow::schema::{StepDef, TransitionDef};
 
 /// Contextual metadata for a run: paths and GitHub references.
 /// Used to populate the persistent run registry beyond the core identifiers.
@@ -645,10 +645,11 @@ impl EngineRunner {
 
         // Get the step_type and parameters from the StepDef
         let step_type = &step_def.step_type;
-        let params = step_def
-            .parameters
+        let owned_params = self.step_parameters_with_config_manifest(step_def)?;
+        let params = owned_params
             .as_ref()
-            .map_or(&serde_json::Value::Null, |p| p);
+            .or(step_def.parameters.as_ref())
+            .unwrap_or(&serde_json::Value::Null);
 
         // Dispatch to the registry for execution
         self.registry.dispatch(step_type, &mut self.context, params)
@@ -692,6 +693,37 @@ impl EngineRunner {
     /// @plan:PLAN-20260404-INITIAL-RUNTIME.P08
     pub fn run_id(&self) -> &str {
         &self.instance.run_id
+    }
+
+    fn step_parameters_with_config_manifest(
+        &self,
+        step_def: &StepDef,
+    ) -> Result<Option<serde_json::Value>, EngineError> {
+        let Some(manifest) = &self.instance.config.command_manifest else {
+            return Ok(None);
+        };
+        let mut params = step_def
+            .parameters
+            .clone()
+            .unwrap_or(serde_json::Value::Null);
+        if matches!(params, serde_json::Value::Null) {
+            params = serde_json::json!({});
+        }
+        let Some(object) = params.as_object_mut() else {
+            return Err(EngineError::StepExecutionError {
+                step_id: step_def.step_id.clone(),
+                message: "step parameters must be an object to attach command_manifest".to_string(),
+            });
+        };
+        if !object.contains_key("command_manifest") {
+            let value =
+                serde_json::to_value(manifest).map_err(|err| EngineError::StepExecutionError {
+                    step_id: step_def.step_id.clone(),
+                    message: format!("failed to serialize command_manifest: {err}"),
+                })?;
+            object.insert("command_manifest".to_string(), value);
+        }
+        Ok(Some(params))
     }
 
     /// Export a normalized smoke trace of this run's recorded step/outcome

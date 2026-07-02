@@ -3,8 +3,10 @@
 /// Verify executor - runs a configurable sequence of verification checks.
 /// @requirement:REQ-LF-VERIFY-001,REQ-LF-VERIFY-002,REQ-LF-VERIFY-003,REQ-LF-VERIFY-004,REQ-LF-VERIFY-005,REQ-LF-VERIFY-006,REQ-LF-VERIFY-007,REQ-LF-VERIFY-008,REQ-LF-VERIFY-009
 use crate::engine::executor::{interpolate_string, StepContext, StepExecutor};
+use crate::engine::executors::command_manifest::{request_from_entry, run_manifest_command};
 use crate::engine::runner::EngineError;
 use crate::engine::transition::StepOutcome;
+use crate::workflow::command_manifest::{CommandEntry, CommandManifest, FailureOutcome};
 use regex::Regex;
 use std::io::{BufReader, Read};
 #[cfg(unix)]
@@ -26,6 +28,8 @@ pub struct CheckResult {
     pub errors: Vec<ErrorRecord>,
     pub raw_stdout: String,
     pub raw_stderr: String,
+    #[serde(default)]
+    pub command: Option<CommandEvidence>,
 }
 
 /// Structured error record for parsed errors.
@@ -43,6 +47,16 @@ pub struct ErrorRecord {
     pub assertion_kind: Option<String>,
     pub expected: Option<String>,
     pub actual: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
+pub struct CommandEvidence {
+    pub command_id: String,
+    pub argv: Vec<String>,
+    pub cwd: String,
+    pub expectation_failures: Vec<String>,
+    pub artifact_failures: Vec<String>,
+    pub failure_classification: String,
 }
 
 /// Report containing all verification check results.
@@ -75,14 +89,7 @@ impl StepExecutor for VerifyExecutor {
         context: &mut StepContext,
         params: &serde_json::Value,
     ) -> Result<StepOutcome, EngineError> {
-        // Extract checks array from params
-        let checks_array = params
-            .get("checks")
-            .and_then(|v| v.as_array())
-            .ok_or_else(|| EngineError::StepExecutionError {
-                step_id: "verify".to_string(),
-                message: "Missing 'checks' parameter".to_string(),
-            })?;
+        let check_names = verify_check_sequence(params)?;
 
         // Validate the verification profile (defaults to npm for backward
         // compatibility). Unknown profiles are a configuration error.
@@ -98,7 +105,7 @@ impl StepExecutor for VerifyExecutor {
         }
 
         // If checks array is empty, return success immediately
-        if checks_array.is_empty() {
+        if check_names.is_empty() {
             context.set("verify_passed", "true");
             context.set("verify_summary", "No checks configured");
             return Ok(StepOutcome::Success);
@@ -112,16 +119,27 @@ impl StepExecutor for VerifyExecutor {
             .map(Duration::from_secs);
         let mut results: Vec<CheckResult> = Vec::new();
         let mut all_passed = true;
+        let mut fatal_failed = false;
 
         // Process each check
-        for check_value in checks_array {
-            let check_type =
-                check_value
-                    .as_str()
-                    .ok_or_else(|| EngineError::StepExecutionError {
-                        step_id: "verify".to_string(),
-                        message: "Check type must be a string".to_string(),
-                    })?;
+        for check_type in &check_names {
+            if let Some(result) = run_manifest_check(check_type, params, context, timeout)? {
+                if !result.passed {
+                    all_passed = false;
+                }
+                let is_fatal = result
+                    .command
+                    .as_ref()
+                    .is_some_and(|command| command.failure_classification == "fatal");
+                if !result.passed && is_fatal {
+                    fatal_failed = true;
+                }
+                results.push(result);
+                if fatal_failed {
+                    break;
+                }
+                continue;
+            }
 
             // Resolve the command for this check type
             let command = resolve_check_command(check_type, params, context)?;
@@ -151,6 +169,7 @@ impl StepExecutor for VerifyExecutor {
                             "{check_type} timed out after {} seconds",
                             timeout.as_secs()
                         ),
+                        command: None,
                     });
                     break;
                 }
@@ -200,6 +219,7 @@ impl StepExecutor for VerifyExecutor {
                 errors,
                 raw_stdout: cap_output(&stdout),
                 raw_stderr: cap_output(&stderr),
+                command: None,
             });
         }
 
@@ -256,6 +276,8 @@ impl StepExecutor for VerifyExecutor {
 
         if all_passed {
             Ok(StepOutcome::Success)
+        } else if fatal_failed {
+            Ok(StepOutcome::Fatal)
         } else {
             Ok(StepOutcome::Fixable)
         }
@@ -505,6 +527,159 @@ pub fn profile_default_command(profile: &str, check_type: &str) -> Option<&'stat
 /// @plan:PLAN-20260408-LLXPRT-FIRST.P06
 /// @plan:PLAN-20260408-LLXPRT-FIRST.P08
 /// @requirement:REQ-LF-VERIFY-007
+fn verify_check_sequence(params: &serde_json::Value) -> Result<Vec<String>, EngineError> {
+    let mut check_names = explicit_check_sequence(params)?;
+    if let Some(mut manifest_names) = manifest_group_check_sequence(params)? {
+        if let Some(position) = check_names
+            .iter()
+            .position(|check_name| check_name == "command_manifest")
+        {
+            check_names.splice(position..=position, manifest_names);
+        } else if check_names.is_empty() {
+            check_names.append(&mut manifest_names);
+        }
+    }
+    if check_names.is_empty() && params.get("checks").is_none() {
+        return Err(EngineError::StepExecutionError {
+            step_id: "verify".to_string(),
+            message: "Missing 'checks' parameter".to_string(),
+        });
+    }
+    Ok(check_names)
+}
+
+fn explicit_check_sequence(params: &serde_json::Value) -> Result<Vec<String>, EngineError> {
+    let Some(checks) = params.get("checks") else {
+        return Ok(Vec::new());
+    };
+    checks
+        .as_array()
+        .ok_or_else(|| EngineError::StepExecutionError {
+            step_id: "verify".to_string(),
+            message: "'checks' parameter must be an array".to_string(),
+        })?
+        .iter()
+        .map(|check| {
+            check
+                .as_str()
+                .map(ToString::to_string)
+                .ok_or_else(|| EngineError::StepExecutionError {
+                    step_id: "verify".to_string(),
+                    message: "Check type must be a string".to_string(),
+                })
+        })
+        .collect()
+}
+
+fn manifest_group_check_sequence(
+    params: &serde_json::Value,
+) -> Result<Option<Vec<String>>, EngineError> {
+    let Some(manifest_value) = params.get("command_manifest") else {
+        return Ok(None);
+    };
+    reject_shell_manifest(manifest_value)?;
+    let manifest = parse_manifest_value(manifest_value)?;
+    let group_id = params
+        .get("command_manifest_group")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("local");
+    Ok(manifest.groups.get(group_id).cloned())
+}
+
+fn parse_manifest_value(
+    manifest_value: &serde_json::Value,
+) -> Result<CommandManifest, EngineError> {
+    serde_json::from_value(manifest_value.clone()).map_err(|err| EngineError::StepExecutionError {
+        step_id: "verify".to_string(),
+        message: format!("invalid command_manifest: {err}"),
+    })
+}
+
+fn reject_shell_manifest(manifest_value: &serde_json::Value) -> Result<(), EngineError> {
+    if manifest_value.get("command").is_some() || manifest_value.get("shell").is_some() {
+        return Err(EngineError::StepExecutionError {
+            step_id: "verify".to_string(),
+            message: "shell-string command manifests are forbidden".to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn run_manifest_check(
+    check_type: &str,
+    params: &serde_json::Value,
+    context: &StepContext,
+    timeout: Option<Duration>,
+) -> Result<Option<CheckResult>, EngineError> {
+    let Some(entry) = manifest_entry_for_check(check_type, params)? else {
+        return Ok(None);
+    };
+    let default_timeout = timeout.map_or(900, |duration| duration.as_secs());
+    let request =
+        request_from_entry(&entry, context.work_dir(), default_timeout).map_err(|message| {
+            EngineError::StepExecutionError {
+                step_id: "verify".to_string(),
+                message,
+            }
+        })?;
+    let result = run_manifest_command(request);
+    let mut errors = parse_check_output(
+        check_type,
+        &result.bounded_stdout,
+        &result.bounded_stderr,
+        result.exit_code.unwrap_or(-1),
+    );
+    errors.extend(
+        result
+            .expectation_failures
+            .iter()
+            .chain(result.artifact_failures.iter())
+            .map(|message| ErrorRecord {
+                message: message.clone(),
+                severity: Some("error".to_string()),
+                ..ErrorRecord::default()
+            }),
+    );
+    Ok(Some(CheckResult {
+        check_type: check_type.to_string(),
+        passed: result.passed(),
+        exit_code: result.exit_code.unwrap_or(-1),
+        errors,
+        raw_stdout: result.bounded_stdout,
+        raw_stderr: result.bounded_stderr,
+        command: Some(CommandEvidence {
+            command_id: result.command_id,
+            argv: result.argv,
+            cwd: result.working_directory.to_string_lossy().to_string(),
+            expectation_failures: result.expectation_failures,
+            artifact_failures: result.artifact_failures,
+            failure_classification: failure_classification(&result.failure_outcome),
+        }),
+    }))
+}
+
+fn manifest_entry_for_check(
+    check_type: &str,
+    params: &serde_json::Value,
+) -> Result<Option<CommandEntry>, EngineError> {
+    let Some(manifest_value) = params.get("command_manifest") else {
+        return Ok(None);
+    };
+    reject_shell_manifest(manifest_value)?;
+    let manifest = parse_manifest_value(manifest_value)?;
+    Ok(manifest
+        .commands
+        .into_iter()
+        .find(|entry| entry.id == check_type))
+}
+
+fn failure_classification(outcome: &FailureOutcome) -> String {
+    match outcome {
+        FailureOutcome::Fatal => "fatal".to_string(),
+        FailureOutcome::Fixable => "fixable".to_string(),
+    }
+}
+
 pub fn resolve_check_command(
     check_type: &str,
     params: &serde_json::Value,

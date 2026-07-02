@@ -156,24 +156,14 @@
       "parameters": {
         "checks": [
           "diff_or_existing_pr",
-          "lint",
-          "typecheck",
-          "build",
-          "test",
-          "format",
-          "ocr_review",
+          "command_manifest",
           "diff_or_existing_pr"
         ],
+        "command_manifest_group": "local",
         "timeout_seconds": 2400,
         "artifact_root": "{artifact_dir}",
         "check_commands": {
-          "diff_or_existing_pr": "CHANGED=$(git status --porcelain --untracked-files=all | sed 's/^...//' | grep -E '{diff_required_path_regex}' || true)\nif [ -n \"$CHANGED\" ]; then\n  exit 0\nfi\nif [ \"{setup_workspace.existing_pr_number}\" != \"0\" ]; then\n  exit 0\nfi\necho '{diff_failure_message}'\nexit 1\n",
-          "lint": "{lint_command}",
-          "typecheck": "{typecheck_command}",
-          "build": "{build_command}",
-          "test": "{test_command}",
-          "format": "{format_command}",
-          "ocr_review": "{ocr_review_command}"
+          "diff_or_existing_pr": "CHANGED=$(git status --porcelain --untracked-files=all | sed 's/^...//' | grep -E '{diff_required_path_regex}' || true)\nif [ -n \"$CHANGED\" ]; then\n  exit 0\nfi\nif [ \"{setup_workspace.existing_pr_number}\" != \"0\" ]; then\n  exit 0\nfi\necho '{diff_failure_message}'\nexit 1\n"
         }
       }
     },
@@ -434,46 +424,7 @@
         "repository_owner": "{repository_owner}",
         "repository_name": "{repository_name}",
         "pr_number": "{pr_number}",
-        "post_pr_test_commands": [
-          {
-            "id": "core-typecheck",
-            "argv": [
-              "npm",
-              "run",
-              "typecheck",
-              "--workspace",
-              "@vybestack/llxprt-code-core"
-            ]
-          },
-          {
-            "id": "core-focused-tests",
-            "argv": [
-              "npm",
-              "run",
-              "test",
-              "--workspace",
-              "@vybestack/llxprt-code-core",
-              "--",
-              "DirectMessageProcessor",
-              "StreamProcessor",
-              "geminiChat.hook-control",
-              "hookAggregator"
-            ]
-          },
-          {
-            "id": "core-format",
-            "argv": [
-              "npx",
-              "prettier",
-              "--check",
-              "packages/core/src/core/DirectMessageProcessor.ts",
-              "packages/core/src/core/StreamProcessor.ts",
-              "packages/core/src/core/toolSelectionHook.allowedFunctionNames.test.ts",
-              "packages/core/src/core/geminiChat.hook-control.test.ts",
-              "packages/core/src/hooks/hookAggregator.test.ts"
-            ]
-          }
-        ]
+        "command_manifest_group": "post_pr"
       }
     },
     {

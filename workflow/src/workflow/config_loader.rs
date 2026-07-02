@@ -4,6 +4,7 @@ use std::collections::HashSet;
 use std::path::Path;
 
 use crate::engine::executor::extract_tokens;
+use crate::workflow::command_manifest::{CommandEntry, CommandManifest};
 use crate::workflow::schema::{
     DaemonSchedulerConfig, DiscoveryConfig, StepDef, WorkflowConfig, WorkflowRunRef, WorkflowType,
 };
@@ -269,23 +270,25 @@ fn attach_source_path(mut error: ConfigError, source_path: &Path) -> ConfigError
 /// Parse workflow config from TOML string.
 /// @plan:PLAN-20260404-INITIAL-RUNTIME.P05
 pub fn parse_workflow_config_toml(toml_str: &str) -> Result<WorkflowConfig> {
-    // TOML uses [repository] and [guards] - the struct handles aliasing
-    toml::from_str(toml_str).map_err(|e| ConfigError {
+    let config = toml::from_str(toml_str).map_err(|e| ConfigError {
         message: format!("Failed to parse workflow config TOML: {}", e),
         source_path: None,
         kind: ConfigErrorKind::ParseError,
-    })
+    })?;
+    validate_workflow_config(&config)?;
+    Ok(config)
 }
 
 /// Parse workflow config from JSON string.
 /// @plan:PLAN-20260404-INITIAL-RUNTIME.P05
 pub fn parse_workflow_config_json(json_str: &str) -> Result<WorkflowConfig> {
-    // JSON uses "repository" and "guard_limits" - the struct handles aliasing
-    serde_json::from_str(json_str).map_err(|e| ConfigError {
+    let config = serde_json::from_str(json_str).map_err(|e| ConfigError {
         message: format!("Failed to parse workflow config JSON: {}", e),
         source_path: None,
         kind: ConfigErrorKind::ParseError,
-    })
+    })?;
+    validate_workflow_config(&config)?;
+    Ok(config)
 }
 
 /// Validate a workflow type definition.
@@ -398,8 +401,147 @@ pub fn validate_workflow_config(config: &WorkflowConfig) -> Result<()> {
     }
 
     validate_discovery_config(config)?;
+    if let Some(manifest) = &config.command_manifest {
+        validate_command_manifest(manifest)?;
+    }
+    validate_command_variable_shadowing(config)?;
 
     Ok(())
+}
+
+fn validate_command_variable_shadowing(config: &WorkflowConfig) -> Result<()> {
+    if config.command_manifest.is_some()
+        && config.variables.keys().any(|key| key.ends_with("_command"))
+    {
+        return command_manifest_error(
+            "command manifests must not be combined with legacy *_command shell variables",
+        );
+    }
+    Ok(())
+}
+
+pub fn command_manifest_entry<'a>(
+    manifest: &'a CommandManifest,
+    id: &str,
+) -> Result<&'a CommandEntry> {
+    manifest
+        .commands
+        .iter()
+        .find(|entry| entry.id == id)
+        .ok_or_else(|| ConfigError {
+            message: format!("unknown command manifest id '{id}'"),
+            source_path: None,
+            kind: ConfigErrorKind::ValidationError,
+        })
+}
+
+pub fn validate_command_manifest(manifest: &CommandManifest) -> Result<()> {
+    let mut ids = HashSet::new();
+    for entry in &manifest.commands {
+        validate_command_entry(entry, &mut ids)?;
+    }
+    for (group_id, command_ids) in &manifest.groups {
+        if group_id.is_empty() || command_ids.is_empty() {
+            return command_manifest_error("command manifest groups require ids and command ids");
+        }
+        for command_id in command_ids {
+            command_manifest_entry(manifest, command_id)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_command_entry(entry: &CommandEntry, ids: &mut HashSet<String>) -> Result<()> {
+    if entry.id.is_empty() || !ids.insert(entry.id.clone()) {
+        return command_manifest_error(format!("duplicate or empty command id '{}'", entry.id));
+    }
+    if entry.argv.is_empty() || entry.argv.iter().any(|arg| arg.is_empty()) {
+        return command_manifest_error(format!("command '{}' argv must not be empty", entry.id));
+    }
+    validate_command_paths(entry)?;
+    validate_command_env(entry)?;
+    validate_command_patterns(entry)?;
+    validate_command_numbers(entry)
+}
+
+fn validate_command_paths(entry: &CommandEntry) -> Result<()> {
+    for path in [
+        entry.working_directory.as_deref(),
+        entry.project_subdirectory.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if Path::new(path).is_absolute() || path.split('/').any(|part| part == "..") {
+            return command_manifest_error(format!(
+                "command '{}' working directory must stay under work_dir",
+                entry.id
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_command_env(entry: &CommandEntry) -> Result<()> {
+    for key in entry.env.keys() {
+        if key.is_empty()
+            || !key
+                .chars()
+                .all(|ch| ch == '_' || ch.is_ascii_uppercase() || ch.is_ascii_digit())
+            || key.chars().next().is_some_and(|ch| ch.is_ascii_digit())
+        {
+            return command_manifest_error(format!(
+                "command '{}' env key '{}' is invalid",
+                entry.id, key
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_command_patterns(entry: &CommandEntry) -> Result<()> {
+    for pattern in entry
+        .stdout
+        .required_patterns
+        .iter()
+        .chain(entry.stdout.forbidden_patterns.iter())
+        .chain(entry.stderr.required_patterns.iter())
+        .chain(entry.stderr.forbidden_patterns.iter())
+    {
+        regex::Regex::new(pattern).map_err(|err| ConfigError {
+            message: format!(
+                "command '{}' has invalid regex '{}': {err}",
+                entry.id, pattern
+            ),
+            source_path: None,
+            kind: ConfigErrorKind::ValidationError,
+        })?;
+    }
+    Ok(())
+}
+
+fn validate_command_numbers(entry: &CommandEntry) -> Result<()> {
+    if entry.timeout_seconds == Some(0) || entry.capture.limit_bytes == 0 {
+        return command_manifest_error(format!(
+            "command '{}' timeout and capture limits must be positive",
+            entry.id
+        ));
+    }
+    if entry.retry.max_attempts > 0 && entry.retry.retry_exit_codes.is_empty() {
+        return command_manifest_error(format!(
+            "command '{}' retry policy requires retry_exit_codes",
+            entry.id
+        ));
+    }
+    Ok(())
+}
+
+fn command_manifest_error(message: impl Into<String>) -> Result<()> {
+    Err(ConfigError {
+        message: message.into(),
+        source_path: None,
+        kind: ConfigErrorKind::ValidationError,
+    })
 }
 
 /// Validate the resolved discovery rules for a workflow config.

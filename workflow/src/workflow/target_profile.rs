@@ -261,6 +261,7 @@ mod tests {
             .map(|(key, value)| (key.to_string(), value.to_string()))
             .collect(),
             discovery: None,
+            command_manifest: None,
         }
     }
 

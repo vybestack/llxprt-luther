@@ -637,6 +637,9 @@ impl PostPrTestCommandRunner for ReplayTestRunner {
             stdout_log_path: Some(request.stdout_log_path),
             stderr_log_path: Some(request.stderr_log_path),
             spawn_error: None,
+            expectation_failures: Vec::new(),
+            artifact_failures: Vec::new(),
+            failure_classification: None,
         }
     }
 }

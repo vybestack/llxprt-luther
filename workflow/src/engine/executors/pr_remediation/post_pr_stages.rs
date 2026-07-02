@@ -1,4 +1,8 @@
 use super::*;
+use crate::engine::executors::command_manifest::{
+    request_from_entry, run_manifest_command, ManifestCommandResult,
+};
+use crate::workflow::command_manifest::{CommandEntry, CommandManifest};
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 
@@ -48,6 +52,7 @@ pub struct PostPrTestCommandRequest {
     pub timeout_seconds: u64,
     pub stdout_log_path: PathBuf,
     pub stderr_log_path: PathBuf,
+    pub manifest_entry: Option<CommandEntry>,
 }
 
 /// Owned post-PR test command result.
@@ -67,6 +72,9 @@ pub struct PostPrTestCommandResult {
     pub stdout_log_path: Option<PathBuf>,
     pub stderr_log_path: Option<PathBuf>,
     pub spawn_error: Option<String>,
+    pub expectation_failures: Vec<String>,
+    pub artifact_failures: Vec<String>,
+    pub failure_classification: Option<String>,
 }
 
 /// Production post-PR test command runner.
@@ -81,6 +89,9 @@ pub struct SystemPostPrTestCommandRunner;
 /// @pseudocode lines 29-30
 impl PostPrTestCommandRunner for SystemPostPrTestCommandRunner {
     fn run(&self, request: PostPrTestCommandRequest) -> PostPrTestCommandResult {
+        if request.manifest_entry.is_some() {
+            return run_manifest_post_pr_test_process(request);
+        }
         run_post_pr_test_process(request)
     }
 }
@@ -268,6 +279,7 @@ fn post_pr_test_request(
         timeout_seconds: command.timeout_seconds,
         stdout_log_path: log_dir.join(format!("{log_name}-stdout.log")),
         stderr_log_path: log_dir.join(format!("{log_name}-stderr.log")),
+        manifest_entry: command.manifest_entry.clone(),
     }
 }
 
@@ -344,6 +356,7 @@ struct PostPrTestCommandConfig {
     argv: Vec<String>,
     working_directory: PathBuf,
     timeout_seconds: u64,
+    manifest_entry: Option<CommandEntry>,
 }
 
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P13
@@ -353,13 +366,21 @@ fn post_pr_test_commands(
     context: &StepContext,
     params: &Value,
 ) -> Result<Vec<PostPrTestCommandConfig>, EngineError> {
+    let manifest_commands = manifest_group_post_pr_commands(params)?;
     let commands_value = params
         .get("commands")
-        .or_else(|| params.get("post_pr_test_commands"))
-        .ok_or_else(|| pr_remediation_error("missing post-PR test commands"))?;
-    let commands = commands_value
-        .as_array()
-        .ok_or_else(|| pr_remediation_error("post-PR test commands must be an array"))?;
+        .or_else(|| params.get("post_pr_test_commands"));
+    let owned_commands;
+    let commands = if let Some(commands_value) = commands_value {
+        commands_value
+            .as_array()
+            .ok_or_else(|| pr_remediation_error("post-PR test commands must be an array"))?
+    } else if let Some(commands) = manifest_commands {
+        owned_commands = commands;
+        &owned_commands
+    } else {
+        return Err(pr_remediation_error("missing post-PR test commands"));
+    };
     if commands.is_empty() {
         return Err(pr_remediation_error(
             "post-PR test commands must not be empty",
@@ -389,6 +410,11 @@ fn post_pr_test_command(
             "shell-string post-PR commands are forbidden",
         ));
     }
+    if value.as_str().is_some() {
+        return Err(pr_remediation_error(
+            "scalar shell-string post-PR commands are forbidden",
+        ));
+    }
     let command_id = object
         .get("id")
         .or_else(|| object.get("command_id"))
@@ -396,7 +422,14 @@ fn post_pr_test_command(
         .filter(|id| !id.is_empty())
         .map(ToString::to_string)
         .unwrap_or_else(|| format!("post-pr-test-{index}"));
-    let argv = if let Some(argv) = object.get("argv") {
+    let manifest_entry = if let Some(id) = object.get("command_id").and_then(Value::as_str) {
+        manifest_command_entry(params, id)?
+    } else {
+        None
+    };
+    let argv = if let Some(entry) = &manifest_entry {
+        entry.argv.clone()
+    } else if let Some(argv) = object.get("argv") {
         string_array(argv, "argv")?
     } else if let Some(id) = object.get("command_id").and_then(Value::as_str) {
         configured_command_argv(params, id)?
@@ -414,12 +447,22 @@ fn post_pr_test_command(
         .get("working_directory")
         .or_else(|| object.get("work_dir"))
         .and_then(Value::as_str)
-        .map(|path| resolve_path(context.work_dir(), path))
+        .map(ToString::to_string)
+        .or_else(|| {
+            manifest_entry.as_ref().and_then(|entry| {
+                entry
+                    .working_directory
+                    .clone()
+                    .or(entry.project_subdirectory.clone())
+            })
+        })
+        .map(|path| resolve_path(context.work_dir(), &path))
         .unwrap_or_else(|| context.work_dir().clone());
     validate_safe_working_directory(context.work_dir(), &working_directory)?;
-    let timeout_seconds = object
-        .get("timeout_seconds")
-        .and_then(Value::as_u64)
+    let timeout_seconds = manifest_entry
+        .as_ref()
+        .and_then(|entry| entry.timeout_seconds)
+        .or_else(|| object.get("timeout_seconds").and_then(Value::as_u64))
         .unwrap_or_else(|| u64_param(params, "test_timeout_seconds", 900));
     if timeout_seconds == 0 {
         return Err(pr_remediation_error(
@@ -431,6 +474,7 @@ fn post_pr_test_command(
         argv,
         working_directory,
         timeout_seconds,
+        manifest_entry,
     })
 }
 
@@ -449,6 +493,41 @@ fn configured_command_argv(params: &Value, id: &str) -> Result<Vec<String>, Engi
         )));
     };
     string_array(value, "command_registry entry")
+}
+
+fn manifest_group_post_pr_commands(params: &Value) -> Result<Option<Vec<Value>>, EngineError> {
+    let Some(value) = params.get("command_manifest") else {
+        return Ok(None);
+    };
+    let manifest: CommandManifest = serde_json::from_value(value.clone())
+        .map_err(|err| pr_remediation_error(format!("invalid command_manifest: {err}")))?;
+    let group_id = params
+        .get("command_manifest_group")
+        .and_then(Value::as_str)
+        .unwrap_or("post_pr");
+    let Some(command_ids) = manifest.groups.get(group_id) else {
+        return Ok(None);
+    };
+    Ok(Some(
+        command_ids
+            .iter()
+            .map(|id| json!({ "command_id": id }))
+            .collect(),
+    ))
+}
+
+fn manifest_command_entry(params: &Value, id: &str) -> Result<Option<CommandEntry>, EngineError> {
+    let Some(value) = params.get("command_manifest") else {
+        return Ok(None);
+    };
+    if value.get("command").is_some() || value.get("shell").is_some() {
+        return Err(pr_remediation_error(
+            "shell-string command manifests are forbidden",
+        ));
+    }
+    let manifest: CommandManifest = serde_json::from_value(value.clone())
+        .map_err(|err| pr_remediation_error(format!("invalid command_manifest: {err}")))?;
+    Ok(manifest.commands.into_iter().find(|entry| entry.id == id))
 }
 
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P13
@@ -684,13 +763,81 @@ fn command_result_json(result: &PostPrTestCommandResult) -> Value {
         "bounded_stderr": result.bounded_stderr,
         "stdout_artifact_path": result.stdout_log_path.as_ref().map(|path| path.display().to_string()),
         "stderr_artifact_path": result.stderr_log_path.as_ref().map(|path| path.display().to_string()),
-        "spawn_error": result.spawn_error
+        "spawn_error": result.spawn_error,
+        "expectation_failures": result.expectation_failures,
+        "artifact_failures": result.artifact_failures,
+        "failure_classification": result.failure_classification
     })
 }
 
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P13
 /// @requirement:REQ-PRFU-017
 /// @pseudocode lines 29-30
+fn run_manifest_post_pr_test_process(request: PostPrTestCommandRequest) -> PostPrTestCommandResult {
+    let Some(entry) = &request.manifest_entry else {
+        return run_post_pr_test_process(request);
+    };
+    let manifest_request =
+        match request_from_entry(entry, &request.working_directory, request.timeout_seconds) {
+            Ok(mut manifest_request) => {
+                manifest_request.working_directory = request.working_directory.clone();
+                manifest_request
+            }
+            Err(err) => return manifest_post_pr_error(request, err),
+        };
+    let result = run_manifest_command(manifest_request);
+    write_optional_log(&request.stdout_log_path, &result.bounded_stdout);
+    write_optional_log(&request.stderr_log_path, &result.bounded_stderr);
+    post_pr_result_from_manifest(request, result)
+}
+
+fn manifest_post_pr_error(
+    request: PostPrTestCommandRequest,
+    err: String,
+) -> PostPrTestCommandResult {
+    write_optional_log(&request.stdout_log_path, "");
+    write_optional_log(&request.stderr_log_path, &err);
+    PostPrTestCommandResult {
+        command_id: request.command_id,
+        argv: request.argv,
+        working_directory: request.working_directory,
+        exit_code: None,
+        signal: None,
+        status: "fatal".to_string(),
+        bounded_stdout: String::new(),
+        bounded_stderr: bounded_excerpt(&err, 4096),
+        stdout_log_path: Some(request.stdout_log_path),
+        stderr_log_path: Some(request.stderr_log_path),
+        spawn_error: Some(err),
+        expectation_failures: Vec::new(),
+        artifact_failures: Vec::new(),
+        failure_classification: Some("fatal".to_string()),
+    }
+}
+
+fn post_pr_result_from_manifest(
+    request: PostPrTestCommandRequest,
+    result: ManifestCommandResult,
+) -> PostPrTestCommandResult {
+    let status = result.status().to_string();
+    PostPrTestCommandResult {
+        command_id: request.command_id,
+        argv: result.argv,
+        working_directory: result.working_directory,
+        exit_code: result.exit_code,
+        signal: None,
+        status: status.clone(),
+        bounded_stdout: result.bounded_stdout,
+        bounded_stderr: result.bounded_stderr,
+        stdout_log_path: Some(request.stdout_log_path),
+        stderr_log_path: Some(request.stderr_log_path),
+        spawn_error: result.spawn_error,
+        expectation_failures: result.expectation_failures,
+        artifact_failures: result.artifact_failures,
+        failure_classification: Some(status),
+    }
+}
+
 fn run_post_pr_test_process(request: PostPrTestCommandRequest) -> PostPrTestCommandResult {
     let mut child = match spawn_post_pr_test_child(&request) {
         Ok(child) => child,
@@ -781,6 +928,9 @@ fn post_pr_test_spawn_error(
         stdout_log_path: Some(request.stdout_log_path),
         stderr_log_path: Some(request.stderr_log_path),
         spawn_error: Some(err.to_string()),
+        expectation_failures: Vec::new(),
+        artifact_failures: Vec::new(),
+        failure_classification: Some("fatal".to_string()),
     }
 }
 
@@ -823,6 +973,12 @@ fn post_pr_test_process_result(
         stdout_log_path: Some(request.stdout_log_path),
         stderr_log_path: Some(request.stderr_log_path),
         spawn_error: timed_out.then(|| "post-PR test command timed out".to_string()),
+        expectation_failures: timed_out
+            .then(|| "post-PR test command timed out".to_string())
+            .into_iter()
+            .collect(),
+        artifact_failures: Vec::new(),
+        failure_classification: None,
     }
 }
 

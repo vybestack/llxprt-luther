@@ -1,6 +1,6 @@
 {
-  "config_id": "llxprt-luther",
-  "workflow_type_id": "llxprt-luther-dogfood-v1",
+  "config_id": "llxprt-jefe",
+  "workflow_type_id": "llxprt-issue-fix-v1",
   "runtime": {
     "timeout_seconds": 7200,
     "max_retries": 3
@@ -17,19 +17,19 @@
     "max_cost": 50.0
   },
   "variables": {
-    "target_repo": "vybestack/llxprt-luther",
+    "target_repo": "vybestack/llxprt-jefe",
     "repository_owner": "vybestack",
-    "repository_name": "llxprt-luther",
+    "repository_name": "llxprt-jefe",
     "assignee": "acoliver",
-    "work_dir": "/tmp/luther-workspaces/llxprt-luther",
-    "artifact_dir": "/tmp/luther-artifacts/llxprt-luther",
-    "primary_issue_number": "3",
-    "issue_number": "3",
+    "work_dir": "/tmp/luther-workspaces/llxprt-jefe",
+    "artifact_dir": "/tmp/luther-artifacts/llxprt-jefe",
+    "primary_issue_number": "0",
+    "issue_number": "0",
     "base_branch": "main",
-    "profile_planning": "opusthinking",
-    "profile_evaluating": "opusthinking",
-    "profile_implementing": "opusthinking",
-    "profile_remediating": "opusthinking",
+    "profile_planning": "gpt55high",
+    "profile_evaluating": "gpt55high",
+    "profile_implementing": "ollamaglm51",
+    "profile_remediating": "ollamaglm51",
     "luther_label": "Luther working",
     "ok_label": "OK for Luther"
   },
@@ -40,9 +40,8 @@
         "argv": [
           "cargo",
           "fmt",
-          "--check",
-          "--manifest-path",
-          "workflow/Cargo.toml"
+          "--all",
+          "--check"
         ],
         "timeout_seconds": 300,
         "failure_outcome": "fixable"
@@ -52,21 +51,11 @@
         "argv": [
           "cargo",
           "check",
-          "--manifest-path",
-          "workflow/Cargo.toml"
+          "--workspace",
+          "--all-features",
+          "--locked"
         ],
-        "timeout_seconds": 900,
-        "failure_outcome": "fixable"
-      },
-      {
-        "id": "build",
-        "argv": [
-          "cargo",
-          "build",
-          "--manifest-path",
-          "workflow/Cargo.toml"
-        ],
-        "timeout_seconds": 900,
+        "timeout_seconds": 1200,
         "failure_outcome": "fixable"
       },
       {
@@ -74,10 +63,11 @@
         "argv": [
           "cargo",
           "test",
-          "--manifest-path",
-          "workflow/Cargo.toml"
+          "--workspace",
+          "--all-features",
+          "--locked"
         ],
-        "timeout_seconds": 1200,
+        "timeout_seconds": 1800,
         "failure_outcome": "fixable"
       },
       {
@@ -85,26 +75,39 @@
         "argv": [
           "cargo",
           "clippy",
-          "--manifest-path",
-          "workflow/Cargo.toml",
-          "--all-targets",
+          "--workspace",
+          "--all-features",
+          "--locked",
           "--",
           "-D",
           "warnings"
         ],
-        "timeout_seconds": 1200,
+        "timeout_seconds": 1800,
         "failure_outcome": "fixable"
       },
       {
-        "id": "ocr_review",
+        "id": "coverage",
+        "argv": [
+          "cargo",
+          "llvm-cov",
+          "--workspace",
+          "--all-features",
+          "--locked",
+          "--fail-under-lines",
+          "80"
+        ],
+        "timeout_seconds": 1800,
+        "failure_outcome": "fixable"
+      },
+      {
+        "id": "source-size",
         "argv": [
           "cargo",
           "xtask",
-          "ocr-review",
-          "--preview"
+          "source-size",
+          "--locked"
         ],
-        "working_directory": "workflow",
-        "timeout_seconds": 300,
+        "timeout_seconds": 600,
         "failure_outcome": "fatal"
       }
     ],
@@ -112,16 +115,13 @@
       "local": [
         "format",
         "check",
-        "build",
         "test",
         "clippy",
-        "ocr_review"
+        "coverage",
+        "source-size"
       ],
       "post_pr": [
         "test"
-      ],
-      "review": [
-        "ocr_review"
       ]
     }
   }

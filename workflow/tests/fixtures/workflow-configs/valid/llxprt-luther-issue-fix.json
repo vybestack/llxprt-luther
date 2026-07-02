@@ -1,46 +1,134 @@
 {
   "config_id": "llxprt-luther-issue-fix",
-  "guards": {
-    "max_cost": 50.0,
-    "max_file_changes": 200,
-    "max_iterations": 4,
-    "max_tokens": 500000
+  "workflow_type_id": "llxprt-issue-fix-v1",
+  "runtime": {
+    "timeout_seconds": 7200,
+    "max_retries": 3
   },
   "repository": {
-    "base_branch": "main",
+    "workspace_strategy": "temp_clone",
     "branch_template": "issue{issue_number}",
-    "workspace_strategy": "temp_clone"
+    "base_branch": "main"
   },
-  "runtime": {
-    "max_retries": 3,
-    "timeout_seconds": 7200
+  "guards": {
+    "max_iterations": 4,
+    "max_file_changes": 200,
+    "max_tokens": 500000,
+    "max_cost": 50.0
   },
   "variables": {
-    "artifact_dir": "/tmp/luther-artifacts/llxprt-luther",
+    "target_repo": "vybestack/llxprt-luther",
+    "repository_owner": "vybestack",
+    "repository_name": "llxprt-luther",
     "assignee": "acoliver",
-    "base_branch": "main",
-    "build_command": "cargo build --manifest-path workflow/Cargo.toml 2>&1",
-    "diff_failure_message": "No Luther workflow/config/test/doc diff found and no reusable open PR exists",
-    "diff_required_path_regex": "^([.]github/workflows/|workflow/(src/|config/|tests/|docs/))",
-    "format_command": "cargo fmt --check --manifest-path workflow/Cargo.toml 2>&1",
+    "work_dir": "/tmp/luther-workspaces/llxprt-luther",
+    "artifact_dir": "/tmp/luther-artifacts/llxprt-luther",
+    "primary_issue_number": "3",
     "issue_number": "3",
-    "ocr_review_command": "cd workflow && cargo xtask ocr-review --preview",
-    "lint_command": "cargo fmt --check --manifest-path workflow/Cargo.toml 2>&1",
+    "base_branch": "main",
+    "profile_planning": "opusthinking",
+    "profile_evaluating": "opusthinking",
+    "profile_implementing": "opusthinking",
+    "profile_remediating": "opusthinking",
     "luther_label": "Luther working",
     "ok_label": "OK for Luther",
     "plan_static_content": "# Implementation Plan\n\n1. Read {artifact_dir}/issue.md and confirm the requested behavior for Luther issue #{issue_number}: runtime target selection must not require editing checked-in workflow templates.\n2. Inspect workflow/src/cli/mod.rs, workflow/src/main.rs, workflow/src/workflow/, workflow/config/, and workflow/tests/e2e_workflow_integration.rs.\n3. Implement the smallest source/config change so CLI target overrides can set repo, issue, work_dir, and artifact_dir, and unresolved target/path variables fail before execution.\n4. Add or update focused tests and fixtures covering llxprt-code and llxprt-luther target profiles.\n5. Run targeted verification for the changed workflow files only, then keep the final diff narrowly scoped to issue #{issue_number}.\n",
-    "primary_issue_number": "3",
-    "profile_evaluating": "opusthinking",
-    "profile_implementing": "opusthinking",
-    "profile_planning": "opusthinking",
-    "profile_remediating": "opusthinking",
-    "repository_name": "llxprt-luther",
-    "repository_owner": "vybestack",
     "required_changed_path_pattern": "workflow",
-    "target_repo": "vybestack/llxprt-luther",
-    "test_command": "cargo test --manifest-path workflow/Cargo.toml target_profile e2e_workflow_integration 2>&1",
-    "typecheck_command": "cargo check --manifest-path workflow/Cargo.toml 2>&1",
-    "work_dir": "/tmp/luther-workspaces/llxprt-luther"
+    "diff_required_path_regex": "^([.]github/workflows/|workflow/(src/|config/|tests/|docs/))",
+    "diff_failure_message": "No Luther workflow/config/test/doc diff found and no reusable open PR exists"
   },
-  "workflow_type_id": "llxprt-issue-fix-v1"
+  "command_manifest": {
+    "commands": [
+      {
+        "id": "format",
+        "argv": [
+          "cargo",
+          "fmt",
+          "--check",
+          "--manifest-path",
+          "workflow/Cargo.toml"
+        ],
+        "timeout_seconds": 300,
+        "failure_outcome": "fixable"
+      },
+      {
+        "id": "lint",
+        "argv": [
+          "cargo",
+          "clippy",
+          "--manifest-path",
+          "workflow/Cargo.toml",
+          "--all-targets",
+          "--",
+          "-D",
+          "warnings"
+        ],
+        "timeout_seconds": 1200,
+        "failure_outcome": "fixable"
+      },
+      {
+        "id": "typecheck",
+        "argv": [
+          "cargo",
+          "check",
+          "--manifest-path",
+          "workflow/Cargo.toml"
+        ],
+        "timeout_seconds": 900,
+        "failure_outcome": "fixable"
+      },
+      {
+        "id": "build",
+        "argv": [
+          "cargo",
+          "build",
+          "--manifest-path",
+          "workflow/Cargo.toml"
+        ],
+        "timeout_seconds": 900,
+        "failure_outcome": "fixable"
+      },
+      {
+        "id": "test",
+        "argv": [
+          "cargo",
+          "test",
+          "--manifest-path",
+          "workflow/Cargo.toml",
+          "target_profile",
+          "e2e_workflow_integration"
+        ],
+        "timeout_seconds": 1200,
+        "failure_outcome": "fixable"
+      },
+      {
+        "id": "ocr_review",
+        "argv": [
+          "cargo",
+          "xtask",
+          "ocr-review",
+          "--preview"
+        ],
+        "working_directory": "workflow",
+        "timeout_seconds": 300,
+        "failure_outcome": "fatal"
+      }
+    ],
+    "groups": {
+      "local": [
+        "format",
+        "lint",
+        "typecheck",
+        "build",
+        "test",
+        "ocr_review"
+      ],
+      "post_pr": [
+        "test"
+      ],
+      "review": [
+        "ocr_review"
+      ]
+    }
+  }
 }

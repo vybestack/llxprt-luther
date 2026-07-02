@@ -35,3 +35,45 @@ profile_implementing = "opusthinking"
 profile_remediating = "opusthinking"
 luther_label = "Luther working"
 ok_label = "OK for Luther"
+
+[[command_manifest.commands]]
+id = "format"
+argv = ["cargo", "fmt", "--check", "--manifest-path", "workflow/Cargo.toml"]
+timeout_seconds = 300
+failure_outcome = "fixable"
+
+[[command_manifest.commands]]
+id = "check"
+argv = ["cargo", "check", "--manifest-path", "workflow/Cargo.toml"]
+timeout_seconds = 900
+failure_outcome = "fixable"
+
+[[command_manifest.commands]]
+id = "build"
+argv = ["cargo", "build", "--manifest-path", "workflow/Cargo.toml"]
+timeout_seconds = 900
+failure_outcome = "fixable"
+
+[[command_manifest.commands]]
+id = "test"
+argv = ["cargo", "test", "--manifest-path", "workflow/Cargo.toml"]
+timeout_seconds = 1200
+failure_outcome = "fixable"
+
+[[command_manifest.commands]]
+id = "clippy"
+argv = ["cargo", "clippy", "--manifest-path", "workflow/Cargo.toml", "--all-targets", "--", "-D", "warnings"]
+timeout_seconds = 1200
+failure_outcome = "fixable"
+
+[[command_manifest.commands]]
+id = "ocr_review"
+argv = ["cargo", "xtask", "ocr-review", "--preview"]
+working_directory = "workflow"
+timeout_seconds = 300
+failure_outcome = "fatal"
+
+[command_manifest.groups]
+local = ["format", "check", "build", "test", "clippy", "ocr_review"]
+post_pr = ["test"]
+review = ["ocr_review"]

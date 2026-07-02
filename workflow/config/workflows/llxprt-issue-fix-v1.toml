@@ -340,7 +340,8 @@ step_type = "verify"
 description = "Run lint, typecheck, test, format, build checks"
 
 [steps.parameters]
-checks = ["diff_or_existing_pr", "lint", "typecheck", "build", "test", "format", "ocr_review", "diff_or_existing_pr"]
+checks = ["diff_or_existing_pr", "command_manifest", "diff_or_existing_pr"]
+command_manifest_group = "local"
 timeout_seconds = 2400
 artifact_root = "{artifact_dir}"
 
@@ -356,13 +357,6 @@ fi
 echo '{diff_failure_message}'
 exit 1
 """
-
-lint = "{lint_command}"
-typecheck = "{typecheck_command}"
-build = "{build_command}"
-test = "{test_command}"
-format = "{format_command}"
-ocr_review = "{ocr_review_command}"
 
 
 [[steps]]
@@ -692,11 +686,7 @@ repository_owner = "{repository_owner}"
 repository_name = "{repository_name}"
 pr_number = "{pr_number}"
 
-post_pr_test_commands = [
-  { id = "core-typecheck", argv = ["npm", "run", "typecheck", "--workspace", "@vybestack/llxprt-code-core"] },
-  { id = "core-focused-tests", argv = ["npm", "run", "test", "--workspace", "@vybestack/llxprt-code-core", "--", "DirectMessageProcessor", "StreamProcessor", "geminiChat.hook-control", "hookAggregator"] },
-  { id = "core-format", argv = ["npx", "prettier", "--check", "packages/core/src/core/DirectMessageProcessor.ts", "packages/core/src/core/StreamProcessor.ts", "packages/core/src/core/toolSelectionHook.allowedFunctionNames.test.ts", "packages/core/src/core/geminiChat.hook-control.test.ts", "packages/core/src/hooks/hookAggregator.test.ts"] },
-]
+command_manifest_group = "post_pr"
 
 # @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P17
 # @requirement:REQ-PRFU-001,REQ-PRFU-015,REQ-PRFU-017,REQ-PRFU-018,REQ-PRFU-020A,REQ-PRFU-026

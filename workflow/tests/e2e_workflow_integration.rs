@@ -952,7 +952,7 @@ fn test_run_completion_records_metadata() {
 // ============================================================================
 
 use luther_workflow::workflow::config_loader::{parse_workflow_type_toml, validate_workflow_type};
-use luther_workflow::workflow::schema::{WorkflowConfig, WorkflowType};
+use luther_workflow::workflow::schema::{StepDef, WorkflowConfig, WorkflowType};
 use luther_workflow::workflow::validation::validate_workflow_graph;
 
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P16
@@ -1024,6 +1024,51 @@ fn context_from_config(config: &WorkflowConfig) -> StepContext {
     context.set("existing_pr_number", "0");
     context.set_current_step_id("run_tests");
     context
+}
+
+fn manifest_command_argv(config: &WorkflowConfig, command_id: &str) -> Vec<String> {
+    let manifest = config
+        .command_manifest
+        .as_ref()
+        .expect("command manifest exists");
+    manifest
+        .commands
+        .iter()
+        .find(|entry| entry.id == command_id)
+        .unwrap_or_else(|| panic!("manifest command {command_id} exists"))
+        .argv
+        .clone()
+}
+
+fn manifest_group(config: &WorkflowConfig, group_id: &str) -> Vec<String> {
+    config
+        .command_manifest
+        .as_ref()
+        .expect("command manifest exists")
+        .groups
+        .get(group_id)
+        .unwrap_or_else(|| panic!("manifest group {group_id} exists"))
+        .clone()
+}
+
+fn run_tests_check_names(workflow_type: &WorkflowType) -> Vec<&str> {
+    run_tests_step(workflow_type)
+        .parameters
+        .as_ref()
+        .and_then(|params| params.get("checks"))
+        .and_then(serde_json::Value::as_array)
+        .expect("checks array exists")
+        .iter()
+        .filter_map(serde_json::Value::as_str)
+        .collect()
+}
+
+fn run_tests_step(workflow_type: &WorkflowType) -> &StepDef {
+    workflow_type
+        .steps
+        .iter()
+        .find(|step| step.step_id == "run_tests")
+        .expect("run_tests step exists")
 }
 
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P16
@@ -1780,29 +1825,21 @@ fn abandon_cleanup_falls_back_to_primary_issue_number() {
 fn run_tests_format_command_formats_changed_files_before_checking() {
     let workflow_type = post_pr_workflow();
     let config = workflow_config("llxprt-code");
-    let context = context_from_config(&config);
-    let run_tests = workflow_type
-        .steps
-        .iter()
-        .find(|step| step.step_id == "run_tests")
-        .expect("run_tests step exists");
-    let format_command = run_tests
-        .parameters
-        .as_ref()
-        .and_then(|params| params.get("check_commands"))
-        .and_then(|commands| commands.get("format"))
-        .and_then(serde_json::Value::as_str)
-        .expect("format check command exists");
-    assert_eq!(
-        format_command, "{format_command}",
-        "workflow type should source format command from target profile config"
-    );
-    let format_command = interpolate_string(format_command, &context);
-
+    let check_names = run_tests_check_names(&workflow_type);
     assert!(
-        format_command.contains("prettier --write $CHANGED")
-            && format_command.contains("prettier --check $CHANGED"),
-        "format check should deterministically normalize changed files before asserting they are formatted: {format_command}"
+        check_names.contains(&"command_manifest"),
+        "run_tests should expand the manifest-backed local check group: {check_names:?}"
+    );
+    assert!(
+        manifest_group(&config, "local").contains(&"format".to_string()),
+        "target profile local manifest group should include format"
+    );
+
+    let format_argv = manifest_command_argv(&config, "format");
+    assert_eq!(
+        format_argv,
+        ["npm", "run", "format:check"],
+        "format should be declared as argv in the command manifest"
     );
 }
 
@@ -2098,42 +2135,36 @@ fn dogfood_verify_step_uses_cargo_profile() {
 fn reusable_issue_fix_run_tests_includes_profile_driven_ocr_review() {
     let workflow_type = post_pr_workflow();
     let config = workflow_config("llxprt-luther-issue-fix");
-    let context = context_from_config(&config);
-    let run_tests = workflow_type
-        .steps
-        .iter()
-        .find(|step| step.step_id == "run_tests")
-        .expect("run_tests step exists");
-    let params = run_tests
-        .parameters
-        .as_ref()
-        .expect("run_tests parameters exist");
-    let checks = params
-        .get("checks")
-        .and_then(serde_json::Value::as_array)
-        .expect("checks array exists");
-    let check_names = checks
-        .iter()
-        .filter_map(serde_json::Value::as_str)
-        .collect::<Vec<_>>();
+    let check_names = run_tests_check_names(&workflow_type);
     assert!(
-        check_names.contains(&"ocr_review"),
-        "issue-fix verification should include the local OCR wrapper: {check_names:?}"
+        check_names.contains(&"command_manifest"),
+        "issue-fix verification should expand the local manifest group: {check_names:?}"
+    );
+    assert!(
+        manifest_group(&config, "local").contains(&"ocr_review".to_string()),
+        "issue-fix target profile should include OCR review in its local manifest group"
     );
 
-    let command = params
-        .get("check_commands")
-        .and_then(|commands| commands.get("ocr_review"))
-        .and_then(serde_json::Value::as_str)
-        .expect("ocr_review command exists");
+    let command = manifest_command_argv(&config, "ocr_review");
     assert_eq!(
-        command, "{ocr_review_command}",
-        "workflow type should use a structured profile variable for the OCR command"
+        command,
+        ["cargo", "xtask", "ocr-review", "--preview"],
+        "llxprt-luther issue-fix profile should run the local OCR preview wrapper through argv"
     );
-    let command = interpolate_string(command, &context);
-    assert!(
-        command == "cd workflow && cargo xtask ocr-review --preview",
-        "llxprt-luther issue-fix profile should run the local OCR preview wrapper: {command}"
+    let working_directory = config
+        .command_manifest
+        .as_ref()
+        .and_then(|manifest| {
+            manifest
+                .commands
+                .iter()
+                .find(|entry| entry.id == "ocr_review")
+        })
+        .and_then(|entry| entry.working_directory.as_deref());
+    assert_eq!(
+        working_directory,
+        Some("workflow"),
+        "Luther OCR review should run from workflow/ so the cargo xtask alias is available"
     );
 }
 
@@ -2293,83 +2324,51 @@ fn dogfood_agents_do_not_escalate_self_authored_shell_syntax_errors() {
 fn run_tests_mirrors_ci_lint_typecheck_and_build_before_push() {
     let workflow_type = post_pr_workflow();
     let config = workflow_config("llxprt-code");
-    let context = context_from_config(&config);
-    let run_tests = workflow_type
-        .steps
-        .iter()
-        .find(|step| step.step_id == "run_tests")
-        .expect("run_tests step exists");
-    let params = run_tests
-        .parameters
-        .as_ref()
-        .expect("run_tests parameters exist");
-    let checks = params
-        .get("checks")
-        .and_then(serde_json::Value::as_array)
-        .expect("checks array exists");
-    let check_names = checks
-        .iter()
-        .filter_map(serde_json::Value::as_str)
-        .collect::<Vec<_>>();
+    let check_names = run_tests_check_names(&workflow_type);
+    assert!(
+        check_names.contains(&"command_manifest"),
+        "run_tests should expand the target profile local manifest group: {check_names:?}"
+    );
 
-    for expected in ["lint", "typecheck", "build", "test", "format", "ocr_review"] {
+    let local_group = manifest_group(&config, "local");
+    for expected in ["lint", "typecheck", "build", "test", "format"] {
         assert!(
-            check_names.contains(&expected),
-            "run_tests should include {expected} before push: {check_names:?}"
+            local_group.contains(&expected.to_string()),
+            "target profile local manifest group should include {expected}: {local_group:?}"
         );
     }
 
-    let commands = params
-        .get("check_commands")
-        .and_then(serde_json::Value::as_object)
-        .expect("check_commands exist");
-    let lint_command = commands
-        .get("lint")
-        .and_then(serde_json::Value::as_str)
-        .expect("lint command exists");
     assert_eq!(
-        lint_command, "{lint_command}",
-        "workflow type should source lint command from target profile config"
-    );
-    let lint_command = interpolate_string(lint_command, &context);
-    assert!(
-        lint_command.contains("git status --porcelain --untracked-files=all"),
-        "pre-PR verification should lint changed files only to keep smoke gates bounded: {lint_command}"
-    );
-    assert!(
-        lint_command.contains("npx eslint $CHANGED"),
-        "pre-PR verification should run eslint over changed lintable files: {lint_command}"
-    );
-    assert!(
-        lint_command.contains("tail -n 240"),
-        "pre-PR verification should cap lint output for remediation prompts: {lint_command}"
+        manifest_command_argv(&config, "lint"),
+        ["npm", "run", "lint"],
+        "pre-PR verification should run lint from the command manifest"
     );
     assert_eq!(
-        commands
-            .get("typecheck")
-            .and_then(serde_json::Value::as_str)
-            .map(|command| interpolate_string(command, &context)),
-        Some("npm run typecheck 2>&1".to_string()),
+        manifest_command_argv(&config, "typecheck"),
+        ["npm", "run", "typecheck"],
         "pre-PR verification should run workspace type checking"
     );
     assert_eq!(
-        commands
-            .get("build")
-            .and_then(serde_json::Value::as_str)
-            .map(|command| interpolate_string(command, &context)),
-        Some("npm run build 2>&1".to_string()),
+        manifest_command_argv(&config, "build"),
+        ["npm", "run", "build"],
         "pre-PR verification should run the full build rather than only core"
     );
-    let ocr_review_command = commands
-        .get("ocr_review")
-        .and_then(serde_json::Value::as_str)
-        .expect("ocr_review command exists");
     assert_eq!(
-        ocr_review_command, "{ocr_review_command}",
-        "workflow type should source local OCR review command from target profile config"
+        manifest_command_argv(&config, "ocr_review"),
+        [
+            "echo",
+            "Local OCR wrapper is not configured for this target profile"
+        ],
+        "workflow type should source local OCR review command from the manifest"
     );
     assert!(
-        commands.get("build_core").is_none(),
+        config
+            .command_manifest
+            .as_ref()
+            .expect("command manifest exists")
+            .commands
+            .iter()
+            .all(|entry| entry.id != "build_core"),
         "run_tests should not use the narrow core-only build gate"
     );
 }
@@ -2737,23 +2736,13 @@ fn llxprt_issue_fix_workflow_loads_with_two_target_profiles() {
         .and_then(serde_json::Value::as_str)
         .expect("create_plan static plan exists");
 
-    let run_tests = workflow_type
-        .steps
-        .iter()
-        .find(|step| step.step_id == "run_tests")
-        .expect("run_tests step exists");
-    let check_commands = run_tests
+    let run_tests = run_tests_step(&workflow_type);
+    let diff_command_template = run_tests
         .parameters
         .as_ref()
         .and_then(|params| params.get("check_commands"))
         .and_then(serde_json::Value::as_object)
-        .expect("check_commands exist");
-    let test_command_template = check_commands
-        .get("test")
-        .and_then(serde_json::Value::as_str)
-        .expect("test command exists");
-    let diff_command_template = check_commands
-        .get("diff_or_existing_pr")
+        .and_then(|commands| commands.get("diff_or_existing_pr"))
         .and_then(serde_json::Value::as_str)
         .expect("diff_or_existing_pr command exists");
 
@@ -2769,27 +2758,65 @@ fn llxprt_issue_fix_workflow_loads_with_two_target_profiles() {
     let alt_context = context_from_config(&alt_config);
     let llxprt_code_plan = interpolate_string(static_plan_template, &llxprt_code_context);
     let alt_plan = interpolate_string(static_plan_template, &alt_context);
-    let llxprt_code_test_command = interpolate_string(test_command_template, &llxprt_code_context);
-    let alt_test_command = interpolate_string(test_command_template, &alt_context);
+    let llxprt_code_test_argv = manifest_command_argv(&llxprt_code_config, "test");
+    let alt_test_argv = manifest_command_argv(&alt_config, "test");
     let llxprt_code_diff_command = interpolate_string(diff_command_template, &llxprt_code_context);
     let alt_diff_command = interpolate_string(diff_command_template, &alt_context);
 
     assert!(
         llxprt_code_plan.trim().is_empty()
-            && llxprt_code_test_command == "npm run test --workspace @vybestack/llxprt-code 2>&1"
+            && llxprt_code_test_argv
+                == ["npm", "run", "test", "--workspace", "@vybestack/llxprt-code"]
             && llxprt_code_diff_command.contains("grep -E '.'"),
         "generic llxprt-code profile should let planning follow the selected issue while running the package test command and allowing any changed path"
     );
     assert!(
         alt_plan.contains("StreamProcessor.ts")
-            && alt_test_command.contains("StreamProcessor")
+            && alt_test_argv.iter().any(|arg| arg == "StreamProcessor")
             && alt_diff_command.contains("packages/core/src/core/"),
         "alternate profile should inject distinct planning, test, and diff scope"
     );
     assert_ne!(llxprt_code_plan, alt_plan);
 
-    assert_ne!(llxprt_code_test_command, alt_test_command);
+    assert_ne!(llxprt_code_test_argv, alt_test_argv);
     assert_ne!(llxprt_code_diff_command, alt_diff_command);
+}
+
+#[test]
+fn llxprt_jefe_runs_custom_gates_from_manifest_without_workflow_edits() {
+    let workflow_type = post_pr_workflow();
+    let jefe_config = workflow_config("llxprt-jefe");
+
+    let check_names = run_tests_check_names(&workflow_type);
+    assert_eq!(
+        check_names,
+        [
+            "diff_or_existing_pr",
+            "command_manifest",
+            "diff_or_existing_pr"
+        ],
+        "generic workflow should delegate repo-specific gates to the target manifest"
+    );
+
+    let local_group = manifest_group(&jefe_config, "local");
+    assert!(
+        local_group.contains(&"coverage".to_string())
+            && local_group.contains(&"source-size".to_string()),
+        "llxprt-jefe should add custom coverage and source-size gates through config only: {local_group:?}"
+    );
+    assert_eq!(
+        manifest_command_argv(&jefe_config, "coverage"),
+        [
+            "cargo",
+            "llvm-cov",
+            "--workspace",
+            "--all-features",
+            "--locked",
+            "--fail-under-lines",
+            "80",
+        ],
+        "coverage gate should be fully declared as argv in the target config"
+    );
 }
 
 /// @plan:PLAN-20260408-LLXPRT-FIRST.P17

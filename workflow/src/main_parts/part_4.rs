@@ -806,6 +806,7 @@ mod tests {
                 artifact_dir.to_string_lossy().to_string(),
             )]),
             discovery: None,
+            command_manifest: None,
         }
     }
 
