@@ -10,7 +10,6 @@ use crate::workflow::command_manifest::{CommandEntry, CommandManifest};
 /// @pseudocode lines 29-33
 #[derive(Debug, Default)]
 pub struct RunPostPrTestsExecutor;
-
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P13
 /// @requirement:REQ-PRFU-014,REQ-PRFU-017
 /// @pseudocode lines 29-33
@@ -28,7 +27,6 @@ impl StepExecutor for RunPostPrTestsExecutor {
         )
     }
 }
-
 /// Safe argv-only command runner used by post-PR local verification.
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P13
 /// @requirement:REQ-PRFU-014,REQ-PRFU-017
@@ -36,7 +34,6 @@ impl StepExecutor for RunPostPrTestsExecutor {
 pub trait PostPrTestCommandRunner: Send + Sync {
     fn run(&self, request: PostPrTestCommandRequest) -> PostPrTestCommandResult;
 }
-
 /// Owned post-PR test command request.
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P13
 /// @requirement:REQ-PRFU-014,REQ-PRFU-017
@@ -52,7 +49,6 @@ pub struct PostPrTestCommandRequest {
     pub stderr_log_path: PathBuf,
     pub manifest_entry: Option<CommandEntry>,
 }
-
 /// Owned post-PR test command result.
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P13
 /// @requirement:REQ-PRFU-014,REQ-PRFU-017
@@ -74,14 +70,12 @@ pub struct PostPrTestCommandResult {
     pub artifact_failures: Vec<String>,
     pub failure_classification: Option<String>,
 }
-
 /// Production post-PR test command runner.
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P13
 /// @requirement:REQ-PRFU-014,REQ-PRFU-017
 /// @pseudocode lines 29-30
 #[derive(Debug, Default)]
 pub struct SystemPostPrTestCommandRunner;
-
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P13
 /// @requirement:REQ-PRFU-014,REQ-PRFU-017
 /// @pseudocode lines 29-30
@@ -93,7 +87,6 @@ impl PostPrTestCommandRunner for SystemPostPrTestCommandRunner {
         run_post_pr_test_process(request)
     }
 }
-
 /// Testable post-PR verification executor with injected runner and clock.
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P13
 /// @requirement:REQ-PRFU-014,REQ-PRFU-017
@@ -102,7 +95,6 @@ pub struct RunPostPrTestsExecutorWithRunner<R, C> {
     runner: R,
     clock: C,
 }
-
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P13
 /// @requirement:REQ-PRFU-014,REQ-PRFU-017
 /// @pseudocode lines 29-33
