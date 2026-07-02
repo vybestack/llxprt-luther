@@ -23,6 +23,9 @@ fn command_entry(id: &str, argv: &[&str]) -> CommandEntry {
         artifacts: Default::default(),
         failure_outcome: FailureOutcome::Fatal,
         retry: Default::default(),
+        run_if_missing_any: Vec::new(),
+        run_if_present_all: Vec::new(),
+        remove_before_run: Vec::new(),
     }
 }
 
@@ -257,4 +260,56 @@ fn manifest_executor_retries_configured_exit_codes() {
     assert!(result.passed(), "{result:?}");
     assert_eq!(result.exit_code, Some(0));
     assert!(result.bounded_stdout.contains("retried"));
+}
+
+#[test]
+fn command_manifest_group_honors_conditions_and_removal_paths() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    fs::write(temp.path().join("stale.txt"), "stale").expect("stale");
+    fs::create_dir(temp.path().join("present")).expect("present dir");
+    let mut context = luther_workflow::engine::executor::StepContext::new(
+        temp.path().to_path_buf(),
+        "run".to_string(),
+    );
+    let params = serde_json::json!({
+        "command_manifest_group": "bootstrap",
+        "command_manifest": {
+            "commands": [{
+                "id": "boot",
+                "argv": ["python3", "-c", "from pathlib import Path; Path('created.txt').write_text('ok')"],
+                "run_if_missing_any": ["missing"],
+                "run_if_present_all": ["present"],
+                "remove_before_run": ["stale.txt"]
+            }],
+            "groups": { "bootstrap": ["boot"] }
+        }
+    });
+    let registry = luther_workflow::engine::executor::ExecutorRegistry::with_defaults();
+    let outcome = registry
+        .dispatch("command_manifest_group", &mut context, &params)
+        .expect("dispatch command_manifest_group");
+    assert_eq!(
+        outcome,
+        luther_workflow::engine::transition::StepOutcome::Success
+    );
+    assert!(temp.path().join("created.txt").exists());
+    assert!(!temp.path().join("stale.txt").exists());
+}
+
+#[test]
+fn command_manifest_group_empty_group_is_noop() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut context = luther_workflow::engine::executor::StepContext::new(
+        temp.path().to_path_buf(),
+        "run".to_string(),
+    );
+    let params = serde_json::json!({ "command_manifest_group": "" });
+    let registry = luther_workflow::engine::executor::ExecutorRegistry::with_defaults();
+    let outcome = registry
+        .dispatch("command_manifest_group", &mut context, &params)
+        .expect("empty group succeeds");
+    assert_eq!(
+        outcome,
+        luther_workflow::engine::transition::StepOutcome::Success
+    );
 }

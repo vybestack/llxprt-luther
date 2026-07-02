@@ -362,6 +362,10 @@ impl ExecutorRegistry {
             Box::new(crate::engine::executors::WriteFileExecutor),
         );
         self.register("verify", Box::new(crate::engine::executors::VerifyExecutor));
+        self.register(
+            "command_manifest_group",
+            Box::new(crate::engine::executors::command_manifest::CommandManifestGroupExecutor),
+        );
         self.register("llxprt", Box::new(crate::engine::executors::LlxprtExecutor));
         self.register(
             "workflow_auth_preflight",

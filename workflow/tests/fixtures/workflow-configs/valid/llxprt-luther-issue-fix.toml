@@ -89,6 +89,7 @@ requirements = ["gh", "git", "cargo-llvm-cov", "cargo-audit", "workflow scope fo
 expectations = ["verify workflow auth before editing .github/workflows"]
 
 [target_profile.prompt_guidance]
+ecosystem_name = "Rust"
 planning = "Use Luther's Rust workflow subcrate conventions and include fixture parity when changing config schema."
 implementation = "Respect strict clippy limits, avoid lint suppressions, and keep workflow shell commands statically allowlisted."
 review = "Run Open Code Review through the configured cargo xtask wrapper when review gates are requested."

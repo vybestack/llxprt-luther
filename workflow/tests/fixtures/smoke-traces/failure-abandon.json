@@ -10,10 +10,35 @@
     "reason": "Fatal error occurred"
   },
   "events": [
-    { "seq": 0, "step_id": "select_issue", "outcome": "success" },
-    { "seq": 1, "step_id": "setup_workspace", "outcome": "success" },
-    { "seq": 2, "step_id": "fetch_issue", "outcome": "success" },
-    { "seq": 3, "step_id": "create_plan", "outcome": "fatal" },
-    { "seq": 4, "step_id": "abandon_and_log", "outcome": "fatal" }
+    {
+      "seq": 0,
+      "step_id": "select_issue",
+      "outcome": "success"
+    },
+    {
+      "seq": 1,
+      "step_id": "setup_workspace",
+      "outcome": "success"
+    },
+    {
+      "seq": 2,
+      "step_id": "bootstrap_workspace",
+      "outcome": "success"
+    },
+    {
+      "seq": 3,
+      "step_id": "fetch_issue",
+      "outcome": "success"
+    },
+    {
+      "seq": 4,
+      "step_id": "create_plan",
+      "outcome": "fatal"
+    },
+    {
+      "seq": 5,
+      "step_id": "abandon_and_log",
+      "outcome": "fatal"
+    }
   ]
 }

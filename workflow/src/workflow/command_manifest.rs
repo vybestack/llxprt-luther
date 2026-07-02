@@ -35,6 +35,12 @@ pub struct CommandEntry {
     pub failure_outcome: FailureOutcome,
     #[serde(default)]
     pub retry: RetryPolicy,
+    #[serde(default)]
+    pub run_if_missing_any: Vec<String>,
+    #[serde(default)]
+    pub run_if_present_all: Vec<String>,
+    #[serde(default)]
+    pub remove_before_run: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

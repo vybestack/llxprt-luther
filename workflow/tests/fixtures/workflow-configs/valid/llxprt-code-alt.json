@@ -94,6 +94,7 @@
       ]
     },
     "prompt_guidance": {
+      "ecosystem_name": "TypeScript/npm",
       "planning": "Use the npm TypeScript monorepo layout and prefer existing package scripts.",
       "implementation": "Do not loosen eslint guardrails or add TypeScript/ESLint suppressions.",
       "review": "Review CodeRabbit/LLxprt conventions."

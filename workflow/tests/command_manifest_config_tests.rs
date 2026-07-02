@@ -34,6 +34,7 @@ repository_name = "repo"
 work_dir = "/tmp/luther"
 artifact_dir = "/tmp/luther-artifacts"
 primary_issue_number = "1"
+target_ecosystem_name = "Rust"
 
 {manifest}
 "#
@@ -149,6 +150,27 @@ local = ["missing"]
 }
 
 #[test]
+fn manifest_validates_conditional_and_removal_paths() {
+    for field in [
+        "run_if_missing_any",
+        "run_if_present_all",
+        "remove_before_run",
+    ] {
+        let manifest = format!(
+            r#"
+[[command_manifest.commands]]
+id = "bad-path"
+argv = ["true"]
+{field} = ["../outside"]
+"#
+        );
+        let err = parse_workflow_config_toml(&config_with_manifest(&manifest))
+            .expect_err("escaping manifest path rejected");
+        assert!(err.message.contains("must stay under work_dir"));
+    }
+}
+
+#[test]
 fn manifest_parses_json_schema() {
     let json = r#"{
         "config_id": "manifest-json",
@@ -156,7 +178,7 @@ fn manifest_parses_json_schema() {
         "runtime": { "timeout_seconds": 3600, "max_retries": 3, "parallel_steps": 1, "log_level": "info" },
         "repository": { "workspace_strategy": "temp", "branch_template": "test-{issue_number}", "base_branch": "main", "workspace_root": "/tmp/luther" },
         "guard_limits": { "max_iterations": 3, "max_file_changes": 50, "max_tokens": 100000, "max_cost": 100.0 },
-        "variables": { "target_repo": "owner/repo", "repository_owner": "owner", "repository_name": "repo", "work_dir": "/tmp/luther", "artifact_dir": "/tmp/luther-artifacts", "primary_issue_number": "1" },
+        "variables": { "target_repo": "owner/repo", "repository_owner": "owner", "repository_name": "repo", "work_dir": "/tmp/luther", "artifact_dir": "/tmp/luther-artifacts", "primary_issue_number": "1", "target_ecosystem_name": "Rust" },
         "command_manifest": {
             "commands": [{ "id": "test", "argv": ["cargo", "test"], "acceptable_exit_codes": [0] }],
             "groups": { "local": ["test"] }
@@ -212,6 +234,9 @@ luther_label = "Working"
 
 [target_profile.command_groups]
 {groups}
+
+[target_profile.prompt_guidance]
+ecosystem_name = "Rust"
 
 {manifest}
 "#

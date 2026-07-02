@@ -95,9 +95,15 @@
       ]
     },
     "prompt_guidance": {
+      "ecosystem_name": "Python/uv",
       "planning": "Use uv, ruff, pytest, and coverage conventions for this Python skeleton.",
       "implementation": "Keep commands argv-only and update this skeleton with the real repo metadata before production use.",
-      "review": "Treat unknown CI names as skeleton placeholders until the repository is confirmed."
+      "review": "Treat unknown CI names as skeleton placeholders until the repository is confirmed.",
+      "verification": "Use targeted uv/ruff/pytest commands only when needed; the workflow runs configured manifest gates.",
+      "style": "Follow Python package conventions and keep skeleton metadata explicit.",
+      "forbidden_actions": "Do not replace structured argv manifest commands with shell snippets.",
+      "remediation_scope": "Fix only failures caused by the current branch diff.",
+      "command_manifest_summary": "Local gates run uv sync, ruff format/check, pytest, and coverage commands."
     }
   },
   "command_manifest": {

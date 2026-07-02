@@ -531,12 +531,26 @@ fn validate_command_paths(entry: &CommandEntry) -> Result<()> {
     .into_iter()
     .flatten()
     {
-        if Path::new(path).is_absolute() || path.split('/').any(|part| part == "..") {
-            return command_manifest_error(format!(
-                "command '{}' working directory must stay under work_dir",
-                entry.id
-            ));
-        }
+        validate_command_relative_path(entry, path, "working directory")?;
+    }
+    for path in entry
+        .run_if_missing_any
+        .iter()
+        .chain(entry.run_if_present_all.iter())
+        .chain(entry.remove_before_run.iter())
+    {
+        validate_command_relative_path(entry, path, "conditional path")?;
+    }
+    Ok(())
+}
+
+fn validate_command_relative_path(entry: &CommandEntry, path: &str, label: &str) -> Result<()> {
+    if path.is_empty() || Path::new(path).is_absolute() || path.split('/').any(|part| part == "..")
+    {
+        return command_manifest_error(format!(
+            "command '{}' {label} must stay under work_dir",
+            entry.id
+        ));
     }
     Ok(())
 }

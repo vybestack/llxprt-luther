@@ -103,9 +103,6 @@ git fetch origin
 git checkout {base_branch}
 git reset --hard origin/{base_branch}
 git checkout -B issue{issue_number}
-if [ ! -d node_modules ]; then
-  npm ci --ignore-scripts
-fi
 mkdir -p {artifact_dir}
 rm -f \
   {artifact_dir}/plan.md \

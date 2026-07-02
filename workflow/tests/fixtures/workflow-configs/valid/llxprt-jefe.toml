@@ -71,9 +71,15 @@ requirements = ["gh", "git", "cargo", "cargo-llvm-cov"]
 expectations = ["custom clippy config and allow policy scripts must run through manifest commands"]
 
 [target_profile.prompt_guidance]
+ecosystem_name = "Rust"
 planning = "Treat llxprt-jefe as a Rust root project with repo-specific gates, not as a generic Rust default."
 implementation = "Keep clippy allow policy and source length checks configured as manifest gates rather than engine steps."
 review = "Include strict complexity and llvm-cov outcomes in remediation notes when those gates fail."
+verification = "Use targeted Rust commands only when needed; the workflow runs the configured manifest gates."
+style = "Respect the repository's strict Rust complexity and source-length policies."
+forbidden_actions = "Do not bypass allow-policy or coverage gates."
+remediation_scope = "Fix only failures caused by the current branch diff."
+command_manifest_summary = "Local gates run cargo fmt, check, clippy, test, source length, allow policy, and llvm-cov commands."
 
 [[command_manifest.commands]]
 id = "format"

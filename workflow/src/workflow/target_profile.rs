@@ -47,6 +47,7 @@ pub fn resolve_target_profile(config: &mut WorkflowConfig) -> Result<()> {
     merge_command_groups(config, &profile);
     merge_list_variables(config, &profile);
     merge_prompt_guidance(config, &profile);
+    merge_bootstrap(config, &profile);
     validate_profile_templates(config, &profile)
 }
 
@@ -84,6 +85,7 @@ pub fn validate_target_profile(config: &WorkflowConfig) -> Result<()> {
     validate_repo_identity(config, &mut errors);
     validate_required_issue(config, &mut errors);
     validate_runtime_path_variables(config, &mut errors);
+    validate_required_guidance(config, &mut errors);
     validate_profile_command_groups(config, &mut errors);
 
     if errors.is_empty() {
@@ -258,15 +260,50 @@ fn merge_list_variables(config: &mut WorkflowConfig, profile: &TargetProfileConf
 }
 
 fn merge_prompt_guidance(config: &mut WorkflowConfig, profile: &TargetProfileConfig) {
-    for key in ["planning", "implementation", "review"] {
-        config
-            .variables
-            .entry(format!("target_guidance_{key}"))
-            .or_default();
-    }
-    for (key, value) in &profile.prompt_guidance {
-        insert_var(config, &format!("target_guidance_{key}"), value);
-    }
+    let guidance = &profile.prompt_guidance;
+    insert_var(config, "target_ecosystem_name", &guidance.ecosystem_name);
+    insert_var(config, "target_guidance_planning", &guidance.planning);
+    insert_var(
+        config,
+        "target_guidance_implementation",
+        &guidance.implementation,
+    );
+    insert_var(config, "target_guidance_review", &guidance.review);
+    insert_var(
+        config,
+        "target_guidance_verification",
+        &guidance.verification,
+    );
+    insert_var(config, "target_guidance_style", &guidance.style);
+    insert_var(
+        config,
+        "target_guidance_fixture_parity",
+        &guidance.fixture_parity,
+    );
+    insert_var(
+        config,
+        "target_guidance_forbidden_actions",
+        &guidance.forbidden_actions,
+    );
+    insert_var(
+        config,
+        "target_guidance_remediation_scope",
+        &guidance.remediation_scope,
+    );
+    insert_var(
+        config,
+        "target_command_manifest_summary",
+        &guidance.command_manifest_summary,
+    );
+}
+
+fn merge_bootstrap(config: &mut WorkflowConfig, profile: &TargetProfileConfig) {
+    let group = profile
+        .bootstrap
+        .command_group
+        .as_deref()
+        .unwrap_or_default();
+    insert_var(config, "target_bootstrap_command_group", group);
 }
 
 fn validate_profile_templates(
@@ -322,11 +359,59 @@ fn profile_templates(profile: &TargetProfileConfig) -> Vec<(&'static str, &str)>
         "target_profile.diff_policy.failure_message",
         profile.diff_policy.failure_message.as_deref(),
     );
-    for (key, value) in &profile.prompt_guidance {
-        templates.push(("target_profile.prompt_guidance", value.as_str()));
-        templates.push(("target_profile.prompt_guidance_key", key.as_str()));
-    }
+    templates.extend(prompt_guidance_templates(profile));
+    push_optional(
+        &mut templates,
+        "target_profile.bootstrap.command_group",
+        profile.bootstrap.command_group.as_deref(),
+    );
     templates
+}
+
+fn prompt_guidance_templates(profile: &TargetProfileConfig) -> Vec<(&'static str, &str)> {
+    let guidance = &profile.prompt_guidance;
+    vec![
+        (
+            "target_profile.prompt_guidance.ecosystem_name",
+            guidance.ecosystem_name.as_str(),
+        ),
+        (
+            "target_profile.prompt_guidance.planning",
+            guidance.planning.as_str(),
+        ),
+        (
+            "target_profile.prompt_guidance.implementation",
+            guidance.implementation.as_str(),
+        ),
+        (
+            "target_profile.prompt_guidance.review",
+            guidance.review.as_str(),
+        ),
+        (
+            "target_profile.prompt_guidance.verification",
+            guidance.verification.as_str(),
+        ),
+        (
+            "target_profile.prompt_guidance.style",
+            guidance.style.as_str(),
+        ),
+        (
+            "target_profile.prompt_guidance.fixture_parity",
+            guidance.fixture_parity.as_str(),
+        ),
+        (
+            "target_profile.prompt_guidance.forbidden_actions",
+            guidance.forbidden_actions.as_str(),
+        ),
+        (
+            "target_profile.prompt_guidance.remediation_scope",
+            guidance.remediation_scope.as_str(),
+        ),
+        (
+            "target_profile.prompt_guidance.command_manifest_summary",
+            guidance.command_manifest_summary.as_str(),
+        ),
+    ]
 }
 
 fn validate_profile_paths(profile: &TargetProfileConfig) -> Result<()> {
@@ -409,6 +494,11 @@ fn validate_runtime_path_variables(config: &WorkflowConfig, errors: &mut Vec<Str
             Some(value) => collect_unresolved_errors(config, key, value, errors),
             None => errors.push(format!("missing target profile variable {key}")),
         }
+    }
+}
+fn validate_required_guidance(config: &WorkflowConfig, errors: &mut Vec<String>) {
+    if trimmed_value(config, "target_ecosystem_name").is_none() {
+        errors.push("missing target profile variable target_ecosystem_name".to_string());
     }
 }
 

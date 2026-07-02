@@ -101,6 +101,7 @@ fn setup_registry(outcomes: HashMap<String, Vec<StepOutcome>>) -> ExecutorRegist
     registry.register("verify", Box::new(executor.clone()));
     registry.register("llxprt", Box::new(executor.clone()));
     registry.register("workflow_auth_preflight", Box::new(executor.clone()));
+    registry.register("command_manifest_group", Box::new(executor.clone()));
     for step_type in [
         "github_pr_identity",
         "post_pr_iteration_guard",
@@ -129,7 +130,7 @@ fn setup_registry(outcomes: HashMap<String, Vec<StepOutcome>>) -> ExecutorRegist
 /// Test 1: Happy path — all steps succeed
 /// GIVEN: Workflow loaded from TOML with all steps returning Success
 /// WHEN: Engine runs
-/// THEN: `RunOutcome::Success`, all 29 steps visited
+/// THEN: `RunOutcome::Success`, all 30 steps visited
 /// @plan:PLAN-20260408-LLXPRT-FIRST.P18
 /// @requirement:REQ-LF-ISSUE-001,REQ-LF-ISSUE-002,REQ-LF-ISSUE-003,REQ-LF-PR-001
 #[test]
@@ -139,8 +140,8 @@ fn test_happy_path_all_steps_succeed() {
     // Count the steps
     assert_eq!(
         workflow_type.steps.len(),
-        29,
-        "Expected 29 steps in workflow after workflow auth gates and PR follow-through tail"
+        30,
+        "Expected 30 steps in workflow after workflow auth gates and PR follow-through tail"
     );
 
     // All steps succeed by default (empty outcomes map)
@@ -631,7 +632,7 @@ fn evaluate_impl_fixable_routes_to_remediation() {
 /// Test 9: Workflow type loads from TOML
 /// GIVEN: llxprt-issue-fix-v1.toml exists
 /// WHEN: `resolve_workflow_type()` is called
-/// THEN: Returns `WorkflowType` with 29 steps, transitions include per-edge limits
+/// THEN: Returns `WorkflowType` with 30 steps, transitions include per-edge limits
 /// @plan:PLAN-20260408-LLXPRT-FIRST.P18
 /// @requirement:REQ-LF-SEP-003
 #[test]
@@ -641,7 +642,7 @@ fn test_workflow_type_loads_from_toml() {
         .expect("Failed to load workflow type");
 
     // Assert base workflow plus PR follow-through tail steps
-    assert_eq!(workflow_type.steps.len(), 29, "Expected 29 steps");
+    assert_eq!(workflow_type.steps.len(), 30, "Expected 30 steps");
 
     // Assert transitions include per-edge limits
     let has_per_edge_limit = workflow_type
@@ -2539,6 +2540,31 @@ fn push_changes_uses_force_with_lease_for_repeatable_smoke_branch_updates() {
     );
 }
 
+#[test]
+fn push_changes_only_keeps_global_luther_runtime_staging_exclusion() {
+    let workflow_type = post_pr_workflow();
+    let push = workflow_type
+        .steps
+        .iter()
+        .find(|step| step.step_id == "push_changes")
+        .expect("push_changes step exists");
+    let command = push
+        .parameters
+        .as_ref()
+        .and_then(|params| params.get("command"))
+        .and_then(serde_json::Value::as_str)
+        .expect("push_changes command exists");
+
+    assert!(
+        command.contains("':!.luther'") && command.contains("':!.luther/**'"),
+        "push_changes must keep Luther runtime state out of target commits: {command}"
+    );
+    assert!(
+        !command.contains("NOTICES.txt"),
+        "target-specific generated-file exclusions belong in target guidance, not shared staging shell: {command}"
+    );
+}
+
 /// @plan:PLAN-20260408-LLXPRT-FIRST.P17
 /// @requirement:REQ-LF-EXEC-001
 #[test]
@@ -2918,6 +2944,70 @@ fn target_profiles_cover_current_and_skeleton_repositories() {
             "{config_id} should derive legacy prompt/diff variables from target_profile"
         );
     }
+}
+
+#[test]
+fn shared_workflow_bootstrap_is_manifest_based_and_setup_is_generic() {
+    let workflow_type = load_workflow_toml("config/workflows/llxprt-issue-fix-v1.toml");
+    let setup = workflow_type
+        .steps
+        .iter()
+        .find(|step| step.step_id == "setup_workspace")
+        .expect("setup_workspace step exists");
+    let setup_command = setup
+        .parameters
+        .as_ref()
+        .and_then(|params| params.get("command"))
+        .and_then(serde_json::Value::as_str)
+        .expect("setup_workspace command exists");
+    assert!(!setup_command.contains("npm ci"));
+    assert!(!setup_command.contains("node_modules"));
+
+    let bootstrap = workflow_type
+        .steps
+        .iter()
+        .find(|step| step.step_id == "bootstrap_workspace")
+        .expect("bootstrap_workspace step exists");
+    assert_eq!(bootstrap.step_type, "command_manifest_group");
+    assert_eq!(
+        bootstrap
+            .parameters
+            .as_ref()
+            .and_then(|params| params.get("command_manifest_group"))
+            .and_then(serde_json::Value::as_str),
+        Some("{target_bootstrap_command_group}")
+    );
+}
+
+#[test]
+fn llxprt_code_bootstrap_uses_structured_npm_manifest_commands() {
+    let config = workflow_config("llxprt-code");
+    assert_eq!(
+        config
+            .variables
+            .get("target_bootstrap_command_group")
+            .map(String::as_str),
+        Some("bootstrap")
+    );
+    let manifest = config.command_manifest.expect("command manifest");
+    let install = manifest
+        .commands
+        .iter()
+        .find(|entry| entry.id == "install_dependencies")
+        .expect("install_dependencies command");
+    assert_eq!(install.argv, ["npm", "ci", "--ignore-scripts"]);
+    assert!(install
+        .run_if_missing_any
+        .iter()
+        .any(|path| path == "node_modules"));
+    assert_eq!(install.remove_before_run, ["node_modules"]);
+    assert_eq!(
+        manifest.groups.get("bootstrap"),
+        Some(&vec![
+            "install_dependencies".to_string(),
+            "repair_node_bin_permissions".to_string()
+        ])
+    );
 }
 
 /// @plan:PLAN-20260408-LLXPRT-FIRST.P17

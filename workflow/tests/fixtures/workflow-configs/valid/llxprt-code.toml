@@ -72,6 +72,9 @@ local = "local"
 post_pr = "post_pr"
 review = "review"
 
+[target_profile.bootstrap]
+command_group = "bootstrap"
+
 [target_profile.pr_checks]
 required = ["format", "lint", "typecheck", "build", "test", "CodeQL"]
 ignored = ["CodeRabbit"]
@@ -83,9 +86,30 @@ requirements = ["gh", "git", "npm registry access"]
 expectations = ["npm ci completes before local gates"]
 
 [target_profile.prompt_guidance]
+ecosystem_name = "TypeScript/npm"
 planning = "Use the npm TypeScript monorepo layout and prefer existing package scripts over ad hoc commands."
 implementation = "Do not loosen eslint guardrails or add TypeScript/ESLint suppressions; fix the underlying issue."
 review = "Review CodeRabbit/LLxprt conventions and keep PR comments shell-safe."
+verification = "Use targeted npm scripts only when needed; the workflow runs the full configured npm manifest gates."
+style = "Match the existing TypeScript package conventions and keep changes package-scoped."
+forbidden_actions = "Do not modify package lockfiles or generated notice files unless the issue explicitly requires it."
+remediation_scope = "Fix only failures caused by the current branch diff."
+command_manifest_summary = "Local gates run npm format, lint, typecheck, build, bundle, test, and eslint guard commands."
+
+[[command_manifest.commands]]
+id = "install_dependencies"
+argv = ["npm", "ci", "--ignore-scripts"]
+timeout_seconds = 900
+run_if_missing_any = ["node_modules", "node_modules/esbuild/index.js", "node_modules/jsdom/lib/jsdom/living/xhr/xhr-sync-worker.js", "node_modules/@ast-grep/lang-python", "node_modules/@lvce-editor/ripgrep"]
+remove_before_run = ["node_modules"]
+failure_outcome = "fatal"
+
+[[command_manifest.commands]]
+id = "repair_node_bin_permissions"
+argv = ["chmod", "-R", "+x", "node_modules/.bin"]
+timeout_seconds = 120
+run_if_present_all = ["node_modules/.bin"]
+failure_outcome = "fatal"
 
 [[command_manifest.commands]]
 id = "format"
@@ -142,6 +166,7 @@ timeout_seconds = 60
 failure_outcome = "fatal"
 
 [command_manifest.groups]
+bootstrap = ["install_dependencies", "repair_node_bin_permissions"]
 local = ["format", "lint", "typecheck", "build", "bundle", "test", "eslint_guard"]
 post_pr = ["test"]
 review = ["ocr_review"]

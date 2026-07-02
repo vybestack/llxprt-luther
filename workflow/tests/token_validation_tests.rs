@@ -203,7 +203,7 @@ fn real_production_workflow_has_no_false_positive_tokens() {
         .expect("read production workflow");
     let wf = parse_workflow_type_toml(&wf_text).expect("parse production workflow");
 
-    for config_id in ["llxprt-code", "llxprt-jefe", "codepuppy"] {
+    for config_id in ["llxprt-code", "llxprt-jefe", "codepuppy", "llxprt-luther"] {
         let cfg_text = std::fs::read_to_string(format!("config/workflow-configs/{config_id}.toml"))
             .expect("read production config");
         let config = parse_workflow_config_toml(&cfg_text).expect("parse production config");

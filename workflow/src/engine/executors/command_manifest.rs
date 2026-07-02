@@ -12,10 +12,141 @@ use std::time::{Duration, Instant};
 use regex::Regex;
 use serde_json::Value;
 
-use crate::engine::executor::{interpolate_string, StepContext};
+use crate::engine::executor::{interpolate_string, StepContext, StepExecutor};
+use crate::engine::runner::EngineError;
+use crate::engine::transition::StepOutcome;
 use crate::workflow::command_manifest::{
-    ArtifactExpectation, ArtifactKind, CommandEntry, FailureOutcome,
+    ArtifactExpectation, ArtifactKind, CommandEntry, CommandManifest, FailureOutcome,
 };
+
+pub struct CommandManifestGroupExecutor;
+
+impl StepExecutor for CommandManifestGroupExecutor {
+    fn execute(
+        &self,
+        context: &mut StepContext,
+        params: &Value,
+    ) -> Result<StepOutcome, EngineError> {
+        execute_manifest_group(context, params)
+    }
+}
+
+fn execute_manifest_group(
+    context: &StepContext,
+    params: &Value,
+) -> Result<StepOutcome, EngineError> {
+    let group_id = resolve_manifest_group_id(params, context, "").map_err(group_error)?;
+    if group_id.trim().is_empty() {
+        return Ok(StepOutcome::Success);
+    }
+    let manifest = parse_command_manifest(params)?;
+    let Some(command_ids) = manifest.groups.get(&group_id) else {
+        return Err(group_error(format!(
+            "unknown command_manifest group '{group_id}'"
+        )));
+    };
+    for command_id in command_ids {
+        let entry = manifest
+            .commands
+            .iter()
+            .find(|entry| entry.id == *command_id)
+            .ok_or_else(|| group_error(format!("unknown command manifest id '{command_id}'")))?;
+        if !entry_conditions_match(entry, context.work_dir())? {
+            continue;
+        }
+        remove_manifest_paths(entry, context.work_dir())?;
+        let request = request_from_entry(entry, context.work_dir(), 900).map_err(group_error)?;
+        let result = run_manifest_command(request);
+        if !result.passed() {
+            return Ok(match result.failure_outcome {
+                FailureOutcome::Fatal => StepOutcome::Fatal,
+                FailureOutcome::Fixable => StepOutcome::Fixable,
+            });
+        }
+    }
+    Ok(StepOutcome::Success)
+}
+
+fn parse_command_manifest(params: &Value) -> Result<CommandManifest, EngineError> {
+    let value = params
+        .get("command_manifest")
+        .ok_or_else(|| group_error("command_manifest_group requires command_manifest"))?;
+    if value.get("command").is_some() || value.get("shell").is_some() {
+        return Err(group_error("shell-string command manifests are forbidden"));
+    }
+    serde_json::from_value(value.clone())
+        .map_err(|err| group_error(format!("invalid command_manifest: {err}")))
+}
+
+fn group_error(message: impl Into<String>) -> EngineError {
+    EngineError::StepExecutionError {
+        step_id: "command_manifest_group".to_string(),
+        message: message.into(),
+    }
+}
+
+fn entry_conditions_match(entry: &CommandEntry, work_dir: &Path) -> Result<bool, EngineError> {
+    if !entry.run_if_missing_any.is_empty()
+        && !entry
+            .run_if_missing_any
+            .iter()
+            .any(|path| manifest_relative_path(work_dir, path).is_ok_and(|path| !path.exists()))
+    {
+        return Ok(false);
+    }
+    if !entry
+        .run_if_present_all
+        .iter()
+        .all(|path| manifest_relative_path(work_dir, path).is_ok_and(|path| path.exists()))
+    {
+        return Ok(false);
+    }
+    Ok(true)
+}
+
+fn remove_manifest_paths(entry: &CommandEntry, work_dir: &Path) -> Result<(), EngineError> {
+    for path in &entry.remove_before_run {
+        let path = manifest_relative_path(work_dir, path).map_err(group_error)?;
+        if path.is_dir() {
+            fs::remove_dir_all(&path).map_err(|err| {
+                group_error(format!(
+                    "remove command '{}' path '{}': {err}",
+                    entry.id,
+                    path.display()
+                ))
+            })?;
+        } else if path.exists() {
+            fs::remove_file(&path).map_err(|err| {
+                group_error(format!(
+                    "remove command '{}' path '{}': {err}",
+                    entry.id,
+                    path.display()
+                ))
+            })?;
+        }
+    }
+    Ok(())
+}
+
+fn manifest_relative_path(work_dir: &Path, relative: &str) -> Result<PathBuf, String> {
+    let path = Path::new(relative);
+    if relative.is_empty()
+        || path.is_absolute()
+        || path.components().any(|component| {
+            matches!(
+                component,
+                std::path::Component::Prefix(_)
+                    | std::path::Component::RootDir
+                    | std::path::Component::ParentDir
+            )
+        })
+    {
+        return Err(format!(
+            "manifest path must stay under work_dir: {relative}"
+        ));
+    }
+    Ok(work_dir.join(path))
+}
 
 #[derive(Clone, Debug)]
 pub struct ManifestPathContext {
