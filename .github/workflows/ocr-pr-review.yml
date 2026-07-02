@@ -111,9 +111,6 @@ jobs:
           { set +x; } 2>/dev/null
           cleanup_git_auth() {
             set +e
-            local server_url="${GH_SERVER_URL:-${GITHUB_SERVER_URL:-https://github.com}}"
-            server_url="${server_url%/}/"
-            git config --global --unset-all http."${server_url}".extraheader 2>/dev/null || true
             git config --global --unset-all safe.directory "$GITHUB_WORKSPACE" 2>/dev/null || true
             unset GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0
           }
