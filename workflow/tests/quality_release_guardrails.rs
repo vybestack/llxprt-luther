@@ -1353,6 +1353,7 @@ fn assert_scoped_git_auth_cleanup(content: &str) {
             && content.contains(
                 "unset GIT_CONFIG_GLOBAL GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0"
             )
+            && content.contains("unset GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0")
             && content.contains("ocr-git-auth-config")
             && content.contains("trap cleanup_git_auth EXIT")
             && content.contains("trap 'cleanup_git_auth; exit 130' INT TERM")
@@ -1383,10 +1384,15 @@ fn assert_scoped_git_auth_cleanup(content: &str) {
     let pr_fetch = content
         .find("git fetch origin \"pull/${PR_NUMBER}/head:pr-head\"")
         .expect("PR head fetch must be present");
+    let post_fetch_env_cleanup = content[pr_fetch..]
+        .find("unset GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0")
+        .map(|offset| pr_fetch + offset)
+        .expect("token-bearing fetch env vars must be unset immediately after PR fetch");
     assert!(
         persistent_safe_directory < safe_directory
             && safe_directory < pr_fetch
-            && pr_fetch < persistent_safe_directory_cleanup,
+            && pr_fetch < post_fetch_env_cleanup
+            && post_fetch_env_cleanup < persistent_safe_directory_cleanup,
         "safe.directory should be scoped before fetching PR-controlled refs and cleaned up after later steps"
     );
 }
