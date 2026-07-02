@@ -125,8 +125,8 @@ jobs:
           GH_SERVER_URL="${GITHUB_SERVER_URL:-https://github.com}"
           GH_SERVER_URL="${GH_SERVER_URL%/}/"
           {
-            printf '[http "%s"]\n\textraheader = AUTHORIZATION: bearer ' "${GH_SERVER_URL}"
-            printf '%s\n' "${GH_TOKEN}"
+            printf '[http "%s"]\n' "${GH_SERVER_URL}"
+            printf '\textraheader = AUTHORIZATION: bearer %s\n' "${GH_TOKEN}"
           } > "${RUNNER_TEMP}/ocr-git-auth-config"
           chmod 600 "${RUNNER_TEMP}/ocr-git-auth-config"
           export GIT_CONFIG_GLOBAL="${RUNNER_TEMP}/ocr-git-auth-config"
