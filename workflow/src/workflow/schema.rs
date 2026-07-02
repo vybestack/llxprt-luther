@@ -116,6 +116,7 @@ pub struct TargetDiffPolicyConfig {
     pub failure_message: Option<String>,
     pub allowed_path_patterns: Vec<String>,
     pub required_path_patterns: Vec<String>,
+    pub commit_exclude_pathspecs: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]

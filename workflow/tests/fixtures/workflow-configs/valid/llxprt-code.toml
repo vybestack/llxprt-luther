@@ -66,6 +66,7 @@ required_path_regex = "."
 failure_message = "No issue #{issue_number} source/test diff found and no reusable open PR exists"
 allowed_path_patterns = ["packages/**", "scripts/**", "src/**", "test/**", "tests/**", ".github/workflows/**"]
 required_path_patterns = ["packages/**", "src/**", "test/**", "tests/**"]
+commit_exclude_pathspecs = [":!packages/vscode-ide-companion/NOTICES.txt"]
 
 [target_profile.command_groups]
 local = "local"
@@ -98,14 +99,26 @@ remediation_scope = "Fix only failures caused by the current branch diff."
 command_manifest_summary = "Local gates run npm format, lint, typecheck, build, bundle, test, and eslint guard commands."
 
 [[command_manifest.commands]]
-id = "install_dependencies"
+# Runs only when node_modules is absent; fatal failure halts bootstrap before reinstall checks.
+id = "install_dependencies_when_missing"
 argv = ["npm", "ci", "--ignore-scripts"]
 timeout_seconds = 900
-run_if_missing_any = ["node_modules", "node_modules/esbuild/index.js", "node_modules/jsdom/lib/jsdom/living/xhr/xhr-sync-worker.js", "node_modules/@ast-grep/lang-python", "node_modules/@lvce-editor/ripgrep"]
+run_if_missing_any = ["node_modules"]
+failure_outcome = "fatal"
+
+[[command_manifest.commands]]
+id = "reinstall_dependencies_when_incomplete"
+argv = ["npm", "ci", "--ignore-scripts"]
+timeout_seconds = 900
+run_if_present_all = ["node_modules"]
+# These are version-specific package-presence sentinels for the historical bootstrap guard.
+# Update them when upgrading esbuild, jsdom, @ast-grep/lang-python, or @lvce-editor/ripgrep.
+run_if_missing_any = ["node_modules/esbuild/index.js", "node_modules/jsdom/lib/jsdom/living/xhr/xhr-sync-worker.js", "node_modules/@ast-grep/lang-python", "node_modules/@lvce-editor/ripgrep"]
 remove_before_run = ["node_modules"]
 failure_outcome = "fatal"
 
 [[command_manifest.commands]]
+# Permission repair is critical-path because npm-installed CLIs must be executable for later gates.
 id = "repair_node_bin_permissions"
 argv = ["chmod", "-R", "+x", "node_modules/.bin"]
 timeout_seconds = 120
@@ -167,7 +180,7 @@ timeout_seconds = 60
 failure_outcome = "fatal"
 
 [command_manifest.groups]
-bootstrap = ["install_dependencies", "repair_node_bin_permissions"]
+bootstrap = ["install_dependencies_when_missing", "reinstall_dependencies_when_incomplete", "repair_node_bin_permissions"]
 local = ["format", "lint", "typecheck", "build", "bundle", "test", "eslint_guard"]
 post_pr = ["test"]
 review = ["ocr_review"]

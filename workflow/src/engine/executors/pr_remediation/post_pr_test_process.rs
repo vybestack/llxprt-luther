@@ -3,8 +3,28 @@ use super::*;
 use crate::engine::executors::command_manifest::{
     run_manifest_entry, ManifestCommandResult, ManifestEntryExecution, ManifestPathContext,
 };
+use crate::workflow::command_manifest::CommandManifest;
+use crate::workflow::config_loader::validate_command_manifest;
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
+
+pub(super) fn reject_shell_string_manifest(value: &Value) -> Result<(), EngineError> {
+    if value.get("command").is_some() || value.get("shell").is_some() {
+        return Err(pr_remediation_error(
+            "shell-string command manifests are forbidden",
+        ));
+    }
+    Ok(())
+}
+
+pub(super) fn validated_command_manifest(value: &Value) -> Result<CommandManifest, EngineError> {
+    reject_shell_string_manifest(value)?;
+    let manifest = serde_json::from_value(value.clone())
+        .map_err(|err| pr_remediation_error(format!("invalid command_manifest: {err}")))?;
+    validate_command_manifest(&manifest)
+        .map_err(|err| pr_remediation_error(format!("invalid command_manifest: {err}")))?;
+    Ok(manifest)
+}
 
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P13
 /// @requirement:REQ-PRFU-017

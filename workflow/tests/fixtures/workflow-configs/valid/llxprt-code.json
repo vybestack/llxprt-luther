@@ -80,6 +80,9 @@
         "src/**",
         "test/**",
         "tests/**"
+      ],
+      "commit_exclude_pathspecs": [
+        ":!packages/vscode-ide-companion/NOTICES.txt"
       ]
     },
     "command_groups": {
@@ -131,15 +134,31 @@
   "command_manifest": {
     "commands": [
       {
-        "id": "install_dependencies",
         "argv": [
           "npm",
           "ci",
           "--ignore-scripts"
         ],
         "timeout_seconds": 900,
+        "failure_outcome": "fatal",
+        "id": "install_dependencies_when_missing",
         "run_if_missing_any": [
-          "node_modules",
+          "node_modules"
+        ]
+      },
+      {
+        "argv": [
+          "npm",
+          "ci",
+          "--ignore-scripts"
+        ],
+        "timeout_seconds": 900,
+        "failure_outcome": "fatal",
+        "id": "reinstall_dependencies_when_incomplete",
+        "run_if_present_all": [
+          "node_modules"
+        ],
+        "run_if_missing_any": [
           "node_modules/esbuild/index.js",
           "node_modules/jsdom/lib/jsdom/living/xhr/xhr-sync-worker.js",
           "node_modules/@ast-grep/lang-python",
@@ -147,8 +166,7 @@
         ],
         "remove_before_run": [
           "node_modules"
-        ],
-        "failure_outcome": "fatal"
+        ]
       },
       {
         "id": "repair_node_bin_permissions",
@@ -258,7 +276,8 @@
     ],
     "groups": {
       "bootstrap": [
-        "install_dependencies",
+        "install_dependencies_when_missing",
+        "reinstall_dependencies_when_incomplete",
         "repair_node_bin_permissions"
       ],
       "local": [

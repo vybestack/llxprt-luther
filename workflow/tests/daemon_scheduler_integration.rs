@@ -185,3 +185,19 @@ config_id = "llxprt-luther"
     assert_eq!(cfg.targets[0].config_id, "llxprt-code");
     assert_eq!(cfg.targets[1].config_id, "llxprt-luther");
 }
+
+#[test]
+fn parse_daemon_scheduler_config_toml_empty_returns_defaults() {
+    let cfg = parse_daemon_scheduler_config_toml("").unwrap();
+
+    assert_eq!(cfg.max_concurrent_active_runs, None);
+    assert_eq!(cfg.max_concurrent_runs_per_config, None);
+    assert_eq!(cfg.max_concurrent_runs_per_repository, None);
+    assert_eq!(cfg.poll_interval_seconds, None);
+    assert!(cfg.targets.is_empty());
+}
+
+#[test]
+fn parse_daemon_scheduler_config_toml_malformed_returns_error() {
+    assert!(parse_daemon_scheduler_config_toml("not valid toml =").is_err());
+}

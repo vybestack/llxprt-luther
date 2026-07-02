@@ -173,6 +173,7 @@ description = "Run target-specific bootstrap commands"
 
 [steps.parameters]
 command_manifest_group = "{target_bootstrap_command_group}"
+allow_empty_group = true
 
 [[steps]]
 step_id = "fetch_issue"
@@ -426,7 +427,10 @@ description = "Stage, commit, and push changes"
 command = """
 set -euo pipefail
 # .luther contains Luther runtime state and is never staged from target workspaces.
-git add -A -- ':!.luther' ':!.luther/**'
+if [ "{target_has_commit_restore_paths}" = "1" ]; then
+  git restore --worktree -- {target_commit_restore_paths} 2>/dev/null || true
+fi
+git add -A -- ':!.luther' ':!.luther/**' {target_commit_exclude_pathspecs}
 if git diff --cached --quiet --exit-code; then
   if [ "{setup_workspace.existing_pr_number}" != "0" ]; then
     echo "No new repository changes; existing PR #{setup_workspace.existing_pr_number} already carries issue branch changes."
@@ -1106,6 +1110,8 @@ from = "bootstrap_workspace"
 to = "abandon_and_log"
 condition = "fatal"
 
+# Bootstrap runs before issue artifacts and remediation context exist, so fixable
+# command failures are treated as terminal setup failures rather than retried.
 [[transitions]]
 from = "bootstrap_workspace"
 to = "abandon_and_log"

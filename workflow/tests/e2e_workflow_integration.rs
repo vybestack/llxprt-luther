@@ -2564,8 +2564,46 @@ fn push_changes_only_keeps_global_luther_runtime_staging_exclusion() {
         "push_changes must exclude .luther/** contents: {command}"
     );
     assert!(
+        command.contains(r#"[ "{target_has_commit_restore_paths}" = "1" ]"#),
+        "target-specific generated-file restore guard should use a boolean flag, not shell-quoted path words: {command}"
+    );
+    assert!(
+        command.contains("git restore --worktree -- {target_commit_restore_paths}"),
+        "target-specific generated-file restores should be injected from target config, not hardcoded: {command}"
+    );
+    assert!(
+        command.contains("{target_commit_exclude_pathspecs}"),
+        "target-specific generated-file exclusions should be injected from target config, not hardcoded: {command}"
+    );
+    assert!(
         !command.contains("NOTICES.txt"),
-        "target-specific generated-file exclusions belong in target guidance, not shared staging shell: {command}"
+        "target-specific generated-file exclusions belong in target config, not shared staging shell: {command}"
+    );
+}
+
+#[test]
+fn llxprt_code_target_config_injects_generated_file_staging_exclusion() {
+    let config = workflow_config("llxprt-code");
+    assert_eq!(
+        config
+            .variables
+            .get("target_commit_restore_paths")
+            .map(String::as_str),
+        Some("'packages/vscode-ide-companion/NOTICES.txt'")
+    );
+    assert_eq!(
+        config
+            .variables
+            .get("target_has_commit_restore_paths")
+            .map(String::as_str),
+        Some("1")
+    );
+    assert_eq!(
+        config
+            .variables
+            .get("target_commit_exclude_pathspecs")
+            .map(String::as_str),
+        Some("':!packages/vscode-ide-companion/NOTICES.txt'")
     );
 }
 
@@ -2973,13 +3011,21 @@ fn shared_workflow_bootstrap_is_manifest_based_and_setup_is_generic() {
         .find(|step| step.step_id == "bootstrap_workspace")
         .expect("bootstrap_workspace step exists");
     assert_eq!(bootstrap.step_type, "command_manifest_group");
+    let bootstrap_params = bootstrap
+        .parameters
+        .as_ref()
+        .expect("bootstrap_workspace parameters");
     assert_eq!(
-        bootstrap
-            .parameters
-            .as_ref()
-            .and_then(|params| params.get("command_manifest_group"))
+        bootstrap_params
+            .get("command_manifest_group")
             .and_then(serde_json::Value::as_str),
         Some("{target_bootstrap_command_group}")
+    );
+    assert_eq!(
+        bootstrap_params
+            .get("allow_empty_group")
+            .and_then(serde_json::Value::as_bool),
+        Some(true)
     );
 
     let config = workflow_config("llxprt-code");
@@ -3006,21 +3052,33 @@ fn llxprt_code_bootstrap_uses_structured_npm_manifest_commands() {
         Some("bootstrap")
     );
     let manifest = config.command_manifest.expect("command manifest");
-    let install = manifest
+    let missing_install = manifest
         .commands
         .iter()
-        .find(|entry| entry.id == "install_dependencies")
-        .expect("install_dependencies command");
-    assert_eq!(install.argv, ["npm", "ci", "--ignore-scripts"]);
-    assert!(install
+        .find(|entry| entry.id == "install_dependencies_when_missing")
+        .expect("install_dependencies_when_missing command");
+    assert_eq!(missing_install.argv, ["npm", "ci", "--ignore-scripts"]);
+    assert_eq!(missing_install.run_if_missing_any, ["node_modules"]);
+    assert!(missing_install.run_if_present_all.is_empty());
+    assert!(missing_install.remove_before_run.is_empty());
+
+    let incomplete_install = manifest
+        .commands
+        .iter()
+        .find(|entry| entry.id == "reinstall_dependencies_when_incomplete")
+        .expect("reinstall_dependencies_when_incomplete command");
+    assert_eq!(incomplete_install.argv, ["npm", "ci", "--ignore-scripts"]);
+    assert_eq!(incomplete_install.run_if_present_all, ["node_modules"]);
+    assert!(incomplete_install
         .run_if_missing_any
         .iter()
-        .any(|path| path == "node_modules"));
-    assert_eq!(install.remove_before_run, ["node_modules"]);
+        .any(|path| path == "node_modules/esbuild/index.js"));
+    assert_eq!(incomplete_install.remove_before_run, ["node_modules"]);
     assert_eq!(
         manifest.groups.get("bootstrap"),
         Some(&vec![
-            "install_dependencies".to_string(),
+            "install_dependencies_when_missing".to_string(),
+            "reinstall_dependencies_when_incomplete".to_string(),
             "repair_node_bin_permissions".to_string()
         ])
     );

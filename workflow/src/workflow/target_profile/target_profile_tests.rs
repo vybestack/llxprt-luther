@@ -282,6 +282,34 @@ fn prompt_guidance_seeds_typed_defaults_and_bootstrap_group() {
 }
 
 #[test]
+fn empty_profile_ecosystem_name_does_not_preserve_stale_runtime_value() {
+    let mut config = test_config();
+    config.variables.insert(
+        "target_ecosystem_name".to_string(),
+        "stale ecosystem".to_string(),
+    );
+    config.target_profile = Some(crate::workflow::schema::TargetProfileConfig {
+        prompt_guidance: TargetPromptGuidance {
+            ecosystem_name: String::new(),
+            ..Default::default()
+        },
+        ..Default::default()
+    });
+
+    resolve_target_profile(&mut config).expect("profile resolves");
+    let error = validate_target_profile(&config).expect_err("empty ecosystem should fail");
+
+    assert_eq!(
+        config
+            .variables
+            .get("target_ecosystem_name")
+            .map(String::as_str),
+        Some("")
+    );
+    assert!(error.message.contains("target_ecosystem_name"));
+}
+
+#[test]
 fn profile_rejects_unresolved_prompt_variables_and_unsafe_paths() {
     let mut config = test_config();
     config.target_profile = Some(crate::workflow::schema::TargetProfileConfig {

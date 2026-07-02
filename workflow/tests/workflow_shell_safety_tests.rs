@@ -156,7 +156,12 @@ fn production_and_fixture_workflows_use_safe_body_handling() {
 
 #[test]
 fn shared_shell_commands_do_not_embed_target_bootstrap_or_guidance() {
-    for command in shell_commands() {
+    let commands = shell_commands();
+    assert!(
+        !commands.is_empty(),
+        "shell command audit must inspect production and fixture commands"
+    );
+    for command in &commands {
         assert!(
             !command.command.contains("npm ci") && !command.command.contains("node_modules"),
             "target bootstrap belongs in command_manifest argv, not shared shell command {}:{}\n{}",

@@ -1,16 +1,16 @@
 use std::collections::BTreeMap;
 use std::fs;
-use std::io::Read;
+use std::io::{BufReader, Read};
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::{Arc, Mutex};
+use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use regex::Regex;
-use serde_json::Value;
+use serde_json::{json, Value};
 
 use crate::engine::executor::{interpolate_string, StepContext, StepExecutor};
 use crate::engine::runner::EngineError;
@@ -18,6 +18,9 @@ use crate::engine::transition::StepOutcome;
 use crate::workflow::command_manifest::{
     ArtifactExpectation, ArtifactKind, CommandEntry, CommandManifest, FailureOutcome,
 };
+use crate::workflow::config_loader::validate_command_manifest;
+
+const MANIFEST_GROUP_TIMEOUT_SECONDS: u64 = 900;
 
 pub struct CommandManifestGroupExecutor;
 
@@ -32,35 +35,53 @@ impl StepExecutor for CommandManifestGroupExecutor {
 }
 
 fn execute_manifest_group(
-    context: &StepContext,
+    context: &mut StepContext,
     params: &Value,
 ) -> Result<StepOutcome, EngineError> {
+    let has_group_param = params.get("command_manifest_group").is_some();
     let group_id = resolve_manifest_group_id(params, context, "").map_err(group_error)?;
+    let allow_empty_group = params
+        .get("allow_empty_group")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     if group_id.trim().is_empty() {
-        return Ok(StepOutcome::Success);
+        if allow_empty_group {
+            return Ok(StepOutcome::Success);
+        }
+        return if has_group_param {
+            Err(group_error("command_manifest_group must not be empty"))
+        } else {
+            Err(group_error("command_manifest_group is required"))
+        };
     }
     let manifest = parse_command_manifest(params)?;
+    let default_timeout_seconds = params
+        .get("timeout_seconds")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(MANIFEST_GROUP_TIMEOUT_SECONDS);
     let Some(command_ids) = manifest.groups.get(&group_id) else {
         return Err(group_error(format!(
             "unknown command_manifest group '{group_id}'"
         )));
     };
+    let commands_by_id: BTreeMap<&str, &CommandEntry> = manifest
+        .commands
+        .iter()
+        .map(|entry| (entry.id.as_str(), entry))
+        .collect();
+    let path_context = manifest_path_context_from_step(context);
     for command_id in command_ids {
-        let entry = manifest
-            .commands
-            .iter()
-            .find(|entry| entry.id == *command_id)
+        let entry = commands_by_id
+            .get(command_id.as_str())
             .ok_or_else(|| group_error(format!("unknown command manifest id '{command_id}'")))?;
-        let path_context = ManifestPathContext {
-            repo_root: context.work_dir().clone(),
-            default_working_directory: context.work_dir().clone(),
-            artifact_base_directory: context.work_dir().clone(),
-        };
-        let result = run_manifest_entry(entry, &path_context, 900).map_err(group_error)?;
+        let result = run_manifest_entry(entry, &path_context, default_timeout_seconds)
+            .map_err(group_error)?;
         let ManifestEntryExecution::Completed(result) = result else {
             continue;
         };
         if !result.passed() {
+            context.set("stdout", &manifest_group_failure_stdout(&result));
+            context.set("stderr", &result.bounded_stderr);
             return Ok(match result.failure_outcome {
                 FailureOutcome::Fatal => StepOutcome::Fatal,
                 FailureOutcome::Fixable => StepOutcome::Fixable,
@@ -70,6 +91,30 @@ fn execute_manifest_group(
     Ok(StepOutcome::Success)
 }
 
+fn context_path(context: &StepContext, key: &str) -> PathBuf {
+    context
+        .get(key)
+        .filter(|value| !value.is_empty())
+        .map_or_else(|| context.work_dir().clone(), PathBuf::from)
+}
+
+fn manifest_group_failure_stdout(result: &ManifestCommandResult) -> String {
+    json!({
+        "command_id": result.command_id,
+        "argv": result.argv,
+        "working_directory": result.working_directory.display().to_string(),
+        "exit_code": result.exit_code,
+        "timed_out": result.timed_out,
+        "status": result.status(),
+        "stdout": result.bounded_stdout,
+        "stderr": result.bounded_stderr,
+        "expectation_failures": result.expectation_failures,
+        "artifact_failures": result.artifact_failures,
+        "spawn_error": result.spawn_error,
+    })
+    .to_string()
+}
+
 fn parse_command_manifest(params: &Value) -> Result<CommandManifest, EngineError> {
     let value = params
         .get("command_manifest")
@@ -77,8 +122,10 @@ fn parse_command_manifest(params: &Value) -> Result<CommandManifest, EngineError
     if value.get("command").is_some() || value.get("shell").is_some() {
         return Err(group_error("shell-string command manifests are forbidden"));
     }
-    serde_json::from_value(value.clone())
-        .map_err(|err| group_error(format!("invalid command_manifest: {err}")))
+    let manifest: CommandManifest = serde_json::from_value(value.clone())
+        .map_err(|err| group_error(format!("invalid command_manifest: {err}")))?;
+    validate_command_manifest(&manifest).map_err(|err| group_error(err.message))?;
+    Ok(manifest)
 }
 
 fn group_error(message: impl Into<String>) -> EngineError {
@@ -110,32 +157,148 @@ fn entry_conditions_match(entry: &CommandEntry, work_dir: &Path) -> Result<bool,
 }
 
 fn remove_manifest_paths(entry: &CommandEntry, work_dir: &Path) -> Result<(), String> {
-    for path in &entry.remove_before_run {
-        let path = manifest_relative_path(work_dir, path)?;
-        if path.is_dir() {
-            fs::remove_dir_all(&path).map_err(|err| {
-                format!(
-                    "remove command '{}' path '{}': {err}",
-                    entry.id,
-                    path.display()
-                )
-            })?;
-        } else if path.exists() {
-            fs::remove_file(&path).map_err(|err| {
-                format!(
-                    "remove command '{}' path '{}': {err}",
-                    entry.id,
-                    path.display()
-                )
-            })?;
+    for (index, path) in entry.remove_before_run.iter().enumerate() {
+        let path = manifest_removal_path(work_dir, path)?;
+        remove_manifest_path(entry, work_dir, &path, index)?;
+    }
+    Ok(())
+}
+
+fn remove_manifest_path(
+    entry: &CommandEntry,
+    work_dir: &Path,
+    path: &Path,
+    index: usize,
+) -> Result<(), String> {
+    let Ok(metadata) = fs::symlink_metadata(path) else {
+        return Ok(());
+    };
+    validate_removal_target(entry, work_dir, path, &metadata)?;
+    let tombstone = tombstone_path(path, index);
+    fs::rename(path, &tombstone).map_err(|err| {
+        format!(
+            "rename command '{}' path '{}' for removal: {err}",
+            entry.id,
+            path.display()
+        )
+    })?;
+    match remove_tombstone(entry, &tombstone) {
+        Ok(()) => Ok(()),
+        Err(err) => {
+            let _ = fs::rename(&tombstone, path);
+            Err(err)
+        }
+    }
+}
+
+fn remove_tombstone(entry: &CommandEntry, tombstone: &Path) -> Result<(), String> {
+    let metadata = fs::symlink_metadata(tombstone).map_err(|err| {
+        format!(
+            "inspect command '{}' removal path '{}': {err}",
+            entry.id,
+            tombstone.display()
+        )
+    })?;
+    if metadata.is_dir() && !metadata.file_type().is_symlink() {
+        fs::remove_dir_all(tombstone).map_err(|err| {
+            format!(
+                "remove command '{}' path '{}': {err}",
+                entry.id,
+                tombstone.display()
+            )
+        })
+    } else {
+        fs::remove_file(tombstone).map_err(|err| {
+            format!(
+                "remove command '{}' path '{}': {err}",
+                entry.id,
+                tombstone.display()
+            )
+        })
+    }
+}
+
+fn validate_removal_target(
+    entry: &CommandEntry,
+    work_dir: &Path,
+    path: &Path,
+    metadata: &fs::Metadata,
+) -> Result<(), String> {
+    let root = removal_root(work_dir)?;
+    let parent = path.parent().unwrap_or(&root);
+    let canonical_parent = parent.canonicalize().map_err(|err| {
+        format!(
+            "inspect command '{}' removal parent '{}': {err}",
+            entry.id,
+            parent.display()
+        )
+    })?;
+    if !canonical_parent.starts_with(&root) {
+        return Err(format!(
+            "remove command '{}' path '{}' must stay under work_dir",
+            entry.id,
+            path.display()
+        ));
+    }
+    if !metadata.file_type().is_symlink() {
+        let canonical_path = path.canonicalize().map_err(|err| {
+            format!(
+                "inspect command '{}' removal path '{}': {err}",
+                entry.id,
+                path.display()
+            )
+        })?;
+        if !canonical_path.starts_with(&root) {
+            return Err(format!(
+                "remove command '{}' path '{}' must stay under work_dir",
+                entry.id,
+                path.display()
+            ));
         }
     }
     Ok(())
 }
 
+fn removal_root(work_dir: &Path) -> Result<PathBuf, String> {
+    work_dir
+        .canonicalize()
+        .map_err(|err| format!("inspect removal root '{}': {err}", work_dir.display()))
+}
+
+fn tombstone_path(path: &Path, index: usize) -> PathBuf {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("manifest-path");
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_nanos());
+    parent.join(format!(
+        ".luther-removing-{}-{index}-{stamp}-{file_name}",
+        std::process::id()
+    ))
+}
+
+fn manifest_removal_path(work_dir: &Path, relative: &str) -> Result<PathBuf, String> {
+    let path = manifest_relative_path(work_dir, relative)?;
+    if !has_named_path_component(Path::new(relative)) {
+        return Err(format!(
+            "remove_before_run path must not target work_dir itself: {relative}"
+        ));
+    }
+    Ok(path)
+}
+
+fn has_named_path_component(path: &Path) -> bool {
+    path.components()
+        .any(|component| matches!(component, std::path::Component::Normal(_)))
+}
+
 fn manifest_relative_path(work_dir: &Path, relative: &str) -> Result<PathBuf, String> {
     let path = Path::new(relative);
     if relative.is_empty()
+        || relative.contains('\\')
         || path.is_absolute()
         || path.components().any(|component| {
             matches!(
@@ -158,6 +321,31 @@ pub struct ManifestPathContext {
     pub repo_root: PathBuf,
     pub default_working_directory: PathBuf,
     pub artifact_base_directory: PathBuf,
+}
+
+pub fn manifest_path_context_from_step(context: &StepContext) -> ManifestPathContext {
+    ManifestPathContext {
+        repo_root: context.work_dir().clone(),
+        default_working_directory: manifest_default_working_directory(context),
+        artifact_base_directory: context_path(context, "artifact_base_dir"),
+    }
+}
+
+pub fn manifest_default_working_directory(context: &StepContext) -> PathBuf {
+    context
+        .get("default_command_cwd")
+        .filter(|value| !value.is_empty())
+        .map_or_else(
+            || context_path(context, "project_dir"),
+            |value| {
+                let path = PathBuf::from(value);
+                if path.is_absolute() {
+                    path
+                } else {
+                    context.work_dir().join(path)
+                }
+            },
+        )
 }
 
 #[derive(Clone, Debug)]
@@ -194,6 +382,8 @@ pub fn run_manifest_entry(
     paths: &ManifestPathContext,
     default_timeout_seconds: u64,
 ) -> Result<ManifestEntryExecution, String> {
+    // Manifest condition and removal paths are repository-root-relative, matching
+    // their validation as target repository paths rather than command cwd paths.
     if !entry_conditions_match(entry, &paths.repo_root)? {
         return Ok(ManifestEntryExecution::Skipped);
     }
@@ -305,11 +495,16 @@ pub fn run_manifest_command(request: ManifestCommandRequest) -> ManifestCommandR
     let mut attempts_remaining = request.retry_max_attempts.saturating_add(1);
     loop {
         let output = match spawn_manifest_child(&request) {
-            Ok(mut child) => wait_for_manifest_child(&mut child, request.timeout_seconds),
+            Ok(mut child) => wait_for_manifest_child(
+                &mut child,
+                request.timeout_seconds,
+                request.capture_limit_bytes,
+            ),
             Err(err) => return manifest_spawn_error(request, err),
         };
-        let Ok(output) = output else {
-            return manifest_spawn_error(request, std::io::Error::last_os_error());
+        let output = match output {
+            Ok(output) => output,
+            Err(err) => return manifest_spawn_error(request, err),
         };
         let should_retry =
             should_retry_manifest_result(&request, output.exit_code, attempts_remaining);
@@ -388,15 +583,25 @@ fn spawn_manifest_child(request: &ManifestCommandRequest) -> std::io::Result<std
 fn wait_for_manifest_child(
     child: &mut std::process::Child,
     timeout_seconds: u64,
+    capture_limit_bytes: usize,
 ) -> std::io::Result<ProcessOutputCapture> {
     let stdout_buffer = Arc::new(Mutex::new(String::new()));
     let stderr_buffer = Arc::new(Mutex::new(String::new()));
-    let stdout_reader = spawn_reader(child.stdout.take(), &stdout_buffer);
-    let stderr_reader = spawn_reader(child.stderr.take(), &stderr_buffer);
+    let stdout_reader = spawn_reader(child.stdout.take(), &stdout_buffer, capture_limit_bytes);
+    let stderr_reader = spawn_reader(child.stderr.take(), &stderr_buffer, capture_limit_bytes);
     let wait_result = wait_for_child_exit(child, timeout_seconds);
-    join_reader(stdout_reader);
-    join_reader(stderr_reader);
+    let stdout_done = wait_for_reader(&stdout_reader);
+    let stderr_done = wait_for_reader(&stderr_reader);
     let (exit_code, timed_out) = wait_result?;
+    if (!stdout_done || !stderr_done) && !timed_out {
+        terminate_child(child);
+        if !stdout_done {
+            let _ = wait_for_reader_after_cleanup(&stdout_reader);
+        }
+        if !stderr_done {
+            let _ = wait_for_reader_after_cleanup(&stderr_reader);
+        }
+    }
     Ok(ProcessOutputCapture {
         stdout_buffer,
         stderr_buffer,
@@ -578,17 +783,41 @@ impl ProcessOutputCapture {
 fn spawn_reader(
     pipe: Option<impl Read + Send + 'static>,
     buffer: &Arc<Mutex<String>>,
-) -> thread::JoinHandle<()> {
+    capture_limit_bytes: usize,
+) -> mpsc::Receiver<()> {
     let buffer = Arc::clone(buffer);
+    let (sender, receiver) = mpsc::channel();
     thread::spawn(move || {
-        if let Some(mut pipe) = pipe {
-            let mut text = String::new();
-            let _ = pipe.read_to_string(&mut text);
+        if let Some(pipe) = pipe {
+            let text = read_bounded_text(pipe, capture_limit_bytes);
             if let Ok(mut guard) = buffer.lock() {
                 *guard = text;
             }
         }
-    })
+        let _ = sender.send(());
+    });
+    receiver
+}
+
+fn read_bounded_text(pipe: impl Read, capture_limit_bytes: usize) -> String {
+    let mut reader = BufReader::new(pipe);
+    let capture_bound = capture_limit_bytes.saturating_add(1);
+    let mut bytes = Vec::with_capacity(capture_bound.min(8192));
+    let mut scratch = [0_u8; 8192];
+    loop {
+        match reader.read(&mut scratch) {
+            Ok(0) => break,
+            Ok(count) => {
+                let remaining = capture_bound.saturating_sub(bytes.len());
+                if remaining > 0 {
+                    bytes.extend_from_slice(&scratch[..count.min(remaining)]);
+                }
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => break,
+        }
+    }
+    String::from_utf8_lossy(&bytes).into_owned()
 }
 
 fn wait_for_child_exit(
@@ -612,15 +841,41 @@ fn wait_for_child_exit(
 fn terminate_child(child: &mut std::process::Child) {
     #[cfg(unix)]
     {
-        let pid = child.id().to_string();
-        let _ = Command::new("kill").args(["-TERM", "-", &pid]).status();
-        thread::sleep(Duration::from_millis(100));
+        let process_group = format!("-{}", child.id());
+        let _ = run_process_group_kill("TERM", &process_group);
+        thread::sleep(Duration::from_millis(250));
+        let _ = run_process_group_kill("KILL", &process_group);
+        thread::sleep(Duration::from_millis(25));
     }
     let _ = child.kill();
 }
 
-fn join_reader(reader: thread::JoinHandle<()>) {
-    let _ = reader.join();
+#[cfg(unix)]
+fn run_process_group_kill(
+    signal: &str,
+    process_group: &str,
+) -> std::io::Result<std::process::ExitStatus> {
+    let mut command = Command::new("/bin/kill");
+    command.env_clear();
+    apply_allowed_command_environment(&mut command);
+    let signal_arg = format!("-{signal}");
+    command.args([signal_arg.as_str(), process_group]);
+    command.stdin(Stdio::null());
+    command.stdout(Stdio::null());
+    command.stderr(Stdio::null());
+    command.status()
+}
+
+fn wait_for_reader(reader: &mpsc::Receiver<()>) -> bool {
+    wait_for_reader_for(reader, Duration::from_secs(1))
+}
+
+fn wait_for_reader_after_cleanup(reader: &mpsc::Receiver<()>) -> bool {
+    wait_for_reader_for(reader, Duration::from_secs(3))
+}
+
+fn wait_for_reader_for(reader: &mpsc::Receiver<()>, timeout: Duration) -> bool {
+    reader.recv_timeout(timeout).is_ok()
 }
 
 fn captured_excerpt(enabled: bool, text: &str, limit_bytes: usize) -> String {

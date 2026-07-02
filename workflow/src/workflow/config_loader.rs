@@ -537,19 +537,46 @@ fn validate_command_paths(entry: &CommandEntry) -> Result<()> {
         .run_if_missing_any
         .iter()
         .chain(entry.run_if_present_all.iter())
-        .chain(entry.remove_before_run.iter())
     {
         validate_command_relative_path(entry, path, "conditional path")?;
+    }
+    for path in &entry.remove_before_run {
+        validate_command_relative_path(entry, path, "removal path")?;
+        validate_command_removal_path(entry, path)?;
     }
     Ok(())
 }
 
 fn validate_command_relative_path(entry: &CommandEntry, path: &str, label: &str) -> Result<()> {
-    if path.is_empty() || Path::new(path).is_absolute() || path.split('/').any(|part| part == "..")
+    let path = Path::new(path);
+    if path.as_os_str().is_empty()
+        || path.to_string_lossy().contains('\\')
+        || path.components().any(|component| {
+            matches!(
+                component,
+                std::path::Component::ParentDir
+                    | std::path::Component::RootDir
+                    | std::path::Component::Prefix(_)
+            )
+        })
     {
         return command_manifest_error(format!(
-            "command '{}' {label} must stay under work_dir",
-            entry.id
+            "command '{}' {label} '{}' must stay under work_dir",
+            entry.id,
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
+fn validate_command_removal_path(entry: &CommandEntry, path: &str) -> Result<()> {
+    if !Path::new(path)
+        .components()
+        .any(|component| matches!(component, std::path::Component::Normal(_)))
+    {
+        return command_manifest_error(format!(
+            "command '{}' removal path '{}' must not target work_dir itself",
+            entry.id, path
         ));
     }
     Ok(())

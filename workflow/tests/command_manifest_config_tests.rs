@@ -156,18 +156,33 @@ fn manifest_validates_conditional_and_removal_paths() {
         "run_if_present_all",
         "remove_before_run",
     ] {
-        let manifest = format!(
-            r#"
+        for path in ["../outside", "/etc/passwd", "C:\\temp"] {
+            let manifest = format!(
+                r#"
 [[command_manifest.commands]]
 id = "bad-path"
 argv = ["true"]
-{field} = ["../outside"]
+{field} = ['{path}']
 "#
-        );
-        let err = parse_workflow_config_toml(&config_with_manifest(&manifest))
-            .expect_err("escaping manifest path rejected");
-        assert!(err.message.contains("must stay under work_dir"));
+            );
+            let err = parse_workflow_config_toml(&config_with_manifest(&manifest))
+                .expect_err("escaping manifest path rejected");
+            assert!(err.message.contains("must stay under work_dir"));
+        }
     }
+}
+
+#[test]
+fn manifest_rejects_removal_path_that_targets_work_dir_itself() {
+    let manifest = r#"
+[[command_manifest.commands]]
+id = "bad-removal"
+argv = ["true"]
+remove_before_run = ["."]
+"#;
+    let err = parse_workflow_config_toml(&config_with_manifest(manifest))
+        .expect_err("work_dir removal path rejected");
+    assert!(err.message.contains("must not target work_dir itself"));
 }
 
 #[test]
@@ -217,6 +232,14 @@ fn repository_path_fields_parse_and_validate() {
 }
 
 fn config_with_target_profile(manifest: &str, groups: &str) -> String {
+    config_with_target_profile_and_bootstrap(manifest, groups, "")
+}
+
+fn config_with_target_profile_and_bootstrap(
+    manifest: &str,
+    groups: &str,
+    bootstrap: &str,
+) -> String {
     config_with_manifest(&format!(
         r#"
 [target_profile.identity]
@@ -237,6 +260,8 @@ luther_label = "Working"
 
 [target_profile.prompt_guidance]
 ecosystem_name = "Rust"
+
+{bootstrap}
 
 {manifest}
 "#
@@ -289,6 +314,26 @@ local = ["lint"]
 }
 
 #[test]
+fn target_profile_validates_templated_commit_exclude_pathspecs_after_interpolation() {
+    for unsafe_value in ["../outside", "safe/'bad", "safe/bad\npath", "C:\\temp"] {
+        let config = config_with_target_profile("", "").replace(
+            "target_ecosystem_name = \"Rust\"",
+            &format!("target_ecosystem_name = \"Rust\"\ngenerated_path = \"{}\"", unsafe_value.replace('\\', "\\\\").replace('\n', "\\n")),
+        ).replace(
+            "[target_profile.prompt_guidance]\necosystem_name = \"Rust\"",
+            "[target_profile.diff_policy]\ncommit_exclude_pathspecs = [\":!{generated_path}\"]\n\n[target_profile.prompt_guidance]\necosystem_name = \"Rust\"",
+        );
+        let err = parse_workflow_config_toml(&config)
+            .expect_err("unsafe templated target commit pathspec should be rejected");
+        assert!(
+            err.message.contains("commit_exclude_pathspecs"),
+            "{unsafe_value} should report commit exclusion validation: {}",
+            err.message
+        );
+    }
+}
+
+#[test]
 fn target_profile_rejects_unknown_bootstrap_manifest_group_reference() {
     let err = parse_workflow_config_toml(&config_with_target_profile(
         r#"
@@ -309,4 +354,36 @@ local = ["lint"]
 
     assert!(err.message.contains("bootstrap command_group"));
     assert!(err.message.contains("unknown manifest group"));
+}
+
+#[test]
+fn target_profile_rejects_unsafe_commit_exclude_pathspecs() {
+    for pathspec in [
+        "packages/generated.txt",
+        ":!../outside",
+        ":!",
+        ":!safe/'bad",
+        ":!safe/bad\npath",
+        ":!C:\\temp",
+        ":!:(glob)**",
+        ":!packages/*.txt",
+        ":!packages/file?.txt",
+        ":!packages/[abc].txt",
+        ":!packages:name.txt",
+    ] {
+        let toml_pathspec = pathspec.replace('\\', "\\\\").replace('\n', "\\n");
+        let config = config_with_target_profile("", "").replace(
+            "[target_profile.prompt_guidance]\necosystem_name = \"Rust\"",
+            &format!(
+                "[target_profile.diff_policy]\ncommit_exclude_pathspecs = [\"{toml_pathspec}\"]\n\n[target_profile.prompt_guidance]\necosystem_name = \"Rust\""
+            ),
+        );
+        let err = parse_workflow_config_toml(&config)
+            .expect_err("unsafe target commit pathspec should be rejected");
+        assert!(
+            err.message.contains("commit_exclude_pathspecs"),
+            "{pathspec} should report commit exclusion validation: {}",
+            err.message
+        );
+    }
 }
