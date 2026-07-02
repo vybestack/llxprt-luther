@@ -2374,7 +2374,7 @@ fn luther_profile_uses_nested_project_paths_without_manifest_path_prefixes() {
     assert_eq!(config.repo.diff_path_base.as_deref(), Some("workflow"));
     assert_eq!(
         config.repo.diff_path_normalization,
-        Some(DiffPathNormalization::RepoRelative)
+        DiffPathNormalization::RepoRelative
     );
 
     for command_id in ["format", "check", "build", "test", "clippy"] {

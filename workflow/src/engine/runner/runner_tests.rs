@@ -97,7 +97,7 @@ fn test_workflow_config(workflow_type_id: &str) -> crate::workflow::schema::Work
             project_subdir: None,
             artifact_path_base: None,
             diff_path_base: None,
-            diff_path_normalization: None,
+            diff_path_normalization: crate::workflow::schema::DiffPathNormalization::RepoRelative,
         },
         guard_limits: crate::workflow::schema::GuardLimits {
             max_iterations: Some(3),
@@ -223,7 +223,7 @@ fn engine_runner_can_be_created() {
             project_subdir: None,
             artifact_path_base: None,
             diff_path_base: None,
-            diff_path_normalization: None,
+            diff_path_normalization: crate::workflow::schema::DiffPathNormalization::RepoRelative,
         },
         guard_limits: GuardLimits {
             max_iterations: Some(3),
@@ -287,7 +287,7 @@ fn seam_test_instance() -> WorkflowInstance {
             project_subdir: None,
             artifact_path_base: None,
             diff_path_base: None,
-            diff_path_normalization: None,
+            diff_path_normalization: crate::workflow::schema::DiffPathNormalization::RepoRelative,
         },
         guard_limits: GuardLimits {
             max_iterations: Some(3),

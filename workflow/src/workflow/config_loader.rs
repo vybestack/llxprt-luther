@@ -430,7 +430,7 @@ fn validate_repository_paths(config: &WorkflowConfig) -> Result<()> {
     {
         validate_repo_relative_path(field, path)?;
     }
-    if config.repo.diff_path_normalization == Some(DiffPathNormalization::BaseRelative)
+    if config.repo.diff_path_normalization == DiffPathNormalization::BaseRelative
         && config.repo.diff_path_base.is_none()
     {
         return Err(ConfigError {

@@ -328,6 +328,9 @@ fn artifact_matches(root: &Path, artifact: &ArtifactExpectation) -> bool {
     let Some(path) = artifact_path_under_root(root, &artifact.path) else {
         return false;
     };
+    let Some(path) = resolved_artifact_path_under_root(root, &path) else {
+        return false;
+    };
     match artifact.kind {
         ArtifactKind::Any => path.exists(),
         ArtifactKind::File => path.is_file(),
@@ -346,6 +349,12 @@ fn artifact_path_under_root(root: &Path, artifact_path: &str) -> Option<PathBuf>
         )
     });
     (!escapes_root).then(|| root.join(path))
+}
+
+fn resolved_artifact_path_under_root(root: &Path, path: &Path) -> Option<PathBuf> {
+    let root = root.canonicalize().ok()?;
+    let path = path.canonicalize().ok()?;
+    path.starts_with(&root).then_some(path)
 }
 
 fn manifest_spawn_error(

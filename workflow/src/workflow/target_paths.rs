@@ -27,10 +27,7 @@ impl TargetPathConfig {
             project_subdir: repository.project_subdir.clone().map(PathBuf::from),
             artifact_path_base: repository.artifact_path_base.clone().map(PathBuf::from),
             diff_path_base: repository.diff_path_base.clone().map(PathBuf::from),
-            diff_path_normalization: repository
-                .diff_path_normalization
-                .clone()
-                .unwrap_or_default(),
+            diff_path_normalization: repository.diff_path_normalization.clone(),
         }
     }
 
@@ -86,7 +83,7 @@ mod tests {
             project_subdir: project_subdir.map(ToString::to_string),
             artifact_path_base: None,
             diff_path_base: diff_path_base.map(ToString::to_string),
-            diff_path_normalization: Some(normalization),
+            diff_path_normalization: normalization,
         }
     }
 

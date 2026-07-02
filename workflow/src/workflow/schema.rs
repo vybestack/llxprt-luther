@@ -146,7 +146,7 @@ pub struct RepoConfig {
     #[serde(default)]
     pub diff_path_base: Option<String>,
     #[serde(default)]
-    pub diff_path_normalization: Option<DiffPathNormalization>,
+    pub diff_path_normalization: DiffPathNormalization,
 }
 
 #[derive(Debug, Clone, Default, serde::Deserialize, PartialEq, Eq)]

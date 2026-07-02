@@ -134,7 +134,8 @@ fn hello_world_config() -> WorkflowConfig {
             project_subdir: None,
             artifact_path_base: None,
             diff_path_base: None,
-            diff_path_normalization: None,
+            diff_path_normalization:
+                luther_workflow::workflow::schema::DiffPathNormalization::RepoRelative,
         },
         guard_limits: GuardLimits {
             max_iterations: Some(3),

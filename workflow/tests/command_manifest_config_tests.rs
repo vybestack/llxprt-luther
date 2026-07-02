@@ -173,7 +173,7 @@ fn repository_path_fields_parse_and_validate() {
     assert_eq!(config.repo.diff_path_base.as_deref(), Some("workflow"));
     assert_eq!(
         config.repo.diff_path_normalization,
-        Some(DiffPathNormalization::BaseRelative)
+        DiffPathNormalization::BaseRelative
     );
 
     let invalid = config_with_manifest("").replace(
