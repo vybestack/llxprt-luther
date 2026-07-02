@@ -8,7 +8,7 @@ pub fn parse_args() -> Cli {
 mod tests {
     use super::*;
     use clap::CommandFactory;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
 
     #[test]
     fn cli_parses_without_error() {
@@ -271,13 +271,22 @@ mod tests {
     #[test]
     fn runs_resume_parses_with_force() {
         // @plan:PLAN-20260623-LUTHER-CONTINUATION
-        let cli = Cli::try_parse_from(["luther-workflow", "runs", "resume", "run-123", "--force"])
-            .expect("runs resume should parse");
+        let cli = Cli::try_parse_from([
+            "luther-workflow",
+            "runs",
+            "resume",
+            "run-123",
+            "--force",
+            "--config-dir",
+            "/tmp/cfg",
+        ])
+        .expect("runs resume should parse");
         match cli.command {
             Commands::Runs(RunsArgs {
                 command: RunsCommand::Resume(args),
             }) => {
                 assert_eq!(args.run_id, "run-123");
+                assert_eq!(args.config_dir, Some(PathBuf::from("/tmp/cfg")));
                 assert!(args.force);
                 assert!(!args.json);
             }
@@ -294,6 +303,8 @@ mod tests {
             "retry",
             "run-123",
             "--from-failed-step",
+            "--config-dir",
+            "/tmp/cfg",
         ])
         .expect("runs retry should parse");
         match cli.command {
@@ -301,6 +312,7 @@ mod tests {
                 command: RunsCommand::Retry(args),
             }) => {
                 assert_eq!(args.run_id, "run-123");
+                assert_eq!(args.config_dir, Some(PathBuf::from("/tmp/cfg")));
                 assert!(args.from_failed_step);
                 assert!(!args.force);
             }

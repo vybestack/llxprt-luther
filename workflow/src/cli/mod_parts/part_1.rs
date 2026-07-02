@@ -454,6 +454,9 @@ pub struct RunsResumeArgs {
     /// The run id to resume
     #[arg(value_name = "RUN_ID")]
     pub run_id: String,
+    /// Directory containing workflows/ and workflow-configs/ subdirectories
+    #[arg(long, value_name = "DIR")]
+    pub config_dir: Option<PathBuf>,
     /// Permit resuming from a non-whitelisted (e.g. implementation) step
     #[arg(long)]
     pub force: bool,
@@ -469,6 +472,9 @@ pub struct RunsRetryArgs {
     /// The run id to retry
     #[arg(value_name = "RUN_ID")]
     pub run_id: String,
+    /// Directory containing workflows/ and workflow-configs/ subdirectories
+    #[arg(long, value_name = "DIR")]
+    pub config_dir: Option<PathBuf>,
     /// Retry from the failed external-wait step using its prior context
     #[arg(long)]
     pub from_failed_step: bool,

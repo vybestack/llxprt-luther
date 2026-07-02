@@ -584,7 +584,7 @@ pattern = "CodeRabbit"
 
 [[steps.parameters.check_policy.required]]
 mode = "prefix"
-pattern = "CI"
+pattern = "PR Quality"
 allow_skipped = false
 
 # @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P17

@@ -1073,18 +1073,6 @@ fn assert_pr_check_policy(watch_params: &serde_json::Value) {
         Some(300),
         "daemon polling should happen in bounded chunks",
     );
-    let required = policy
-        .get("required")
-        .and_then(serde_json::Value::as_array)
-        .expect("check_policy.required");
-    assert!(
-        required.iter().any(|entry| {
-            entry.get("mode").and_then(serde_json::Value::as_str) == Some("prefix")
-                && entry.get("pattern").and_then(serde_json::Value::as_str) == Some("CI")
-                && entry.get("allow_skipped").and_then(serde_json::Value::as_bool) == Some(false)
-        }),
-        "watch_pr_checks must require the target repository CI checks and disallow skipped required CI",
-    );
     let ignored = policy
         .get("ignored")
         .and_then(serde_json::Value::as_array)
@@ -1095,6 +1083,25 @@ fn assert_pr_check_policy(watch_params: &serde_json::Value) {
                 && entry.get("pattern").and_then(serde_json::Value::as_str) == Some("CodeRabbit")
         }),
         "CodeRabbit status checks must be ignored by the PR-check wait policy",
+    );
+}
+
+fn assert_required_pr_check_prefix(policy: &serde_json::Value, expected_prefix: &str) {
+    let required = policy
+        .get("required")
+        .and_then(serde_json::Value::as_array)
+        .expect("check_policy.required");
+    assert!(
+        required.iter().any(|entry| {
+            entry.get("mode").and_then(serde_json::Value::as_str) == Some("prefix")
+                && entry.get("pattern").and_then(serde_json::Value::as_str) == Some(expected_prefix)
+                && entry
+                    .get("allow_skipped")
+                    .and_then(serde_json::Value::as_bool)
+                    == Some(false)
+        }),
+        "watch_pr_checks must require {} and disallow skipped required checks",
+        expected_prefix,
     );
 }
 
@@ -1393,6 +1400,10 @@ fn post_pr_exact_p17_routing_contract_is_present() {
         "suspended PR check waits must retain artifact-backed poll identity",
     );
     assert_pr_check_policy(watch_params);
+    let policy = watch_params
+        .get("check_policy")
+        .expect("watch_pr_checks must declare a structured check_policy");
+    assert_required_pr_check_prefix(policy, "CI");
     assert_eq!(
         coderabbit_params
             .get("coderabbit_feedback_result_path")
@@ -2860,17 +2871,21 @@ fn production_and_fixture_llxprt_issue_fix_v1_are_equivalent() {
 // ============================================================================
 
 #[test]
-fn dogfood_pr_check_wait_policy_matches_issue_fix_policy() {
+fn dogfood_pr_check_wait_policy_targets_luther_pr_quality_checks() {
     let issue_fix = load_workflow_toml("config/workflows/llxprt-issue-fix-v1.toml");
     let dogfood = load_workflow_toml("config/workflows/llxprt-luther-dogfood-v1.toml");
     let issue_policy = watch_pr_check_policy(&issue_fix);
     let dogfood_policy = watch_pr_check_policy(&dogfood);
 
-    assert_eq!(
-        issue_policy, dogfood_policy,
-        "dogfood and issue-fix workflows must use the same durable PR check wait policy",
-    );
+    assert_pr_check_policy(watch_pr_check_params(&issue_fix));
     assert_pr_check_policy(watch_pr_check_params(&dogfood));
+    assert_eq!(
+        policy_without_required(issue_policy),
+        policy_without_required(dogfood_policy),
+        "dogfood and issue-fix workflows must keep the same durable PR check wait defaults",
+    );
+    assert_required_pr_check_prefix(issue_policy, "CI");
+    assert_required_pr_check_prefix(dogfood_policy, "PR Quality");
 }
 
 fn watch_pr_check_params(workflow_type: &WorkflowType) -> &serde_json::Value {
@@ -2886,6 +2901,14 @@ fn watch_pr_check_policy(workflow_type: &WorkflowType) -> &serde_json::Value {
     watch_pr_check_params(workflow_type)
         .get("check_policy")
         .expect("watch_pr_checks check_policy")
+}
+
+fn policy_without_required(policy: &serde_json::Value) -> serde_json::Value {
+    let mut policy = policy.clone();
+    if let Some(object) = policy.as_object_mut() {
+        object.remove("required");
+    }
+    policy
 }
 
 /// Issue #12: the shipped llxprt-issue-fix-v1 workflow must satisfy the new
