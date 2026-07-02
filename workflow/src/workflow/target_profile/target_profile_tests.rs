@@ -226,6 +226,10 @@ fn profile_resolution_derives_legacy_variables_and_repo_fields() {
 #[test]
 fn prompt_guidance_seeds_typed_defaults_and_bootstrap_group() {
     let mut config = test_config();
+    config.variables.insert(
+        "target_guidance_review".to_string(),
+        "preserve runtime review guidance".to_string(),
+    );
     config.target_profile = Some(crate::workflow::schema::TargetProfileConfig {
         prompt_guidance: TargetPromptGuidance {
             ecosystem_name: "Rust".to_string(),
@@ -260,6 +264,13 @@ fn prompt_guidance_seeds_typed_defaults_and_bootstrap_group() {
             .get("target_guidance_planning")
             .map(String::as_str),
         Some("")
+    );
+    assert_eq!(
+        config
+            .variables
+            .get("target_guidance_review")
+            .map(String::as_str),
+        Some("preserve runtime review guidance")
     );
     assert_eq!(
         config

@@ -2556,8 +2556,12 @@ fn push_changes_only_keeps_global_luther_runtime_staging_exclusion() {
         .expect("push_changes command exists");
 
     assert!(
-        command.contains("':!.luther'") && command.contains("':!.luther/**'"),
-        "push_changes must keep Luther runtime state out of target commits: {command}"
+        command.contains("':!.luther'"),
+        "push_changes must exclude .luther directory: {command}"
+    );
+    assert!(
+        command.contains("':!.luther/**'"),
+        "push_changes must exclude .luther/** contents: {command}"
     );
     assert!(
         !command.contains("NOTICES.txt"),

@@ -4,8 +4,7 @@
 /// @requirement:REQ-LF-VERIFY-001,REQ-LF-VERIFY-002,REQ-LF-VERIFY-003,REQ-LF-VERIFY-004,REQ-LF-VERIFY-005,REQ-LF-VERIFY-006,REQ-LF-VERIFY-007,REQ-LF-VERIFY-008,REQ-LF-VERIFY-009
 use crate::engine::executor::{interpolate_string, StepContext, StepExecutor};
 use crate::engine::executors::command_manifest::{
-    request_from_entry_with_paths, resolve_manifest_group_id, run_manifest_command,
-    ManifestPathContext,
+    resolve_manifest_group_id, run_manifest_entry, ManifestEntryExecution, ManifestPathContext,
 };
 use crate::engine::runner::EngineError;
 use crate::engine::transition::StepOutcome;
@@ -856,13 +855,16 @@ fn run_manifest_check(
     };
     let default_timeout = timeout.map_or(900, |duration| duration.as_secs());
     let path_context = manifest_path_context(context);
-    let request = request_from_entry_with_paths(&entry, &path_context, default_timeout).map_err(
-        |message| EngineError::StepExecutionError {
-            step_id: "verify".to_string(),
-            message,
-        },
-    )?;
-    let result = run_manifest_command(request);
+    let outcome =
+        run_manifest_entry(&entry, &path_context, default_timeout).map_err(|message| {
+            EngineError::StepExecutionError {
+                step_id: "verify".to_string(),
+                message,
+            }
+        })?;
+    let ManifestEntryExecution::Completed(result) = outcome else {
+        return Ok(Some(skipped_manifest_check(check_type, &entry)));
+    };
     let mut errors = parse_check_output(
         check_type,
         &result.bounded_stdout,
@@ -896,6 +898,25 @@ fn run_manifest_check(
             failure_classification: failure_classification(&result.failure_outcome),
         }),
     }))
+}
+
+fn skipped_manifest_check(check_type: &str, entry: &CommandEntry) -> CheckResult {
+    CheckResult {
+        check_type: check_type.to_string(),
+        passed: true,
+        exit_code: 0,
+        errors: Vec::new(),
+        raw_stdout: "skipped by command manifest conditions".to_string(),
+        raw_stderr: String::new(),
+        command: Some(CommandEvidence {
+            command_id: entry.id.clone(),
+            argv: entry.argv.clone(),
+            cwd: String::new(),
+            expectation_failures: Vec::new(),
+            artifact_failures: Vec::new(),
+            failure_classification: failure_classification(&entry.failure_outcome),
+        }),
+    }
 }
 fn manifest_path_context(context: &StepContext) -> ManifestPathContext {
     ManifestPathContext {

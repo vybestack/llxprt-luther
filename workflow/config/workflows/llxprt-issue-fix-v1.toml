@@ -170,7 +170,6 @@ jq -n --argjson existing_pr_number "$EXISTING_PR_NUMBER" --arg existing_pr_url "
 step_id = "bootstrap_workspace"
 step_type = "command_manifest_group"
 description = "Run target-specific bootstrap commands"
-depends_on = ["setup_workspace"]
 
 [steps.parameters]
 command_manifest_group = "{target_bootstrap_command_group}"

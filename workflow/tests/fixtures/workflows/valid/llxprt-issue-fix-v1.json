@@ -38,9 +38,6 @@
       "step_id": "bootstrap_workspace",
       "step_type": "command_manifest_group",
       "description": "Run target-specific bootstrap commands",
-      "depends_on": [
-        "setup_workspace"
-      ],
       "parameters": {
         "command_manifest_group": "{target_bootstrap_command_group}"
       }

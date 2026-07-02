@@ -261,36 +261,36 @@ fn merge_list_variables(config: &mut WorkflowConfig, profile: &TargetProfileConf
 
 fn merge_prompt_guidance(config: &mut WorkflowConfig, profile: &TargetProfileConfig) {
     let guidance = &profile.prompt_guidance;
-    insert_var(config, "target_ecosystem_name", &guidance.ecosystem_name);
-    insert_var(config, "target_guidance_planning", &guidance.planning);
-    insert_var(
+    insert_guidance_var(config, "target_ecosystem_name", &guidance.ecosystem_name);
+    insert_guidance_var(config, "target_guidance_planning", &guidance.planning);
+    insert_guidance_var(
         config,
         "target_guidance_implementation",
         &guidance.implementation,
     );
-    insert_var(config, "target_guidance_review", &guidance.review);
-    insert_var(
+    insert_guidance_var(config, "target_guidance_review", &guidance.review);
+    insert_guidance_var(
         config,
         "target_guidance_verification",
         &guidance.verification,
     );
-    insert_var(config, "target_guidance_style", &guidance.style);
-    insert_var(
+    insert_guidance_var(config, "target_guidance_style", &guidance.style);
+    insert_guidance_var(
         config,
         "target_guidance_fixture_parity",
         &guidance.fixture_parity,
     );
-    insert_var(
+    insert_guidance_var(
         config,
         "target_guidance_forbidden_actions",
         &guidance.forbidden_actions,
     );
-    insert_var(
+    insert_guidance_var(
         config,
         "target_guidance_remediation_scope",
         &guidance.remediation_scope,
     );
-    insert_var(
+    insert_guidance_var(
         config,
         "target_command_manifest_summary",
         &guidance.command_manifest_summary,
@@ -652,6 +652,14 @@ fn valid_token_tail(rest: &str) -> bool {
 
 fn valid_token_tail_byte(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || byte == b'_'
+}
+
+fn insert_guidance_var(config: &mut WorkflowConfig, key: &str, value: &str) {
+    if value.is_empty() {
+        config.variables.entry(key.to_string()).or_default();
+    } else {
+        insert_var(config, key, value);
+    }
 }
 
 fn insert_var(config: &mut WorkflowConfig, key: &str, value: &str) {

@@ -1,7 +1,7 @@
 use super::post_pr_stages::{PostPrTestCommandRequest, PostPrTestCommandResult};
 use super::*;
 use crate::engine::executors::command_manifest::{
-    request_from_entry, run_manifest_command, ManifestCommandResult,
+    run_manifest_entry, ManifestCommandResult, ManifestEntryExecution, ManifestPathContext,
 };
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
@@ -18,22 +18,41 @@ pub(super) fn run_manifest_post_pr_test_process(
     let mut resolved_entry = entry.clone();
     resolved_entry.working_directory = None;
     resolved_entry.project_subdirectory = None;
-    let manifest_request = match request_from_entry(
-        &resolved_entry,
-        &request.working_directory,
-        request.timeout_seconds,
-    ) {
-        Ok(mut manifest_request) => {
-            manifest_request.working_directory = request.working_directory.clone();
-            manifest_request.artifact_base_directory = request.artifact_base_directory.clone();
-            manifest_request
-        }
+    let paths = ManifestPathContext {
+        repo_root: request.working_directory.clone(),
+        default_working_directory: request.working_directory.clone(),
+        artifact_base_directory: request.artifact_base_directory.clone(),
+    };
+    let result = match run_manifest_entry(&resolved_entry, &paths, request.timeout_seconds) {
+        Ok(ManifestEntryExecution::Completed(result)) => result,
+        Ok(ManifestEntryExecution::Skipped) => return skipped_manifest_post_pr_result(request),
         Err(err) => return manifest_post_pr_error(request, err),
     };
-    let result = run_manifest_command(manifest_request);
     write_optional_log(&request.stdout_log_path, &result.bounded_stdout);
     write_optional_log(&request.stderr_log_path, &result.bounded_stderr);
-    post_pr_result_from_manifest(request, result)
+    post_pr_result_from_manifest(request, *result)
+}
+
+fn skipped_manifest_post_pr_result(request: PostPrTestCommandRequest) -> PostPrTestCommandResult {
+    let stdout = "skipped by command manifest conditions".to_string();
+    write_optional_log(&request.stdout_log_path, &stdout);
+    write_optional_log(&request.stderr_log_path, "");
+    PostPrTestCommandResult {
+        command_id: request.command_id,
+        argv: request.argv,
+        working_directory: request.working_directory,
+        exit_code: Some(0),
+        signal: None,
+        status: "passed".to_string(),
+        bounded_stdout: stdout,
+        bounded_stderr: String::new(),
+        stdout_log_path: Some(request.stdout_log_path),
+        stderr_log_path: Some(request.stderr_log_path),
+        spawn_error: None,
+        expectation_failures: Vec::new(),
+        artifact_failures: Vec::new(),
+        failure_classification: Some("fixable".to_string()),
+    }
 }
 
 fn manifest_post_pr_error(

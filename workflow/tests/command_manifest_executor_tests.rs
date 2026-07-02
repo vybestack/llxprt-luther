@@ -297,6 +297,38 @@ fn command_manifest_group_honors_conditions_and_removal_paths() {
 }
 
 #[test]
+fn command_manifest_group_skips_command_when_present_all_not_satisfied() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    fs::write(temp.path().join("stale.txt"), "stale").expect("stale");
+    let mut context = luther_workflow::engine::executor::StepContext::new(
+        temp.path().to_path_buf(),
+        "run".to_string(),
+    );
+    let params = serde_json::json!({
+        "command_manifest_group": "bootstrap",
+        "command_manifest": {
+            "commands": [{
+                "id": "boot",
+                "argv": ["python3", "-c", "from pathlib import Path; Path('created.txt').write_text('ok')"],
+                "run_if_present_all": ["does_not_exist"],
+                "remove_before_run": ["stale.txt"]
+            }],
+            "groups": { "bootstrap": ["boot"] }
+        }
+    });
+    let registry = luther_workflow::engine::executor::ExecutorRegistry::with_defaults();
+    let outcome = registry
+        .dispatch("command_manifest_group", &mut context, &params)
+        .expect("dispatch command_manifest_group");
+    assert_eq!(
+        outcome,
+        luther_workflow::engine::transition::StepOutcome::Success
+    );
+    assert!(!temp.path().join("created.txt").exists());
+    assert!(temp.path().join("stale.txt").exists());
+}
+
+#[test]
 fn command_manifest_group_empty_group_is_noop() {
     let temp = tempfile::tempdir().expect("tempdir");
     let mut context = luther_workflow::engine::executor::StepContext::new(

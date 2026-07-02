@@ -51,12 +51,15 @@ fn execute_manifest_group(
             .iter()
             .find(|entry| entry.id == *command_id)
             .ok_or_else(|| group_error(format!("unknown command manifest id '{command_id}'")))?;
-        if !entry_conditions_match(entry, context.work_dir())? {
+        let path_context = ManifestPathContext {
+            repo_root: context.work_dir().clone(),
+            default_working_directory: context.work_dir().clone(),
+            artifact_base_directory: context.work_dir().clone(),
+        };
+        let result = run_manifest_entry(entry, &path_context, 900).map_err(group_error)?;
+        let ManifestEntryExecution::Completed(result) = result else {
             continue;
-        }
-        remove_manifest_paths(entry, context.work_dir())?;
-        let request = request_from_entry(entry, context.work_dir(), 900).map_err(group_error)?;
-        let result = run_manifest_command(request);
+        };
         if !result.passed() {
             return Ok(match result.failure_outcome {
                 FailureOutcome::Fatal => StepOutcome::Fatal,
@@ -85,7 +88,7 @@ fn group_error(message: impl Into<String>) -> EngineError {
     }
 }
 
-fn entry_conditions_match(entry: &CommandEntry, work_dir: &Path) -> Result<bool, EngineError> {
+fn entry_conditions_match(entry: &CommandEntry, work_dir: &Path) -> Result<bool, String> {
     if !entry.run_if_missing_any.is_empty()
         && !entry
             .run_if_missing_any
@@ -104,24 +107,24 @@ fn entry_conditions_match(entry: &CommandEntry, work_dir: &Path) -> Result<bool,
     Ok(true)
 }
 
-fn remove_manifest_paths(entry: &CommandEntry, work_dir: &Path) -> Result<(), EngineError> {
+fn remove_manifest_paths(entry: &CommandEntry, work_dir: &Path) -> Result<(), String> {
     for path in &entry.remove_before_run {
-        let path = manifest_relative_path(work_dir, path).map_err(group_error)?;
+        let path = manifest_relative_path(work_dir, path)?;
         if path.is_dir() {
             fs::remove_dir_all(&path).map_err(|err| {
-                group_error(format!(
+                format!(
                     "remove command '{}' path '{}': {err}",
                     entry.id,
                     path.display()
-                ))
+                )
             })?;
         } else if path.exists() {
             fs::remove_file(&path).map_err(|err| {
-                group_error(format!(
+                format!(
                     "remove command '{}' path '{}': {err}",
                     entry.id,
                     path.display()
-                ))
+                )
             })?;
         }
     }
@@ -176,6 +179,27 @@ pub struct ManifestCommandRequest {
     pub failure_outcome: FailureOutcome,
     pub retry_max_attempts: u32,
     pub retry_exit_codes: Vec<i32>,
+}
+
+#[derive(Clone, Debug)]
+pub enum ManifestEntryExecution {
+    Skipped,
+    Completed(Box<ManifestCommandResult>),
+}
+
+pub fn run_manifest_entry(
+    entry: &CommandEntry,
+    paths: &ManifestPathContext,
+    default_timeout_seconds: u64,
+) -> Result<ManifestEntryExecution, String> {
+    if !entry_conditions_match(entry, &paths.repo_root)? {
+        return Ok(ManifestEntryExecution::Skipped);
+    }
+    remove_manifest_paths(entry, &paths.repo_root)?;
+    let request = request_from_entry_with_paths(entry, paths, default_timeout_seconds)?;
+    Ok(ManifestEntryExecution::Completed(Box::new(
+        run_manifest_command(request),
+    )))
 }
 
 #[derive(Clone, Debug)]
