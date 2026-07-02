@@ -1350,7 +1350,9 @@ fn assert_scoped_git_auth_cleanup(content: &str) {
             && content.contains("GIT_CONFIG_COUNT=1")
             && content.contains("GIT_CONFIG_KEY_0=\"http.${GH_SERVER_URL}.extraheader\"")
             && content.contains("GIT_CONFIG_VALUE_0=\"AUTHORIZATION: bearer ${GH_TOKEN}\"")
-            && content.contains("unset GIT_CONFIG_GLOBAL GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0")
+            && content.contains(
+                "unset GIT_CONFIG_GLOBAL GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0"
+            )
             && content.contains("ocr-git-auth-config")
             && content.contains("trap cleanup_git_auth EXIT")
             && content.contains("trap 'cleanup_git_auth; exit 130' INT TERM")
