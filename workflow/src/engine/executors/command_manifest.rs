@@ -325,12 +325,27 @@ fn artifact_failures(request: &ManifestCommandRequest) -> Vec<String> {
 }
 
 fn artifact_matches(root: &Path, artifact: &ArtifactExpectation) -> bool {
-    let path = root.join(&artifact.path);
+    let Some(path) = artifact_path_under_root(root, &artifact.path) else {
+        return false;
+    };
     match artifact.kind {
         ArtifactKind::Any => path.exists(),
         ArtifactKind::File => path.is_file(),
         ArtifactKind::Directory => path.is_dir(),
     }
+}
+
+fn artifact_path_under_root(root: &Path, artifact_path: &str) -> Option<PathBuf> {
+    let path = Path::new(artifact_path);
+    let escapes_root = path.components().any(|component| {
+        matches!(
+            component,
+            std::path::Component::Prefix(_)
+                | std::path::Component::RootDir
+                | std::path::Component::ParentDir
+        )
+    });
+    (!escapes_root).then(|| root.join(path))
 }
 
 fn manifest_spawn_error(

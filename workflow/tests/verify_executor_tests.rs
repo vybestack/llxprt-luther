@@ -760,6 +760,36 @@ fn test_verify_structured_diff_gate_existing_pr_fallback() {
 }
 
 #[test]
+fn test_verify_structured_diff_gate_rejects_invalid_existing_pr_fallback() {
+    let executor = VerifyExecutor;
+    let temp_dir = tempfile::tempdir().unwrap();
+    let work_dir = temp_dir.path();
+    std::process::Command::new("git")
+        .args(["init"])
+        .current_dir(work_dir)
+        .output()
+        .expect("git init");
+    let mut ctx = StepContext::new(work_dir.to_path_buf(), "run-1".to_string());
+    ctx.set_current_step_id("setup_workspace");
+    ctx.set("existing_pr_number", " not-a-pr ");
+    ctx.set_current_step_id("run_tests");
+
+    let params = json!({
+        "checks": ["diff_or_existing_pr"],
+        "diff_or_existing_pr": {
+            "required_path_regex": "^src/",
+            "failure_message": "No source diff found",
+            "existing_pr_number": "{setup_workspace.existing_pr_number}"
+        }
+    });
+
+    let result = executor
+        .execute(&mut ctx, &params)
+        .expect("verify executes");
+    assert_eq!(result, StepOutcome::Fatal);
+}
+
+#[test]
 fn test_verify_parses_eslint_stylish_errors_without_storing_all_warnings_as_error() {
     let executor = VerifyExecutor;
     let temp_dir = tempfile::tempdir().unwrap();

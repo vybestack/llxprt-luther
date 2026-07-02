@@ -132,6 +132,41 @@ fn manifest_executor_checks_artifacts_even_on_zero_exit() {
 }
 
 #[test]
+fn manifest_executor_rejects_artifact_paths_that_escape_base() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    fs::write(temp.path().join("outside.txt"), "outside").expect("outside artifact");
+    fs::write(temp.path().join("bad.log"), "bad").expect("bad artifact");
+    let mut entry = command_entry("artifact-containment", &["true"]);
+    entry.artifacts = ArtifactExpectations {
+        required: vec![
+            ArtifactExpectation {
+                path: "../outside.txt".to_string(),
+                kind: ArtifactKind::File,
+            },
+            ArtifactExpectation {
+                path: temp.path().join("outside.txt").display().to_string(),
+                kind: ArtifactKind::File,
+            },
+        ],
+        forbidden: vec![ArtifactExpectation {
+            path: "../bad.log".to_string(),
+            kind: ArtifactKind::File,
+        }],
+    };
+    let artifact_base = temp.path().join("artifacts");
+    fs::create_dir(&artifact_base).expect("artifact base");
+    let paths = ManifestPathContext {
+        repo_root: temp.path().to_path_buf(),
+        default_working_directory: temp.path().to_path_buf(),
+        artifact_base_directory: artifact_base,
+    };
+    let request = request_from_entry_with_paths(&entry, &paths, 5).expect("request");
+    let result = run_manifest_command(request);
+    assert!(!result.passed());
+    assert_eq!(result.artifact_failures.len(), 2);
+}
+
+#[test]
 fn manifest_executor_honors_acceptable_exit_codes() {
     let temp = tempfile::tempdir().expect("tempdir");
     let mut entry = command_entry("exit", &["python3", "-c", "raise SystemExit(7)"]);

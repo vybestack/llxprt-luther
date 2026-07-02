@@ -6,7 +6,8 @@ use std::path::Path;
 use crate::engine::executor::extract_tokens;
 use crate::workflow::command_manifest::{CommandEntry, CommandManifest};
 use crate::workflow::schema::{
-    DaemonSchedulerConfig, DiscoveryConfig, StepDef, WorkflowConfig, WorkflowRunRef, WorkflowType,
+    DaemonSchedulerConfig, DiffPathNormalization, DiscoveryConfig, StepDef, WorkflowConfig,
+    WorkflowRunRef, WorkflowType,
 };
 use crate::workflow::validation::validate_workflow_graph;
 
@@ -428,6 +429,15 @@ fn validate_repository_paths(config: &WorkflowConfig) -> Result<()> {
     .filter_map(|(field, value)| value.map(|value| (field, value)))
     {
         validate_repo_relative_path(field, path)?;
+    }
+    if config.repo.diff_path_normalization == Some(DiffPathNormalization::BaseRelative)
+        && config.repo.diff_path_base.is_none()
+    {
+        return Err(ConfigError {
+            message: "repository.diff_path_base is required when repository.diff_path_normalization is base_relative".to_string(),
+            source_path: None,
+            kind: ConfigErrorKind::ValidationError,
+        });
     }
     Ok(())
 }

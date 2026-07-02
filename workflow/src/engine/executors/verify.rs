@@ -284,12 +284,13 @@ fn run_diff_or_existing_pr_check(
         .map_err(|err| diff_gate_error(format!("invalid required_path_regex: {err}")))?;
     let existing_pr =
         optional_string(config, "existing_pr_number", context).unwrap_or_else(|| "0".to_string());
+    let has_existing_pr = valid_existing_pr_number(&existing_pr);
     let changed_paths = git_changed_paths(context.work_dir())?;
     let matched_path = changed_paths
         .iter()
         .filter_map(|path| normalize_diff_path(context, path))
         .find(|path| regex.is_match(path));
-    let passed = matched_path.is_some() || existing_pr != "0";
+    let passed = matched_path.is_some() || has_existing_pr;
     let message = optional_string(config, "failure_message", context)
         .unwrap_or_else(|| "required changed path not found".to_string());
     Ok(CheckExecutionOutcome::Completed(diff_gate_result(
@@ -298,6 +299,13 @@ fn run_diff_or_existing_pr_check(
         changed_paths,
         message,
     )))
+}
+
+fn valid_existing_pr_number(existing_pr: &str) -> bool {
+    existing_pr
+        .trim()
+        .parse::<u64>()
+        .is_ok_and(|number| number != 0)
 }
 
 fn git_changed_paths(work_dir: &std::path::Path) -> Result<Vec<String>, EngineError> {

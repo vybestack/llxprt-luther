@@ -16,7 +16,9 @@ use crate::persistence::{
     StateSnapshot, CHECKPOINT_STATUS_WAITING,
 };
 use crate::workflow::schema::{StepDef, TransitionDef};
-use crate::workflow::target_paths::TargetPathConfig;
+
+mod target_path_context;
+use target_path_context::seed_target_paths;
 
 /// Contextual metadata for a run: paths and GitHub references.
 /// Used to populate the persistent run registry beyond the core identifiers.
@@ -947,37 +949,6 @@ fn build_step_context(instance: &WorkflowInstance) -> Result<StepContext, Engine
     seed_target_paths(&mut context, instance);
 
     Ok(context)
-}
-
-fn seed_target_paths(context: &mut StepContext, instance: &WorkflowInstance) {
-    let target_paths = TargetPathConfig::from_repo_config(&instance.config.repo);
-    let repo_root = context.work_dir().clone();
-    let project_dir = target_paths.project_dir(&repo_root);
-    let artifact_base_dir = target_paths.artifact_base_dir(&repo_root);
-    let diff_base_dir = target_paths.diff_base_dir(&repo_root);
-    context.set("repo_root", &repo_root.to_string_lossy());
-    context.set(
-        "project_subdir",
-        &path_value(target_paths.project_subdir.as_deref()),
-    );
-    context.set("project_dir", &project_dir.to_string_lossy());
-    context.set("artifact_base_dir", &artifact_base_dir.to_string_lossy());
-    context.set(
-        "diff_path_base",
-        &path_value(target_paths.diff_path_base.as_deref()),
-    );
-    context.set("diff_path_base_dir", &diff_base_dir.to_string_lossy());
-    context.set(
-        "diff_path_normalization",
-        match target_paths.diff_path_normalization {
-            crate::workflow::schema::DiffPathNormalization::RepoRelative => "repo_relative",
-            crate::workflow::schema::DiffPathNormalization::BaseRelative => "base_relative",
-        },
-    );
-}
-
-fn path_value(path: Option<&std::path::Path>) -> String {
-    path.map_or_else(String::new, |path| path.to_string_lossy().into_owned())
 }
 
 fn run_outcome_without_transition(step_id: &str, outcome: &StepOutcome) -> RunOutcome {

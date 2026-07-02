@@ -25,7 +25,7 @@ pub(super) fn run_manifest_post_pr_test_process(
     ) {
         Ok(mut manifest_request) => {
             manifest_request.working_directory = request.working_directory.clone();
-            manifest_request.artifact_base_directory = request.working_directory.clone();
+            manifest_request.artifact_base_directory = request.artifact_base_directory.clone();
             manifest_request
         }
         Err(err) => return manifest_post_pr_error(request, err),
