@@ -126,7 +126,7 @@ pub fn classify_pr_checks(
     let (current_checks, stale_checks): (Vec<_>, Vec<_>) = checks
         .into_iter()
         .partition(|check| check.head_sha.as_deref().unwrap_or(head_sha) == head_sha);
-    let ignored_check_ids = ignored_check_ids(&current_checks, &config.ignored);
+    let ignored_check_ids = ignored_check_ids(&current_checks, &stale_checks, &config.ignored);
     let considered = current_checks
         .iter()
         .filter(|check| !ignored_check_ids.contains(&check.check_id))
@@ -370,9 +370,14 @@ fn missing_state(
     }
 }
 
-fn ignored_check_ids(checks: &[PrCheckObservation], ignored: &[PrCheckDefinition]) -> Vec<String> {
-    checks
+fn ignored_check_ids(
+    current_checks: &[PrCheckObservation],
+    stale_checks: &[PrCheckObservation],
+    ignored: &[PrCheckDefinition],
+) -> Vec<String> {
+    current_checks
         .iter()
+        .chain(stale_checks.iter())
         .filter(|check| {
             ignored
                 .iter()
@@ -524,6 +529,22 @@ mod tests {
         let result = classify_pr_checks("h", vec![check], &config, PrCheckWaitCounters::default());
         assert_eq!(result.overall_state, OverallState::PendingTimeout);
         assert_eq!(result.ignored_check_ids, vec!["ci".to_string()]);
+    }
+
+    #[test]
+    fn stale_ignored_checks_are_reported_for_collectors() {
+        let config = PrCheckWaitConfig {
+            ignored: vec![definition("CodeRabbit")],
+            ..PrCheckWaitConfig::default()
+        };
+        let mut stale = check("coderabbit-old", "pending");
+        stale.name = "CodeRabbit".to_string();
+        stale.head_sha = Some("old".to_string());
+
+        let result = classify_pr_checks("h", vec![stale], &config, PrCheckWaitCounters::default());
+
+        assert_eq!(result.ignored_check_ids, vec!["coderabbit-old".to_string()]);
+        assert_eq!(result.stale_checks.len(), 1);
     }
 
     #[test]

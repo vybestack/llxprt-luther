@@ -551,6 +551,29 @@ fn p07_ci_failures_path(temp: &tempfile::TempDir) -> PathBuf {
         .join("ci-failures.json")
 }
 
+fn p07_pr_check_status_path(temp: &tempfile::TempDir) -> PathBuf {
+    temp.path()
+        .join("artifacts")
+        .join("pr-followup")
+        .join("current")
+        .join("run-p07")
+        .join("example")
+        .join("workflow")
+        .join("1910")
+        .join("pr-check-status.json")
+}
+
+fn set_p07_ignored_check_ids(temp: &tempfile::TempDir, ids: &[&str]) {
+    let check_status_path = p07_pr_check_status_path(temp);
+    let mut check_status = read_json(&check_status_path);
+    check_status["ignored_check_ids"] = serde_json::json!(ids);
+    std::fs::write(
+        &check_status_path,
+        serde_json::to_string_pretty(&check_status).expect("serialize check status"),
+    )
+    .expect("write check status");
+}
+
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P07
 /// @requirement:REQ-PRFU-007
 /// @pseudocode lines 1-5,17-18
@@ -2271,6 +2294,101 @@ fn ci_failure_failed_pending_collects_logs_preserves_pending_and_routes_terminal
         StepOutcome::Fatal,
         "failed+pending CI collection must collect concrete failure logs, preserve pending_or_unknown, and route terminal",
     );
+}
+
+/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P07
+/// @requirement:REQ-PRFU-007
+#[test]
+fn ci_failure_ignores_stale_checks_marked_ignored_by_policy() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_p07_check_status(
+        &temp,
+        "failed",
+        serde_json::json!([
+            { "check_id": "build", "name": "build", "state": "failure", "conclusion": "failure", "bucket": "failed", "url": null, "run_id": null, "job_id": null }
+        ]),
+        serde_json::json!([
+            { "check_id": "coderabbit", "name": "CodeRabbit", "state": "PENDING", "conclusion": "pending", "bucket": "pending", "url": null, "run_id": null, "job_id": null }
+        ]),
+        serde_json::Value::Null,
+    );
+    set_p07_ignored_check_ids(&temp, &["coderabbit"]);
+    let mut context = p07_context(&temp);
+    let outcome = GithubCheckFailuresExecutorWithRunner::new(
+        ScriptedGithubRunner::new(
+            serde_json::json!([]),
+            serde_json::json!({ "total_count": 0, "check_runs": [] }),
+        ),
+        FixedClock,
+    )
+    .execute(&mut context, &p07_params(&temp))
+    .expect("collect ci failures");
+    let artifact = read_json(&p07_ci_failures_path(&temp));
+    assert_expected_outcome(
+        outcome,
+        StepOutcome::Success,
+        "ignored stale checks must not block collecting concrete CI failures",
+    );
+    assert_eq!(
+        artifact
+            .get("failures")
+            .and_then(serde_json::Value::as_array)
+            .expect("failures")
+            .len(),
+        1
+    );
+    assert!(artifact
+        .get("pending_or_unknown")
+        .and_then(serde_json::Value::as_array)
+        .expect("pending")
+        .is_empty());
+}
+
+/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P07
+/// @requirement:REQ-PRFU-007
+#[test]
+fn ci_failure_ignores_pending_checks_marked_ignored_by_policy() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_p07_check_status(
+        &temp,
+        "failed",
+        serde_json::json!([
+            { "check_id": "build", "name": "build", "state": "failure", "conclusion": "failure", "bucket": "failed", "url": null, "run_id": null, "job_id": null },
+            { "check_id": "coderabbit", "name": "CodeRabbit", "state": "PENDING", "conclusion": "pending", "bucket": "pending", "url": null, "run_id": null, "job_id": null }
+        ]),
+        serde_json::json!([]),
+        serde_json::Value::Null,
+    );
+    set_p07_ignored_check_ids(&temp, &["coderabbit"]);
+    let mut context = p07_context(&temp);
+    let outcome = GithubCheckFailuresExecutorWithRunner::new(
+        ScriptedGithubRunner::new(
+            serde_json::json!([]),
+            serde_json::json!({ "total_count": 0, "check_runs": [] }),
+        ),
+        FixedClock,
+    )
+    .execute(&mut context, &p07_params(&temp))
+    .expect("collect ci failures");
+    let artifact = read_json(&p07_ci_failures_path(&temp));
+    assert_expected_outcome(
+        outcome,
+        StepOutcome::Success,
+        "ignored pending checks must not block collecting concrete CI failures",
+    );
+    assert_eq!(
+        artifact
+            .get("failures")
+            .and_then(serde_json::Value::as_array)
+            .expect("failures")
+            .len(),
+        1
+    );
+    assert!(artifact
+        .get("pending_or_unknown")
+        .and_then(serde_json::Value::as_array)
+        .expect("pending")
+        .is_empty());
 }
 
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P07
@@ -9214,6 +9332,43 @@ fn marker_comment_shell_safety_uses_body_files_or_graphql_variables() {
         StepOutcome::Success,
         "marker comment shell safety must use body files or GraphQL variables for malicious CodeRabbit text",
     );
+}
+
+/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P13
+/// @requirement:REQ-PRFU-014
+/// @pseudocode lines 29-33
+#[test]
+fn run_post_pr_tests_expands_manifest_group_placeholder() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_p11_plan_and_result(&temp, serde_json::json!([]));
+    let runner = P13RecordingRunner::with_results(vec![p13_result("passed")]);
+    let mut context = p11_context(&temp);
+    context.set("command_manifest_group_post_pr", "custom_pr");
+    let mut params = p11_params(&temp);
+    params["command_manifest_group"] = serde_json::json!("{command_manifest_group_post_pr}");
+    params["command_manifest"] = serde_json::json!({
+        "commands": [
+            { "id": "unit", "argv": ["cargo", "test", "--lib"] },
+            { "id": "ignored", "argv": ["cargo", "fmt", "--check"] }
+        ],
+        "groups": {
+            "post_pr": ["ignored"],
+            "custom_pr": ["unit"]
+        }
+    });
+
+    let outcome = RunPostPrTestsExecutorWithRunner::new(runner.clone(), FixedClock)
+        .execute(&mut context, &params)
+        .expect("post-pr manifest group interpolation");
+    let requests = runner.requests();
+
+    assert_expected_outcome(
+        outcome,
+        StepOutcome::Success,
+        "post-PR tests must resolve profile-provided command manifest group placeholders",
+    );
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].command_id, "unit");
 }
 
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P04

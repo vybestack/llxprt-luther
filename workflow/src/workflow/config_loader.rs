@@ -9,7 +9,10 @@ use crate::workflow::schema::{
     DaemonSchedulerConfig, DiffPathNormalization, DiscoveryConfig, StepDef, WorkflowConfig,
     WorkflowRunRef, WorkflowType,
 };
-use crate::workflow::target_profile::{resolve_target_profile, validate_target_profile};
+use crate::workflow::target_profile::{
+    resolve_target_profile, target_profile_validation_required, validate_target_profile,
+    TargetProfileOverrides,
+};
 use crate::workflow::validation::validate_workflow_graph;
 
 /// Error type for configuration loading and validation failures.
@@ -294,7 +297,11 @@ pub fn parse_workflow_config_json(json_str: &str) -> Result<WorkflowConfig> {
 fn resolve_and_validate_workflow_config(mut config: WorkflowConfig) -> Result<WorkflowConfig> {
     resolve_target_profile(&mut config)?;
     validate_workflow_config(&config)?;
-    if config.target_profile.is_some() || config.variables.contains_key("target_repo") {
+    if target_profile_validation_required(
+        &config.workflow_type_id,
+        &config,
+        &TargetProfileOverrides::default(),
+    ) {
         validate_target_profile(&config)?;
     }
     Ok(config)

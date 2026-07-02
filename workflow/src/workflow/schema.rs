@@ -52,7 +52,7 @@ pub struct WorkflowConfig {
 #[serde(default, deny_unknown_fields)]
 pub struct TargetProfileConfig {
     pub identity: TargetIdentityConfig,
-    pub paths: TargetPathConfig,
+    pub paths: TargetProfilePathConfig,
     pub issue_conventions: TargetIssueConventions,
     pub pr_conventions: TargetPrConventions,
     pub templates: TargetTemplateConfig,
@@ -75,7 +75,7 @@ pub struct TargetIdentityConfig {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 #[serde(default, deny_unknown_fields)]
-pub struct TargetPathConfig {
+pub struct TargetProfilePathConfig {
     pub project_subdir: Option<String>,
     pub default_command_cwd: Option<String>,
     pub work_dir: Option<String>,

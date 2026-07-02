@@ -68,13 +68,14 @@ required_path_patterns = ["workflow/src/**", "workflow/config/**", "workflow/tes
 local = "local"
 post_pr = "post_pr"
 review = "review"
+full = "full"
 
 [target_profile.pr_checks]
 required = ["PR Quality"]
 ignored = ["CodeRabbit"]
 
 [target_profile.auth]
-requirements = ["gh", "git", "workflow scope for workflow-file changes"]
+requirements = ["gh", "git", "cargo-llvm-cov", "cargo-audit", "workflow scope for workflow-file changes"]
 
 [target_profile.preflight]
 expectations = ["verify workflow auth before editing .github/workflows"]

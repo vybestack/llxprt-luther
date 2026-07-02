@@ -4,7 +4,8 @@
 /// @requirement:REQ-LF-VERIFY-001,REQ-LF-VERIFY-002,REQ-LF-VERIFY-003,REQ-LF-VERIFY-004,REQ-LF-VERIFY-005,REQ-LF-VERIFY-006,REQ-LF-VERIFY-007,REQ-LF-VERIFY-008,REQ-LF-VERIFY-009
 use crate::engine::executor::{interpolate_string, StepContext, StepExecutor};
 use crate::engine::executors::command_manifest::{
-    request_from_entry_with_paths, run_manifest_command, ManifestPathContext,
+    request_from_entry_with_paths, resolve_manifest_group_id, run_manifest_command,
+    ManifestPathContext,
 };
 use crate::engine::runner::EngineError;
 use crate::engine::transition::StepOutcome;
@@ -765,7 +766,7 @@ fn verify_check_sequence(
     context: &StepContext,
 ) -> Result<Vec<String>, EngineError> {
     let mut check_names = explicit_check_sequence(params)?;
-    if let Some(mut manifest_names) = manifest_group_check_sequence(params, context)? {
+    if let Some(mut manifest_names) = manifest_group_check_sequence(context, params)? {
         if let Some(position) = check_names
             .iter()
             .position(|check_name| check_name == "command_manifest")
@@ -808,19 +809,20 @@ fn explicit_check_sequence(params: &serde_json::Value) -> Result<Vec<String>, En
 }
 
 fn manifest_group_check_sequence(
-    params: &serde_json::Value,
     context: &StepContext,
+    params: &serde_json::Value,
 ) -> Result<Option<Vec<String>>, EngineError> {
     let Some(manifest_value) = params.get("command_manifest") else {
         return Ok(None);
     };
     reject_shell_manifest(manifest_value)?;
     let manifest = parse_manifest_value(manifest_value)?;
-    let group_id = params
-        .get("command_manifest_group")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("local");
-    let group_id = interpolate_string(group_id, context);
+    let group_id = resolve_manifest_group_id(params, context, "local").map_err(|message| {
+        EngineError::StepExecutionError {
+            step_id: "verify".to_string(),
+            message,
+        }
+    })?;
     Ok(manifest.groups.get(&group_id).cloned())
 }
 

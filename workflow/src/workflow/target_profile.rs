@@ -31,17 +31,9 @@ pub fn target_profile_validation_required(
     config.target_profile.is_some()
         || workflow_type_id.starts_with("llxprt-")
         || !overrides.is_empty()
-        || [
-            "target_repo",
-            "repository_owner",
-            "repository_name",
-            "primary_issue_number",
-            "issue_number",
-            "work_dir",
-            "artifact_dir",
-        ]
-        .iter()
-        .any(|key| config.variables.contains_key(*key))
+        || config.variables.contains_key("target_repo")
+        || config.variables.contains_key("repository_owner")
+        || config.variables.contains_key("repository_name")
 }
 
 pub fn resolve_target_profile(config: &mut WorkflowConfig) -> Result<()> {
@@ -266,8 +258,13 @@ fn merge_list_variables(config: &mut WorkflowConfig, profile: &TargetProfileConf
 }
 
 fn merge_prompt_guidance(config: &mut WorkflowConfig, profile: &TargetProfileConfig) {
+    for key in ["planning", "implementation", "review"] {
+        config
+            .variables
+            .entry(format!("target_guidance_{key}"))
+            .or_default();
+    }
     for (key, value) in &profile.prompt_guidance {
-        insert_var(config, key, value);
         insert_var(config, &format!("target_guidance_{key}"), value);
     }
 }

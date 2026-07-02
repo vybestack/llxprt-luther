@@ -90,6 +90,22 @@ fn overrides_replace_target_profile_values() {
 }
 
 #[test]
+fn validation_required_for_partial_repository_identity() {
+    let mut config = test_config();
+    config.target_profile = None;
+    config.variables.remove("target_repo");
+    config.variables.remove("repository_name");
+
+    assert!(target_profile_validation_required(
+        &config.workflow_type_id,
+        &config,
+        &TargetProfileOverrides::default()
+    ));
+    let error = validate_target_profile(&config).unwrap_err();
+    assert!(error.message.contains("repository_name"));
+}
+
+#[test]
 fn invalid_repo_fails_with_repo_variable_name() {
     let mut config = test_config();
     let overrides = TargetProfileOverrides {
@@ -158,7 +174,7 @@ fn profile_resolution_derives_legacy_variables_and_repo_fields() {
             base_branch: Some("develop".to_string()),
             ..Default::default()
         },
-        paths: crate::workflow::schema::TargetPathConfig {
+        paths: crate::workflow::schema::TargetProfilePathConfig {
             project_subdir: Some("workflow".to_string()),
             work_dir: Some("/tmp/luther-workspaces/jefe".to_string()),
             artifact_dir: Some("/tmp/luther-artifacts/jefe".to_string()),
@@ -206,10 +222,66 @@ fn profile_resolution_derives_legacy_variables_and_repo_fields() {
 }
 
 #[test]
+fn prompt_guidance_seeds_defaults_and_does_not_clobber_runtime_variables() {
+    let mut config = test_config();
+    config.variables.insert(
+        "target_guidance_review".to_string(),
+        "Keep existing review guidance".to_string(),
+    );
+    config.target_profile = Some(crate::workflow::schema::TargetProfileConfig {
+        prompt_guidance: [
+            ("implementation".to_string(), "Use custom gates".to_string()),
+            (
+                "work_dir".to_string(),
+                "do not clobber work dir".to_string(),
+            ),
+        ]
+        .into_iter()
+        .collect(),
+        ..Default::default()
+    });
+
+    resolve_target_profile(&mut config).expect("profile resolves");
+
+    assert_eq!(
+        config.variables.get("work_dir").map(String::as_str),
+        Some("/tmp/luther-workspaces/llxprt-code")
+    );
+    assert_eq!(
+        config
+            .variables
+            .get("target_guidance_implementation")
+            .map(String::as_str),
+        Some("Use custom gates")
+    );
+    assert_eq!(
+        config
+            .variables
+            .get("target_guidance_planning")
+            .map(String::as_str),
+        Some("")
+    );
+    assert_eq!(
+        config
+            .variables
+            .get("target_guidance_review")
+            .map(String::as_str),
+        Some("Keep existing review guidance")
+    );
+    assert_eq!(
+        config
+            .variables
+            .get("target_guidance_work_dir")
+            .map(String::as_str),
+        Some("do not clobber work dir")
+    );
+}
+
+#[test]
 fn profile_rejects_unresolved_prompt_variables_and_unsafe_paths() {
     let mut config = test_config();
     config.target_profile = Some(crate::workflow::schema::TargetProfileConfig {
-        paths: crate::workflow::schema::TargetPathConfig {
+        paths: crate::workflow::schema::TargetProfilePathConfig {
             project_subdir: Some("../outside".to_string()),
             ..Default::default()
         },

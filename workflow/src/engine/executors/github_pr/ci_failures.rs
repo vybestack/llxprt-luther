@@ -2,6 +2,7 @@
 //! @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P07
 //! @requirement:REQ-PRFU-007
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::PathBuf;
 
@@ -86,6 +87,7 @@ struct CiFailureCollection {
 struct CiFailureCollectionInput<'a> {
     binding: &'a PrFollowupBinding,
     check_status: &'a Value,
+    ignored_check_ids: BTreeSet<String>,
     source_sequence: u64,
     runner: &'a dyn GithubPrCommandRunner,
     store: &'a PrFollowupArtifactStore,
@@ -119,6 +121,7 @@ pub(super) fn collect_ci_failures(
     let collection = collect_ci_failure_fragments(CiFailureCollectionInput {
         binding: &binding,
         check_status: &check_status,
+        ignored_check_ids: ignored_check_ids(&check_status),
         source_sequence,
         runner,
         store: &store,
@@ -198,6 +201,7 @@ fn collect_ci_failure_fragments(
     let mut collection = collect_current_head_check_fragments(&input)?;
     collect_stale_check_fragments(
         input.check_status,
+        &input.ignored_check_ids,
         input.source_sequence,
         &mut collection.stale_checks,
     );
@@ -216,6 +220,9 @@ fn collect_current_head_check_fragments(
         .into_iter()
         .flatten()
     {
+        if check_id(check).is_some_and(|check_id| input.ignored_check_ids.contains(check_id)) {
+            continue;
+        }
         match check_entry_bucket(check) {
             "failed" => collection.failures.push(ci_failure_json(
                 input.binding,
@@ -240,6 +247,7 @@ fn collect_current_head_check_fragments(
 
 fn collect_stale_check_fragments(
     check_status: &Value,
+    ignored_check_ids: &BTreeSet<String>,
     source_sequence: u64,
     pending_or_unknown: &mut Vec<Value>,
 ) {
@@ -249,6 +257,9 @@ fn collect_stale_check_fragments(
         .into_iter()
         .flatten()
     {
+        if check_id(stale).is_some_and(|check_id| ignored_check_ids.contains(check_id)) {
+            continue;
+        }
         pending_or_unknown.push(pending_or_unknown_json(
             "stale_check",
             "stale_only",
@@ -378,6 +389,21 @@ fn pending_or_unknown_count(payload: &Value) -> usize {
         .get("pending_or_unknown")
         .and_then(Value::as_array)
         .map_or(0, Vec::len)
+}
+
+fn ignored_check_ids(check_status: &Value) -> BTreeSet<String> {
+    check_status
+        .get("ignored_check_ids")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::to_string)
+        .collect()
+}
+
+fn check_id(check: &Value) -> Option<&str> {
+    check.get("check_id").and_then(Value::as_str)
 }
 
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P07

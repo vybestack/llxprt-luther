@@ -1,6 +1,6 @@
 use super::post_pr_test_process::{run_manifest_post_pr_test_process, run_post_pr_test_process};
 use super::*;
-use crate::engine::executor::interpolate_string;
+use crate::engine::executors::command_manifest::resolve_manifest_group_id;
 use crate::workflow::command_manifest::{CommandEntry, CommandManifest};
 
 /// Dedicated post-PR local verification executor for `run_post_pr_tests`.
@@ -557,11 +557,8 @@ fn manifest_group_post_pr_commands(
     };
     let manifest: CommandManifest = serde_json::from_value(value.clone())
         .map_err(|err| pr_remediation_error(format!("invalid command_manifest: {err}")))?;
-    let raw_group_id = params
-        .get("command_manifest_group")
-        .and_then(Value::as_str)
-        .unwrap_or("post_pr");
-    let group_id = interpolate_string(raw_group_id, context);
+    let group_id =
+        resolve_manifest_group_id(params, context, "post_pr").map_err(pr_remediation_error)?;
     let Some(command_ids) = manifest.groups.get(group_id.as_str()) else {
         return Ok(None);
     };

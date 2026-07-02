@@ -75,7 +75,8 @@
     "command_groups": {
       "local": "local",
       "post_pr": "post_pr",
-      "review": "review"
+      "review": "review",
+      "full": "full"
     },
     "pr_checks": {
       "required": [
@@ -89,6 +90,8 @@
       "requirements": [
         "gh",
         "git",
+        "cargo-llvm-cov",
+        "cargo-audit",
         "workflow scope for workflow-file changes"
       ]
     },
