@@ -1,5 +1,6 @@
 use super::post_pr_test_process::{run_manifest_post_pr_test_process, run_post_pr_test_process};
 use super::*;
+use crate::engine::executors::command_manifest::resolve_manifest_group_id;
 use crate::workflow::command_manifest::{CommandEntry, CommandManifest};
 
 /// Dedicated post-PR local verification executor for `run_post_pr_tests`.
@@ -9,7 +10,6 @@ use crate::workflow::command_manifest::{CommandEntry, CommandManifest};
 /// @pseudocode lines 29-33
 #[derive(Debug, Default)]
 pub struct RunPostPrTestsExecutor;
-
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P13
 /// @requirement:REQ-PRFU-014,REQ-PRFU-017
 /// @pseudocode lines 29-33
@@ -27,7 +27,6 @@ impl StepExecutor for RunPostPrTestsExecutor {
         )
     }
 }
-
 /// Safe argv-only command runner used by post-PR local verification.
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P13
 /// @requirement:REQ-PRFU-014,REQ-PRFU-017
@@ -35,7 +34,6 @@ impl StepExecutor for RunPostPrTestsExecutor {
 pub trait PostPrTestCommandRunner: Send + Sync {
     fn run(&self, request: PostPrTestCommandRequest) -> PostPrTestCommandResult;
 }
-
 /// Owned post-PR test command request.
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P13
 /// @requirement:REQ-PRFU-014,REQ-PRFU-017
@@ -51,7 +49,6 @@ pub struct PostPrTestCommandRequest {
     pub stderr_log_path: PathBuf,
     pub manifest_entry: Option<CommandEntry>,
 }
-
 /// Owned post-PR test command result.
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P13
 /// @requirement:REQ-PRFU-014,REQ-PRFU-017
@@ -73,14 +70,12 @@ pub struct PostPrTestCommandResult {
     pub artifact_failures: Vec<String>,
     pub failure_classification: Option<String>,
 }
-
 /// Production post-PR test command runner.
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P13
 /// @requirement:REQ-PRFU-014,REQ-PRFU-017
 /// @pseudocode lines 29-30
 #[derive(Debug, Default)]
 pub struct SystemPostPrTestCommandRunner;
-
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P13
 /// @requirement:REQ-PRFU-014,REQ-PRFU-017
 /// @pseudocode lines 29-30
@@ -92,7 +87,6 @@ impl PostPrTestCommandRunner for SystemPostPrTestCommandRunner {
         run_post_pr_test_process(request)
     }
 }
-
 /// Testable post-PR verification executor with injected runner and clock.
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P13
 /// @requirement:REQ-PRFU-014,REQ-PRFU-017
@@ -101,7 +95,6 @@ pub struct RunPostPrTestsExecutorWithRunner<R, C> {
     runner: R,
     clock: C,
 }
-
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P13
 /// @requirement:REQ-PRFU-014,REQ-PRFU-017
 /// @pseudocode lines 29-33
@@ -364,7 +357,7 @@ fn post_pr_test_commands(
     context: &StepContext,
     params: &Value,
 ) -> Result<Vec<PostPrTestCommandConfig>, EngineError> {
-    let manifest_commands = manifest_group_post_pr_commands(params)?;
+    let manifest_commands = manifest_group_post_pr_commands(context, params)?;
     let commands_value = params
         .get("commands")
         .or_else(|| params.get("post_pr_test_commands"));
@@ -555,17 +548,18 @@ fn configured_command_argv(params: &Value, id: &str) -> Result<Vec<String>, Engi
     string_array(value, "command_registry entry")
 }
 
-fn manifest_group_post_pr_commands(params: &Value) -> Result<Option<Vec<Value>>, EngineError> {
+fn manifest_group_post_pr_commands(
+    context: &StepContext,
+    params: &Value,
+) -> Result<Option<Vec<Value>>, EngineError> {
     let Some(value) = params.get("command_manifest") else {
         return Ok(None);
     };
     let manifest: CommandManifest = serde_json::from_value(value.clone())
         .map_err(|err| pr_remediation_error(format!("invalid command_manifest: {err}")))?;
-    let group_id = params
-        .get("command_manifest_group")
-        .and_then(Value::as_str)
-        .unwrap_or("post_pr");
-    let Some(command_ids) = manifest.groups.get(group_id) else {
+    let group_id =
+        resolve_manifest_group_id(params, context, "post_pr").map_err(pr_remediation_error)?;
+    let Some(command_ids) = manifest.groups.get(group_id.as_str()) else {
         return Ok(None);
     };
     Ok(Some(

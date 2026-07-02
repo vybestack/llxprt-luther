@@ -1,6 +1,6 @@
 /// @plan:PLAN-20260404-INITIAL-RUNTIME.P03
 /// Schema definitions for workflow types, configurations, and runtime references.
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use crate::workflow::command_manifest::CommandManifest;
 
@@ -42,6 +42,99 @@ pub struct WorkflowConfig {
     /// Optional argv-only command manifest for repository-specific gates.
     #[serde(default)]
     pub command_manifest: Option<CommandManifest>,
+    /// Optional config-first target profile used to derive legacy runtime
+    /// variables and repository-specific command/check conventions.
+    #[serde(default)]
+    pub target_profile: Option<TargetProfileConfig>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct TargetProfileConfig {
+    pub identity: TargetIdentityConfig,
+    pub paths: TargetProfilePathConfig,
+    pub issue_conventions: TargetIssueConventions,
+    pub pr_conventions: TargetPrConventions,
+    pub templates: TargetTemplateConfig,
+    pub diff_policy: TargetDiffPolicyConfig,
+    pub command_groups: BTreeMap<String, String>,
+    pub pr_checks: TargetPrCheckPolicy,
+    pub auth: TargetAuthConfig,
+    pub preflight: TargetPreflightConfig,
+    pub prompt_guidance: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct TargetIdentityConfig {
+    pub repo: Option<String>,
+    pub owner: Option<String>,
+    pub name: Option<String>,
+    pub base_branch: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct TargetProfilePathConfig {
+    pub project_subdir: Option<String>,
+    pub default_command_cwd: Option<String>,
+    pub work_dir: Option<String>,
+    pub artifact_dir: Option<String>,
+    pub artifact_path_base: Option<String>,
+    pub diff_path_base: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct TargetIssueConventions {
+    pub assignee: Option<String>,
+    pub ok_label: Option<String>,
+    pub luther_label: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct TargetPrConventions {
+    pub title_prefix: Option<String>,
+    pub body_guidance: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct TargetTemplateConfig {
+    pub branch: Option<String>,
+    pub pr_title: Option<String>,
+    pub pr_body: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct TargetDiffPolicyConfig {
+    pub required_changed_path_pattern: Option<String>,
+    pub required_path_regex: Option<String>,
+    pub failure_message: Option<String>,
+    pub allowed_path_patterns: Vec<String>,
+    pub required_path_patterns: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct TargetPrCheckPolicy {
+    pub required: Vec<String>,
+    pub optional: Vec<String>,
+    pub ignored: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct TargetAuthConfig {
+    pub requirements: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct TargetPreflightConfig {
+    pub expectations: Vec<String>,
 }
 
 /// Bound runtime identity for a workflow run.

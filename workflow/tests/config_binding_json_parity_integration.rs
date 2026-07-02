@@ -229,6 +229,10 @@ fn assert_configs_equivalent(
         toml_config.command_manifest, json_config.command_manifest,
         "command_manifest should match for {fixture_id}"
     );
+    assert_eq!(
+        toml_config.target_profile, json_config.target_profile,
+        "target_profile should match for {fixture_id}"
+    );
 }
 
 /// Test: TOML and JSON fixtures produce equivalent `WorkflowConfig` structs.
@@ -244,6 +248,7 @@ fn test_toml_json_produce_equivalent_config() {
         "llxprt-luther",
         "llxprt-luther-issue-fix",
         "llxprt-jefe",
+        "codepuppy",
     ] {
         let (toml_config, json_config) = load_config_pair(fixture_id);
         assert_configs_equivalent(fixture_id, &toml_config, &json_config);

@@ -146,6 +146,7 @@ fn hello_world_config() -> WorkflowConfig {
         variables: std::collections::HashMap::new(),
         discovery: None,
         command_manifest: None,
+        target_profile: None,
     }
 }
 

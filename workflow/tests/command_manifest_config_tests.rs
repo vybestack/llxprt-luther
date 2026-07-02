@@ -28,7 +28,12 @@ max_tokens = 100000
 max_cost = 100.0
 
 [variables]
+target_repo = "owner/repo"
+repository_owner = "owner"
+repository_name = "repo"
 work_dir = "/tmp/luther"
+artifact_dir = "/tmp/luther-artifacts"
+primary_issue_number = "1"
 
 {manifest}
 "#
@@ -151,7 +156,7 @@ fn manifest_parses_json_schema() {
         "runtime": { "timeout_seconds": 3600, "max_retries": 3, "parallel_steps": 1, "log_level": "info" },
         "repository": { "workspace_strategy": "temp", "branch_template": "test-{issue_number}", "base_branch": "main", "workspace_root": "/tmp/luther" },
         "guard_limits": { "max_iterations": 3, "max_file_changes": 50, "max_tokens": 100000, "max_cost": 100.0 },
-        "variables": { "work_dir": "/tmp/luther" },
+        "variables": { "target_repo": "owner/repo", "repository_owner": "owner", "repository_name": "repo", "work_dir": "/tmp/luther", "artifact_dir": "/tmp/luther-artifacts", "primary_issue_number": "1" },
         "command_manifest": {
             "commands": [{ "id": "test", "argv": ["cargo", "test"], "acceptable_exit_codes": [0] }],
             "groups": { "local": ["test"] }
@@ -187,4 +192,73 @@ fn repository_path_fields_parse_and_validate() {
         "workspace_root = \"/tmp/luther\"\ndiff_path_normalization = \"base_relative\"",
     );
     assert!(parse_workflow_config_toml(&invalid_base_relative).is_err());
+}
+
+fn config_with_target_profile(manifest: &str, groups: &str) -> String {
+    config_with_manifest(&format!(
+        r#"
+[target_profile.identity]
+repo = "owner/repo"
+base_branch = "main"
+
+[target_profile.paths]
+work_dir = "/tmp/luther"
+artifact_dir = "/tmp/luther-artifacts"
+
+[target_profile.issue_conventions]
+assignee = "bot"
+ok_label = "OK"
+luther_label = "Working"
+
+[target_profile.command_groups]
+{groups}
+
+{manifest}
+"#
+    ))
+}
+
+#[test]
+fn target_profile_command_groups_resolve_to_manifest_groups() {
+    let config = parse_workflow_config_toml(&config_with_target_profile(
+        r#"
+[[command_manifest.commands]]
+id = "lint"
+argv = ["cargo", "fmt", "--check"]
+
+[command_manifest.groups]
+local = ["lint"]
+post_pr = ["lint"]
+"#,
+        "local = \"local\"\npost_pr = \"post_pr\"",
+    ))
+    .expect("target profile command groups resolve");
+
+    let profile = config.target_profile.expect("target profile present");
+    assert_eq!(
+        profile.command_groups.get("local").map(String::as_str),
+        Some("local")
+    );
+    assert_eq!(
+        config.variables.get("command_manifest_group_local"),
+        Some(&"local".to_string())
+    );
+}
+
+#[test]
+fn target_profile_rejects_unknown_manifest_group_reference() {
+    let err = parse_workflow_config_toml(&config_with_target_profile(
+        r#"
+[[command_manifest.commands]]
+id = "lint"
+argv = ["cargo", "fmt", "--check"]
+
+[command_manifest.groups]
+local = ["lint"]
+"#,
+        "local = \"missing\"",
+    ))
+    .expect_err("unknown target profile command group rejected");
+
+    assert!(err.message.contains("unknown manifest group"));
 }

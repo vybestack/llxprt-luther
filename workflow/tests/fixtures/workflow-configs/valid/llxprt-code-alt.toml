@@ -1,7 +1,4 @@
-# Alternate LLxprt-Code Workflow Configuration
-# @plan:PLAN-20260408-LLXPRT-FIRST.P17
-# @requirement:REQ-LF-PROF-001,REQ-LF-PROF-002,REQ-LF-PROF-003
-
+# LLxprt-Code alternate profile fixture.
 config_id = "llxprt-code-alt"
 workflow_type_id = "llxprt-issue-fix-v1"
 
@@ -21,22 +18,12 @@ max_tokens = 500000
 max_cost = 50.0
 
 [variables]
-target_repo = "vybestack/llxprt-code"
-repository_owner = "vybestack"
-repository_name = "llxprt-code"
-assignee = "acoliver"
-work_dir = "/tmp/luther-workspaces/llxprt-code-alt"
-artifact_dir = "/tmp/luther-artifacts/llxprt-code-alt"
 primary_issue_number = "1804"
 issue_number = "1804"
-
-base_branch = "main"
 profile_planning = "gpt55high"
 profile_evaluating = "gpt55high"
 profile_implementing = "gpt55high"
 profile_remediating = "gpt55high"
-luther_label = "Luther working"
-ok_label = "OK for Luther"
 plan_static_content = """
 # Implementation Plan
 
@@ -46,9 +33,56 @@ plan_static_content = """
 4. Add or update focused regression tests proving cancelled and subsequent tool calls are reported separately.
 5. Run targeted verification for the changed package/files only, then keep the final diff narrowly scoped to issue #{issue_number}; do not modify package lockfiles, generated notice files, .luther files, generated build output, or unrelated files.
 """
+
+[target_profile.identity]
+repo = "vybestack/llxprt-code"
+base_branch = "main"
+
+[target_profile.paths]
+default_command_cwd = "."
+work_dir = "/tmp/luther-workspaces/llxprt-code-alt"
+artifact_dir = "/tmp/luther-artifacts/llxprt-code-alt"
+
+[target_profile.issue_conventions]
+assignee = "acoliver"
+ok_label = "OK for Luther"
+luther_label = "Luther working"
+
+[target_profile.pr_conventions]
+title_prefix = "Fix"
+body_guidance = "Alternate llxprt-code fixture for profile-driven tests."
+
+[target_profile.templates]
+branch = "issue{issue_number}"
+pr_title = "Fix #{issue_number}: {issue_title}"
+pr_body = "{pr_body_guidance}"
+
+[target_profile.diff_policy]
 required_changed_path_pattern = "packages/core/src/core/"
-diff_required_path_regex = "^packages/core/src/core/"
-diff_failure_message = "No alternate issue source/test diff found and no reusable open PR exists"
+required_path_regex = "^packages/core/src/core/"
+failure_message = "No alternate issue source/test diff found and no reusable open PR exists"
+allowed_path_patterns = ["packages/**", "scripts/**", "src/**", "test/**", "tests/**"]
+required_path_patterns = ["packages/core/src/core/**"]
+
+[target_profile.command_groups]
+local = "local"
+post_pr = "post_pr"
+review = "review"
+
+[target_profile.pr_checks]
+required = ["format", "lint", "typecheck", "build", "test"]
+ignored = ["CodeRabbit"]
+
+[target_profile.auth]
+requirements = ["gh", "git", "npm registry access"]
+
+[target_profile.preflight]
+expectations = ["npm ci completes before local gates"]
+
+[target_profile.prompt_guidance]
+planning = "Use the npm TypeScript monorepo layout and prefer existing package scripts."
+implementation = "Do not loosen eslint guardrails or add TypeScript/ESLint suppressions."
+review = "Review CodeRabbit/LLxprt conventions."
 
 [[command_manifest.commands]]
 id = "format"
@@ -81,12 +115,18 @@ timeout_seconds = 900
 failure_outcome = "fixable"
 
 [[command_manifest.commands]]
+id = "eslint_guard"
+argv = ["npm", "run", "lint:eslint-guard"]
+timeout_seconds = 600
+failure_outcome = "fixable"
+
+[[command_manifest.commands]]
 id = "ocr_review"
 argv = ["echo", "Local OCR wrapper is not configured for this target profile"]
 timeout_seconds = 60
 failure_outcome = "fatal"
 
 [command_manifest.groups]
-local = ["format", "lint", "typecheck", "build", "test"]
+local = ["format", "lint", "typecheck", "build", "test", "eslint_guard"]
 post_pr = ["test"]
 review = ["ocr_review"]

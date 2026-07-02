@@ -1,4 +1,4 @@
-# LLxprt-Luther Issue Fix Workflow Configuration
+# LLxprt-Luther Dogfood Workflow Configuration
 
 config_id = "llxprt-luther-issue-fix"
 workflow_type_id = "llxprt-issue-fix-v1"
@@ -23,22 +23,12 @@ max_tokens = 500000
 max_cost = 50.0
 
 [variables]
-target_repo = "vybestack/llxprt-luther"
-repository_owner = "vybestack"
-repository_name = "llxprt-luther"
-assignee = "acoliver"
-work_dir = "/tmp/luther-workspaces/llxprt-luther"
-artifact_dir = "/tmp/luther-artifacts/llxprt-luther"
 primary_issue_number = "3"
 issue_number = "3"
-
-base_branch = "main"
 profile_planning = "opusthinking"
 profile_evaluating = "opusthinking"
 profile_implementing = "opusthinking"
 profile_remediating = "opusthinking"
-luther_label = "Luther working"
-ok_label = "OK for Luther"
 plan_static_content = """
 # Implementation Plan
 
@@ -48,47 +38,133 @@ plan_static_content = """
 4. Add or update focused tests and fixtures covering llxprt-code and llxprt-luther target profiles.
 5. Run targeted verification for the changed workflow files only, then keep the final diff narrowly scoped to issue #{issue_number}.
 """
+
+[target_profile.identity]
+repo = "vybestack/llxprt-luther"
+base_branch = "main"
+
+[target_profile.paths]
+project_subdir = "workflow"
+default_command_cwd = "workflow"
+work_dir = "/tmp/luther-workspaces/llxprt-luther"
+artifact_dir = "/tmp/luther-artifacts/llxprt-luther"
+artifact_path_base = "."
+diff_path_base = "workflow"
+
+[target_profile.issue_conventions]
+assignee = "acoliver"
+ok_label = "OK for Luther"
+luther_label = "Luther working"
+
+[target_profile.pr_conventions]
+title_prefix = "Fix"
+body_guidance = "Mention the fixed issue, summarize source/test changes, and call out workflow/auth-sensitive changes."
+
+[target_profile.templates]
+branch = "issue{issue_number}"
+pr_title = "Fix #{issue_number}: {issue_title}"
+pr_body = "{pr_body_guidance}"
+
+[target_profile.diff_policy]
 required_changed_path_pattern = "workflow"
-diff_required_path_regex = "^([.]github/workflows/|workflow/(src/|config/|tests/|docs/))"
-diff_failure_message = "No Luther workflow/config/test/doc diff found and no reusable open PR exists"
+required_path_regex = "^(workflow/(src/|config/|tests/|docs/)|\\.github/workflows/)"
+failure_message = "No issue #{issue_number} workflow/source/test diff found and no reusable open PR exists"
+allowed_path_patterns = [".github/workflows/**", "workflow/**", "docs/**"]
+required_path_patterns = ["workflow/src/**", "workflow/config/**", "workflow/tests/**", "workflow/docs/**"]
+
+[target_profile.command_groups]
+local = "local"
+post_pr = "post_pr"
+review = "review"
+full = "full"
+
+[target_profile.pr_checks]
+required = ["PR Quality"]
+ignored = ["CodeRabbit"]
+
+[target_profile.auth]
+requirements = ["gh", "git", "cargo-llvm-cov", "cargo-audit", "workflow scope for workflow-file changes"]
+
+[target_profile.preflight]
+expectations = ["verify workflow auth before editing .github/workflows"]
+
+[target_profile.prompt_guidance]
+planning = "Use Luther's Rust workflow subcrate conventions and include fixture parity when changing config schema."
+implementation = "Respect strict clippy limits, avoid lint suppressions, and keep workflow shell commands statically allowlisted."
+review = "Run Open Code Review through the configured cargo xtask wrapper when review gates are requested."
 
 [[command_manifest.commands]]
 id = "format"
 argv = ["cargo", "fmt", "--check"]
+project_subdirectory = "workflow"
 timeout_seconds = 300
 failure_outcome = "fixable"
 
 [[command_manifest.commands]]
-id = "lint"
-argv = ["cargo", "clippy", "--all-targets", "--", "-D", "warnings"]
-timeout_seconds = 1200
-failure_outcome = "fixable"
-
-[[command_manifest.commands]]
-id = "typecheck"
+id = "check"
 argv = ["cargo", "check"]
+project_subdirectory = "workflow"
 timeout_seconds = 900
 failure_outcome = "fixable"
 
 [[command_manifest.commands]]
 id = "build"
 argv = ["cargo", "build"]
+project_subdirectory = "workflow"
 timeout_seconds = 900
 failure_outcome = "fixable"
 
 [[command_manifest.commands]]
 id = "test"
-argv = ["cargo", "test", "target_profile", "e2e_workflow_integration"]
+argv = ["cargo", "test"]
+project_subdirectory = "workflow"
 timeout_seconds = 1200
+failure_outcome = "fixable"
+
+[[command_manifest.commands]]
+id = "clippy"
+argv = ["cargo", "clippy", "--all-targets", "--", "-D", "warnings"]
+project_subdirectory = "workflow"
+timeout_seconds = 1200
+failure_outcome = "fixable"
+
+[[command_manifest.commands]]
+id = "coverage"
+argv = ["cargo", "llvm-cov"]
+project_subdirectory = "workflow"
+timeout_seconds = 1200
+failure_outcome = "fixable"
+
+[[command_manifest.commands]]
+id = "docs"
+argv = ["cargo", "doc", "--no-deps"]
+project_subdirectory = "workflow"
+timeout_seconds = 900
+failure_outcome = "fixable"
+
+[[command_manifest.commands]]
+id = "audit"
+argv = ["cargo", "audit"]
+project_subdirectory = "workflow"
+timeout_seconds = 900
+failure_outcome = "fixable"
+
+[[command_manifest.commands]]
+id = "release_readiness"
+argv = ["cargo", "xtask", "release-readiness"]
+project_subdirectory = "workflow"
+timeout_seconds = 900
 failure_outcome = "fixable"
 
 [[command_manifest.commands]]
 id = "ocr_review"
 argv = ["cargo", "xtask", "ocr-review", "--preview"]
+project_subdirectory = "workflow"
 timeout_seconds = 300
 failure_outcome = "fatal"
 
 [command_manifest.groups]
-local = ["format", "lint", "typecheck", "build", "test", "ocr_review"]
+local = ["format", "check", "build", "test", "clippy", "ocr_review"]
 post_pr = ["test"]
 review = ["ocr_review"]
+full = ["format", "check", "build", "test", "clippy", "coverage", "docs", "audit", "release_readiness", "ocr_review"]

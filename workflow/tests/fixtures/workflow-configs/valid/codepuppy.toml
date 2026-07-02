@@ -1,0 +1,118 @@
+config_id = "codepuppy"
+workflow_type_id = "llxprt-issue-fix-v1"
+
+[runtime]
+timeout_seconds = 7200
+max_retries = 3
+
+[repository]
+workspace_strategy = "temp_clone"
+branch_template = "issue{issue_number}"
+base_branch = "main"
+
+[guards]
+max_iterations = 4
+max_file_changes = 200
+max_tokens = 500000
+max_cost = 50.0
+
+[variables]
+primary_issue_number = "0"
+issue_number = "0"
+profile_planning = "gpt55high"
+profile_evaluating = "gpt55high"
+profile_implementing = "ollamaglm51"
+profile_remediating = "ollamaglm51"
+plan_static_content = ""
+
+[target_profile.identity]
+repo = "TODO-OWNER/codepuppy"
+base_branch = "main"
+
+[target_profile.paths]
+default_command_cwd = "."
+work_dir = "/tmp/luther-workspaces/codepuppy"
+artifact_dir = "/tmp/luther-artifacts/codepuppy"
+
+[target_profile.issue_conventions]
+assignee = "acoliver"
+ok_label = "OK for Luther"
+luther_label = "Luther working"
+
+[target_profile.pr_conventions]
+title_prefix = "Fix"
+body_guidance = "Python target skeleton: confirm real repo slug, CI check names, and coverage thresholds before enabling production runs."
+
+[target_profile.templates]
+branch = "issue{issue_number}"
+pr_title = "Fix #{issue_number}: {issue_title}"
+pr_body = "{pr_body_guidance}"
+
+[target_profile.diff_policy]
+required_changed_path_pattern = ""
+required_path_regex = "."
+failure_message = "No issue #{issue_number} source/test diff found and no reusable open PR exists"
+allowed_path_patterns = ["src/**", "tests/**", "pyproject.toml", ".github/workflows/**"]
+required_path_patterns = ["src/**", "tests/**"]
+
+[target_profile.command_groups]
+local = "local"
+post_pr = "post_pr"
+review = "review"
+
+[target_profile.pr_checks]
+required = ["ruff", "pytest", "coverage"]
+optional = ["typecheck"]
+ignored = ["CodeRabbit"]
+
+[target_profile.auth]
+requirements = ["gh", "git", "uv"]
+
+[target_profile.preflight]
+expectations = ["complete repo slug and exact CI checks after the real CodePuppy repository is known"]
+
+[target_profile.prompt_guidance]
+planning = "Use uv, ruff, pytest, and coverage conventions for this Python skeleton."
+implementation = "Keep commands argv-only and update this skeleton with the real repo metadata before production use."
+review = "Treat unknown CI names as skeleton placeholders until the repository is confirmed."
+
+[[command_manifest.commands]]
+id = "setup"
+argv = ["uv", "sync", "--all-extras", "--dev"]
+timeout_seconds = 900
+failure_outcome = "fixable"
+
+[[command_manifest.commands]]
+id = "ruff_format"
+argv = ["uv", "run", "ruff", "format", "--check", "."]
+timeout_seconds = 600
+failure_outcome = "fixable"
+
+[[command_manifest.commands]]
+id = "ruff_lint"
+argv = ["uv", "run", "ruff", "check", "."]
+timeout_seconds = 600
+failure_outcome = "fixable"
+
+[[command_manifest.commands]]
+id = "pytest"
+argv = ["uv", "run", "pytest"]
+timeout_seconds = 1200
+failure_outcome = "fixable"
+
+[[command_manifest.commands]]
+id = "coverage"
+argv = ["uv", "run", "pytest", "--cov", "--cov-report=term-missing"]
+timeout_seconds = 1200
+failure_outcome = "fixable"
+
+[[command_manifest.commands]]
+id = "ocr_review"
+argv = ["echo", "Local OCR wrapper is not configured for this target profile"]
+timeout_seconds = 60
+failure_outcome = "fatal"
+
+[command_manifest.groups]
+local = ["setup", "ruff_format", "ruff_lint", "pytest", "coverage"]
+post_pr = ["pytest", "coverage"]
+review = ["ocr_review"]

@@ -199,21 +199,21 @@ fn issue_number_alias_resolves_from_step_produced_primary_issue_number() {
 
 #[test]
 fn real_production_workflow_has_no_false_positive_tokens() {
-    // Guards that context_map outputs, namespaced tokens, and the issue_number
-    // fallback are all handled against the real production config.
     let wf_text = std::fs::read_to_string("config/workflows/llxprt-issue-fix-v1.toml")
         .expect("read production workflow");
-    let cfg_text = std::fs::read_to_string("config/workflow-configs/llxprt-code.toml")
-        .expect("read production config");
     let wf = parse_workflow_type_toml(&wf_text).expect("parse production workflow");
-    let config = parse_workflow_config_toml(&cfg_text).expect("parse production config");
 
-    let unresolved = validate_workflow_tokens(&wf, &config);
+    for config_id in ["llxprt-code", "llxprt-jefe", "codepuppy"] {
+        let cfg_text = std::fs::read_to_string(format!("config/workflow-configs/{config_id}.toml"))
+            .expect("read production config");
+        let config = parse_workflow_config_toml(&cfg_text).expect("parse production config");
+        let unresolved = validate_workflow_tokens(&wf, &config);
 
-    assert!(
-        unresolved.is_empty(),
-        "expected no unresolved tokens in production workflow, got: {unresolved:?}"
-    );
+        assert!(
+            unresolved.is_empty(),
+            "expected no unresolved tokens in production workflow for {config_id}, got: {unresolved:?}"
+        );
+    }
 }
 
 fn artifact_step(step_id: &str, produces: &[&str], consumes: &[&str]) -> StepDef {

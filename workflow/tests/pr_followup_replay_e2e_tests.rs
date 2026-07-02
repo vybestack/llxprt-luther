@@ -625,6 +625,7 @@ struct ReplayTestRunner;
 
 impl PostPrTestCommandRunner for ReplayTestRunner {
     fn run(&self, request: PostPrTestCommandRequest) -> PostPrTestCommandResult {
+        std::fs::create_dir_all(&request.artifact_base_directory).expect("create artifact base");
         PostPrTestCommandResult {
             command_id: request.command_id,
             argv: request.argv,

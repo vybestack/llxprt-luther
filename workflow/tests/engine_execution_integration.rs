@@ -115,6 +115,7 @@ fn test_workflow_config() -> WorkflowConfig {
         variables: std::collections::HashMap::new(),
         discovery: None,
         command_manifest: None,
+        target_profile: None,
     }
 }
 

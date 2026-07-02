@@ -10,7 +10,9 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use regex::Regex;
+use serde_json::Value;
 
+use crate::engine::executor::{interpolate_string, StepContext};
 use crate::workflow::command_manifest::{
     ArtifactExpectation, ArtifactKind, CommandEntry, FailureOutcome,
 };
@@ -78,6 +80,25 @@ impl ManifestCommandResult {
         } else {
             "failed"
         }
+    }
+}
+
+pub fn resolve_manifest_group_id(
+    params: &Value,
+    context: &StepContext,
+    default: &str,
+) -> Result<String, String> {
+    let raw_group_id = params
+        .get("command_manifest_group")
+        .and_then(Value::as_str)
+        .unwrap_or(default);
+    let group_id = interpolate_string(raw_group_id, context);
+    if group_id.contains('{') || group_id.contains('}') {
+        Err(format!(
+            "command_manifest_group contains unresolved template token: {group_id}"
+        ))
+    } else {
+        Ok(group_id)
     }
 }
 

@@ -59,7 +59,7 @@
         "timeout_seconds": 900,
         "success_file": "{artifact_dir}/plan.md",
         "static_content": "{plan_static_content}",
-        "prompt": "Do not use subagents. Do not ask questions. Read {artifact_dir}/issue.md and {artifact_dir}/comments.md. Inspect the repository as needed.\nWrite a concise implementation plan to {artifact_dir}/plan.md. The plan MUST be specific to issue #{issue_number} and the current issue text, must identify the relevant source/test files, must describe the code bug from the issue, and must list the intended tests.\nDo not implement the fix in this step. Exit after writing {artifact_dir}/plan.md.\n",
+        "prompt": "Do not use subagents. Do not ask questions. Read {artifact_dir}/issue.md and {artifact_dir}/comments.md. Inspect the repository as needed.\nWrite a concise implementation plan to {artifact_dir}/plan.md. The plan MUST be specific to issue #{issue_number} and the current issue text, must identify the relevant source/test files, must describe the code bug from the issue, and must list the intended tests.\nTarget-specific guidance: {target_guidance_planning}\nDo not implement the fix in this step. Exit after writing {artifact_dir}/plan.md.\n",
         "exit_code_map": {
           "1": "fatal"
         }
@@ -85,9 +85,10 @@
     {
       "step_id": "workflow_auth_preflight_plan",
       "step_type": "workflow_auth_preflight",
-      "description": "Preflight workflow-file push capability from plan scope",
+      "description": "Preflight workflow-file authorization from plan scope",
       "parameters": {
         "artifact_dir": "{artifact_dir}",
+        "artifact_path": "{artifact_dir}/workflow-auth-preflight-plan.json",
         "include_git_status": false,
         "text_artifacts": [
           "plan.md"
@@ -97,8 +98,7 @@
         ],
         "required_scopes": [
           "workflow"
-        ],
-        "artifact_path": "{artifact_dir}/workflow-auth-preflight-plan.json"
+        ]
       }
     },
     {
@@ -118,7 +118,7 @@
         "min_runtime_before_success_seconds": 120,
         "stdout_file": "{artifact_dir}/implement-stdout.txt",
         "stderr_file": "{artifact_dir}/implement-stderr.txt",
-        "prompt": "Do not ask questions. You may use subagents to inspect context or propose focused edits, but you are responsible for applying the final source/test changes directly. Read the current issue in {artifact_dir}/issue.md and the approved plan in {artifact_dir}/plan.md, then implement that plan.\nMake the smallest source/config/test changes needed to fix issue #{issue_number}. You MUST leave a non-empty git diff in {work_dir}; if no files are changed, this step is not complete. Do not modify package lockfiles, generated notice files, .luther files, or unrelated files.\nApply edits directly to files with available file-writing/editing tools. Do not print unified diffs, replacement snippets, or patch text as a substitute for modifying files. A patch shown only in stdout is a failed implementation.\nAfter reading the issue and plan, inspect only the minimal source/test context needed, then make the first source/test edit before doing broader investigation. Sustained read-only analysis is forbidden; only actual file modifications count as implementation progress.\nThe required source and test scope is whatever the approved plan identifies for this issue. If the plan and issue disagree, follow the issue text and update only files directly relevant to the current issue.\nAdd or update focused tests and fixtures when practical. You are not finished unless git diff shows intentional changes related to issue #{issue_number}.\nDo not run full project verification commands for the target repository. The workflow runs configured checks after this step. You may run narrowly targeted tests/checks related to the files you changed.\nIf {artifact_dir}/implementation-evaluation.md exists, treat it as a required remediation checklist and address every unresolved item before finishing this step. Do not stop after partially addressing the feedback.\nBefore responding, inspect git diff --stat and git diff. If the diff does not match the current issue and approved plan, continue working or remove the unrelated changes before finishing. Remove any accidental temporary files in {work_dir} before finishing.\nFinish as soon as source/test edits are present and you have inspected the diff. Do not keep iterating on targeted tests after making a scoped diff; the workflow will run deterministic verification and remediation steps. Finish with exactly IMPLEMENTATION_COMPLETE on its own line, followed by a concise truthful summary of the changes and verification you performed, then exit.\n",
+        "prompt": "Do not ask questions. You may use subagents to inspect context or propose focused edits, but you are responsible for applying the final source/test changes directly. Read the current issue in {artifact_dir}/issue.md and the approved plan in {artifact_dir}/plan.md, then implement that plan.\nMake the smallest source/config/test changes needed to fix issue #{issue_number}. You MUST leave a non-empty git diff in {work_dir}; if no files are changed, this step is not complete. Do not modify package lockfiles, generated notice files, .luther files, or unrelated files.\nApply edits directly to files with available file-writing/editing tools. Do not print unified diffs, replacement snippets, or patch text as a substitute for modifying files. A patch shown only in stdout is a failed implementation.\nAfter reading the issue and plan, inspect only the minimal source/test context needed, then make the first source/test edit before doing broader investigation. Sustained read-only analysis is forbidden; only actual file modifications count as implementation progress.\nTarget-specific guidance: {target_guidance_implementation}\nThe required source and test scope is whatever the approved plan identifies for this issue. If the plan and issue disagree, follow the issue text and update only files directly relevant to the current issue.\nAdd or update focused tests and fixtures when practical. You are not finished unless git diff shows intentional changes related to issue #{issue_number}.\nDo not run full project verification commands for the target repository. The workflow runs configured checks after this step. You may run narrowly targeted tests/checks related to the files you changed.\nIf {artifact_dir}/implementation-evaluation.md exists, treat it as a required remediation checklist and address every unresolved item before finishing this step. Do not stop after partially addressing the feedback.\nBefore responding, inspect git diff --stat and git diff. If the diff does not match the current issue and approved plan, continue working or remove the unrelated changes before finishing. Remove any accidental temporary files in {work_dir} before finishing.\nFinish as soon as source/test edits are present and you have inspected the diff. Do not keep iterating on targeted tests after making a scoped diff; the workflow will run deterministic verification and remediation steps. Finish with exactly IMPLEMENTATION_COMPLETE on its own line, followed by a concise truthful summary of the changes and verification you performed, then exit.\n",
         "outcome_on_stdout": {
           "IMPLEMENTATION_COMPLETE": "success",
           "REMEDIATION_SYSTEM_ERROR": "fatal",
@@ -138,7 +138,7 @@
         "timeout_seconds": 420,
         "stdout_file": "{artifact_dir}/implementation-evaluation-stdout.txt",
         "stderr_file": "{artifact_dir}/implementation-evaluation-stderr.txt",
-        "prompt": "Do not use subagents. Do not ask questions. All deterministic checks (lint, typecheck, test, format, build) have already passed.\nThis workflow step is not a broad audit or design review. It is a narrow issue-acceptance gate for the current branch diff.\nYour job is ONLY subjective correctness: read the issue in {artifact_dir}/issue.md and the plan in {artifact_dir}/plan.md, then inspect git diff against origin/{base_branch}.\nJudge only: does this implementation materially solve the current issue text and approved plan? Verify the diff is scoped to issue #{issue_number}. Do not require the exact approach from the plan if the behavior is correct, tested, and narrowly scoped.\nDo NOT re-flag style, formatting, or test issues - those are handled elsewhere.\nIf the implementation correctly addresses the issue and plan, respond with exactly IMPL_APPROVED on its own line.\nIf the implementation does not actually solve the issue or materially diverges from the plan, respond with exactly IMPL_NEEDS_WORK on its own line, followed by concise feedback, and also write detailed actionable feedback to {artifact_dir}/implementation-evaluation.md.\nIf you cannot perform this narrow acceptance gate because of instruction conflict or tool/runtime limitations, respond with exactly IMPL_EVALUATION_BLOCKED on its own line followed by the blocker; do not write implementation-evaluation.md in that case.\n\n",
+        "prompt": "Do not use subagents. Do not ask questions. All deterministic checks (lint, typecheck, test, format, build) have already passed.\nThis workflow step is not a broad audit or design review. It is a narrow issue-acceptance gate for the current branch diff.\nTarget-specific guidance: {target_guidance_review}\nYour job is ONLY subjective correctness: read the issue in {artifact_dir}/issue.md and the plan in {artifact_dir}/plan.md, then inspect git diff against origin/{base_branch}.\nJudge only: does this implementation materially solve the current issue text and approved plan? Verify the diff is scoped to issue #{issue_number}. Do not require the exact approach from the plan if the behavior is correct, tested, and narrowly scoped.\nDo NOT re-flag style, formatting, or test issues - those are handled elsewhere.\nIf the implementation correctly addresses the issue and plan, respond with exactly IMPL_APPROVED on its own line.\nIf the implementation does not actually solve the issue or materially diverges from the plan, respond with exactly IMPL_NEEDS_WORK on its own line, followed by concise feedback, and also write detailed actionable feedback to {artifact_dir}/implementation-evaluation.md.\nIf you cannot perform this narrow acceptance gate because of instruction conflict or tool/runtime limitations, respond with exactly IMPL_EVALUATION_BLOCKED on its own line followed by the blocker; do not write implementation-evaluation.md in that case.\n\n",
         "outcome_on_stdout": {
           "IMPL_APPROVED": "success",
           "IMPL_NEEDS_WORK": "fixable",
@@ -159,7 +159,7 @@
           "command_manifest",
           "diff_or_existing_pr"
         ],
-        "command_manifest_group": "local",
+        "command_manifest_group": "{command_manifest_group_local}",
         "timeout_seconds": 2400,
         "artifact_root": "{artifact_dir}",
         "diff_or_existing_pr": {
@@ -186,7 +186,7 @@
         "min_runtime_before_success_seconds": 30,
         "max_runtime_after_required_diff_seconds": 30,
         "idle_timeout_seconds": 180,
-        "prompt": "Do not ask questions. You may use subagents to inspect context or propose focused remediation, but you are responsible for applying the final source/test changes directly. Read the current issue in {artifact_dir}/issue.md, the approved plan in {artifact_dir}/plan.md, the verification report in {artifact_dir}/verify-report.json if present, and {artifact_dir}/implementation-evaluation.md if present.\nThese artifact paths are intentionally outside the target repository. If file-reading tools cannot read an absolute artifact path, inspect it with shell commands such as cat, sed, or python3 instead; do not report an artifact-path access constraint while shell access works. Missing optional artifacts such as implementation-evaluation.md are not blockers.\n\nIf implementation-evaluation.md exists, treat it as the primary remediation checklist and address every unresolved evaluator item before finishing. If verify-report.json contains failed checks, also fix only those failures caused by the current branch diff.\nStart by inspecting git diff --stat origin/{base_branch}...HEAD, git diff origin/{base_branch}...HEAD, git status --porcelain --untracked-files=all, and any failing check messages. Focus only on errors or evaluator feedback caused by the current branch diff and issue #{issue_number}; do not try to fix pre-existing repository-wide warnings unrelated to the current diff.\nFix the current branch so it both materially solves the issue and lets the configured checks pass. Do not modify package lockfiles, generated notice files, .luther files, or unrelated files unless required by the issue. If implementation-evaluation.md reports unrelated committed branch artifacts, remove those artifacts from the branch even if plain git diff is otherwise empty.\nBefore responding, inspect git diff --stat origin/{base_branch}...HEAD, git diff origin/{base_branch}...HEAD, and git status --porcelain --untracked-files=all again. You are not complete if the branch diff is empty, if unrelated files remain in the branch diff, or if implementation-evaluation.md still lists unresolved required actions.\nIf there is no current branch diff, first make the minimal issue-specific source/test edit from the plan instead of only inspecting files; do not emit REMEDIATION_SYSTEM_ERROR merely because the previous implementation step stopped early without changes.\n\nIf the current branch already contains the issue-specific diff and there are no verification/evaluation failure artifacts to address, inspect git diff and respond with exactly REMEDIATION_COMPLETE on its own line as the final output.\n\nIf you successfully fix all current verification/evaluation issues, respond with exactly REMEDIATION_COMPLETE on its own line as the final output.\nIf you encounter a system/workflow/tooling problem (shell parse failure, malformed command, missing profile/tool, etc.), respond with exactly REMEDIATION_SYSTEM_ERROR on its own line, followed by a brief reason.\nDo not output shell snippets with unmatched quotes.\n",
+        "prompt": "Do not ask questions. You may use subagents to inspect context or propose focused remediation, but you are responsible for applying the final source/test changes directly. Read the current issue in {artifact_dir}/issue.md, the approved plan in {artifact_dir}/plan.md, the verification report in {artifact_dir}/verify-report.json if present, and {artifact_dir}/implementation-evaluation.md if present.\nThese artifact paths are intentionally outside the target repository. If file-reading tools cannot read an absolute artifact path, inspect it with shell commands such as cat, sed, or python3 instead; do not report an artifact-path access constraint while shell access works. Missing optional artifacts such as implementation-evaluation.md are not blockers.\n\nIf implementation-evaluation.md exists, treat it as the primary remediation checklist and address every unresolved evaluator item before finishing. If verify-report.json contains failed checks, also fix only those failures caused by the current branch diff.\nStart by inspecting git diff --stat origin/{base_branch}...HEAD, git diff origin/{base_branch}...HEAD, git status --porcelain --untracked-files=all, and any failing check messages. Focus only on errors or evaluator feedback caused by the current branch diff and issue #{issue_number}; do not try to fix pre-existing repository-wide warnings unrelated to the current diff.\nFix the current branch so it both materially solves the issue and lets the configured checks pass. Target-specific guidance: {target_guidance_implementation}\nDo not modify package lockfiles, generated notice files, .luther files, or unrelated files unless required by the issue. If implementation-evaluation.md reports unrelated committed branch artifacts, remove those artifacts from the branch even if plain git diff is otherwise empty.\nBefore responding, inspect git diff --stat origin/{base_branch}...HEAD, git diff origin/{base_branch}...HEAD, and git status --porcelain --untracked-files=all again. You are not complete if the branch diff is empty, if unrelated files remain in the branch diff, or if implementation-evaluation.md still lists unresolved required actions.\nIf there is no current branch diff, first make the minimal issue-specific source/test edit from the plan instead of only inspecting files; do not emit REMEDIATION_SYSTEM_ERROR merely because the previous implementation step stopped early without changes.\n\nIf the current branch already contains the issue-specific diff and there are no verification/evaluation failure artifacts to address, inspect git diff and respond with exactly REMEDIATION_COMPLETE on its own line as the final output.\n\nIf you successfully fix all current verification/evaluation issues, respond with exactly REMEDIATION_COMPLETE on its own line as the final output.\nIf you encounter a system/workflow/tooling problem (shell parse failure, malformed command, missing profile/tool, etc.), respond with exactly REMEDIATION_SYSTEM_ERROR on its own line, followed by a brief reason.\nDo not output shell snippets with unmatched quotes.\n",
         "exit_code_map": {
           "1": "fatal"
         }
@@ -198,6 +198,7 @@
       "description": "Preflight workflow-file authorization for pending push diff",
       "parameters": {
         "artifact_dir": "{artifact_dir}",
+        "artifact_path": "{artifact_dir}/workflow-auth-preflight-pre-push.json",
         "include_git_status": true,
         "text_artifacts": [],
         "workflow_path_patterns": [
@@ -205,8 +206,7 @@
         ],
         "required_scopes": [
           "workflow"
-        ],
-        "artifact_path": "{artifact_dir}/workflow-auth-preflight-pre-push.json"
+        ]
       }
     },
     {
@@ -426,7 +426,7 @@
         "repository_owner": "{repository_owner}",
         "repository_name": "{repository_name}",
         "pr_number": "{pr_number}",
-        "command_manifest_group": "post_pr"
+        "command_manifest_group": "{command_manifest_group_post_pr}"
       }
     },
     {
@@ -442,6 +442,12 @@
         "max_push_retries": 1,
         "push_timeout_seconds": 900,
         "push_remediation_result_path": "{artifact_dir}/pr-followup/current/push-remediation-result.json",
+        "workflow_path_patterns": [
+          ".github/workflows/**"
+        ],
+        "required_scopes": [
+          "workflow"
+        ],
         "remote_ref": "refs/heads/issue{issue_number}",
         "commit_message": "Apply PR follow-up remediation for issue #{issue_number}",
         "staging_exclusions": [
@@ -453,12 +459,6 @@
           "**/.generated-notice.md",
           "**/GENERATED_NOTICE.md",
           "**/generated-notice/**"
-        ],
-        "workflow_path_patterns": [
-          ".github/workflows/**"
-        ],
-        "required_scopes": [
-          "workflow"
         ]
       }
     },
@@ -538,11 +538,6 @@
       "condition": "success"
     },
     {
-      "from": "workflow_auth_preflight_plan",
-      "to": "abandon_and_log",
-      "condition": "fatal"
-    },
-    {
       "from": "create_plan",
       "to": "create_plan",
       "condition": "fixable",
@@ -602,11 +597,6 @@
       "from": "workflow_auth_preflight_pre_push",
       "to": "push_changes",
       "condition": "success"
-    },
-    {
-      "from": "workflow_auth_preflight_pre_push",
-      "to": "abandon_and_log",
-      "condition": "fatal"
     },
     {
       "from": "push_changes",
@@ -771,6 +761,16 @@
     {
       "from": "mark_coderabbit_feedback",
       "to": "post_pr_failure_terminal",
+      "condition": "fatal"
+    },
+    {
+      "from": "workflow_auth_preflight_plan",
+      "to": "abandon_and_log",
+      "condition": "fatal"
+    },
+    {
+      "from": "workflow_auth_preflight_pre_push",
+      "to": "abandon_and_log",
       "condition": "fatal"
     },
     {

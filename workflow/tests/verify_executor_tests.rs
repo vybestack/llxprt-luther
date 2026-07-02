@@ -1007,10 +1007,11 @@ fn test_verify_expands_manifest_group_placeholder() {
     let executor = VerifyExecutor;
     let temp_dir = tempfile::tempdir().unwrap();
     let mut ctx = StepContext::new(temp_dir.path().to_path_buf(), "run-1".to_string());
+    ctx.set("command_manifest_group_local", "local");
 
     let params = json!({
         "checks": ["command_manifest"],
-        "command_manifest_group": "local",
+        "command_manifest_group": "{command_manifest_group_local}",
         "command_manifest": {
             "commands": [
                 { "id": "alpha", "argv": ["python3", "-c", "print('alpha')"] },
@@ -1035,6 +1036,31 @@ fn test_verify_expands_manifest_group_placeholder() {
         .map(|command| command.command_id.as_str())
         .collect::<Vec<_>>();
     assert_eq!(command_ids, ["alpha", "beta"]);
+}
+
+#[test]
+fn test_verify_rejects_unresolved_manifest_group_placeholder() {
+    let executor = VerifyExecutor;
+    let temp_dir = tempfile::tempdir().unwrap();
+    let mut ctx = StepContext::new(temp_dir.path().to_path_buf(), "run-1".to_string());
+
+    let params = json!({
+        "checks": ["command_manifest"],
+        "command_manifest_group": "{missing_group}",
+        "command_manifest": {
+            "commands": [
+                { "id": "alpha", "argv": ["python3", "-c", "print('alpha')"] }
+            ],
+            "groups": { "local": ["alpha"] }
+        }
+    });
+
+    let error = executor
+        .execute(&mut ctx, &params)
+        .expect_err("unresolved group placeholder rejected");
+    assert!(
+        format!("{error:?}").contains("command_manifest_group contains unresolved template token")
+    );
 }
 
 #[test]

@@ -25,8 +25,8 @@ pub use schema::{
 };
 pub use target_paths::TargetPathConfig;
 pub use target_profile::{
-    apply_target_profile_overrides, target_profile_validation_required, validate_target_profile,
-    TargetProfileOverrides,
+    apply_target_profile_overrides, resolve_target_profile, target_profile_validation_required,
+    validate_target_profile, TargetProfileOverrides,
 };
 pub use validation::{
     compute_reachable_steps, validate_workflow_graph, GraphErrorCategory, GraphValidationError,
