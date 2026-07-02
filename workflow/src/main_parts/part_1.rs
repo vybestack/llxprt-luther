@@ -532,9 +532,12 @@ fn resume_daemon_workflow(
     let metadata = get_run_with_conn(&conn, &request.run_id)
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("missing run metadata for {}", request.run_id))?;
+    // Daemon-launched resumes use the same hardcoded "config" root as launch_daemon_workflow;
+    // CLI `runs resume --config-dir` covers temporary per-run config roots.
     let config_root = std::path::PathBuf::from("config");
     let wait_config = resolve_workflow_config(&metadata.config_id, &config_root)
         .map_err(|e| format!("resolve config '{}': {e}", metadata.config_id))?;
+    let config_dir = Some(config_root);
     let step = metadata
         .current_step
         .as_deref()
@@ -550,7 +553,7 @@ fn resume_daemon_workflow(
         step,
     )
     .map_err(|e| format!("commit resume: {e}"))?;
-    let mut runner = reconstruct_runner(&metadata, &request.run_id, &db_path)?;
+    let mut runner = reconstruct_runner(&metadata, &request.run_id, &db_path, &config_dir)?;
     run_daemon_runner(request, &wait_config, &db_path, &mut runner)
 }
 

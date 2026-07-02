@@ -606,9 +606,10 @@ fn reconstruct_runner(
     md: &RunMetadata,
     run_id: &str,
     db_path: &std::path::Path,
+    config_dir: &Option<std::path::PathBuf>,
 ) -> Result<EngineRunner, String> {
-    let config_root = std::path::PathBuf::from("config");
-    let mut config = resolve_workflow_config(&md.config_id, &config_root)
+    let config_root = config_dir.as_deref().unwrap_or(std::path::Path::new("config"));
+    let mut config = resolve_workflow_config(&md.config_id, config_root)
         .map_err(|e| format!("resolve config '{}': {e}", md.config_id))?;
     // Re-apply the original run's effective runtime overrides so the resumed
     // interpolation context (target_repo, issue_number, work_dir, artifact_dir)
@@ -617,7 +618,7 @@ fn reconstruct_runner(
     let overrides = luther_workflow::engine::continuation::continuation_overrides(md);
     apply_target_profile_overrides(&mut config, &overrides)
         .map_err(|e| format!("apply continuation overrides: {e}"))?;
-    let workflow_type = resolve_workflow_type(&md.workflow_type_id, &config_root)
+    let workflow_type = resolve_workflow_type(&md.workflow_type_id, config_root)
         .map_err(|e| format!("resolve workflow type '{}': {e}", md.workflow_type_id))?;
     // Fail fast with diagnostics rather than resuming against an invalid profile,
     // but only when the workflow actually uses a target profile (mirrors the
@@ -670,6 +671,7 @@ fn commit_and_execute(
     md: &RunMetadata,
     request: &luther_workflow::engine::ContinuationRequest,
     plan: &luther_workflow::engine::continuation::ContinuationPlan,
+    config_dir: &Option<std::path::PathBuf>,
 ) {
     let step = plan
         .selected
@@ -686,7 +688,7 @@ fn commit_and_execute(
         .db_path()
         .map(Path::to_path_buf)
         .unwrap_or_else(|| luther_workflow::runtime_paths::get_data_dir().join("checkpoints.db"));
-    let mut runner = match reconstruct_runner(md, &request.run_id, &db_path) {
+    let mut runner = match reconstruct_runner(md, &request.run_id, &db_path, config_dir) {
         Ok(runner) => runner,
         Err(e) => {
             eprintln!("Error: {e}");
@@ -862,7 +864,7 @@ fn handle_runs_resume(args: &luther_workflow::cli::RunsResumeArgs) {
         force: args.force,
     };
     let plan = plan_continuation_or_exit(&store, &md, &request);
-    commit_and_execute(&store, &md, &request, &plan);
+    commit_and_execute(&store, &md, &request, &plan, &args.config_dir);
 }
 
 /// `runs retry RUN_ID [--from-failed-step]` — retry an external-wait step.
@@ -878,7 +880,7 @@ fn handle_runs_retry(args: &luther_workflow::cli::RunsRetryArgs) {
         force: args.force,
     };
     let plan = plan_continuation_or_exit(&store, &md, &request);
-    commit_and_execute(&store, &md, &request, &plan);
+    commit_and_execute(&store, &md, &request, &plan, &args.config_dir);
 }
 
 /// `runs rewind RUN_ID (--to-step S | --to-checkpoint ID)` — set the resume
@@ -916,3 +918,62 @@ fn handle_runs_rewind(args: &luther_workflow::cli::RunsRewindArgs) {
     );
 }
 
+#[cfg(test)]
+mod part3_tests {
+    use super::*;
+
+    fn write_config_root(root: &std::path::Path, wf: &str, step: &str) {
+        let workflows = root.join("workflows");
+        let configs = root.join("workflow-configs");
+        std::fs::create_dir_all(&workflows).expect("workflow dir");
+        std::fs::create_dir_all(&configs).expect("config dir");
+        let workflow = serde_json::json!({
+            "workflow_type_id": wf,
+            "steps": [{"step_id": step, "step_type": "noop"}],
+            "transitions": [],
+            "guards": {"max_retries": 1, "timeout_seconds": 30}
+        });
+        let config = serde_json::json!({
+            "config_id": "custom-resume-config",
+            "workflow_type_id": wf,
+            "runtime": {"timeout_seconds": 30, "max_retries": 1},
+            "repository": {"workspace_strategy": "temp", "branch_template": "test-{run_id}", "base_branch": "main"},
+            "guards": {"max_iterations": 1, "max_file_changes": 10, "max_tokens": 1000, "max_cost": 1.0}
+        });
+        std::fs::write(workflows.join(format!("{wf}.json")), workflow.to_string())
+            .expect("workflow file");
+        std::fs::write(configs.join("custom-resume-config.json"), config.to_string())
+            .expect("config file");
+    }
+
+    fn seed_run(store: &SqliteStore, run_id: &str, wf: &str, step: &str) -> RunMetadata {
+        let mut md = RunMetadata::new(run_id, wf, "custom-resume-config");
+        md.status = RunStatus::Failed;
+        md.current_step = Some(step.to_string());
+        persist_run_with_conn(store.conn(), &md).expect("persist run");
+        let cp = luther_workflow::persistence::Checkpoint::with_snapshot(
+            run_id,
+            step,
+            luther_workflow::persistence::StateSnapshot {
+                status: luther_workflow::persistence::CHECKPOINT_STATUS_INTERRUPTED.to_string(),
+                ..Default::default()
+            },
+        );
+        luther_workflow::persistence::save_checkpoint_with_conn(store.conn(), &cp)
+            .expect("save checkpoint");
+        md
+    }
+
+    #[test]
+    fn reconstructs_runner_from_non_default_config_dir() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let config_root = temp.path().join("custom-config");
+        let db_path = temp.path().join("checkpoints.db");
+        write_config_root(&config_root, "custom-resume-v1", "custom_marker_step");
+        let store = SqliteStore::open(&db_path).expect("open store");
+        let md = seed_run(&store, "custom-config-run", "custom-resume-v1", "custom_marker_step");
+        let runner = reconstruct_runner(&md, &md.run_id, &db_path, &Some(config_root))
+            .expect("custom config root reconstructs runner");
+        assert_eq!(runner.current_step(), "custom_marker_step");
+    }
+}
