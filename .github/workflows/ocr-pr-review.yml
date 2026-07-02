@@ -115,8 +115,7 @@ jobs:
             server_url="${server_url%/}/"
             git config --global --unset-all http."${server_url}".extraheader 2>/dev/null || true
             git config --global --unset-all safe.directory "$GITHUB_WORKSPACE" 2>/dev/null || true
-            rm -f "${RUNNER_TEMP}/ocr-git-auth-config"
-            unset GIT_CONFIG_GLOBAL GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0
+            unset GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0
           }
           trap cleanup_git_auth EXIT
           trap 'cleanup_git_auth; exit 130' INT TERM
@@ -124,16 +123,9 @@ jobs:
           umask 077
           GH_SERVER_URL="${GITHUB_SERVER_URL:-https://github.com}"
           GH_SERVER_URL="${GH_SERVER_URL%/}/"
-          {
-            printf '[http "%s"]\n' "${GH_SERVER_URL}"
-            printf '\textraheader = AUTHORIZATION: bearer %s\n' "${GH_TOKEN}"
-          } > "${RUNNER_TEMP}/ocr-git-auth-config"
-          chmod 600 "${RUNNER_TEMP}/ocr-git-auth-config"
-          export GIT_CONFIG_GLOBAL="${RUNNER_TEMP}/ocr-git-auth-config"
-
           # Scope safe.directory to this trusted workspace only (never '*').
-          # Persist one entry for later steps, then also add it to the temp
-          # fetch-step config used with the scoped auth header below.
+          # Persist one entry for later steps, then also add it to the global
+          # config while the fetch-step auth header is passed only to git fetch.
           git config --file "${HOME}/.gitconfig" --add safe.directory "$GITHUB_WORKSPACE"
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
