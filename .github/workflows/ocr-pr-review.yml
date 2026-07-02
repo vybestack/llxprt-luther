@@ -408,7 +408,7 @@ jobs:
 
             function inlineCommentKey(comment) {
               const startLine = comment.start_line || '';
-              return `${comment.path} ${comment.line} ${startLine} ${unrenderFindingText(comment.body)}`;
+              return `${comment.path}\u0000${comment.line}\u0000${startLine}\u0000${unrenderFindingText(comment.body)}`;
             }
 
             async function existingInlineCommentKeys() {
@@ -456,8 +456,7 @@ jobs:
                   path: String(f.path),
                   line: endLine,
                   side: 'RIGHT',
-                  body: `${INLINE_MARKER}
-${text}`,
+                  body: `${INLINE_MARKER}\n${text}`,
                 };
                 if (startLine < endLine) {
                   comment.start_line = startLine;
