@@ -489,19 +489,25 @@ fn post_pr_command_working_directory(
         .get("working_directory")
         .or_else(|| object.get("work_dir"))
         .and_then(Value::as_str)
-        .map(ToString::to_string)
-        .or_else(|| manifest_entry.and_then(manifest_working_directory))
-        .map(|path| resolve_path(context.work_dir(), &path))
-        .unwrap_or_else(|| context.work_dir().clone());
+        .or_else(|| manifest_entry.and_then(explicit_manifest_working_directory))
+        .map(|path| resolve_path(context.work_dir(), path))
+        .unwrap_or_else(|| default_command_working_directory(context));
     validate_safe_working_directory(context.work_dir(), &working_directory)?;
     Ok(working_directory)
 }
 
-fn manifest_working_directory(entry: &CommandEntry) -> Option<String> {
+fn explicit_manifest_working_directory(entry: &CommandEntry) -> Option<&str> {
     entry
         .working_directory
-        .clone()
-        .or_else(|| entry.project_subdirectory.clone())
+        .as_deref()
+        .or(entry.project_subdirectory.as_deref())
+}
+
+fn default_command_working_directory(context: &StepContext) -> PathBuf {
+    context
+        .get("project_dir")
+        .filter(|value| !value.is_empty())
+        .map_or_else(|| context.work_dir().clone(), PathBuf::from)
 }
 
 fn post_pr_command_timeout(

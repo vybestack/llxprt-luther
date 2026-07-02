@@ -103,6 +103,10 @@ fn make_config(max_iterations: Option<u32>) -> WorkflowConfig {
             branch_template: "test-{run_id}".to_string(),
             base_branch: Some("main".to_string()),
             workspace_root: None,
+            project_subdir: None,
+            artifact_path_base: None,
+            diff_path_base: None,
+            diff_path_normalization: None,
         },
         guard_limits: GuardLimits {
             max_iterations,

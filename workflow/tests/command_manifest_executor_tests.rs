@@ -1,7 +1,7 @@
 use std::fs;
 
 use luther_workflow::engine::executors::command_manifest::{
-    request_from_entry, run_manifest_command,
+    request_from_entry, request_from_entry_with_paths, run_manifest_command, ManifestPathContext,
 };
 use luther_workflow::workflow::command_manifest::{
     ArtifactExpectation, ArtifactExpectations, ArtifactKind, CapturePolicy, CommandEntry,
@@ -47,6 +47,48 @@ fn manifest_executor_uses_argv_cwd_and_env_without_shell() {
     assert!(result.passed(), "{result:?}");
     assert!(result.bounded_stdout.contains("manifest"));
     assert!(result.bounded_stdout.contains("True"));
+}
+
+#[test]
+fn manifest_executor_uses_default_project_cwd_and_repo_relative_override() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let repo = temp.path();
+    fs::create_dir_all(repo.join("workflow")).expect("workflow dir");
+    fs::create_dir_all(repo.join("other")).expect("other dir");
+    let paths = ManifestPathContext {
+        repo_root: repo.to_path_buf(),
+        default_working_directory: repo.join("workflow"),
+        artifact_base_directory: repo.to_path_buf(),
+    };
+    let default_entry = command_entry("default", &["pwd"]);
+    let request = request_from_entry_with_paths(&default_entry, &paths, 5).expect("request");
+    assert_eq!(request.working_directory, repo.join("workflow"));
+
+    let mut override_entry = command_entry("override", &["pwd"]);
+    override_entry.working_directory = Some("other".to_string());
+    let request = request_from_entry_with_paths(&override_entry, &paths, 5).expect("request");
+    assert_eq!(request.working_directory, repo.join("other"));
+}
+
+#[test]
+fn manifest_executor_checks_artifacts_against_artifact_base() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let repo = temp.path();
+    fs::create_dir_all(repo.join("workflow")).expect("workflow dir");
+    fs::write(repo.join("artifact.txt"), "ok").expect("artifact");
+    let paths = ManifestPathContext {
+        repo_root: repo.to_path_buf(),
+        default_working_directory: repo.join("workflow"),
+        artifact_base_directory: repo.to_path_buf(),
+    };
+    let mut entry = command_entry("artifact-base", &["true"]);
+    entry.artifacts.required.push(ArtifactExpectation {
+        path: "artifact.txt".to_string(),
+        kind: ArtifactKind::File,
+    });
+    let request = request_from_entry_with_paths(&entry, &paths, 5).expect("request");
+    let result = run_manifest_command(request);
+    assert!(result.passed(), "{result:?}");
 }
 
 #[test]

@@ -16,10 +16,18 @@ use crate::workflow::command_manifest::{
 };
 
 #[derive(Clone, Debug)]
+pub struct ManifestPathContext {
+    pub repo_root: PathBuf,
+    pub default_working_directory: PathBuf,
+    pub artifact_base_directory: PathBuf,
+}
+
+#[derive(Clone, Debug)]
 pub struct ManifestCommandRequest {
     pub command_id: String,
     pub argv: Vec<String>,
     pub working_directory: PathBuf,
+    pub artifact_base_directory: PathBuf,
     pub timeout_seconds: u64,
     pub env: BTreeMap<String, String>,
     pub acceptable_exit_codes: Vec<i32>,
@@ -78,11 +86,25 @@ pub fn request_from_entry(
     work_dir: &Path,
     default_timeout_seconds: u64,
 ) -> Result<ManifestCommandRequest, String> {
-    let working_directory = manifest_working_directory(entry, work_dir)?;
+    let path_context = ManifestPathContext {
+        repo_root: work_dir.to_path_buf(),
+        default_working_directory: work_dir.to_path_buf(),
+        artifact_base_directory: work_dir.to_path_buf(),
+    };
+    request_from_entry_with_paths(entry, &path_context, default_timeout_seconds)
+}
+
+pub fn request_from_entry_with_paths(
+    entry: &CommandEntry,
+    paths: &ManifestPathContext,
+    default_timeout_seconds: u64,
+) -> Result<ManifestCommandRequest, String> {
+    let working_directory = manifest_working_directory(entry, paths)?;
     Ok(ManifestCommandRequest {
         command_id: entry.id.clone(),
         argv: entry.argv.clone(),
         working_directory,
+        artifact_base_directory: paths.artifact_base_directory.clone(),
         timeout_seconds: entry.timeout_seconds.unwrap_or(default_timeout_seconds),
         env: entry.env.clone(),
         acceptable_exit_codes: entry.acceptable_exit_codes.clone(),
@@ -128,18 +150,19 @@ fn should_retry_manifest_result(
     attempts_remaining > 1 && exit_code.is_some_and(|code| request.retry_exit_codes.contains(&code))
 }
 
-fn manifest_working_directory(entry: &CommandEntry, work_dir: &Path) -> Result<PathBuf, String> {
+fn manifest_working_directory(
+    entry: &CommandEntry,
+    paths: &ManifestPathContext,
+) -> Result<PathBuf, String> {
     let relative = entry
         .working_directory
         .as_deref()
-        .or(entry.project_subdirectory.as_deref())
-        .unwrap_or("");
-    let candidate = if relative.is_empty() {
-        work_dir.to_path_buf()
-    } else {
-        work_dir.join(relative)
-    };
-    validate_manifest_working_directory(work_dir, &candidate)?;
+        .or(entry.project_subdirectory.as_deref());
+    let candidate = relative.map_or_else(
+        || paths.default_working_directory.clone(),
+        |relative| paths.repo_root.join(relative),
+    );
+    validate_manifest_working_directory(&paths.repo_root, &candidate)?;
     Ok(candidate)
 }
 
@@ -289,12 +312,12 @@ fn pattern_failures(
 fn artifact_failures(request: &ManifestCommandRequest) -> Vec<String> {
     let mut failures = Vec::new();
     for artifact in &request.required_artifacts {
-        if !artifact_matches(&request.working_directory, artifact) {
+        if !artifact_matches(&request.artifact_base_directory, artifact) {
             failures.push(format!("required artifact missing: {}", artifact.path));
         }
     }
     for artifact in &request.forbidden_artifacts {
-        if artifact_matches(&request.working_directory, artifact) {
+        if artifact_matches(&request.artifact_base_directory, artifact) {
             failures.push(format!("forbidden artifact present: {}", artifact.path));
         }
     }

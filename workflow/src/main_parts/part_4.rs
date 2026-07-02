@@ -794,6 +794,10 @@ mod tests {
                 branch_template: "issue{issue_number}".to_string(),
                 base_branch: Some("main".to_string()),
                 workspace_root: None,
+                project_subdir: None,
+                artifact_path_base: None,
+                diff_path_base: None,
+                diff_path_normalization: None,
             },
             guard_limits: luther_workflow::workflow::schema::GuardLimits {
                 max_iterations: None,

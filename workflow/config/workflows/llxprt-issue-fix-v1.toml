@@ -345,18 +345,10 @@ command_manifest_group = "local"
 timeout_seconds = 2400
 artifact_root = "{artifact_dir}"
 
-[steps.parameters.check_commands]
-diff_or_existing_pr = """
-CHANGED=$(git status --porcelain --untracked-files=all | sed 's/^...//' | grep -E '{diff_required_path_regex}' || true)
-if [ -n "$CHANGED" ]; then
-  exit 0
-fi
-if [ "{setup_workspace.existing_pr_number}" != "0" ]; then
-  exit 0
-fi
-echo '{diff_failure_message}'
-exit 1
-"""
+[steps.parameters.diff_or_existing_pr]
+required_path_regex = "{diff_required_path_regex}"
+failure_message = "{diff_failure_message}"
+existing_pr_number = "{setup_workspace.existing_pr_number}"
 
 
 [[steps]]

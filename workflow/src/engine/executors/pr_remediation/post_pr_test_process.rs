@@ -15,14 +15,21 @@ pub(super) fn run_manifest_post_pr_test_process(
     let Some(entry) = &request.manifest_entry else {
         return run_post_pr_test_process(request);
     };
-    let manifest_request =
-        match request_from_entry(entry, &request.working_directory, request.timeout_seconds) {
-            Ok(mut manifest_request) => {
-                manifest_request.working_directory = request.working_directory.clone();
-                manifest_request
-            }
-            Err(err) => return manifest_post_pr_error(request, err),
-        };
+    let mut resolved_entry = entry.clone();
+    resolved_entry.working_directory = None;
+    resolved_entry.project_subdirectory = None;
+    let manifest_request = match request_from_entry(
+        &resolved_entry,
+        &request.working_directory,
+        request.timeout_seconds,
+    ) {
+        Ok(mut manifest_request) => {
+            manifest_request.working_directory = request.working_directory.clone();
+            manifest_request.artifact_base_directory = request.working_directory.clone();
+            manifest_request
+        }
+        Err(err) => return manifest_post_pr_error(request, err),
+    };
     let result = run_manifest_command(manifest_request);
     write_optional_log(&request.stdout_log_path, &result.bounded_stdout);
     write_optional_log(&request.stderr_log_path, &result.bounded_stderr);
