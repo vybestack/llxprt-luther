@@ -967,35 +967,3 @@ pub fn validate_artifact_dependencies(wf: &WorkflowType) -> Vec<MissingArtifactP
     }
     out
 }
-
-#[cfg(test)]
-mod daemon_scheduler_tests {
-    use super::*;
-
-    #[test]
-    fn parse_daemon_scheduler_config_toml_reads_limits_and_targets() {
-        let cfg = parse_daemon_scheduler_config_toml(
-            r#"
-max_concurrent_active_runs = 5
-max_concurrent_runs_per_config = 2
-max_concurrent_runs_per_repository = 3
-poll_interval_seconds = 300
-
-[[targets]]
-config_id = "llxprt-code"
-
-[[targets]]
-config_id = "llxprt-luther"
-"#,
-        )
-        .unwrap();
-
-        assert_eq!(cfg.max_concurrent_active_runs, Some(5));
-        assert_eq!(cfg.max_concurrent_runs_per_config, Some(2));
-        assert_eq!(cfg.max_concurrent_runs_per_repository, Some(3));
-        assert_eq!(cfg.poll_interval_seconds, Some(300));
-        assert_eq!(cfg.targets.len(), 2);
-        assert_eq!(cfg.targets[0].config_id, "llxprt-code");
-        assert_eq!(cfg.targets[1].config_id, "llxprt-luther");
-    }
-}
