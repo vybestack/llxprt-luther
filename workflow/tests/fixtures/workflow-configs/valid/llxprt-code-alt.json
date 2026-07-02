@@ -17,25 +17,87 @@
     "max_cost": 50.0
   },
   "variables": {
-    "target_repo": "vybestack/llxprt-code",
-    "repository_owner": "vybestack",
-    "repository_name": "llxprt-code",
-    "assignee": "acoliver",
-    "work_dir": "/tmp/luther-workspaces/llxprt-code-alt",
-    "artifact_dir": "/tmp/luther-artifacts/llxprt-code-alt",
     "primary_issue_number": "1804",
     "issue_number": "1804",
-    "base_branch": "main",
     "profile_planning": "gpt55high",
     "profile_evaluating": "gpt55high",
     "profile_implementing": "gpt55high",
     "profile_remediating": "gpt55high",
-    "luther_label": "Luther working",
-    "ok_label": "OK for Luther",
-    "plan_static_content": "# Implementation Plan\n\n1. Read {artifact_dir}/issue.md and confirm the requested behavior for issue #{issue_number}: preserve explicit tool call cancellation state when a stream emits a cancellation event.\n2. Inspect packages/core/src/core/StreamProcessor.ts and the adjacent stream processor tests that cover cancellation handling.\n3. Implement the smallest source change so cancellation state is retained until the next tool call begins.\n4. Add or update focused regression tests proving cancelled and subsequent tool calls are reported separately.\n5. Run targeted verification for the changed package/files only, then keep the final diff narrowly scoped to issue #{issue_number}; do not modify package lockfiles, generated notice files, .luther files, generated build output, or unrelated files.\n",
-    "required_changed_path_pattern": "packages/core/src/core/",
-    "diff_required_path_regex": "^packages/core/src/core/",
-    "diff_failure_message": "No alternate issue source/test diff found and no reusable open PR exists"
+    "plan_static_content": "# Implementation Plan\n\n1. Read {artifact_dir}/issue.md and confirm the requested behavior for issue #{issue_number}: preserve explicit tool call cancellation state when a stream emits a cancellation event.\n2. Inspect packages/core/src/core/StreamProcessor.ts and the adjacent stream processor tests that cover cancellation handling.\n3. Implement the smallest source change so cancellation state is retained until the next tool call begins.\n4. Add or update focused regression tests proving cancelled and subsequent tool calls are reported separately.\n5. Run targeted verification for the changed package/files only, then keep the final diff narrowly scoped to issue #{issue_number}; do not modify package lockfiles, generated notice files, .luther files, generated build output, or unrelated files.\n"
+  },
+  "target_profile": {
+    "identity": {
+      "repo": "vybestack/llxprt-code",
+      "base_branch": "main"
+    },
+    "paths": {
+      "default_command_cwd": ".",
+      "work_dir": "/tmp/luther-workspaces/llxprt-code-alt",
+      "artifact_dir": "/tmp/luther-artifacts/llxprt-code-alt"
+    },
+    "issue_conventions": {
+      "assignee": "acoliver",
+      "ok_label": "OK for Luther",
+      "luther_label": "Luther working"
+    },
+    "pr_conventions": {
+      "title_prefix": "Fix",
+      "body_guidance": "Alternate llxprt-code fixture for profile-driven tests."
+    },
+    "templates": {
+      "branch": "issue{issue_number}",
+      "pr_title": "Fix #{issue_number}: {issue_title}",
+      "pr_body": "{pr_body_guidance}"
+    },
+    "diff_policy": {
+      "required_changed_path_pattern": "packages/core/src/core/",
+      "required_path_regex": "^packages/core/src/core/",
+      "failure_message": "No alternate issue source/test diff found and no reusable open PR exists",
+      "allowed_path_patterns": [
+        "packages/**",
+        "scripts/**",
+        "src/**",
+        "test/**",
+        "tests/**"
+      ],
+      "required_path_patterns": [
+        "packages/core/src/core/**"
+      ]
+    },
+    "command_groups": {
+      "local": "local",
+      "post_pr": "post_pr",
+      "review": "review"
+    },
+    "pr_checks": {
+      "required": [
+        "format",
+        "lint",
+        "typecheck",
+        "build",
+        "test"
+      ],
+      "ignored": [
+        "CodeRabbit"
+      ]
+    },
+    "auth": {
+      "requirements": [
+        "gh",
+        "git",
+        "npm registry access"
+      ]
+    },
+    "preflight": {
+      "expectations": [
+        "npm ci completes before local gates"
+      ]
+    },
+    "prompt_guidance": {
+      "planning": "Use the npm TypeScript monorepo layout and prefer existing package scripts.",
+      "implementation": "Do not loosen eslint guardrails or add TypeScript/ESLint suppressions.",
+      "review": "Review CodeRabbit/LLxprt conventions."
+    }
   },
   "command_manifest": {
     "commands": [
@@ -96,6 +158,16 @@
         "failure_outcome": "fixable"
       },
       {
+        "id": "eslint_guard",
+        "argv": [
+          "npm",
+          "run",
+          "lint:eslint-guard"
+        ],
+        "timeout_seconds": 600,
+        "failure_outcome": "fixable"
+      },
+      {
         "id": "ocr_review",
         "argv": [
           "echo",
@@ -111,7 +183,8 @@
         "lint",
         "typecheck",
         "build",
-        "test"
+        "test",
+        "eslint_guard"
       ],
       "post_pr": [
         "test"

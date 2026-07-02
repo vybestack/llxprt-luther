@@ -21,25 +21,87 @@
     "max_cost": 50.0
   },
   "variables": {
-    "target_repo": "vybestack/llxprt-luther",
-    "repository_owner": "vybestack",
-    "repository_name": "llxprt-luther",
-    "assignee": "acoliver",
-    "work_dir": "/tmp/luther-workspaces/llxprt-luther",
-    "artifact_dir": "/tmp/luther-artifacts/llxprt-luther",
     "primary_issue_number": "3",
     "issue_number": "3",
-    "base_branch": "main",
     "profile_planning": "opusthinking",
     "profile_evaluating": "opusthinking",
     "profile_implementing": "opusthinking",
     "profile_remediating": "opusthinking",
-    "luther_label": "Luther working",
-    "ok_label": "OK for Luther",
-    "plan_static_content": "# Implementation Plan\n\n1. Read {artifact_dir}/issue.md and confirm the requested behavior for Luther issue #{issue_number}: runtime target selection must not require editing checked-in workflow templates.\n2. Inspect workflow/src/cli/mod.rs, workflow/src/main.rs, workflow/src/workflow/, workflow/config/, and workflow/tests/e2e_workflow_integration.rs.\n3. Implement the smallest source/config change so CLI target overrides can set repo, issue, work_dir, and artifact_dir, and unresolved target/path variables fail before execution.\n4. Add or update focused tests and fixtures covering llxprt-code and llxprt-luther target profiles.\n5. Run targeted verification for the changed workflow files only, then keep the final diff narrowly scoped to issue #{issue_number}.\n",
-    "required_changed_path_pattern": "workflow",
-    "diff_required_path_regex": "^([.]github/workflows/|workflow/(src/|config/|tests/|docs/))",
-    "diff_failure_message": "No Luther workflow/config/test/doc diff found and no reusable open PR exists"
+    "plan_static_content": "# Implementation Plan\n\n1. Read {artifact_dir}/issue.md and confirm the requested behavior for Luther issue #{issue_number}: runtime target selection must not require editing checked-in workflow templates.\n2. Inspect workflow/src/cli/mod.rs, workflow/src/main.rs, workflow/src/workflow/, workflow/config/, and workflow/tests/e2e_workflow_integration.rs.\n3. Implement the smallest source/config change so CLI target overrides can set repo, issue, work_dir, and artifact_dir, and unresolved target/path variables fail before execution.\n4. Add or update focused tests and fixtures covering llxprt-code and llxprt-luther target profiles.\n5. Run targeted verification for the changed workflow files only, then keep the final diff narrowly scoped to issue #{issue_number}.\n"
+  },
+  "target_profile": {
+    "identity": {
+      "repo": "vybestack/llxprt-luther",
+      "base_branch": "main"
+    },
+    "paths": {
+      "project_subdir": "workflow",
+      "default_command_cwd": "workflow",
+      "work_dir": "/tmp/luther-workspaces/llxprt-luther",
+      "artifact_dir": "/tmp/luther-artifacts/llxprt-luther",
+      "artifact_path_base": ".",
+      "diff_path_base": "workflow"
+    },
+    "issue_conventions": {
+      "assignee": "acoliver",
+      "ok_label": "OK for Luther",
+      "luther_label": "Luther working"
+    },
+    "pr_conventions": {
+      "title_prefix": "Fix",
+      "body_guidance": "Mention the fixed issue, summarize source/test changes, and call out workflow/auth-sensitive changes."
+    },
+    "templates": {
+      "branch": "issue{issue_number}",
+      "pr_title": "Fix #{issue_number}: {issue_title}",
+      "pr_body": "{pr_body_guidance}"
+    },
+    "diff_policy": {
+      "required_changed_path_pattern": "workflow",
+      "required_path_regex": "^(workflow/(src/|config/|tests/|docs/)|\\.github/workflows/)",
+      "failure_message": "No issue #{issue_number} workflow/source/test diff found and no reusable open PR exists",
+      "allowed_path_patterns": [
+        ".github/workflows/**",
+        "workflow/**",
+        "docs/**"
+      ],
+      "required_path_patterns": [
+        "workflow/src/**",
+        "workflow/config/**",
+        "workflow/tests/**",
+        "workflow/docs/**"
+      ]
+    },
+    "command_groups": {
+      "local": "local",
+      "post_pr": "post_pr",
+      "review": "review"
+    },
+    "pr_checks": {
+      "required": [
+        "PR Quality"
+      ],
+      "ignored": [
+        "CodeRabbit"
+      ]
+    },
+    "auth": {
+      "requirements": [
+        "gh",
+        "git",
+        "workflow scope for workflow-file changes"
+      ]
+    },
+    "preflight": {
+      "expectations": [
+        "verify workflow auth before editing .github/workflows"
+      ]
+    },
+    "prompt_guidance": {
+      "planning": "Use Luther's Rust workflow subcrate conventions and include fixture parity when changing config schema.",
+      "implementation": "Respect strict clippy limits, avoid lint suppressions, and keep workflow shell commands statically allowlisted.",
+      "review": "Run Open Code Review through the configured cargo xtask wrapper when review gates are requested."
+    }
   },
   "command_manifest": {
     "commands": [
@@ -50,28 +112,17 @@
           "fmt",
           "--check"
         ],
+        "project_subdirectory": "workflow",
         "timeout_seconds": 300,
         "failure_outcome": "fixable"
       },
       {
-        "id": "lint",
-        "argv": [
-          "cargo",
-          "clippy",
-          "--all-targets",
-          "--",
-          "-D",
-          "warnings"
-        ],
-        "timeout_seconds": 1200,
-        "failure_outcome": "fixable"
-      },
-      {
-        "id": "typecheck",
+        "id": "check",
         "argv": [
           "cargo",
           "check"
         ],
+        "project_subdirectory": "workflow",
         "timeout_seconds": 900,
         "failure_outcome": "fixable"
       },
@@ -81,6 +132,7 @@
           "cargo",
           "build"
         ],
+        "project_subdirectory": "workflow",
         "timeout_seconds": 900,
         "failure_outcome": "fixable"
       },
@@ -88,11 +140,66 @@
         "id": "test",
         "argv": [
           "cargo",
-          "test",
-          "target_profile",
-          "e2e_workflow_integration"
+          "test"
         ],
+        "project_subdirectory": "workflow",
         "timeout_seconds": 1200,
+        "failure_outcome": "fixable"
+      },
+      {
+        "id": "clippy",
+        "argv": [
+          "cargo",
+          "clippy",
+          "--all-targets",
+          "--",
+          "-D",
+          "warnings"
+        ],
+        "project_subdirectory": "workflow",
+        "timeout_seconds": 1200,
+        "failure_outcome": "fixable"
+      },
+      {
+        "id": "coverage",
+        "argv": [
+          "cargo",
+          "llvm-cov"
+        ],
+        "project_subdirectory": "workflow",
+        "timeout_seconds": 1200,
+        "failure_outcome": "fixable"
+      },
+      {
+        "id": "docs",
+        "argv": [
+          "cargo",
+          "doc",
+          "--no-deps"
+        ],
+        "project_subdirectory": "workflow",
+        "timeout_seconds": 900,
+        "failure_outcome": "fixable"
+      },
+      {
+        "id": "audit",
+        "argv": [
+          "cargo",
+          "audit"
+        ],
+        "project_subdirectory": "workflow",
+        "timeout_seconds": 900,
+        "failure_outcome": "fixable"
+      },
+      {
+        "id": "release_readiness",
+        "argv": [
+          "cargo",
+          "xtask",
+          "release-readiness"
+        ],
+        "project_subdirectory": "workflow",
+        "timeout_seconds": 900,
         "failure_outcome": "fixable"
       },
       {
@@ -103,6 +210,7 @@
           "ocr-review",
           "--preview"
         ],
+        "project_subdirectory": "workflow",
         "timeout_seconds": 300,
         "failure_outcome": "fatal"
       }
@@ -110,16 +218,28 @@
     "groups": {
       "local": [
         "format",
-        "lint",
-        "typecheck",
+        "check",
         "build",
         "test",
+        "clippy",
         "ocr_review"
       ],
       "post_pr": [
         "test"
       ],
       "review": [
+        "ocr_review"
+      ],
+      "full": [
+        "format",
+        "check",
+        "build",
+        "test",
+        "clippy",
+        "coverage",
+        "docs",
+        "audit",
+        "release_readiness",
         "ocr_review"
       ]
     }

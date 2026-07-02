@@ -93,7 +93,7 @@ impl StepExecutor for VerifyExecutor {
         context: &mut StepContext,
         params: &serde_json::Value,
     ) -> Result<StepOutcome, EngineError> {
-        let check_names = verify_check_sequence(params)?;
+        let check_names = verify_check_sequence(params, context)?;
 
         // Validate the verification profile (defaults to npm for backward
         // compatibility). Unknown profiles are a configuration error.
@@ -760,9 +760,12 @@ pub fn profile_default_command(profile: &str, check_type: &str) -> Option<&'stat
 /// @plan:PLAN-20260408-LLXPRT-FIRST.P06
 /// @plan:PLAN-20260408-LLXPRT-FIRST.P08
 /// @requirement:REQ-LF-VERIFY-007
-fn verify_check_sequence(params: &serde_json::Value) -> Result<Vec<String>, EngineError> {
+fn verify_check_sequence(
+    params: &serde_json::Value,
+    context: &StepContext,
+) -> Result<Vec<String>, EngineError> {
     let mut check_names = explicit_check_sequence(params)?;
-    if let Some(mut manifest_names) = manifest_group_check_sequence(params)? {
+    if let Some(mut manifest_names) = manifest_group_check_sequence(params, context)? {
         if let Some(position) = check_names
             .iter()
             .position(|check_name| check_name == "command_manifest")
@@ -806,6 +809,7 @@ fn explicit_check_sequence(params: &serde_json::Value) -> Result<Vec<String>, En
 
 fn manifest_group_check_sequence(
     params: &serde_json::Value,
+    context: &StepContext,
 ) -> Result<Option<Vec<String>>, EngineError> {
     let Some(manifest_value) = params.get("command_manifest") else {
         return Ok(None);
@@ -816,7 +820,8 @@ fn manifest_group_check_sequence(
         .get("command_manifest_group")
         .and_then(serde_json::Value::as_str)
         .unwrap_or("local");
-    Ok(manifest.groups.get(group_id).cloned())
+    let group_id = interpolate_string(group_id, context);
+    Ok(manifest.groups.get(&group_id).cloned())
 }
 
 fn parse_manifest_value(

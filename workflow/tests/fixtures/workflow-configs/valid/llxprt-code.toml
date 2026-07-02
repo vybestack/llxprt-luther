@@ -29,26 +29,63 @@ max_concurrent_runs = 1
 poll_interval_secs = 300
 
 [variables]
-target_repo = "vybestack/llxprt-code"
-repository_owner = "vybestack"
-repository_name = "llxprt-code"
-assignee = "acoliver"
-work_dir = "/tmp/luther-workspaces/llxprt-code"
-artifact_dir = "/tmp/luther-artifacts/llxprt-code"
 primary_issue_number = "0"
 issue_number = "0"
-
-base_branch = "main"
 profile_planning = "gpt55high"
 profile_evaluating = "gpt55high"
 profile_implementing = "ollamaglm51"
 profile_remediating = "ollamaglm51"
-luther_label = "Luther working"
-ok_label = "OK for Luther"
 plan_static_content = ""
+
+[target_profile.identity]
+repo = "vybestack/llxprt-code"
+base_branch = "main"
+
+[target_profile.paths]
+default_command_cwd = "."
+work_dir = "/tmp/luther-workspaces/llxprt-code"
+artifact_dir = "/tmp/luther-artifacts/llxprt-code"
+
+[target_profile.issue_conventions]
+assignee = "acoliver"
+ok_label = "OK for Luther"
+luther_label = "Luther working"
+
+[target_profile.pr_conventions]
+title_prefix = "Fix"
+body_guidance = "Follow CodeRabbit/LLxprt conventions, include verification commands, and mention package/workspace impact."
+
+[target_profile.templates]
+branch = "issue{issue_number}"
+pr_title = "Fix #{issue_number}: {issue_title}"
+pr_body = "{pr_body_guidance}"
+
+[target_profile.diff_policy]
 required_changed_path_pattern = ""
-diff_required_path_regex = "."
-diff_failure_message = "No issue #{issue_number} source/test diff found and no reusable open PR exists"
+required_path_regex = "."
+failure_message = "No issue #{issue_number} source/test diff found and no reusable open PR exists"
+allowed_path_patterns = ["packages/**", "scripts/**", "src/**", "test/**", "tests/**", ".github/workflows/**"]
+required_path_patterns = ["packages/**", "src/**", "test/**", "tests/**"]
+
+[target_profile.command_groups]
+local = "local"
+post_pr = "post_pr"
+review = "review"
+
+[target_profile.pr_checks]
+required = ["format", "lint", "typecheck", "build", "test", "CodeQL"]
+ignored = ["CodeRabbit"]
+
+[target_profile.auth]
+requirements = ["gh", "git", "npm registry access"]
+
+[target_profile.preflight]
+expectations = ["npm ci completes before local gates"]
+
+[target_profile.prompt_guidance]
+planning = "Use the npm TypeScript monorepo layout and prefer existing package scripts over ad hoc commands."
+implementation = "Do not loosen eslint guardrails or add TypeScript/ESLint suppressions; fix the underlying issue."
+review = "Review CodeRabbit/LLxprt conventions and keep PR comments shell-safe."
 
 [[command_manifest.commands]]
 id = "format"
@@ -75,8 +112,26 @@ timeout_seconds = 900
 failure_outcome = "fixable"
 
 [[command_manifest.commands]]
+id = "bundle"
+argv = ["npm", "run", "bundle"]
+timeout_seconds = 900
+failure_outcome = "fixable"
+
+[[command_manifest.commands]]
 id = "test"
 argv = ["npm", "run", "test", "--workspace", "@vybestack/llxprt-code"]
+timeout_seconds = 900
+failure_outcome = "fixable"
+
+[[command_manifest.commands]]
+id = "eslint_guard"
+argv = ["npm", "run", "lint:eslint-guard"]
+timeout_seconds = 600
+failure_outcome = "fixable"
+
+[[command_manifest.commands]]
+id = "codeql_build"
+argv = ["npm", "run", "build"]
 timeout_seconds = 900
 failure_outcome = "fixable"
 
@@ -87,6 +142,7 @@ timeout_seconds = 60
 failure_outcome = "fatal"
 
 [command_manifest.groups]
-local = ["format", "lint", "typecheck", "build", "test"]
+local = ["format", "lint", "typecheck", "build", "bundle", "test", "eslint_guard"]
 post_pr = ["test"]
 review = ["ocr_review"]
+codeql = ["codeql_build"]

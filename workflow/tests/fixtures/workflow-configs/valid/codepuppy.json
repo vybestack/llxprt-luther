@@ -1,5 +1,5 @@
 {
-  "config_id": "llxprt-code",
+  "config_id": "codepuppy",
   "workflow_type_id": "llxprt-issue-fix-v1",
   "runtime": {
     "timeout_seconds": 7200,
@@ -16,20 +16,6 @@
     "max_tokens": 500000,
     "max_cost": 50.0
   },
-  "discovery": {
-    "enabled": false,
-    "include_labels": [
-      "OK for Luther"
-    ],
-    "exclude_labels": [
-      "Luther working"
-    ],
-    "issue_states": [
-      "open"
-    ],
-    "max_concurrent_runs": 1,
-    "poll_interval_secs": 300
-  },
   "variables": {
     "primary_issue_number": "0",
     "issue_number": "0",
@@ -41,13 +27,13 @@
   },
   "target_profile": {
     "identity": {
-      "repo": "vybestack/llxprt-code",
+      "repo": "TODO-OWNER/codepuppy",
       "base_branch": "main"
     },
     "paths": {
       "default_command_cwd": ".",
-      "work_dir": "/tmp/luther-workspaces/llxprt-code",
-      "artifact_dir": "/tmp/luther-artifacts/llxprt-code"
+      "work_dir": "/tmp/luther-workspaces/codepuppy",
+      "artifact_dir": "/tmp/luther-artifacts/codepuppy"
     },
     "issue_conventions": {
       "assignee": "acoliver",
@@ -56,7 +42,7 @@
     },
     "pr_conventions": {
       "title_prefix": "Fix",
-      "body_guidance": "Follow CodeRabbit/LLxprt conventions, include verification commands, and mention package/workspace impact."
+      "body_guidance": "Python target skeleton: confirm real repo slug, CI check names, and coverage thresholds before enabling production runs."
     },
     "templates": {
       "branch": "issue{issue_number}",
@@ -68,17 +54,13 @@
       "required_path_regex": ".",
       "failure_message": "No issue #{issue_number} source/test diff found and no reusable open PR exists",
       "allowed_path_patterns": [
-        "packages/**",
-        "scripts/**",
         "src/**",
-        "test/**",
         "tests/**",
+        "pyproject.toml",
         ".github/workflows/**"
       ],
       "required_path_patterns": [
-        "packages/**",
         "src/**",
-        "test/**",
         "tests/**"
       ]
     },
@@ -89,12 +71,12 @@
     },
     "pr_checks": {
       "required": [
-        "format",
-        "lint",
-        "typecheck",
-        "build",
-        "test",
-        "CodeQL"
+        "ruff",
+        "pytest",
+        "coverage"
+      ],
+      "optional": [
+        "typecheck"
       ],
       "ignored": [
         "CodeRabbit"
@@ -104,102 +86,78 @@
       "requirements": [
         "gh",
         "git",
-        "npm registry access"
+        "uv"
       ]
     },
     "preflight": {
       "expectations": [
-        "npm ci completes before local gates"
+        "complete repo slug and exact CI checks after the real CodePuppy repository is known"
       ]
     },
     "prompt_guidance": {
-      "planning": "Use the npm TypeScript monorepo layout and prefer existing package scripts over ad hoc commands.",
-      "implementation": "Do not loosen eslint guardrails or add TypeScript/ESLint suppressions; fix the underlying issue.",
-      "review": "Review CodeRabbit/LLxprt conventions and keep PR comments shell-safe."
+      "planning": "Use uv, ruff, pytest, and coverage conventions for this Python skeleton.",
+      "implementation": "Keep commands argv-only and update this skeleton with the real repo metadata before production use.",
+      "review": "Treat unknown CI names as skeleton placeholders until the repository is confirmed."
     }
   },
   "command_manifest": {
     "commands": [
       {
-        "id": "format",
+        "id": "setup",
         "argv": [
-          "npm",
-          "run",
-          "format:check"
-        ],
-        "timeout_seconds": 600,
-        "failure_outcome": "fixable"
-      },
-      {
-        "id": "lint",
-        "argv": [
-          "npm",
-          "run",
-          "lint"
-        ],
-        "timeout_seconds": 600,
-        "failure_outcome": "fixable"
-      },
-      {
-        "id": "typecheck",
-        "argv": [
-          "npm",
-          "run",
-          "typecheck"
-        ],
-        "timeout_seconds": 600,
-        "failure_outcome": "fixable"
-      },
-      {
-        "id": "build",
-        "argv": [
-          "npm",
-          "run",
-          "build"
+          "uv",
+          "sync",
+          "--all-extras",
+          "--dev"
         ],
         "timeout_seconds": 900,
         "failure_outcome": "fixable"
       },
       {
-        "id": "bundle",
+        "id": "ruff_format",
         "argv": [
-          "npm",
+          "uv",
           "run",
-          "bundle"
-        ],
-        "timeout_seconds": 900,
-        "failure_outcome": "fixable"
-      },
-      {
-        "id": "test",
-        "argv": [
-          "npm",
-          "run",
-          "test",
-          "--workspace",
-          "@vybestack/llxprt-code"
-        ],
-        "timeout_seconds": 900,
-        "failure_outcome": "fixable"
-      },
-      {
-        "id": "eslint_guard",
-        "argv": [
-          "npm",
-          "run",
-          "lint:eslint-guard"
+          "ruff",
+          "format",
+          "--check",
+          "."
         ],
         "timeout_seconds": 600,
         "failure_outcome": "fixable"
       },
       {
-        "id": "codeql_build",
+        "id": "ruff_lint",
         "argv": [
-          "npm",
+          "uv",
           "run",
-          "build"
+          "ruff",
+          "check",
+          "."
         ],
-        "timeout_seconds": 900,
+        "timeout_seconds": 600,
+        "failure_outcome": "fixable"
+      },
+      {
+        "id": "pytest",
+        "argv": [
+          "uv",
+          "run",
+          "pytest"
+        ],
+        "timeout_seconds": 1200,
+        "failure_outcome": "fixable"
+      },
+      {
+        "id": "coverage",
+        "argv": [
+          "uv",
+          "run",
+          "pytest",
+          "--cov",
+          "--cov-report=term-missing"
+        ],
+        "timeout_seconds": 1200,
         "failure_outcome": "fixable"
       },
       {
@@ -214,22 +172,18 @@
     ],
     "groups": {
       "local": [
-        "format",
-        "lint",
-        "typecheck",
-        "build",
-        "bundle",
-        "test",
-        "eslint_guard"
+        "setup",
+        "ruff_format",
+        "ruff_lint",
+        "pytest",
+        "coverage"
       ],
       "post_pr": [
-        "test"
+        "pytest",
+        "coverage"
       ],
       "review": [
         "ocr_review"
-      ],
-      "codeql": [
-        "codeql_build"
       ]
     }
   }

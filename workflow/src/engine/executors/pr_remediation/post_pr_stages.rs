@@ -1,5 +1,6 @@
 use super::post_pr_test_process::{run_manifest_post_pr_test_process, run_post_pr_test_process};
 use super::*;
+use crate::engine::executor::interpolate_string;
 use crate::workflow::command_manifest::{CommandEntry, CommandManifest};
 
 /// Dedicated post-PR local verification executor for `run_post_pr_tests`.
@@ -364,7 +365,7 @@ fn post_pr_test_commands(
     context: &StepContext,
     params: &Value,
 ) -> Result<Vec<PostPrTestCommandConfig>, EngineError> {
-    let manifest_commands = manifest_group_post_pr_commands(params)?;
+    let manifest_commands = manifest_group_post_pr_commands(context, params)?;
     let commands_value = params
         .get("commands")
         .or_else(|| params.get("post_pr_test_commands"));
@@ -555,17 +556,21 @@ fn configured_command_argv(params: &Value, id: &str) -> Result<Vec<String>, Engi
     string_array(value, "command_registry entry")
 }
 
-fn manifest_group_post_pr_commands(params: &Value) -> Result<Option<Vec<Value>>, EngineError> {
+fn manifest_group_post_pr_commands(
+    context: &StepContext,
+    params: &Value,
+) -> Result<Option<Vec<Value>>, EngineError> {
     let Some(value) = params.get("command_manifest") else {
         return Ok(None);
     };
     let manifest: CommandManifest = serde_json::from_value(value.clone())
         .map_err(|err| pr_remediation_error(format!("invalid command_manifest: {err}")))?;
-    let group_id = params
+    let raw_group_id = params
         .get("command_manifest_group")
         .and_then(Value::as_str)
         .unwrap_or("post_pr");
-    let Some(command_ids) = manifest.groups.get(group_id) else {
+    let group_id = interpolate_string(raw_group_id, context);
+    let Some(command_ids) = manifest.groups.get(group_id.as_str()) else {
         return Ok(None);
     };
     Ok(Some(

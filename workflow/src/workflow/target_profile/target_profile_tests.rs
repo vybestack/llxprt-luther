@@ -40,6 +40,7 @@ fn test_config() -> WorkflowConfig {
         .collect(),
         discovery: None,
         command_manifest: None,
+        target_profile: None,
     }
 }
 
@@ -147,4 +148,86 @@ fn non_utf8_path_overrides_fail_explicitly() {
     let error = apply_target_profile_overrides(&mut config, &overrides).unwrap_err();
 
     assert!(error.message.contains("work_dir path is not valid UTF-8"));
+}
+#[test]
+fn profile_resolution_derives_legacy_variables_and_repo_fields() {
+    let mut config = test_config();
+    config.target_profile = Some(crate::workflow::schema::TargetProfileConfig {
+        identity: crate::workflow::schema::TargetIdentityConfig {
+            repo: Some("vybestack/llxprt-jefe".to_string()),
+            base_branch: Some("develop".to_string()),
+            ..Default::default()
+        },
+        paths: crate::workflow::schema::TargetPathConfig {
+            project_subdir: Some("workflow".to_string()),
+            work_dir: Some("/tmp/luther-workspaces/jefe".to_string()),
+            artifact_dir: Some("/tmp/luther-artifacts/jefe".to_string()),
+            ..Default::default()
+        },
+        diff_policy: crate::workflow::schema::TargetDiffPolicyConfig {
+            required_path_regex: Some("^src/".to_string()),
+            ..Default::default()
+        },
+        prompt_guidance: [("implementation".to_string(), "Use custom gates".to_string())]
+            .into_iter()
+            .collect(),
+        ..Default::default()
+    });
+
+    resolve_target_profile(&mut config).expect("profile resolves");
+
+    assert_eq!(
+        config.variables.get("target_repo").map(String::as_str),
+        Some("vybestack/llxprt-jefe")
+    );
+    assert_eq!(
+        config.variables.get("repository_name").map(String::as_str),
+        Some("llxprt-jefe")
+    );
+    assert_eq!(
+        config.variables.get("base_branch").map(String::as_str),
+        Some("develop")
+    );
+    assert_eq!(config.repo.project_subdir.as_deref(), Some("workflow"));
+    assert_eq!(
+        config
+            .variables
+            .get("diff_required_path_regex")
+            .map(String::as_str),
+        Some("^src/")
+    );
+    assert_eq!(
+        config
+            .variables
+            .get("target_guidance_implementation")
+            .map(String::as_str),
+        Some("Use custom gates")
+    );
+}
+
+#[test]
+fn profile_rejects_unresolved_prompt_variables_and_unsafe_paths() {
+    let mut config = test_config();
+    config.target_profile = Some(crate::workflow::schema::TargetProfileConfig {
+        paths: crate::workflow::schema::TargetPathConfig {
+            project_subdir: Some("../outside".to_string()),
+            ..Default::default()
+        },
+        prompt_guidance: [("planning".to_string(), "Use {unknown_guidance}".to_string())]
+            .into_iter()
+            .collect(),
+        ..Default::default()
+    });
+
+    let path_error = resolve_target_profile(&mut config).unwrap_err();
+    assert!(path_error.message.contains("project_subdir"));
+
+    config
+        .target_profile
+        .as_mut()
+        .expect("profile")
+        .paths
+        .project_subdir = None;
+    let prompt_error = resolve_target_profile(&mut config).unwrap_err();
+    assert!(prompt_error.message.contains("unknown_guidance"));
 }

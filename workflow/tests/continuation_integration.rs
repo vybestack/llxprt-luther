@@ -141,6 +141,7 @@ fn followup_config() -> WorkflowConfig {
         variables: HashMap::new(),
         discovery: None,
         command_manifest: None,
+        target_profile: None,
     }
 }
 

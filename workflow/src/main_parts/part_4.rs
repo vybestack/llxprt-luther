@@ -812,6 +812,7 @@ mod tests {
             )]),
             discovery: None,
             command_manifest: None,
+        target_profile: None,
         }
     }
 

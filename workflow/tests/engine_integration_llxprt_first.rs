@@ -134,6 +134,7 @@ fn make_config_with_vars(
         variables,
         discovery: None,
         command_manifest: None,
+        target_profile: None,
     }
 }
 

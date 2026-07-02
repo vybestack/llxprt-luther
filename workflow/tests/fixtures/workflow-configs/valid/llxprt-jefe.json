@@ -17,21 +17,91 @@
     "max_cost": 50.0
   },
   "variables": {
-    "target_repo": "vybestack/llxprt-jefe",
-    "repository_owner": "vybestack",
-    "repository_name": "llxprt-jefe",
-    "assignee": "acoliver",
-    "work_dir": "/tmp/luther-workspaces/llxprt-jefe",
-    "artifact_dir": "/tmp/luther-artifacts/llxprt-jefe",
     "primary_issue_number": "0",
     "issue_number": "0",
-    "base_branch": "main",
     "profile_planning": "gpt55high",
     "profile_evaluating": "gpt55high",
     "profile_implementing": "ollamaglm51",
     "profile_remediating": "ollamaglm51",
-    "luther_label": "Luther working",
-    "ok_label": "OK for Luther"
+    "plan_static_content": ""
+  },
+  "target_profile": {
+    "identity": {
+      "repo": "vybestack/llxprt-jefe",
+      "base_branch": "main"
+    },
+    "paths": {
+      "default_command_cwd": ".",
+      "work_dir": "/tmp/luther-workspaces/llxprt-jefe",
+      "artifact_dir": "/tmp/luther-artifacts/llxprt-jefe"
+    },
+    "issue_conventions": {
+      "assignee": "acoliver",
+      "ok_label": "OK for Luther",
+      "luther_label": "Luther working"
+    },
+    "pr_conventions": {
+      "title_prefix": "Fix",
+      "body_guidance": "Call out custom clippy policy, source-size, strict complexity, and coverage impact when relevant."
+    },
+    "templates": {
+      "branch": "issue{issue_number}",
+      "pr_title": "Fix #{issue_number}: {issue_title}",
+      "pr_body": "{pr_body_guidance}"
+    },
+    "diff_policy": {
+      "required_changed_path_pattern": "",
+      "required_path_regex": ".",
+      "failure_message": "No issue #{issue_number} source/test diff found and no reusable open PR exists",
+      "allowed_path_patterns": [
+        "src/**",
+        "tests/**",
+        "xtask/**",
+        "scripts/**",
+        ".github/workflows/**"
+      ],
+      "required_path_patterns": [
+        "src/**",
+        "tests/**",
+        "xtask/**"
+      ]
+    },
+    "command_groups": {
+      "local": "local",
+      "post_pr": "post_pr",
+      "review": "review"
+    },
+    "pr_checks": {
+      "required": [
+        "format",
+        "clippy policy",
+        "strict complexity",
+        "coverage",
+        "build",
+        "test"
+      ],
+      "ignored": [
+        "CodeRabbit"
+      ]
+    },
+    "auth": {
+      "requirements": [
+        "gh",
+        "git",
+        "cargo",
+        "cargo-llvm-cov"
+      ]
+    },
+    "preflight": {
+      "expectations": [
+        "custom clippy config and allow policy scripts must run through manifest commands"
+      ]
+    },
+    "prompt_guidance": {
+      "planning": "Treat llxprt-jefe as a Rust root project with repo-specific gates, not as a generic Rust default.",
+      "implementation": "Keep clippy allow policy and source length checks configured as manifest gates rather than engine steps.",
+      "review": "Include strict complexity and llvm-cov outcomes in remediation notes when those gates fail."
+    }
   },
   "command_manifest": {
     "commands": [
@@ -59,6 +129,18 @@
         "failure_outcome": "fixable"
       },
       {
+        "id": "build",
+        "argv": [
+          "cargo",
+          "build",
+          "--workspace",
+          "--all-features",
+          "--locked"
+        ],
+        "timeout_seconds": 1200,
+        "failure_outcome": "fixable"
+      },
+      {
         "id": "test",
         "argv": [
           "cargo",
@@ -71,11 +153,45 @@
         "failure_outcome": "fixable"
       },
       {
-        "id": "clippy",
+        "id": "clippy_custom_config",
         "argv": [
           "cargo",
           "clippy",
           "--workspace",
+          "--all-features",
+          "--locked",
+          "--",
+          "-D",
+          "warnings"
+        ],
+        "timeout_seconds": 1800,
+        "failure_outcome": "fixable"
+      },
+      {
+        "id": "clippy_allow_policy",
+        "argv": [
+          "python3",
+          "scripts/check-clippy-allows.py"
+        ],
+        "timeout_seconds": 600,
+        "failure_outcome": "fatal"
+      },
+      {
+        "id": "source_length",
+        "argv": [
+          "python3",
+          "scripts/check-source-length.py"
+        ],
+        "timeout_seconds": 600,
+        "failure_outcome": "fatal"
+      },
+      {
+        "id": "strict_complexity",
+        "argv": [
+          "cargo",
+          "clippy",
+          "--workspace",
+          "--all-targets",
           "--all-features",
           "--locked",
           "--",
@@ -100,14 +216,12 @@
         "failure_outcome": "fixable"
       },
       {
-        "id": "source-size",
+        "id": "ocr_review",
         "argv": [
-          "cargo",
-          "xtask",
-          "source-size",
-          "--locked"
+          "echo",
+          "Local OCR wrapper is not configured for this target profile"
         ],
-        "timeout_seconds": 600,
+        "timeout_seconds": 60,
         "failure_outcome": "fatal"
       }
     ],
@@ -115,13 +229,20 @@
       "local": [
         "format",
         "check",
+        "build",
         "test",
-        "clippy",
-        "coverage",
-        "source-size"
+        "clippy_custom_config",
+        "clippy_allow_policy",
+        "source_length",
+        "strict_complexity",
+        "coverage"
       ],
       "post_pr": [
-        "test"
+        "test",
+        "coverage"
+      ],
+      "review": [
+        "ocr_review"
       ]
     }
   }

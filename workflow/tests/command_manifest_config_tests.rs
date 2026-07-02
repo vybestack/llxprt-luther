@@ -29,6 +29,7 @@ max_cost = 100.0
 
 [variables]
 work_dir = "/tmp/luther"
+primary_issue_number = "1"
 
 {manifest}
 "#
@@ -187,4 +188,73 @@ fn repository_path_fields_parse_and_validate() {
         "workspace_root = \"/tmp/luther\"\ndiff_path_normalization = \"base_relative\"",
     );
     assert!(parse_workflow_config_toml(&invalid_base_relative).is_err());
+}
+
+fn config_with_target_profile(manifest: &str, groups: &str) -> String {
+    config_with_manifest(&format!(
+        r#"
+[target_profile.identity]
+repo = "owner/repo"
+base_branch = "main"
+
+[target_profile.paths]
+work_dir = "/tmp/luther"
+artifact_dir = "/tmp/luther-artifacts"
+
+[target_profile.issue_conventions]
+assignee = "bot"
+ok_label = "OK"
+luther_label = "Working"
+
+[target_profile.command_groups]
+{groups}
+
+{manifest}
+"#
+    ))
+}
+
+#[test]
+fn target_profile_command_groups_resolve_to_manifest_groups() {
+    let config = parse_workflow_config_toml(&config_with_target_profile(
+        r#"
+[[command_manifest.commands]]
+id = "lint"
+argv = ["cargo", "fmt", "--check"]
+
+[command_manifest.groups]
+local = ["lint"]
+post_pr = ["lint"]
+"#,
+        "local = \"local\"\npost_pr = \"post_pr\"",
+    ))
+    .expect("target profile command groups resolve");
+
+    let profile = config.target_profile.expect("target profile present");
+    assert_eq!(
+        profile.command_groups.get("local").map(String::as_str),
+        Some("local")
+    );
+    assert_eq!(
+        config.variables.get("command_manifest_group_local"),
+        Some(&"local".to_string())
+    );
+}
+
+#[test]
+fn target_profile_rejects_unknown_manifest_group_reference() {
+    let err = parse_workflow_config_toml(&config_with_target_profile(
+        r#"
+[[command_manifest.commands]]
+id = "lint"
+argv = ["cargo", "fmt", "--check"]
+
+[command_manifest.groups]
+local = ["lint"]
+"#,
+        "local = \"missing\"",
+    ))
+    .expect_err("unknown target profile command group rejected");
+
+    assert!(err.message.contains("unknown manifest group"));
 }

@@ -2877,7 +2877,7 @@ fn llxprt_jefe_runs_custom_gates_from_manifest_without_workflow_edits() {
     let local_group = manifest_group(&jefe_config, "local");
     assert!(
         local_group.contains(&"coverage".to_string())
-            && local_group.contains(&"source-size".to_string()),
+            && local_group.contains(&"source_length".to_string()),
         "llxprt-jefe should add custom coverage and source-size gates through config only: {local_group:?}"
     );
     assert_eq!(
@@ -2893,6 +2893,31 @@ fn llxprt_jefe_runs_custom_gates_from_manifest_without_workflow_edits() {
         ],
         "coverage gate should be fully declared as argv in the target config"
     );
+}
+
+#[test]
+fn target_profiles_cover_current_and_skeleton_repositories() {
+    for config_id in ["llxprt-luther", "llxprt-code", "llxprt-jefe", "codepuppy"] {
+        let config = workflow_config(config_id);
+        let profile = config
+            .target_profile
+            .as_ref()
+            .expect("target profile present");
+        assert!(
+            profile.command_groups.contains_key("local")
+                && profile.command_groups.contains_key("post_pr")
+                && config.command_manifest.is_some(),
+            "{config_id} should use shared target profile command groups"
+        );
+        assert!(
+            config.variables.contains_key("target_repo")
+                && config.variables.contains_key("diff_required_path_regex")
+                && config
+                    .variables
+                    .contains_key("target_guidance_implementation"),
+            "{config_id} should derive legacy prompt/diff variables from target_profile"
+        );
+    }
 }
 
 /// @plan:PLAN-20260408-LLXPRT-FIRST.P17
