@@ -42,6 +42,7 @@ pub trait PostPrTestCommandRunner: Send + Sync {
 pub struct PostPrTestCommandRequest {
     pub command_id: String,
     pub argv: Vec<String>,
+    pub repo_root_directory: PathBuf,
     pub working_directory: PathBuf,
     pub artifact_base_directory: PathBuf,
     pub timeout_seconds: u64,
@@ -265,6 +266,7 @@ fn post_pr_test_request(
     PostPrTestCommandRequest {
         command_id: command.command_id.clone(),
         argv: command.argv.clone(),
+        repo_root_directory: command.repo_root_directory.clone(),
         working_directory: command.working_directory.clone(),
         artifact_base_directory: command.artifact_base_directory.clone(),
         timeout_seconds: command.timeout_seconds,
@@ -345,6 +347,7 @@ fn write_post_pr_test_completion(
 struct PostPrTestCommandConfig {
     command_id: String,
     argv: Vec<String>,
+    repo_root_directory: PathBuf,
     working_directory: PathBuf,
     artifact_base_directory: PathBuf,
     timeout_seconds: u64,
@@ -397,6 +400,7 @@ fn post_pr_test_command(
     let command_id = post_pr_command_id(object, index);
     let manifest_entry = post_pr_manifest_entry(params, object)?;
     let argv = post_pr_command_argv(params, object, manifest_entry.as_ref())?;
+    let repo_root_directory = context.work_dir().clone();
     let working_directory =
         post_pr_command_working_directory(context, object, manifest_entry.as_ref())?;
     let artifact_base_directory = post_pr_command_artifact_base_directory(context);
@@ -405,6 +409,7 @@ fn post_pr_test_command(
     Ok(PostPrTestCommandConfig {
         command_id,
         argv,
+        repo_root_directory,
         working_directory,
         artifact_base_directory,
         timeout_seconds,

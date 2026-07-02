@@ -287,3 +287,26 @@ local = ["lint"]
 
     assert!(err.message.contains("unknown manifest group"));
 }
+
+#[test]
+fn target_profile_rejects_unknown_bootstrap_manifest_group_reference() {
+    let err = parse_workflow_config_toml(&config_with_target_profile(
+        r#"
+[[command_manifest.commands]]
+id = "lint"
+argv = ["cargo", "fmt", "--check"]
+
+[command_manifest.groups]
+local = ["lint"]
+"#,
+        "",
+    )
+    .replace(
+        "[target_profile.prompt_guidance]\necosystem_name = \"Rust\"",
+        "[target_profile.prompt_guidance]\necosystem_name = \"Rust\"\n\n[target_profile.bootstrap]\ncommand_group = \"missing\"",
+    ))
+    .expect_err("unknown bootstrap target profile command group rejected");
+
+    assert!(err.message.contains("bootstrap command_group"));
+    assert!(err.message.contains("unknown manifest group"));
+}

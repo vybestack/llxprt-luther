@@ -104,6 +104,7 @@
       "review": "Include strict complexity and llvm-cov outcomes in remediation notes when those gates fail.",
       "verification": "Use targeted Rust commands only when needed; the workflow runs the configured manifest gates.",
       "style": "Respect the repository's strict Rust complexity and source-length policies.",
+      "fixture_parity": "Maintain TOML/JSON fixture parity for valid workflow and workflow-config fixtures.",
       "forbidden_actions": "Do not bypass allow-policy or coverage gates.",
       "remediation_scope": "Fix only failures caused by the current branch diff.",
       "command_manifest_summary": "Local gates run cargo fmt, check, clippy, test, source length, allow policy, and llvm-cov commands."

@@ -2981,6 +2981,18 @@ fn shared_workflow_bootstrap_is_manifest_based_and_setup_is_generic() {
             .and_then(serde_json::Value::as_str),
         Some("{target_bootstrap_command_group}")
     );
+
+    let config = workflow_config("llxprt-code");
+    let resolved_group = config
+        .variables
+        .get("target_bootstrap_command_group")
+        .map(String::as_str)
+        .expect("target_bootstrap_command_group variable");
+    let manifest = config.command_manifest.expect("command manifest");
+    assert!(
+        manifest.groups.contains_key(resolved_group),
+        "resolved bootstrap group '{resolved_group}' must exist in command manifest groups"
+    );
 }
 
 #[test]

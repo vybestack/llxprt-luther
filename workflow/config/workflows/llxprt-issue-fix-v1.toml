@@ -1107,6 +1107,11 @@ to = "abandon_and_log"
 condition = "fatal"
 
 [[transitions]]
+from = "bootstrap_workspace"
+to = "abandon_and_log"
+condition = "fixable"
+
+[[transitions]]
 from = "fetch_issue"
 to = "abandon_and_log"
 condition = "fatal"

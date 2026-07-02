@@ -89,20 +89,22 @@ fn group_error(message: impl Into<String>) -> EngineError {
 }
 
 fn entry_conditions_match(entry: &CommandEntry, work_dir: &Path) -> Result<bool, String> {
-    if !entry.run_if_missing_any.is_empty()
-        && !entry
-            .run_if_missing_any
-            .iter()
-            .any(|path| manifest_relative_path(work_dir, path).is_ok_and(|path| !path.exists()))
-    {
-        return Ok(false);
+    if !entry.run_if_missing_any.is_empty() {
+        let mut any_missing = false;
+        for path in &entry.run_if_missing_any {
+            if !manifest_relative_path(work_dir, path)?.exists() {
+                any_missing = true;
+                break;
+            }
+        }
+        if !any_missing {
+            return Ok(false);
+        }
     }
-    if !entry
-        .run_if_present_all
-        .iter()
-        .all(|path| manifest_relative_path(work_dir, path).is_ok_and(|path| path.exists()))
-    {
-        return Ok(false);
+    for path in &entry.run_if_present_all {
+        if !manifest_relative_path(work_dir, path)?.exists() {
+            return Ok(false);
+        }
     }
     Ok(true)
 }

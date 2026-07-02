@@ -101,6 +101,7 @@
       "review": "Treat unknown CI names as skeleton placeholders until the repository is confirmed.",
       "verification": "Use targeted uv/ruff/pytest commands only when needed; the workflow runs configured manifest gates.",
       "style": "Follow Python package conventions and keep skeleton metadata explicit.",
+      "fixture_parity": "Maintain TOML/JSON fixture parity for valid workflow and workflow-config fixtures.",
       "forbidden_actions": "Do not replace structured argv manifest commands with shell snippets.",
       "remediation_scope": "Fix only failures caused by the current branch diff.",
       "command_manifest_summary": "Local gates run uv sync, ruff format/check, pytest, and coverage commands."

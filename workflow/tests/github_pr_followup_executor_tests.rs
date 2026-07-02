@@ -9427,6 +9427,44 @@ fn post_pr_tests_and_push_shell_safety_use_configured_argv_without_shell_injecti
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P13
 /// @requirement:REQ-PRFU-017
 /// @pseudocode lines 29-40
+
+#[test]
+fn run_post_pr_tests_manifest_conditions_use_repo_root_not_project_dir() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_p11_plan_and_result(&temp, serde_json::json!([]));
+    let runner = P13RecordingRunner::with_results(Vec::new());
+    let mut context = p11_context(&temp);
+    let project_dir = temp.path().join("workflow");
+    std::fs::create_dir(&project_dir).expect("project dir");
+    std::fs::write(temp.path().join("repo-marker"), "repo").expect("repo marker");
+    context.set("project_dir", &project_dir.to_string_lossy());
+    context.set("command_manifest_group_post_pr", "custom_pr");
+    let mut params = p11_params(&temp);
+    params["command_manifest_group"] = serde_json::json!("{command_manifest_group_post_pr}");
+    params["command_manifest"] = serde_json::json!({
+        "commands": [{
+            "id": "unit",
+            "argv": ["cargo", "test", "--lib"],
+            "run_if_present_all": ["repo-marker"]
+        }],
+        "groups": { "custom_pr": ["unit"] }
+    });
+
+    let outcome = RunPostPrTestsExecutorWithRunner::new(runner.clone(), FixedClock)
+        .execute(&mut context, &params)
+        .expect("post-pr manifest group uses repo root for conditions");
+    let requests = runner.requests();
+
+    assert_expected_outcome(
+        outcome,
+        StepOutcome::Success,
+        "post-PR manifest conditions must evaluate against the repository root",
+    );
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].repo_root_directory, temp.path());
+    assert_eq!(requests[0].working_directory, project_dir);
+}
+
 #[test]
 fn post_pr_test_requests_preserve_artifact_base_separately_from_working_directory() {
     let temp = tempfile::tempdir().expect("tempdir");
@@ -9450,6 +9488,7 @@ fn post_pr_test_requests_preserve_artifact_base_separately_from_working_director
         "post-PR test requests must keep artifact base separate from command cwd",
     );
     assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].repo_root_directory, temp.path());
     assert_eq!(requests[0].working_directory, project_dir);
     assert_eq!(requests[0].artifact_base_directory, artifact_base);
 }

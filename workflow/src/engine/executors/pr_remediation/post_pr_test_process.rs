@@ -19,7 +19,7 @@ pub(super) fn run_manifest_post_pr_test_process(
     resolved_entry.working_directory = None;
     resolved_entry.project_subdirectory = None;
     let paths = ManifestPathContext {
-        repo_root: request.working_directory.clone(),
+        repo_root: request.repo_root_directory.clone(),
         default_working_directory: request.working_directory.clone(),
         artifact_base_directory: request.artifact_base_directory.clone(),
     };
@@ -51,7 +51,7 @@ fn skipped_manifest_post_pr_result(request: PostPrTestCommandRequest) -> PostPrT
         spawn_error: None,
         expectation_failures: Vec::new(),
         artifact_failures: Vec::new(),
-        failure_classification: Some("fixable".to_string()),
+        failure_classification: None,
     }
 }
 

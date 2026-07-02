@@ -298,12 +298,17 @@ fn merge_prompt_guidance(config: &mut WorkflowConfig, profile: &TargetProfileCon
 }
 
 fn merge_bootstrap(config: &mut WorkflowConfig, profile: &TargetProfileConfig) {
-    let group = profile
-        .bootstrap
-        .command_group
-        .as_deref()
-        .unwrap_or_default();
-    insert_var(config, "target_bootstrap_command_group", group);
+    match profile.bootstrap.command_group.as_deref() {
+        Some(group) if !group.is_empty() => {
+            insert_var(config, "target_bootstrap_command_group", group)
+        }
+        _ => {
+            config
+                .variables
+                .entry("target_bootstrap_command_group".to_string())
+                .or_default();
+        }
+    }
 }
 
 fn validate_profile_templates(
@@ -506,18 +511,42 @@ fn validate_profile_command_groups(config: &WorkflowConfig, errors: &mut Vec<Str
     let Some(profile) = &config.target_profile else {
         return;
     };
+    let bootstrap_group = profile.bootstrap.command_group.as_deref();
+    let has_bootstrap_group = bootstrap_group.is_some_and(|group| !group.is_empty());
     let Some(manifest) = &config.command_manifest else {
-        if !profile.command_groups.is_empty() {
+        if !profile.command_groups.is_empty() || has_bootstrap_group {
             errors.push("target profile command groups require command_manifest".to_string());
         }
         return;
     };
     for (logical_name, manifest_group) in &profile.command_groups {
-        if !manifest.groups.contains_key(manifest_group) {
-            errors.push(format!(
-                "target profile command group '{logical_name}' references unknown manifest group '{manifest_group}'"
-            ));
-        }
+        validate_profile_command_group(
+            manifest,
+            &format!("target profile command group '{logical_name}'"),
+            manifest_group,
+            errors,
+        );
+    }
+    if let Some(manifest_group) = bootstrap_group.filter(|group| !group.is_empty()) {
+        validate_profile_command_group(
+            manifest,
+            "target profile bootstrap command_group",
+            manifest_group,
+            errors,
+        );
+    }
+}
+
+fn validate_profile_command_group(
+    manifest: &crate::workflow::command_manifest::CommandManifest,
+    label: &str,
+    manifest_group: &str,
+    errors: &mut Vec<String>,
+) {
+    if !manifest.groups.contains_key(manifest_group) {
+        errors.push(format!(
+            "{label} references unknown manifest group '{manifest_group}'"
+        ));
     }
 }
 
