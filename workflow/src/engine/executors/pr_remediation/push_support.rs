@@ -418,7 +418,7 @@ pub(super) fn current_push_retry_index(
     if !path.exists() {
         return Ok(0);
     }
-    let value = store.read_current_json(binding, "push-remediation-result")?;
+    let value = store.read_current_raw_json(binding, "push-remediation-result")?;
     let same_scope = value
         .get("retry_scope")
         .and_then(Value::as_object)
