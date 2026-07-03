@@ -43,11 +43,14 @@ pub fn resolve_target_profile(config: &mut WorkflowConfig) -> Result<()> {
     merge_identity(config, &profile)?;
     merge_paths(config, &profile)?;
     merge_conventions(config, &profile);
-    merge_diff_policy(config, &profile);
+    validate_profile_templates(config, &profile)?;
+    let commit_exclude_pathspecs = validated_profile_commit_exclusions(config, &profile)?;
+    merge_diff_policy(config, &profile, &commit_exclude_pathspecs);
     merge_command_groups(config, &profile);
     merge_list_variables(config, &profile);
     merge_prompt_guidance(config, &profile);
-    validate_profile_templates(config, &profile)
+    merge_bootstrap(config, &profile);
+    Ok(())
 }
 
 pub fn apply_target_profile_overrides(
@@ -84,6 +87,7 @@ pub fn validate_target_profile(config: &WorkflowConfig) -> Result<()> {
     validate_repo_identity(config, &mut errors);
     validate_required_issue(config, &mut errors);
     validate_runtime_path_variables(config, &mut errors);
+    validate_required_guidance(config, &mut errors);
     validate_profile_command_groups(config, &mut errors);
 
     if errors.is_empty() {
@@ -207,7 +211,11 @@ fn merge_conventions(config: &mut WorkflowConfig, profile: &TargetProfileConfig)
     );
 }
 
-fn merge_diff_policy(config: &mut WorkflowConfig, profile: &TargetProfileConfig) {
+fn merge_diff_policy(
+    config: &mut WorkflowConfig,
+    profile: &TargetProfileConfig,
+    commit_exclude_pathspecs: &[String],
+) {
     insert_optional(
         config,
         "required_changed_path_pattern",
@@ -232,6 +240,25 @@ fn merge_diff_policy(config: &mut WorkflowConfig, profile: &TargetProfileConfig)
         config,
         "diff_required_path_patterns",
         &profile.diff_policy.required_path_patterns,
+    );
+    insert_shell_pathspecs(
+        config,
+        "target_commit_exclude_pathspecs",
+        commit_exclude_pathspecs,
+    );
+    insert_commit_restore_paths(
+        config,
+        "target_commit_restore_paths",
+        commit_exclude_pathspecs,
+    );
+    insert_var(
+        config,
+        "target_has_commit_restore_paths",
+        if commit_exclude_pathspecs.is_empty() {
+            "0"
+        } else {
+            "1"
+        },
     );
 }
 
@@ -258,14 +285,54 @@ fn merge_list_variables(config: &mut WorkflowConfig, profile: &TargetProfileConf
 }
 
 fn merge_prompt_guidance(config: &mut WorkflowConfig, profile: &TargetProfileConfig) {
-    for key in ["planning", "implementation", "review"] {
-        config
-            .variables
-            .entry(format!("target_guidance_{key}"))
-            .or_default();
-    }
-    for (key, value) in &profile.prompt_guidance {
-        insert_var(config, &format!("target_guidance_{key}"), value);
+    let guidance = &profile.prompt_guidance;
+    insert_var(config, "target_ecosystem_name", &guidance.ecosystem_name);
+    insert_guidance_var(config, "target_guidance_planning", &guidance.planning);
+    insert_guidance_var(
+        config,
+        "target_guidance_implementation",
+        &guidance.implementation,
+    );
+    insert_guidance_var(config, "target_guidance_review", &guidance.review);
+    insert_guidance_var(
+        config,
+        "target_guidance_verification",
+        &guidance.verification,
+    );
+    insert_guidance_var(config, "target_guidance_style", &guidance.style);
+    insert_guidance_var(
+        config,
+        "target_guidance_fixture_parity",
+        &guidance.fixture_parity,
+    );
+    insert_guidance_var(
+        config,
+        "target_guidance_forbidden_actions",
+        &guidance.forbidden_actions,
+    );
+    insert_guidance_var(
+        config,
+        "target_guidance_remediation_scope",
+        &guidance.remediation_scope,
+    );
+    insert_guidance_var(
+        config,
+        "target_command_manifest_summary",
+        &guidance.command_manifest_summary,
+    );
+}
+
+fn merge_bootstrap(config: &mut WorkflowConfig, profile: &TargetProfileConfig) {
+    match profile.bootstrap.command_group.as_deref() {
+        Some(group) if !group.is_empty() => {
+            insert_var(config, "target_bootstrap_command_group", group)
+        }
+        _ => {
+            config
+                .variables
+                .entry("target_bootstrap_command_group".to_string())
+                .or_default();
+        }
     }
 }
 
@@ -288,6 +355,90 @@ fn validate_profile_templates(
             kind: ConfigErrorKind::ValidationError,
         })
     }
+}
+
+fn validated_profile_commit_exclusions(
+    config: &WorkflowConfig,
+    profile: &TargetProfileConfig,
+) -> Result<Vec<String>> {
+    let mut pathspecs = Vec::new();
+    for pathspec in &profile.diff_policy.commit_exclude_pathspecs {
+        let resolved = interpolate_variables(pathspec, &config.variables);
+        let unresolved = unresolved_tokens(&resolved);
+        if !unresolved.is_empty() {
+            return Err(ConfigError {
+                message: format!(
+                    "target_profile.diff_policy.commit_exclude_pathspecs contains unresolved template variable(s): {}",
+                    unresolved.into_iter().collect::<Vec<_>>().join(", ")
+                ),
+                source_path: None,
+                kind: ConfigErrorKind::ValidationError,
+            });
+        }
+        validate_commit_exclude_pathspec(&resolved)?;
+        pathspecs.push(resolved);
+    }
+    Ok(pathspecs)
+}
+
+fn validate_commit_exclude_pathspec(pathspec: &str) -> Result<()> {
+    let Some(path) = pathspec.strip_prefix(":!") else {
+        return Err(ConfigError {
+            message: format!(
+                "target_profile.diff_policy.commit_exclude_pathspecs entries must use :! pathspecs, got '{pathspec}'"
+            ),
+            source_path: None,
+            kind: ConfigErrorKind::ValidationError,
+        });
+    };
+    if pathspec.contains('\\') || pathspec.contains('\'') || pathspec.chars().any(char::is_control)
+    {
+        return Err(ConfigError {
+            message: format!(
+                "target_profile.diff_policy.commit_exclude_pathspecs entries must not contain backslashes, single quotes, or control characters, got '{pathspec}'"
+            ),
+            source_path: None,
+            kind: ConfigErrorKind::ValidationError,
+        });
+    }
+    if path_has_git_pathspec_metacharacters(path) {
+        return Err(ConfigError {
+            message: format!(
+                "target_profile.diff_policy.commit_exclude_pathspecs must be literal repository paths without git pathspec metacharacters, got '{pathspec}'"
+            ),
+            source_path: None,
+            kind: ConfigErrorKind::ValidationError,
+        });
+    }
+    let path = Path::new(path);
+    if path.as_os_str().is_empty()
+        || !path
+            .components()
+            .any(|component| matches!(component, Component::Normal(_)))
+    {
+        return Err(ConfigError {
+            message: format!(
+                "target_profile.diff_policy.commit_exclude_pathspecs must target a repository path, got '{pathspec}'"
+            ),
+            source_path: None,
+            kind: ConfigErrorKind::ValidationError,
+        });
+    }
+    if unsafe_relative_path(path.to_string_lossy().as_ref()) {
+        return Err(ConfigError {
+            message: format!(
+                "target_profile.diff_policy.commit_exclude_pathspecs must stay within the repository, got '{pathspec}'"
+            ),
+            source_path: None,
+            kind: ConfigErrorKind::ValidationError,
+        });
+    }
+    Ok(())
+}
+
+fn path_has_git_pathspec_metacharacters(path: &str) -> bool {
+    path.bytes()
+        .any(|byte| matches!(byte, b'*' | b'?' | b'[' | b']' | b':'))
 }
 
 fn profile_templates(profile: &TargetProfileConfig) -> Vec<(&'static str, &str)> {
@@ -322,11 +473,66 @@ fn profile_templates(profile: &TargetProfileConfig) -> Vec<(&'static str, &str)>
         "target_profile.diff_policy.failure_message",
         profile.diff_policy.failure_message.as_deref(),
     );
-    for (key, value) in &profile.prompt_guidance {
-        templates.push(("target_profile.prompt_guidance", value.as_str()));
-        templates.push(("target_profile.prompt_guidance_key", key.as_str()));
+    for pathspec in &profile.diff_policy.commit_exclude_pathspecs {
+        push_optional(
+            &mut templates,
+            "target_profile.diff_policy.commit_exclude_pathspecs",
+            Some(pathspec.as_str()),
+        );
     }
+    templates.extend(prompt_guidance_templates(profile));
+    push_optional(
+        &mut templates,
+        "target_profile.bootstrap.command_group",
+        profile.bootstrap.command_group.as_deref(),
+    );
     templates
+}
+
+fn prompt_guidance_templates(profile: &TargetProfileConfig) -> Vec<(&'static str, &str)> {
+    let guidance = &profile.prompt_guidance;
+    vec![
+        (
+            "target_profile.prompt_guidance.ecosystem_name",
+            guidance.ecosystem_name.as_str(),
+        ),
+        (
+            "target_profile.prompt_guidance.planning",
+            guidance.planning.as_str(),
+        ),
+        (
+            "target_profile.prompt_guidance.implementation",
+            guidance.implementation.as_str(),
+        ),
+        (
+            "target_profile.prompt_guidance.review",
+            guidance.review.as_str(),
+        ),
+        (
+            "target_profile.prompt_guidance.verification",
+            guidance.verification.as_str(),
+        ),
+        (
+            "target_profile.prompt_guidance.style",
+            guidance.style.as_str(),
+        ),
+        (
+            "target_profile.prompt_guidance.fixture_parity",
+            guidance.fixture_parity.as_str(),
+        ),
+        (
+            "target_profile.prompt_guidance.forbidden_actions",
+            guidance.forbidden_actions.as_str(),
+        ),
+        (
+            "target_profile.prompt_guidance.remediation_scope",
+            guidance.remediation_scope.as_str(),
+        ),
+        (
+            "target_profile.prompt_guidance.command_manifest_summary",
+            guidance.command_manifest_summary.as_str(),
+        ),
+    ]
 }
 
 fn validate_profile_paths(profile: &TargetProfileConfig) -> Result<()> {
@@ -411,23 +617,52 @@ fn validate_runtime_path_variables(config: &WorkflowConfig, errors: &mut Vec<Str
         }
     }
 }
+fn validate_required_guidance(config: &WorkflowConfig, errors: &mut Vec<String>) {
+    if trimmed_value(config, "target_ecosystem_name").is_none() {
+        errors.push("missing target profile variable target_ecosystem_name".to_string());
+    }
+}
 
 fn validate_profile_command_groups(config: &WorkflowConfig, errors: &mut Vec<String>) {
     let Some(profile) = &config.target_profile else {
         return;
     };
+    let bootstrap_group = profile.bootstrap.command_group.as_deref();
+    let has_bootstrap_group = bootstrap_group.is_some_and(|group| !group.is_empty());
     let Some(manifest) = &config.command_manifest else {
-        if !profile.command_groups.is_empty() {
+        if !profile.command_groups.is_empty() || has_bootstrap_group {
             errors.push("target profile command groups require command_manifest".to_string());
         }
         return;
     };
     for (logical_name, manifest_group) in &profile.command_groups {
-        if !manifest.groups.contains_key(manifest_group) {
-            errors.push(format!(
-                "target profile command group '{logical_name}' references unknown manifest group '{manifest_group}'"
-            ));
-        }
+        validate_profile_command_group(
+            manifest,
+            &format!("target profile command group '{logical_name}'"),
+            manifest_group,
+            errors,
+        );
+    }
+    if let Some(manifest_group) = bootstrap_group.filter(|group| !group.is_empty()) {
+        validate_profile_command_group(
+            manifest,
+            "target profile bootstrap command_group",
+            manifest_group,
+            errors,
+        );
+    }
+}
+
+fn validate_profile_command_group(
+    manifest: &crate::workflow::command_manifest::CommandManifest,
+    label: &str,
+    manifest_group: &str,
+    errors: &mut Vec<String>,
+) {
+    if !manifest.groups.contains_key(manifest_group) {
+        errors.push(format!(
+            "{label} references unknown manifest group '{manifest_group}'"
+        ));
     }
 }
 
@@ -564,6 +799,14 @@ fn valid_token_tail_byte(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || byte == b'_'
 }
 
+fn insert_guidance_var(config: &mut WorkflowConfig, key: &str, value: &str) {
+    if value.is_empty() {
+        config.variables.entry(key.to_string()).or_default();
+    } else {
+        insert_var(config, key, value);
+    }
+}
+
 fn insert_var(config: &mut WorkflowConfig, key: &str, value: &str) {
     config.variables.insert(key.to_string(), value.to_string());
 }
@@ -572,6 +815,35 @@ fn insert_optional(config: &mut WorkflowConfig, key: &str, value: Option<&str>) 
     if let Some(value) = value {
         insert_var(config, key, value);
     }
+}
+
+fn insert_shell_pathspecs(config: &mut WorkflowConfig, key: &str, values: &[String]) {
+    insert_shell_words(config, key, values.iter().map(String::as_str));
+}
+
+fn insert_commit_restore_paths(config: &mut WorkflowConfig, key: &str, values: &[String]) {
+    insert_shell_words(
+        config,
+        key,
+        values.iter().filter_map(|value| value.strip_prefix(":!")),
+    );
+}
+
+fn insert_shell_words<'a>(
+    config: &mut WorkflowConfig,
+    key: &str,
+    values: impl Iterator<Item = &'a str>,
+) {
+    let quoted = values.map(shell_quote_word).collect::<Vec<_>>().join(" ");
+    insert_var(config, key, &quoted);
+}
+
+fn shell_quote_word(value: &str) -> String {
+    if value.is_empty() {
+        return "''".to_string();
+    }
+    let escaped = value.replace('\'', "'\\''");
+    format!("'{escaped}'")
 }
 
 fn insert_joined(config: &mut WorkflowConfig, key: &str, values: &[String]) {

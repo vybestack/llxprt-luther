@@ -80,12 +80,18 @@
         "src/**",
         "test/**",
         "tests/**"
+      ],
+      "commit_exclude_pathspecs": [
+        ":!packages/vscode-ide-companion/NOTICES.txt"
       ]
     },
     "command_groups": {
       "local": "local",
       "post_pr": "post_pr",
       "review": "review"
+    },
+    "bootstrap": {
+      "command_group": "bootstrap"
     },
     "pr_checks": {
       "required": [
@@ -113,13 +119,69 @@
       ]
     },
     "prompt_guidance": {
+      "ecosystem_name": "TypeScript/npm",
       "planning": "Use the npm TypeScript monorepo layout and prefer existing package scripts over ad hoc commands.",
       "implementation": "Do not loosen eslint guardrails or add TypeScript/ESLint suppressions; fix the underlying issue.",
-      "review": "Review CodeRabbit/LLxprt conventions and keep PR comments shell-safe."
+      "review": "Review CodeRabbit/LLxprt conventions and keep PR comments shell-safe.",
+      "verification": "Use targeted npm scripts only when needed; the workflow runs the full configured npm manifest gates.",
+      "style": "Match the existing TypeScript package conventions and keep changes package-scoped.",
+      "fixture_parity": "Maintain TOML/JSON fixture parity for valid workflow and workflow-config fixtures.",
+      "forbidden_actions": "Do not modify package lockfiles or generated notice files unless the issue explicitly requires it.",
+      "remediation_scope": "Fix only failures caused by the current branch diff.",
+      "command_manifest_summary": "Local gates run npm format, lint, typecheck, build, bundle, test, and eslint guard commands."
     }
   },
   "command_manifest": {
     "commands": [
+      {
+        "argv": [
+          "npm",
+          "ci",
+          "--ignore-scripts"
+        ],
+        "timeout_seconds": 900,
+        "failure_outcome": "fatal",
+        "id": "install_dependencies_when_missing",
+        "run_if_missing_any": [
+          "node_modules"
+        ]
+      },
+      {
+        "argv": [
+          "npm",
+          "ci",
+          "--ignore-scripts"
+        ],
+        "timeout_seconds": 900,
+        "failure_outcome": "fatal",
+        "id": "reinstall_dependencies_when_incomplete",
+        "run_if_present_all": [
+          "node_modules"
+        ],
+        "run_if_missing_any": [
+          "node_modules/esbuild/index.js",
+          "node_modules/jsdom/lib/jsdom/living/xhr/xhr-sync-worker.js",
+          "node_modules/@ast-grep/lang-python",
+          "node_modules/@lvce-editor/ripgrep"
+        ],
+        "remove_before_run": [
+          "node_modules"
+        ]
+      },
+      {
+        "id": "repair_node_bin_permissions",
+        "argv": [
+          "chmod",
+          "-R",
+          "+x",
+          "node_modules/.bin"
+        ],
+        "timeout_seconds": 120,
+        "run_if_present_all": [
+          "node_modules/.bin"
+        ],
+        "failure_outcome": "fatal"
+      },
       {
         "id": "format",
         "argv": [
@@ -213,6 +275,11 @@
       }
     ],
     "groups": {
+      "bootstrap": [
+        "install_dependencies_when_missing",
+        "reinstall_dependencies_when_incomplete",
+        "repair_node_bin_permissions"
+      ],
       "local": [
         "format",
         "lint",

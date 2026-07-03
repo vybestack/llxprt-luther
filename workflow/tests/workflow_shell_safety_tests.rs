@@ -155,6 +155,51 @@ fn production_and_fixture_workflows_use_safe_body_handling() {
 }
 
 #[test]
+fn shared_shell_commands_do_not_embed_target_bootstrap_or_guidance() {
+    let commands = shell_commands();
+    assert!(
+        !commands.is_empty(),
+        "shell command audit must inspect production and fixture commands"
+    );
+    for command in &commands {
+        assert!(
+            !command.command.contains("npm ci") && !command.command.contains("node_modules"),
+            "target bootstrap belongs in command_manifest argv, not shared shell command {}:{}\n{}",
+            command.path.display(),
+            command.step_id,
+            command.command
+        );
+        assert!(
+            !command.command.contains("target_guidance_")
+                && !command.command.contains("target_bootstrap_command_group"),
+            "target guidance/bootstrap variables must not be interpolated into shell commands {}:{}\n{}",
+            command.path.display(),
+            command.step_id,
+            command.command
+        );
+    }
+}
+
+#[test]
+fn shared_workflow_prompts_keep_forbidden_actions_in_target_guidance() {
+    let root = project_root();
+    let workflow_text =
+        std::fs::read_to_string(root.join("config/workflows/llxprt-issue-fix-v1.toml"))
+            .expect("read production workflow");
+
+    for forbidden_text in ["package lockfiles", "generated notice files", "NOTICES.txt"] {
+        assert!(
+            !workflow_text.contains(forbidden_text),
+            "repository-specific forbidden-action text belongs in target config guidance, not shared workflow TOML: {forbidden_text}"
+        );
+    }
+    assert!(
+        workflow_text.contains("Forbidden actions: {target_guidance_forbidden_actions}"),
+        "shared workflow should inject target-specific forbidden-action guidance"
+    );
+}
+
+#[test]
 fn coderabbit_text_metacharacters_cannot_execute() {
     let commands = shell_commands();
     assert!(
@@ -235,10 +280,8 @@ fn static_command_allowlist_is_machine_checked() {
         "git push ",
         "mkdir ",
         "rm ",
-        "npm ",
         "cd ",
         "cat ",
-        "chmod ",
         "echo ",
         "exit ",
         "if ",

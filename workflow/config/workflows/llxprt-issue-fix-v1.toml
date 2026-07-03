@@ -143,18 +143,6 @@ else
   git checkout -B issue{issue_number} 1>&2
 fi
 
-if [ ! -d node_modules ]; then
-  npm ci --ignore-scripts 1>&2
-elif [ ! -f node_modules/esbuild/index.js ] || [ ! -f node_modules/jsdom/lib/jsdom/living/xhr/xhr-sync-worker.js ] || [ ! -d node_modules/@ast-grep/lang-python ] || [ ! -d node_modules/@lvce-editor/ripgrep ]; then
-  rm -rf node_modules
-
-  npm ci --ignore-scripts 1>&2
-fi
-if [ -d node_modules/.bin ]; then
-  chmod +x node_modules/.bin/* 2>/dev/null || true
-fi
-
-
 mkdir -p {artifact_dir}
 rm -f \
   {artifact_dir}/plan.md \
@@ -177,6 +165,15 @@ jq -n --argjson existing_pr_number "$EXISTING_PR_NUMBER" --arg existing_pr_url "
 [steps.parameters.exit_code_map]
 1 = "fatal"
 128 = "fatal"
+
+[[steps]]
+step_id = "bootstrap_workspace"
+step_type = "command_manifest_group"
+description = "Run target-specific bootstrap commands"
+
+[steps.parameters]
+command_manifest_group = "{target_bootstrap_command_group}"
+allow_empty_group = true
 
 [[steps]]
 step_id = "fetch_issue"
@@ -223,8 +220,9 @@ static_content = "{plan_static_content}"
 
 prompt = """
 Do not use subagents. Do not ask questions. Read {artifact_dir}/issue.md and {artifact_dir}/comments.md. Inspect the repository as needed.
-Write a concise implementation plan to {artifact_dir}/plan.md. The plan MUST be specific to issue #{issue_number} and the current issue text, must identify the relevant source/test files, must describe the code bug from the issue, and must list the intended tests.
-Target-specific guidance: {target_guidance_planning}
+Write a concise implementation plan to {artifact_dir}/plan.md. The plan MUST be specific to issue #{issue_number} and the current issue text, must identify the relevant source/test files, must describe the architectural or behavioral problem from the issue, and must list the intended tests.
+Target ecosystem: {target_ecosystem_name}
+Target-specific planning guidance: {target_guidance_planning}
 Do not implement the fix in this step. Exit after writing {artifact_dir}/plan.md.
 """
 
@@ -283,12 +281,18 @@ stdout_file = "{artifact_dir}/implement-stdout.txt"
 stderr_file = "{artifact_dir}/implement-stderr.txt"
 prompt = """
 Do not ask questions. You may use subagents to inspect context or propose focused edits, but you are responsible for applying the final source/test changes directly. Read the current issue in {artifact_dir}/issue.md and the approved plan in {artifact_dir}/plan.md, then implement that plan.
-Make the smallest source/config/test changes needed to fix issue #{issue_number}. You MUST leave a non-empty git diff in {work_dir}; if no files are changed, this step is not complete. Do not modify package lockfiles, generated notice files, .luther files, or unrelated files.
+Make the smallest source/config/test changes needed to fix issue #{issue_number}. You MUST leave a non-empty git diff in {work_dir}; if no files are changed, this step is not complete. Follow the target-specific forbidden-action guidance below and keep changes scoped to the issue.
 Apply edits directly to files with available file-writing/editing tools. Do not print unified diffs, replacement snippets, or patch text as a substitute for modifying files. A patch shown only in stdout is a failed implementation.
 After reading the issue and plan, inspect only the minimal source/test context needed, then make the first source/test edit before doing broader investigation. Sustained read-only analysis is forbidden; only actual file modifications count as implementation progress.
-Target-specific guidance: {target_guidance_implementation}
+Target ecosystem: {target_ecosystem_name}
+Implementation guidance: {target_guidance_implementation}
+Style guidance: {target_guidance_style}
+Fixture guidance: {target_guidance_fixture_parity}
+Forbidden actions: {target_guidance_forbidden_actions}
+Configured verification summary: {target_command_manifest_summary}
 The required source and test scope is whatever the approved plan identifies for this issue. If the plan and issue disagree, follow the issue text and update only files directly relevant to the current issue.
 Add or update focused tests and fixtures when practical. You are not finished unless git diff shows intentional changes related to issue #{issue_number}.
+Verification guidance: {target_guidance_verification}
 Do not run full project verification commands for the target repository. The workflow runs configured checks after this step. You may run narrowly targeted tests/checks related to the files you changed.
 If {artifact_dir}/implementation-evaluation.md exists, treat it as a required remediation checklist and address every unresolved item before finishing this step. Do not stop after partially addressing the feedback.
 Before responding, inspect git diff --stat and git diff. If the diff does not match the current issue and approved plan, continue working or remove the unrelated changes before finishing. Remove any accidental temporary files in {work_dir} before finishing.
@@ -318,7 +322,10 @@ stderr_file = "{artifact_dir}/implementation-evaluation-stderr.txt"
 prompt = """
 Do not use subagents. Do not ask questions. All deterministic checks (lint, typecheck, test, format, build) have already passed.
 This workflow step is not a broad audit or design review. It is a narrow issue-acceptance gate for the current branch diff.
-Target-specific guidance: {target_guidance_review}
+Target ecosystem: {target_ecosystem_name}
+Review guidance: {target_guidance_review}
+Style guidance: {target_guidance_style}
+Verification guidance: {target_guidance_verification}
 Your job is ONLY subjective correctness: read the issue in {artifact_dir}/issue.md and the plan in {artifact_dir}/plan.md, then inspect git diff against origin/{base_branch}.
 Judge only: does this implementation materially solve the current issue text and approved plan? Verify the diff is scoped to issue #{issue_number}. Do not require the exact approach from the plan if the behavior is correct, tested, and narrowly scoped.
 Do NOT re-flag style, formatting, or test issues - those are handled elsewhere.
@@ -377,8 +384,14 @@ These artifact paths are intentionally outside the target repository. If file-re
 
 If implementation-evaluation.md exists, treat it as the primary remediation checklist and address every unresolved evaluator item before finishing. If verify-report.json contains failed checks, also fix only those failures caused by the current branch diff.
 Start by inspecting git diff --stat origin/{base_branch}...HEAD, git diff origin/{base_branch}...HEAD, git status --porcelain --untracked-files=all, and any failing check messages. Focus only on errors or evaluator feedback caused by the current branch diff and issue #{issue_number}; do not try to fix pre-existing repository-wide warnings unrelated to the current diff.
-Fix the current branch so it both materially solves the issue and lets the configured checks pass. Target-specific guidance: {target_guidance_implementation}
-Do not modify package lockfiles, generated notice files, .luther files, or unrelated files unless required by the issue. If implementation-evaluation.md reports unrelated committed branch artifacts, remove those artifacts from the branch even if plain git diff is otherwise empty.
+Fix the current branch so it both materially solves the issue and lets the configured checks pass. Implementation guidance: {target_guidance_implementation}
+Verification guidance: {target_guidance_verification}
+Style guidance: {target_guidance_style}
+Fixture guidance: {target_guidance_fixture_parity}
+Forbidden actions: {target_guidance_forbidden_actions}
+Remediation scope guidance: {target_guidance_remediation_scope}
+Configured verification summary: {target_command_manifest_summary}
+Follow the target-specific forbidden-action guidance above. If implementation-evaluation.md reports unrelated committed branch artifacts, remove those artifacts from the branch even if plain git diff is otherwise empty.
 Before responding, inspect git diff --stat origin/{base_branch}...HEAD, git diff origin/{base_branch}...HEAD, and git status --porcelain --untracked-files=all again. You are not complete if the branch diff is empty, if unrelated files remain in the branch diff, or if implementation-evaluation.md still lists unresolved required actions.
 If there is no current branch diff, first make the minimal issue-specific source/test edit from the plan instead of only inspecting files; do not emit REMEDIATION_SYSTEM_ERROR merely because the previous implementation step stopped early without changes.
 
@@ -413,8 +426,11 @@ description = "Stage, commit, and push changes"
 [steps.parameters]
 command = """
 set -euo pipefail
-git restore --worktree -- packages/vscode-ide-companion/NOTICES.txt 2>/dev/null || true
-git add -A -- ':!.luther' ':!.luther/**' ':!packages/vscode-ide-companion/NOTICES.txt'
+# .luther contains Luther runtime state and is never staged from target workspaces.
+if [ "{target_has_commit_restore_paths}" = "1" ]; then
+  git restore --worktree -- {target_commit_restore_paths} 2>/dev/null || true
+fi
+git add -A -- ':!.luther' ':!.luther/**' {target_commit_exclude_pathspecs}
 if git diff --cached --quiet --exit-code; then
   if [ "{setup_workspace.existing_pr_number}" != "0" ]; then
     echo "No new repository changes; existing PR #{setup_workspace.existing_pr_number} already carries issue branch changes."
@@ -785,6 +801,10 @@ to = "setup_workspace"
 
 [[transitions]]
 from = "setup_workspace"
+to = "bootstrap_workspace"
+
+[[transitions]]
+from = "bootstrap_workspace"
 to = "fetch_issue"
 
 [[transitions]]
@@ -1084,6 +1104,18 @@ condition = "fatal"
 from = "setup_workspace"
 to = "abandon_and_log"
 condition = "fatal"
+
+[[transitions]]
+from = "bootstrap_workspace"
+to = "abandon_and_log"
+condition = "fatal"
+
+# Bootstrap runs before issue artifacts and remediation context exist, so fixable
+# command failures are treated as terminal setup failures rather than retried.
+[[transitions]]
+from = "bootstrap_workspace"
+to = "abandon_and_log"
+condition = "fixable"
 
 [[transitions]]
 from = "fetch_issue"

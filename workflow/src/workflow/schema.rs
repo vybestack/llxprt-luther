@@ -61,7 +61,8 @@ pub struct TargetProfileConfig {
     pub pr_checks: TargetPrCheckPolicy,
     pub auth: TargetAuthConfig,
     pub preflight: TargetPreflightConfig,
-    pub prompt_guidance: BTreeMap<String, String>,
+    pub prompt_guidance: TargetPromptGuidance,
+    pub bootstrap: TargetBootstrapConfig,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
@@ -115,6 +116,7 @@ pub struct TargetDiffPolicyConfig {
     pub failure_message: Option<String>,
     pub allowed_path_patterns: Vec<String>,
     pub required_path_patterns: Vec<String>,
+    pub commit_exclude_pathspecs: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
@@ -135,6 +137,27 @@ pub struct TargetAuthConfig {
 #[serde(default, deny_unknown_fields)]
 pub struct TargetPreflightConfig {
     pub expectations: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct TargetPromptGuidance {
+    pub ecosystem_name: String,
+    pub planning: String,
+    pub implementation: String,
+    pub review: String,
+    pub verification: String,
+    pub style: String,
+    pub fixture_parity: String,
+    pub forbidden_actions: String,
+    pub remediation_scope: String,
+    pub command_manifest_summary: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct TargetBootstrapConfig {
+    pub command_group: Option<String>,
 }
 
 /// Bound runtime identity for a workflow run.

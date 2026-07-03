@@ -531,12 +531,53 @@ fn validate_command_paths(entry: &CommandEntry) -> Result<()> {
     .into_iter()
     .flatten()
     {
-        if Path::new(path).is_absolute() || path.split('/').any(|part| part == "..") {
-            return command_manifest_error(format!(
-                "command '{}' working directory must stay under work_dir",
-                entry.id
-            ));
-        }
+        validate_command_relative_path(entry, path, "working directory")?;
+    }
+    for path in entry
+        .run_if_missing_any
+        .iter()
+        .chain(entry.run_if_present_all.iter())
+    {
+        validate_command_relative_path(entry, path, "conditional path")?;
+    }
+    for path in &entry.remove_before_run {
+        validate_command_relative_path(entry, path, "removal path")?;
+        validate_command_removal_path(entry, path)?;
+    }
+    Ok(())
+}
+
+fn validate_command_relative_path(entry: &CommandEntry, path: &str, label: &str) -> Result<()> {
+    let path = Path::new(path);
+    if path.as_os_str().is_empty()
+        || path.to_string_lossy().contains('\\')
+        || path.components().any(|component| {
+            matches!(
+                component,
+                std::path::Component::ParentDir
+                    | std::path::Component::RootDir
+                    | std::path::Component::Prefix(_)
+            )
+        })
+    {
+        return command_manifest_error(format!(
+            "command '{}' {label} '{}' must stay under work_dir",
+            entry.id,
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
+fn validate_command_removal_path(entry: &CommandEntry, path: &str) -> Result<()> {
+    if !Path::new(path)
+        .components()
+        .any(|component| matches!(component, std::path::Component::Normal(_)))
+    {
+        return command_manifest_error(format!(
+            "command '{}' removal path '{}' must not target work_dir itself",
+            entry.id, path
+        ));
     }
     Ok(())
 }
@@ -952,36 +993,4 @@ pub fn validate_artifact_dependencies(wf: &WorkflowType) -> Vec<MissingArtifactP
         }
     }
     out
-}
-
-#[cfg(test)]
-mod daemon_scheduler_tests {
-    use super::*;
-
-    #[test]
-    fn parse_daemon_scheduler_config_toml_reads_limits_and_targets() {
-        let cfg = parse_daemon_scheduler_config_toml(
-            r#"
-max_concurrent_active_runs = 5
-max_concurrent_runs_per_config = 2
-max_concurrent_runs_per_repository = 3
-poll_interval_seconds = 300
-
-[[targets]]
-config_id = "llxprt-code"
-
-[[targets]]
-config_id = "llxprt-luther"
-"#,
-        )
-        .unwrap();
-
-        assert_eq!(cfg.max_concurrent_active_runs, Some(5));
-        assert_eq!(cfg.max_concurrent_runs_per_config, Some(2));
-        assert_eq!(cfg.max_concurrent_runs_per_repository, Some(3));
-        assert_eq!(cfg.poll_interval_seconds, Some(300));
-        assert_eq!(cfg.targets.len(), 2);
-        assert_eq!(cfg.targets[0].config_id, "llxprt-code");
-        assert_eq!(cfg.targets[1].config_id, "llxprt-luther");
-    }
 }

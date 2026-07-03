@@ -1,7 +1,11 @@
-use super::post_pr_test_process::{run_manifest_post_pr_test_process, run_post_pr_test_process};
+use super::post_pr_test_process::{
+    run_manifest_post_pr_test_process, run_post_pr_test_process, validated_command_manifest,
+};
 use super::*;
-use crate::engine::executors::command_manifest::resolve_manifest_group_id;
-use crate::workflow::command_manifest::{CommandEntry, CommandManifest};
+use crate::engine::executors::command_manifest::{
+    manifest_default_working_directory, resolve_manifest_group_id,
+};
+use crate::workflow::command_manifest::CommandEntry;
 
 /// Dedicated post-PR local verification executor for `run_post_pr_tests`.
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P03
@@ -42,6 +46,7 @@ pub trait PostPrTestCommandRunner: Send + Sync {
 pub struct PostPrTestCommandRequest {
     pub command_id: String,
     pub argv: Vec<String>,
+    pub repo_root_directory: PathBuf,
     pub working_directory: PathBuf,
     pub artifact_base_directory: PathBuf,
     pub timeout_seconds: u64,
@@ -265,6 +270,7 @@ fn post_pr_test_request(
     PostPrTestCommandRequest {
         command_id: command.command_id.clone(),
         argv: command.argv.clone(),
+        repo_root_directory: command.repo_root_directory.clone(),
         working_directory: command.working_directory.clone(),
         artifact_base_directory: command.artifact_base_directory.clone(),
         timeout_seconds: command.timeout_seconds,
@@ -345,6 +351,7 @@ fn write_post_pr_test_completion(
 struct PostPrTestCommandConfig {
     command_id: String,
     argv: Vec<String>,
+    repo_root_directory: PathBuf,
     working_directory: PathBuf,
     artifact_base_directory: PathBuf,
     timeout_seconds: u64,
@@ -397,6 +404,7 @@ fn post_pr_test_command(
     let command_id = post_pr_command_id(object, index);
     let manifest_entry = post_pr_manifest_entry(params, object)?;
     let argv = post_pr_command_argv(params, object, manifest_entry.as_ref())?;
+    let repo_root_directory = context.work_dir().clone();
     let working_directory =
         post_pr_command_working_directory(context, object, manifest_entry.as_ref())?;
     let artifact_base_directory = post_pr_command_artifact_base_directory(context);
@@ -405,6 +413,7 @@ fn post_pr_test_command(
     Ok(PostPrTestCommandConfig {
         command_id,
         argv,
+        repo_root_directory,
         working_directory,
         artifact_base_directory,
         timeout_seconds,
@@ -501,10 +510,7 @@ fn explicit_manifest_working_directory(entry: &CommandEntry) -> Option<&str> {
 }
 
 fn default_command_working_directory(context: &StepContext) -> PathBuf {
-    context
-        .get("project_dir")
-        .filter(|value| !value.is_empty())
-        .map_or_else(|| context.work_dir().clone(), PathBuf::from)
+    manifest_default_working_directory(context)
 }
 
 fn post_pr_command_artifact_base_directory(context: &StepContext) -> PathBuf {
@@ -555,12 +561,13 @@ fn manifest_group_post_pr_commands(
     let Some(value) = params.get("command_manifest") else {
         return Ok(None);
     };
-    let manifest: CommandManifest = serde_json::from_value(value.clone())
-        .map_err(|err| pr_remediation_error(format!("invalid command_manifest: {err}")))?;
+    let manifest = validated_command_manifest(value)?;
     let group_id =
         resolve_manifest_group_id(params, context, "post_pr").map_err(pr_remediation_error)?;
     let Some(command_ids) = manifest.groups.get(group_id.as_str()) else {
-        return Ok(None);
+        return Err(pr_remediation_error(format!(
+            "unknown command_manifest group '{group_id}'"
+        )));
     };
     Ok(Some(
         command_ids
@@ -574,13 +581,7 @@ fn manifest_command_entry(params: &Value, id: &str) -> Result<Option<CommandEntr
     let Some(value) = params.get("command_manifest") else {
         return Ok(None);
     };
-    if value.get("command").is_some() || value.get("shell").is_some() {
-        return Err(pr_remediation_error(
-            "shell-string command manifests are forbidden",
-        ));
-    }
-    let manifest: CommandManifest = serde_json::from_value(value.clone())
-        .map_err(|err| pr_remediation_error(format!("invalid command_manifest: {err}")))?;
+    let manifest = validated_command_manifest(value)?;
     Ok(manifest.commands.into_iter().find(|entry| entry.id == id))
 }
 

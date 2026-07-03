@@ -101,6 +101,7 @@ fn setup_registry(outcomes: HashMap<String, Vec<StepOutcome>>) -> ExecutorRegist
     registry.register("verify", Box::new(executor.clone()));
     registry.register("llxprt", Box::new(executor.clone()));
     registry.register("workflow_auth_preflight", Box::new(executor.clone()));
+    registry.register("command_manifest_group", Box::new(executor.clone()));
     for step_type in [
         "github_pr_identity",
         "post_pr_iteration_guard",
@@ -129,7 +130,7 @@ fn setup_registry(outcomes: HashMap<String, Vec<StepOutcome>>) -> ExecutorRegist
 /// Test 1: Happy path — all steps succeed
 /// GIVEN: Workflow loaded from TOML with all steps returning Success
 /// WHEN: Engine runs
-/// THEN: `RunOutcome::Success`, all 29 steps visited
+/// THEN: `RunOutcome::Success`, all 30 steps visited
 /// @plan:PLAN-20260408-LLXPRT-FIRST.P18
 /// @requirement:REQ-LF-ISSUE-001,REQ-LF-ISSUE-002,REQ-LF-ISSUE-003,REQ-LF-PR-001
 #[test]
@@ -139,8 +140,8 @@ fn test_happy_path_all_steps_succeed() {
     // Count the steps
     assert_eq!(
         workflow_type.steps.len(),
-        29,
-        "Expected 29 steps in workflow after workflow auth gates and PR follow-through tail"
+        30,
+        "Expected 30 steps in workflow after workflow auth gates and PR follow-through tail"
     );
 
     // All steps succeed by default (empty outcomes map)
@@ -631,7 +632,7 @@ fn evaluate_impl_fixable_routes_to_remediation() {
 /// Test 9: Workflow type loads from TOML
 /// GIVEN: llxprt-issue-fix-v1.toml exists
 /// WHEN: `resolve_workflow_type()` is called
-/// THEN: Returns `WorkflowType` with 29 steps, transitions include per-edge limits
+/// THEN: Returns `WorkflowType` with 30 steps, transitions include per-edge limits
 /// @plan:PLAN-20260408-LLXPRT-FIRST.P18
 /// @requirement:REQ-LF-SEP-003
 #[test]
@@ -641,7 +642,7 @@ fn test_workflow_type_loads_from_toml() {
         .expect("Failed to load workflow type");
 
     // Assert base workflow plus PR follow-through tail steps
-    assert_eq!(workflow_type.steps.len(), 29, "Expected 29 steps");
+    assert_eq!(workflow_type.steps.len(), 30, "Expected 30 steps");
 
     // Assert transitions include per-edge limits
     let has_per_edge_limit = workflow_type
@@ -2539,6 +2540,73 @@ fn push_changes_uses_force_with_lease_for_repeatable_smoke_branch_updates() {
     );
 }
 
+#[test]
+fn push_changes_only_keeps_global_luther_runtime_staging_exclusion() {
+    let workflow_type = post_pr_workflow();
+    let push = workflow_type
+        .steps
+        .iter()
+        .find(|step| step.step_id == "push_changes")
+        .expect("push_changes step exists");
+    let command = push
+        .parameters
+        .as_ref()
+        .and_then(|params| params.get("command"))
+        .and_then(serde_json::Value::as_str)
+        .expect("push_changes command exists");
+
+    assert!(
+        command.contains("':!.luther'"),
+        "push_changes must exclude .luther directory: {command}"
+    );
+    assert!(
+        command.contains("':!.luther/**'"),
+        "push_changes must exclude .luther/** contents: {command}"
+    );
+    assert!(
+        command.contains(r#"[ "{target_has_commit_restore_paths}" = "1" ]"#),
+        "target-specific generated-file restore guard should use a boolean flag, not shell-quoted path words: {command}"
+    );
+    assert!(
+        command.contains("git restore --worktree -- {target_commit_restore_paths}"),
+        "target-specific generated-file restores should be injected from target config, not hardcoded: {command}"
+    );
+    assert!(
+        command.contains("{target_commit_exclude_pathspecs}"),
+        "target-specific generated-file exclusions should be injected from target config, not hardcoded: {command}"
+    );
+    assert!(
+        !command.contains("NOTICES.txt"),
+        "target-specific generated-file exclusions belong in target config, not shared staging shell: {command}"
+    );
+}
+
+#[test]
+fn llxprt_code_target_config_injects_generated_file_staging_exclusion() {
+    let config = workflow_config("llxprt-code");
+    assert_eq!(
+        config
+            .variables
+            .get("target_commit_restore_paths")
+            .map(String::as_str),
+        Some("'packages/vscode-ide-companion/NOTICES.txt'")
+    );
+    assert_eq!(
+        config
+            .variables
+            .get("target_has_commit_restore_paths")
+            .map(String::as_str),
+        Some("1")
+    );
+    assert_eq!(
+        config
+            .variables
+            .get("target_commit_exclude_pathspecs")
+            .map(String::as_str),
+        Some("':!packages/vscode-ide-companion/NOTICES.txt'")
+    );
+}
+
 /// @plan:PLAN-20260408-LLXPRT-FIRST.P17
 /// @requirement:REQ-LF-EXEC-001
 #[test]
@@ -2918,6 +2986,102 @@ fn target_profiles_cover_current_and_skeleton_repositories() {
             "{config_id} should derive legacy prompt/diff variables from target_profile"
         );
     }
+}
+
+#[test]
+fn shared_workflow_bootstrap_is_manifest_based_and_setup_is_generic() {
+    let workflow_type = load_workflow_toml("config/workflows/llxprt-issue-fix-v1.toml");
+    let setup = workflow_type
+        .steps
+        .iter()
+        .find(|step| step.step_id == "setup_workspace")
+        .expect("setup_workspace step exists");
+    let setup_command = setup
+        .parameters
+        .as_ref()
+        .and_then(|params| params.get("command"))
+        .and_then(serde_json::Value::as_str)
+        .expect("setup_workspace command exists");
+    assert!(!setup_command.contains("npm ci"));
+    assert!(!setup_command.contains("node_modules"));
+
+    let bootstrap = workflow_type
+        .steps
+        .iter()
+        .find(|step| step.step_id == "bootstrap_workspace")
+        .expect("bootstrap_workspace step exists");
+    assert_eq!(bootstrap.step_type, "command_manifest_group");
+    let bootstrap_params = bootstrap
+        .parameters
+        .as_ref()
+        .expect("bootstrap_workspace parameters");
+    assert_eq!(
+        bootstrap_params
+            .get("command_manifest_group")
+            .and_then(serde_json::Value::as_str),
+        Some("{target_bootstrap_command_group}")
+    );
+    assert_eq!(
+        bootstrap_params
+            .get("allow_empty_group")
+            .and_then(serde_json::Value::as_bool),
+        Some(true)
+    );
+
+    let config = workflow_config("llxprt-code");
+    let resolved_group = config
+        .variables
+        .get("target_bootstrap_command_group")
+        .map(String::as_str)
+        .expect("target_bootstrap_command_group variable");
+    let manifest = config.command_manifest.expect("command manifest");
+    assert!(
+        manifest.groups.contains_key(resolved_group),
+        "resolved bootstrap group '{resolved_group}' must exist in command manifest groups"
+    );
+}
+
+#[test]
+fn llxprt_code_bootstrap_uses_structured_npm_manifest_commands() {
+    let config = workflow_config("llxprt-code");
+    assert_eq!(
+        config
+            .variables
+            .get("target_bootstrap_command_group")
+            .map(String::as_str),
+        Some("bootstrap")
+    );
+    let manifest = config.command_manifest.expect("command manifest");
+    let missing_install = manifest
+        .commands
+        .iter()
+        .find(|entry| entry.id == "install_dependencies_when_missing")
+        .expect("install_dependencies_when_missing command");
+    assert_eq!(missing_install.argv, ["npm", "ci", "--ignore-scripts"]);
+    assert_eq!(missing_install.run_if_missing_any, ["node_modules"]);
+    assert!(missing_install.run_if_present_all.is_empty());
+    assert!(missing_install.remove_before_run.is_empty());
+
+    let incomplete_install = manifest
+        .commands
+        .iter()
+        .find(|entry| entry.id == "reinstall_dependencies_when_incomplete")
+        .expect("reinstall_dependencies_when_incomplete command");
+    assert_eq!(incomplete_install.argv, ["npm", "ci", "--ignore-scripts"]);
+    assert_eq!(incomplete_install.run_if_present_all, ["node_modules"]);
+    assert!(incomplete_install
+        .run_if_missing_any
+        .iter()
+        .any(|path| path == "node_modules/esbuild/index.js"));
+    assert_eq!(incomplete_install.remove_before_run, ["node_modules"]);
+    assert_eq!(
+        manifest.groups.get("bootstrap"),
+        Some(&vec![
+            "install_dependencies_when_missing".to_string(),
+            "reinstall_dependencies_when_incomplete".to_string(),
+            "repair_node_bin_permissions".to_string()
+        ])
+    );
 }
 
 /// @plan:PLAN-20260408-LLXPRT-FIRST.P17

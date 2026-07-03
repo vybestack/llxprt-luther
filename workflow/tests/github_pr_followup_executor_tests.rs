@@ -6802,6 +6802,68 @@ fn p13_result(status: &str) -> PostPrTestCommandResult {
     }
 }
 
+#[test]
+fn run_post_pr_tests_rejects_invalid_command_manifest_contract() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_p11_plan_and_result(&temp, serde_json::json!([]));
+    let runner = P13RecordingRunner::with_results(Vec::new());
+    let mut context = p11_context(&temp);
+    let mut params = p11_params(&temp);
+    params["command_manifest_group"] = serde_json::json!("post_pr");
+    params["command_manifest"] = serde_json::json!({
+        "commands": [
+            { "id": "dup", "argv": ["cargo", "test"] },
+            { "id": "dup", "argv": ["cargo", "clippy"] }
+        ],
+        "groups": { "post_pr": ["dup"] }
+    });
+
+    let outcome = RunPostPrTestsExecutorWithRunner::new(runner.clone(), FixedClock)
+        .execute(&mut context, &params)
+        .expect("invalid command manifest writes fatal result");
+    let artifact = read_json(&p11_current_artifact_path(&temp, "post-pr-test-result"));
+
+    assert_expected_outcome(
+        outcome,
+        StepOutcome::Fatal,
+        "invalid post-PR manifest contract should fail fast",
+    );
+    let artifact_text = artifact.to_string();
+    assert!(
+        artifact_text.contains("duplicate or empty command id 'dup'"),
+        "unexpected artifact: {artifact}"
+    );
+    assert!(runner.requests().is_empty());
+}
+
+#[test]
+fn run_post_pr_tests_rejects_unknown_manifest_group() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_p11_plan_and_result(&temp, serde_json::json!([]));
+    let runner = P13RecordingRunner::with_results(Vec::new());
+    let mut context = p11_context(&temp);
+    let mut params = p11_params(&temp);
+    params["command_manifest_group"] = serde_json::json!("missing");
+    params["command_manifest"] = serde_json::json!({
+        "commands": [{ "id": "unit", "argv": ["cargo", "test", "--lib"] }],
+        "groups": { "post_pr": ["unit"] }
+    });
+
+    let outcome = RunPostPrTestsExecutorWithRunner::new(runner, FixedClock)
+        .execute(&mut context, &params)
+        .expect("unknown manifest group writes fatal result");
+    let artifact = read_json(&p11_current_artifact_path(&temp, "post-pr-test-result"));
+
+    assert_expected_outcome(
+        outcome,
+        StepOutcome::Fatal,
+        "unknown post-PR manifest groups should fail fast",
+    );
+    assert!(artifact
+        .to_string()
+        .contains("unknown command_manifest group 'missing'"));
+}
+
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P04
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P13
 /// @requirement:REQ-PRFU-014
@@ -9337,6 +9399,36 @@ fn marker_comment_shell_safety_uses_body_files_or_graphql_variables() {
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P13
 /// @requirement:REQ-PRFU-014
 /// @pseudocode lines 29-33
+
+#[test]
+fn run_post_pr_tests_rejects_shell_string_command_manifest_group() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_p11_plan_and_result(&temp, serde_json::json!([]));
+    let runner = P13RecordingRunner::with_results(Vec::new());
+    let mut context = p11_context(&temp);
+    let mut params = p11_params(&temp);
+    params["command_manifest_group"] = serde_json::json!("post_pr");
+    params["command_manifest"] = serde_json::json!({
+        "shell": "echo forbidden",
+        "commands": [{ "id": "unit", "argv": ["cargo", "test", "--lib"] }],
+        "groups": { "post_pr": ["unit"] }
+    });
+
+    let outcome = RunPostPrTestsExecutorWithRunner::new(runner, FixedClock)
+        .execute(&mut context, &params)
+        .expect("shell-string manifest is recorded as configuration fatal");
+    let artifact = read_json(&p11_current_artifact_path(&temp, "post-pr-test-result"));
+
+    assert_expected_outcome(
+        outcome,
+        StepOutcome::Fatal,
+        "shell-string manifest must fail before post-PR command expansion",
+    );
+    assert!(artifact
+        .to_string()
+        .contains("shell-string command manifests are forbidden"));
+}
+
 #[test]
 fn run_post_pr_tests_expands_manifest_group_placeholder() {
     let temp = tempfile::tempdir().expect("tempdir");
@@ -9427,6 +9519,47 @@ fn post_pr_tests_and_push_shell_safety_use_configured_argv_without_shell_injecti
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P13
 /// @requirement:REQ-PRFU-017
 /// @pseudocode lines 29-40
+
+#[test]
+fn run_post_pr_tests_manifest_request_carries_repo_root_separately_from_project_dir() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_p11_plan_and_result(&temp, serde_json::json!([]));
+    let runner = P13RecordingRunner::with_results(Vec::new());
+    let mut context = p11_context(&temp);
+    let project_dir = temp.path().join("workflow");
+    let command_dir = temp.path().join("tools");
+    std::fs::create_dir(&project_dir).expect("project dir");
+    std::fs::create_dir(&command_dir).expect("command dir");
+    std::fs::write(temp.path().join("repo-marker"), "repo").expect("repo marker");
+    context.set("project_dir", &project_dir.to_string_lossy());
+    context.set("default_command_cwd", "tools");
+    context.set("command_manifest_group_post_pr", "custom_pr");
+    let mut params = p11_params(&temp);
+    params["command_manifest_group"] = serde_json::json!("{command_manifest_group_post_pr}");
+    params["command_manifest"] = serde_json::json!({
+        "commands": [{
+            "id": "unit",
+            "argv": ["cargo", "test", "--lib"],
+            "run_if_present_all": ["repo-marker"]
+        }],
+        "groups": { "custom_pr": ["unit"] }
+    });
+
+    let outcome = RunPostPrTestsExecutorWithRunner::new(runner.clone(), FixedClock)
+        .execute(&mut context, &params)
+        .expect("post-pr manifest group carries repo root in request");
+    let requests = runner.requests();
+
+    assert_expected_outcome(
+        outcome,
+        StepOutcome::Success,
+        "post-PR manifest request carries repo root separate from working directory",
+    );
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].repo_root_directory, temp.path());
+    assert_eq!(requests[0].working_directory, command_dir);
+}
+
 #[test]
 fn post_pr_test_requests_preserve_artifact_base_separately_from_working_directory() {
     let temp = tempfile::tempdir().expect("tempdir");
@@ -9450,6 +9583,7 @@ fn post_pr_test_requests_preserve_artifact_base_separately_from_working_director
         "post-PR test requests must keep artifact base separate from command cwd",
     );
     assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].repo_root_directory, temp.path());
     assert_eq!(requests[0].working_directory, project_dir);
     assert_eq!(requests[0].artifact_base_directory, artifact_base);
 }

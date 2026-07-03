@@ -20,101 +20,106 @@
     },
     {
       "seq": 2,
-      "step_id": "fetch_issue",
+      "step_id": "bootstrap_workspace",
       "outcome": "success"
     },
     {
       "seq": 3,
-      "step_id": "create_plan",
+      "step_id": "fetch_issue",
       "outcome": "success"
     },
     {
       "seq": 4,
-      "step_id": "evaluate_plan",
+      "step_id": "create_plan",
       "outcome": "success"
     },
     {
       "seq": 5,
-      "step_id": "workflow_auth_preflight_plan",
+      "step_id": "evaluate_plan",
       "outcome": "success"
     },
     {
       "seq": 6,
-      "step_id": "implement",
+      "step_id": "workflow_auth_preflight_plan",
       "outcome": "success"
     },
     {
       "seq": 7,
-      "step_id": "run_tests",
+      "step_id": "implement",
       "outcome": "success"
     },
     {
       "seq": 8,
-      "step_id": "evaluate_impl",
+      "step_id": "run_tests",
       "outcome": "success"
     },
     {
       "seq": 9,
-      "step_id": "workflow_auth_preflight_pre_push",
+      "step_id": "evaluate_impl",
       "outcome": "success"
     },
     {
       "seq": 10,
-      "step_id": "push_changes",
+      "step_id": "workflow_auth_preflight_pre_push",
       "outcome": "success"
     },
     {
       "seq": 11,
-      "step_id": "generate_pr_description",
+      "step_id": "push_changes",
       "outcome": "success"
     },
     {
       "seq": 12,
-      "step_id": "create_pr",
+      "step_id": "generate_pr_description",
       "outcome": "success"
     },
     {
       "seq": 13,
-      "step_id": "capture_pr_identity",
+      "step_id": "create_pr",
       "outcome": "success"
     },
     {
       "seq": 14,
-      "step_id": "post_pr_iteration_guard",
+      "step_id": "capture_pr_identity",
       "outcome": "success"
     },
     {
       "seq": 15,
-      "step_id": "watch_pr_checks",
+      "step_id": "post_pr_iteration_guard",
       "outcome": "success"
     },
     {
       "seq": 16,
-      "step_id": "collect_ci_failures",
+      "step_id": "watch_pr_checks",
       "outcome": "success"
     },
     {
       "seq": 17,
-      "step_id": "collect_coderabbit_feedback",
+      "step_id": "collect_ci_failures",
       "outcome": "success"
     },
     {
       "seq": 18,
-      "step_id": "evaluate_coderabbit_feedback",
+      "step_id": "collect_coderabbit_feedback",
       "outcome": "success"
     },
     {
       "seq": 19,
-      "step_id": "build_remediation_plan",
+      "step_id": "evaluate_coderabbit_feedback",
       "outcome": "success"
     },
     {
       "seq": 20,
-      "step_id": "mark_coderabbit_feedback",
+      "step_id": "build_remediation_plan",
       "outcome": "success"
     },
     {
       "seq": 21,
+      "step_id": "mark_coderabbit_feedback",
+      "outcome": "success"
+    },
+    {
+      "seq": 22,
       "step_id": "log_completion",
       "outcome": "success"
     }

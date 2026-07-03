@@ -1039,6 +1039,34 @@ fn test_verify_expands_manifest_group_placeholder() {
 }
 
 #[test]
+fn test_verify_validates_inline_command_manifest_contract() {
+    let executor = VerifyExecutor;
+    let temp_dir = tempfile::tempdir().unwrap();
+    let mut ctx = StepContext::new(temp_dir.path().to_path_buf(), "run-1".to_string());
+
+    let params = json!({
+        "checks": ["command_manifest"],
+        "command_manifest_group": "local",
+        "command_manifest": {
+            "commands": [
+                { "id": "alpha", "argv": ["python3", "-c", "print('alpha')"] },
+                { "id": "alpha", "argv": ["python3", "-c", "print('duplicate')"] }
+            ],
+            "groups": { "local": ["alpha"] }
+        }
+    });
+
+    let error = executor
+        .execute(&mut ctx, &params)
+        .expect_err("verify should reject invalid manifest contracts");
+    let message = format!("{error:?}");
+    assert!(
+        message.contains("invalid command_manifest") && message.contains("duplicate"),
+        "unexpected error: {message}"
+    );
+}
+
+#[test]
 fn test_verify_rejects_unresolved_manifest_group_placeholder() {
     let executor = VerifyExecutor;
     let temp_dir = tempfile::tempdir().unwrap();
@@ -1061,6 +1089,29 @@ fn test_verify_rejects_unresolved_manifest_group_placeholder() {
     assert!(
         format!("{error:?}").contains("command_manifest_group contains unresolved template token")
     );
+}
+
+#[test]
+fn test_verify_rejects_unknown_manifest_group() {
+    let executor = VerifyExecutor;
+    let temp_dir = tempfile::tempdir().unwrap();
+    let mut ctx = StepContext::new(temp_dir.path().to_path_buf(), "run-1".to_string());
+
+    let params = json!({
+        "checks": ["command_manifest"],
+        "command_manifest_group": "missing",
+        "command_manifest": {
+            "commands": [
+                { "id": "alpha", "argv": ["python3", "-c", "print('alpha')"] }
+            ],
+            "groups": { "local": ["alpha"] }
+        }
+    });
+
+    let error = executor
+        .execute(&mut ctx, &params)
+        .expect_err("unknown manifest group rejected");
+    assert!(format!("{error:?}").contains("unknown command_manifest group 'missing'"));
 }
 
 #[test]

@@ -1,5 +1,5 @@
 use super::*;
-use crate::workflow::schema::{GuardLimits, RepoConfig, RuntimeConfig};
+use crate::workflow::schema::{GuardLimits, RepoConfig, RuntimeConfig, TargetPromptGuidance};
 
 fn test_config() -> WorkflowConfig {
     WorkflowConfig {
@@ -184,9 +184,11 @@ fn profile_resolution_derives_legacy_variables_and_repo_fields() {
             required_path_regex: Some("^src/".to_string()),
             ..Default::default()
         },
-        prompt_guidance: [("implementation".to_string(), "Use custom gates".to_string())]
-            .into_iter()
-            .collect(),
+        prompt_guidance: TargetPromptGuidance {
+            ecosystem_name: "Rust".to_string(),
+            implementation: "Use custom gates".to_string(),
+            ..Default::default()
+        },
         ..Default::default()
     });
 
@@ -222,30 +224,32 @@ fn profile_resolution_derives_legacy_variables_and_repo_fields() {
 }
 
 #[test]
-fn prompt_guidance_seeds_defaults_and_does_not_clobber_runtime_variables() {
+fn prompt_guidance_seeds_typed_defaults_and_bootstrap_group() {
     let mut config = test_config();
     config.variables.insert(
         "target_guidance_review".to_string(),
-        "Keep existing review guidance".to_string(),
+        "preserve runtime review guidance".to_string(),
     );
     config.target_profile = Some(crate::workflow::schema::TargetProfileConfig {
-        prompt_guidance: [
-            ("implementation".to_string(), "Use custom gates".to_string()),
-            (
-                "work_dir".to_string(),
-                "do not clobber work dir".to_string(),
-            ),
-        ]
-        .into_iter()
-        .collect(),
+        prompt_guidance: TargetPromptGuidance {
+            ecosystem_name: "Rust".to_string(),
+            implementation: "Use custom gates".to_string(),
+            ..Default::default()
+        },
+        bootstrap: crate::workflow::schema::TargetBootstrapConfig {
+            command_group: Some("bootstrap".to_string()),
+        },
         ..Default::default()
     });
 
     resolve_target_profile(&mut config).expect("profile resolves");
 
     assert_eq!(
-        config.variables.get("work_dir").map(String::as_str),
-        Some("/tmp/luther-workspaces/llxprt-code")
+        config
+            .variables
+            .get("target_ecosystem_name")
+            .map(String::as_str),
+        Some("Rust")
     );
     assert_eq!(
         config
@@ -266,15 +270,43 @@ fn prompt_guidance_seeds_defaults_and_does_not_clobber_runtime_variables() {
             .variables
             .get("target_guidance_review")
             .map(String::as_str),
-        Some("Keep existing review guidance")
+        Some("preserve runtime review guidance")
     );
     assert_eq!(
         config
             .variables
-            .get("target_guidance_work_dir")
+            .get("target_bootstrap_command_group")
             .map(String::as_str),
-        Some("do not clobber work dir")
+        Some("bootstrap")
     );
+}
+
+#[test]
+fn empty_profile_ecosystem_name_does_not_preserve_stale_runtime_value() {
+    let mut config = test_config();
+    config.variables.insert(
+        "target_ecosystem_name".to_string(),
+        "stale ecosystem".to_string(),
+    );
+    config.target_profile = Some(crate::workflow::schema::TargetProfileConfig {
+        prompt_guidance: TargetPromptGuidance {
+            ecosystem_name: String::new(),
+            ..Default::default()
+        },
+        ..Default::default()
+    });
+
+    resolve_target_profile(&mut config).expect("profile resolves");
+    let error = validate_target_profile(&config).expect_err("empty ecosystem should fail");
+
+    assert_eq!(
+        config
+            .variables
+            .get("target_ecosystem_name")
+            .map(String::as_str),
+        Some("")
+    );
+    assert!(error.message.contains("target_ecosystem_name"));
 }
 
 #[test]
@@ -285,9 +317,11 @@ fn profile_rejects_unresolved_prompt_variables_and_unsafe_paths() {
             project_subdir: Some("../outside".to_string()),
             ..Default::default()
         },
-        prompt_guidance: [("planning".to_string(), "Use {unknown_guidance}".to_string())]
-            .into_iter()
-            .collect(),
+        prompt_guidance: TargetPromptGuidance {
+            ecosystem_name: "Rust".to_string(),
+            planning: "Use {unknown_guidance}".to_string(),
+            ..Default::default()
+        },
         ..Default::default()
     });
 
@@ -300,6 +334,18 @@ fn profile_rejects_unresolved_prompt_variables_and_unsafe_paths() {
         .expect("profile")
         .paths
         .project_subdir = None;
+
     let prompt_error = resolve_target_profile(&mut config).unwrap_err();
     assert!(prompt_error.message.contains("unknown_guidance"));
+}
+
+#[test]
+fn ecosystem_name_is_required_for_target_profile_validation() {
+    let mut config = test_config();
+    config.target_profile = Some(crate::workflow::schema::TargetProfileConfig::default());
+    resolve_target_profile(&mut config).expect("profile resolves with empty guidance value");
+
+    let error = validate_target_profile(&config).expect_err("ecosystem name required");
+
+    assert!(error.message.contains("target_ecosystem_name"));
 }

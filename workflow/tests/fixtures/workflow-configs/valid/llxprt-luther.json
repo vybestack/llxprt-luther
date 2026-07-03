@@ -101,9 +101,16 @@
       ]
     },
     "prompt_guidance": {
+      "ecosystem_name": "Rust",
       "planning": "Use Luther's Rust workflow subcrate conventions and include fixture parity when changing config schema.",
       "implementation": "Respect strict clippy limits, avoid lint suppressions, and keep workflow shell commands statically allowlisted.",
-      "review": "Run Open Code Review through the configured cargo xtask wrapper when review gates are requested."
+      "review": "Run Open Code Review through the configured cargo xtask wrapper when review gates are requested.",
+      "verification": "Use targeted workflow crate commands only when needed; the workflow runs configured cargo gates.",
+      "style": "Keep Rust functions under strict clippy size and complexity limits.",
+      "fixture_parity": "Maintain TOML/JSON fixture parity for valid workflow and workflow-config fixtures.",
+      "forbidden_actions": "Do not loosen lint rules, add suppressions, or edit generated/unrelated files.",
+      "remediation_scope": "Fix only current-branch diff issues and required evaluator feedback.",
+      "command_manifest_summary": "Local gates run cargo fmt, check, clippy, test, fixture parity, and shell safety checks."
     }
   },
   "command_manifest": {

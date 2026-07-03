@@ -80,9 +80,16 @@ requirements = ["gh", "git", "npm registry access"]
 expectations = ["npm ci completes before local gates"]
 
 [target_profile.prompt_guidance]
+ecosystem_name = "TypeScript/npm"
 planning = "Use the npm TypeScript monorepo layout and prefer existing package scripts."
 implementation = "Do not loosen eslint guardrails or add TypeScript/ESLint suppressions."
 review = "Review CodeRabbit/LLxprt conventions."
+verification = "Use targeted npm scripts only when needed; the workflow runs the configured npm manifest gates."
+style = "Match the existing TypeScript package conventions and keep changes package-scoped."
+fixture_parity = "Maintain TOML/JSON fixture parity for valid workflow and workflow-config fixtures."
+forbidden_actions = "Do not modify package lockfiles, generated notice files, or unrelated files."
+remediation_scope = "Fix only failures caused by the current branch diff."
+command_manifest_summary = "Local gates run npm format, lint, typecheck, build, test, and eslint guard commands."
 
 [[command_manifest.commands]]
 id = "format"

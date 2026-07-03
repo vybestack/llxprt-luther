@@ -4,12 +4,13 @@
 /// @requirement:REQ-LF-VERIFY-001,REQ-LF-VERIFY-002,REQ-LF-VERIFY-003,REQ-LF-VERIFY-004,REQ-LF-VERIFY-005,REQ-LF-VERIFY-006,REQ-LF-VERIFY-007,REQ-LF-VERIFY-008,REQ-LF-VERIFY-009
 use crate::engine::executor::{interpolate_string, StepContext, StepExecutor};
 use crate::engine::executors::command_manifest::{
-    request_from_entry_with_paths, resolve_manifest_group_id, run_manifest_command,
-    ManifestPathContext,
+    manifest_path_context_from_step, resolve_manifest_group_id, run_manifest_entry,
+    ManifestEntryExecution, ManifestPathContext,
 };
 use crate::engine::runner::EngineError;
 use crate::engine::transition::StepOutcome;
 use crate::workflow::command_manifest::{CommandEntry, CommandManifest, FailureOutcome};
+use crate::workflow::config_loader::validate_command_manifest;
 use parse::{build_summary, parse_check_output};
 use std::io::{BufReader, Read};
 #[cfg(unix)]
@@ -823,16 +824,31 @@ fn manifest_group_check_sequence(
             message,
         }
     })?;
-    Ok(manifest.groups.get(&group_id).cloned())
+    manifest
+        .groups
+        .get(&group_id)
+        .cloned()
+        .map(Some)
+        .ok_or_else(|| EngineError::StepExecutionError {
+            step_id: "verify".to_string(),
+            message: format!("unknown command_manifest group '{group_id}'"),
+        })
 }
 
 fn parse_manifest_value(
     manifest_value: &serde_json::Value,
 ) -> Result<CommandManifest, EngineError> {
-    serde_json::from_value(manifest_value.clone()).map_err(|err| EngineError::StepExecutionError {
+    let manifest = serde_json::from_value(manifest_value.clone()).map_err(|err| {
+        EngineError::StepExecutionError {
+            step_id: "verify".to_string(),
+            message: format!("invalid command_manifest: {err}"),
+        }
+    })?;
+    validate_command_manifest(&manifest).map_err(|err| EngineError::StepExecutionError {
         step_id: "verify".to_string(),
-        message: format!("invalid command_manifest: {err}"),
-    })
+        message: format!("invalid command_manifest: {}", err.message),
+    })?;
+    Ok(manifest)
 }
 
 fn reject_shell_manifest(manifest_value: &serde_json::Value) -> Result<(), EngineError> {
@@ -856,13 +872,16 @@ fn run_manifest_check(
     };
     let default_timeout = timeout.map_or(900, |duration| duration.as_secs());
     let path_context = manifest_path_context(context);
-    let request = request_from_entry_with_paths(&entry, &path_context, default_timeout).map_err(
-        |message| EngineError::StepExecutionError {
-            step_id: "verify".to_string(),
-            message,
-        },
-    )?;
-    let result = run_manifest_command(request);
+    let outcome =
+        run_manifest_entry(&entry, &path_context, default_timeout).map_err(|message| {
+            EngineError::StepExecutionError {
+                step_id: "verify".to_string(),
+                message,
+            }
+        })?;
+    let ManifestEntryExecution::Completed(result) = outcome else {
+        return Ok(Some(skipped_manifest_check(check_type, &entry)));
+    };
     let mut errors = parse_check_output(
         check_type,
         &result.bounded_stdout,
@@ -897,19 +916,30 @@ fn run_manifest_check(
         }),
     }))
 }
-fn manifest_path_context(context: &StepContext) -> ManifestPathContext {
-    ManifestPathContext {
-        repo_root: context.work_dir().clone(),
-        default_working_directory: context_path(context, "project_dir"),
-        artifact_base_directory: context_path(context, "artifact_base_dir"),
+
+fn skipped_manifest_check(check_type: &str, entry: &CommandEntry) -> CheckResult {
+    CheckResult {
+        check_type: check_type.to_string(),
+        passed: true,
+        exit_code: 0,
+        errors: Vec::new(),
+        raw_stdout: "skipped by command manifest conditions".to_string(),
+        raw_stderr: String::new(),
+        command: Some(CommandEvidence {
+            command_id: entry.id.clone(),
+            argv: entry.argv.clone(),
+            cwd: entry
+                .working_directory
+                .clone()
+                .unwrap_or_else(|| "<skipped>".to_string()),
+            expectation_failures: Vec::new(),
+            artifact_failures: Vec::new(),
+            failure_classification: "skipped".to_string(),
+        }),
     }
 }
-
-fn context_path(context: &StepContext, key: &str) -> PathBuf {
-    context
-        .get(key)
-        .filter(|value| !value.is_empty())
-        .map_or_else(|| context.work_dir().clone(), PathBuf::from)
+fn manifest_path_context(context: &StepContext) -> ManifestPathContext {
+    manifest_path_context_from_step(context)
 }
 
 fn manifest_entry_for_check(
