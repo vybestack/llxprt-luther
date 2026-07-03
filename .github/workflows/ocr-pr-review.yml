@@ -272,7 +272,7 @@ jobs:
             # CLI still emits escapes, strip CSI and OSC sequences so the
             # section/path parsers below see plain text (otherwise every
             # changed test is reported as missing).
-            sed -i 's/\x1b\[[0-9;]*[A-Za-z]//g; s/\x1b\][^\x07\x1b]*\(\x07\|\x1b\\\)//g' ocr-preview.txt
+            sed -i 's/\x1b\[[0-9;?<>=]*[A-Za-z]//g; s/\x1b\][^\x07\x1b]*\(\x07\|\x1b\\\)//g' ocr-preview.txt
             reviewed="$(awk '
               BEGIN { IGNORECASE = 1; in_section = 0 }
               /^Will review[[:space:]]*\(/ { in_section = 1; next }
