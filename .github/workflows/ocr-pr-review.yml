@@ -180,6 +180,41 @@ jobs:
           ocr version > ocr-version.txt
           cat ocr-version.txt
 
+      - name: Configure OCR review rules
+        # Project policy: changed test files must be reviewed. OCR's default
+        # rules exclude test/spec files, so re-include them here. This config
+        # is written from this trusted workflow only (env-provided JSON); no
+        # PR-supplied OCR rules are ever loaded.
+        env:
+          OCR_RULES_JSON: |
+            {
+              "include": [
+                "**/*.test.{js,jsx,ts,tsx}",
+                "**/*.spec.{js,jsx,ts,tsx}",
+                "**/__tests__/**",
+                "**/tests/**",
+                "**/test/**",
+                "**/*_test.go",
+                "**/*Test.java",
+                "**/*Tests.java",
+                "**/*_test.rs",
+                "**/*_tests.rs",
+                "**/*_test.py",
+                "**/*_spec.rb"
+              ],
+              "exclude": [
+                "**/node_modules/**",
+                "**/dist/**",
+                "**/build/**",
+                "**/*.min.js",
+                "**/generated/**",
+                "**/vendor/**"
+              ]
+            }
+        run: |
+          mkdir -p "${HOME}/.opencodereview"
+          printf '%s' "$OCR_RULES_JSON" > "${HOME}/.opencodereview/rule.json"
+
       - name: Validate OCR configuration
         env:
           OCR_LLM_URL: ${{ vars.OCR_LLM_URL }}
@@ -364,12 +399,21 @@ jobs:
             if (!Number.isInteger(exitCode) || exitCode !== 0) {
               ran = false;
             }
+            function findingsFromParsed(parsed) {
+              if (Array.isArray(parsed)) return parsed;
+              // ocr --format json emits an object envelope with a comments
+              // array (e.g. { "status": "success", "comments": [...] }).
+              if (parsed && typeof parsed === 'object' && Array.isArray(parsed.comments)) {
+                return parsed.comments;
+              }
+              return null;
+            }
+
             function parseFindings(raw) {
               const trimmed = raw.trim();
               if (!trimmed) return null;
               try {
-                const parsed = JSON.parse(trimmed);
-                return Array.isArray(parsed) ? parsed : null;
+                return findingsFromParsed(JSON.parse(trimmed));
               } catch (parseErr) {
                 const start = trimmed.indexOf('[');
                 const end = trimmed.lastIndexOf(']');
@@ -378,8 +422,7 @@ jobs:
                   return null;
                 }
                 try {
-                  const parsed = JSON.parse(trimmed.slice(start, end + 1));
-                  return Array.isArray(parsed) ? parsed : null;
+                  return findingsFromParsed(JSON.parse(trimmed.slice(start, end + 1)));
                 } catch (innerErr) {
                   core.warning(`OCR result was not valid JSON and extracted array substring could not be parsed: ${innerErr.message || innerErr}`);
                   return null;
@@ -455,7 +498,7 @@ jobs:
                 if (startLine > endLine) {
                   [startLine, endLine] = [endLine, startLine];
                 }
-                const rawText = f.comment || f.message || f.body;
+                const rawText = f.content || f.comment || f.message || f.body;
                 const text = renderFindingText(typeof rawText === 'string' ? rawText : 'OCR finding');
                 const comment = {
                   path: String(f.path),
@@ -568,7 +611,7 @@ jobs:
               for (const f of lineless) {
                 const item = f && typeof f === 'object' ? f : {};
                 const where = item.path ? `\`${item.path}\`: ` : '';
-                const rawText = item.comment || item.message || item.body;
+                const rawText = item.content || item.comment || item.message || item.body;
                 const text = renderFindingText(typeof rawText === 'string' ? rawText : 'OCR finding');
                 body.push(`- ${where}${text}`);
               }
