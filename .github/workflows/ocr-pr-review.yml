@@ -180,6 +180,41 @@ jobs:
           ocr version > ocr-version.txt
           cat ocr-version.txt
 
+      - name: Configure OCR review rules
+        # Project policy: changed test files must be reviewed. OCR's default
+        # rules exclude test/spec files, so re-include them here. This config
+        # is written from this trusted workflow only (env-provided JSON); no
+        # PR-supplied OCR rules are ever loaded.
+        env:
+          OCR_RULES_JSON: |
+            {
+              "include": [
+                "**/*.test.{js,jsx,ts,tsx}",
+                "**/*.spec.{js,jsx,ts,tsx}",
+                "**/__tests__/**",
+                "**/tests/**",
+                "**/test/**",
+                "**/*_test.go",
+                "**/*Test.java",
+                "**/*Tests.java",
+                "**/*_test.rs",
+                "**/*_tests.rs",
+                "**/*_test.py",
+                "**/*_spec.rb"
+              ],
+              "exclude": [
+                "**/node_modules/**",
+                "**/dist/**",
+                "**/build/**",
+                "**/*.min.js",
+                "**/generated/**",
+                "**/vendor/**"
+              ]
+            }
+        run: |
+          mkdir -p "${HOME}/.opencodereview"
+          printf '%s' "$OCR_RULES_JSON" > "${HOME}/.opencodereview/rule.json"
+
       - name: Validate OCR configuration
         env:
           OCR_LLM_URL: ${{ vars.OCR_LLM_URL }}
