@@ -1347,8 +1347,13 @@ fn assert_scoped_git_auth_cleanup(content: &str) {
             && content.contains("GH_SERVER_URL=\"${GH_SERVER_URL%/}/\"")
             && content.contains("GIT_CONFIG_COUNT=1")
             && content.contains("GIT_CONFIG_KEY_0=\"http.${GH_SERVER_URL}.extraheader\"")
-            && content.contains("GIT_CONFIG_VALUE_0=\"AUTHORIZATION: bearer ${GH_TOKEN}\"")
+            && content.contains(
+                "AUTH_B64=\"$(printf '%s' \"x-access-token:${GH_TOKEN}\" | base64 | tr -d '\\n')\""
+            )
+            && content.contains("GIT_CONFIG_VALUE_0=\"AUTHORIZATION: basic ${AUTH_B64}\"")
+            && !content.contains("AUTHORIZATION: bearer")
             && content.contains("unset GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0")
+            && content.contains("unset AUTH_B64")
             && !content.contains("GIT_CONFIG_GLOBAL")
             && !content.contains("ocr-git-auth-config")
             && content.contains("trap cleanup_git_auth EXIT")
