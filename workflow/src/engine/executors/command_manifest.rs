@@ -590,10 +590,10 @@ fn wait_for_manifest_child(
     let stdout_reader = spawn_reader(child.stdout.take(), &stdout_buffer, capture_limit_bytes);
     let stderr_reader = spawn_reader(child.stderr.take(), &stderr_buffer, capture_limit_bytes);
     let wait_result = wait_for_child_exit(child, timeout_seconds);
-    let stdout_done = wait_for_reader(&stdout_reader);
-    let stderr_done = wait_for_reader(&stderr_reader);
     let (exit_code, timed_out) = wait_result?;
-    if (!stdout_done || !stderr_done) && !timed_out {
+    let stdout_done = wait_for_reader_after_process_exit(&stdout_reader);
+    let stderr_done = wait_for_reader_after_process_exit(&stderr_reader);
+    if !stdout_done || !stderr_done {
         terminate_child(child);
         if !stdout_done {
             let _ = wait_for_reader_after_cleanup(&stdout_reader);
@@ -866,8 +866,8 @@ fn run_process_group_kill(
     command.status()
 }
 
-fn wait_for_reader(reader: &mpsc::Receiver<()>) -> bool {
-    wait_for_reader_for(reader, Duration::from_secs(1))
+fn wait_for_reader_after_process_exit(reader: &mpsc::Receiver<()>) -> bool {
+    wait_for_reader_for(reader, Duration::from_millis(100))
 }
 
 fn wait_for_reader_after_cleanup(reader: &mpsc::Receiver<()>) -> bool {
