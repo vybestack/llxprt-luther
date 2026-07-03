@@ -387,8 +387,7 @@ jobs:
                   return null;
                 }
                 try {
-                  const parsed = JSON.parse(trimmed.slice(start, end + 1));
-                  return Array.isArray(parsed) ? parsed : null;
+                  return findingsFromParsed(JSON.parse(trimmed.slice(start, end + 1)));
                 } catch (innerErr) {
                   core.warning(`OCR result was not valid JSON and extracted array substring could not be parsed: ${innerErr.message || innerErr}`);
                   return null;
