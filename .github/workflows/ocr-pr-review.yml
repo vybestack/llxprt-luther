@@ -42,6 +42,9 @@ permissions:
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+  # Disable colorized CLI output so text parsers (e.g. the changed-test
+  # scope guard) always see plain text.
+  NO_COLOR: "1"
 
 jobs:
   code-review:
@@ -265,6 +268,11 @@ jobs:
               echo "::error::Could not verify OCR preview scope for changed test files."
               exit 1
             fi
+            # Belt-and-suspenders: NO_COLOR is set workflow-wide, but if the
+            # CLI still emits escapes, strip CSI and OSC sequences so the
+            # section/path parsers below see plain text (otherwise every
+            # changed test is reported as missing).
+            sed -i 's/\x1b\[[0-9;?<>=]*[A-Za-z]//g; s/\x1b\][^\x07\x1b]*\(\x07\|\x1b\\\)//g' ocr-preview.txt
             reviewed="$(awk '
               BEGIN { IGNORECASE = 1; in_section = 0 }
               /^Will review[[:space:]]*\(/ { in_section = 1; next }
