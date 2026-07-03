@@ -859,7 +859,7 @@ fn run_process_group_kill(
     command.env_clear();
     apply_allowed_command_environment(&mut command);
     let signal_arg = format!("-{signal}");
-    command.args([signal_arg.as_str(), process_group]);
+    command.args([signal_arg.as_str(), "--", process_group]);
     command.stdin(Stdio::null());
     command.stdout(Stdio::null());
     command.stderr(Stdio::null());

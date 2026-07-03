@@ -324,6 +324,37 @@ fn manifest_executor_rejects_artifact_symlinks_that_escape_base() {
 
 #[cfg(unix)]
 #[test]
+fn manifest_executor_cleans_up_reparented_pipe_holder() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let script = r#"
+import pathlib
+import subprocess
+import sys
+child = subprocess.Popen(
+    [sys.executable, "-c", "import time; time.sleep(30)"],
+    stdout=sys.stdout,
+    stderr=sys.stderr,
+)
+pathlib.Path("hold.pid").write_text(str(child.pid))
+"#;
+    let entry = command_entry("background", &["python3", "-c", script]);
+    let request = request_from_entry(&entry, temp.path(), 5).expect("request");
+
+    let result = run_manifest_command(request);
+
+    let pid = fs::read_to_string(temp.path().join("hold.pid")).expect("background pid");
+    let pid = pid.trim();
+    let background_exited = wait_until_process_exits(pid, Duration::from_secs(3));
+    assert!(result.passed(), "{result:?}");
+    assert!(
+        background_exited,
+        "reparented pipe holder process {pid} survived manifest cleanup"
+    );
+    kill_pid_forcefully(pid);
+}
+
+#[cfg(unix)]
+#[test]
 fn manifest_executor_timeout_does_not_wait_for_detached_pipe_holder() {
     let temp = tempfile::tempdir().expect("tempdir");
     let script = r#"
