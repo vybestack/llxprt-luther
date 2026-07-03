@@ -1345,30 +1345,22 @@ fn assert_scoped_git_auth_cleanup(content: &str) {
         content.contains("GH_TOKEN: ${{ github.token }}")
             && content.contains("GH_SERVER_URL=\"${GITHUB_SERVER_URL:-https://github.com}\"")
             && content.contains("GH_SERVER_URL=\"${GH_SERVER_URL%/}/\"")
-            && content.contains("extraheader = AUTHORIZATION: bearer ")
-            && content.contains("GIT_CONFIG_GLOBAL")
             && content.contains("GIT_CONFIG_COUNT=1")
             && content.contains("GIT_CONFIG_KEY_0=\"http.${GH_SERVER_URL}.extraheader\"")
             && content.contains("GIT_CONFIG_VALUE_0=\"AUTHORIZATION: bearer ${GH_TOKEN}\"")
-            && content.contains(
-                "unset GIT_CONFIG_GLOBAL GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0"
-            )
             && content.contains("unset GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0")
-            && content.contains("ocr-git-auth-config")
+            && !content.contains("GIT_CONFIG_GLOBAL")
+            && !content.contains("ocr-git-auth-config")
             && content.contains("trap cleanup_git_auth EXIT")
             && content.contains("trap 'cleanup_git_auth; exit 130' INT TERM")
             && content.contains("trap 'cleanup_git_auth; exit 129' HUP")
-            && content.contains("unset GIT_CONFIG_GLOBAL")
             && content.contains("trap - EXIT INT TERM HUP")
             && content.contains("set +e")
             && content.contains("git config --global --unset-all safe.directory")
             && content.contains("git config --file \"${HOME}/.gitconfig\" --add safe.directory")
             && content
                 .contains("git config --file \"${HOME}/.gitconfig\" --unset-all safe.directory")
-            && content.contains("rm -f \"${RUNNER_TEMP}/ocr-git-auth-config\"")
-            && content.contains("chmod 600 \"${RUNNER_TEMP}/ocr-git-auth-config\"")
-            && content.contains("printf '\\textraheader = AUTHORIZATION: bearer %s\\n'")
-            && content.contains(r#""${GH_TOKEN}""#)
+            && content.contains("${GH_TOKEN}")
             && content.contains("if ! git cat-file -e \"${BASE_SHA}^{commit}\"; then"),
         "Fetch step must use scoped GitHub authentication and clean it up"
     );
