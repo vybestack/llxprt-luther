@@ -1013,7 +1013,8 @@ fn test_ocr_pr_review_inline_payload_is_github_compatible() {
     assert!(
         content.contains("lineless.push(f && typeof f === 'object' ? f : { body: f || 'Malformed OCR finding' })")
             && content.contains("const item = f && typeof f === 'object' ? f : {}")
-            && content.contains("const rawText = item.comment || item.message || item.body")
+            && content
+                .contains("const rawText = item.content || item.comment || item.message || item.body")
             && content.contains("renderFindingText(typeof rawText === 'string' ? rawText : 'OCR finding')")
             && !content.contains("|| f || 'OCR finding'"),
         "Sticky summary must safely render malformed lineless findings"
@@ -1024,6 +1025,12 @@ fn test_ocr_pr_review_inline_payload_is_github_compatible() {
             && content
                 .contains("OCR result was not valid JSON and no JSON array could be extracted"),
         "Posting script must fail clearly if PR context did not resolve a valid PR number or head SHA"
+    );
+    assert!(
+        content.contains("function findingsFromParsed(parsed)")
+            && content.contains("Array.isArray(parsed.comments)")
+            && content.contains("return parsed.comments"),
+        "Posting script must accept the ocr --format json object envelope with a comments array"
     );
     assert!(
         content.contains("github.rest.pulls.createReviewComment")

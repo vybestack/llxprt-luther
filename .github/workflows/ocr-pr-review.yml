@@ -364,12 +364,21 @@ jobs:
             if (!Number.isInteger(exitCode) || exitCode !== 0) {
               ran = false;
             }
+            function findingsFromParsed(parsed) {
+              if (Array.isArray(parsed)) return parsed;
+              // ocr --format json emits an object envelope with a comments
+              // array (e.g. { "status": "success", "comments": [...] }).
+              if (parsed && typeof parsed === 'object' && Array.isArray(parsed.comments)) {
+                return parsed.comments;
+              }
+              return null;
+            }
+
             function parseFindings(raw) {
               const trimmed = raw.trim();
               if (!trimmed) return null;
               try {
-                const parsed = JSON.parse(trimmed);
-                return Array.isArray(parsed) ? parsed : null;
+                return findingsFromParsed(JSON.parse(trimmed));
               } catch (parseErr) {
                 const start = trimmed.indexOf('[');
                 const end = trimmed.lastIndexOf(']');
@@ -455,7 +464,7 @@ jobs:
                 if (startLine > endLine) {
                   [startLine, endLine] = [endLine, startLine];
                 }
-                const rawText = f.comment || f.message || f.body;
+                const rawText = f.content || f.comment || f.message || f.body;
                 const text = renderFindingText(typeof rawText === 'string' ? rawText : 'OCR finding');
                 const comment = {
                   path: String(f.path),
@@ -568,7 +577,7 @@ jobs:
               for (const f of lineless) {
                 const item = f && typeof f === 'object' ? f : {};
                 const where = item.path ? `\`${item.path}\`: ` : '';
-                const rawText = item.comment || item.message || item.body;
+                const rawText = item.content || item.comment || item.message || item.body;
                 const text = renderFindingText(typeof rawText === 'string' ? rawText : 'OCR finding');
                 body.push(`- ${where}${text}`);
               }
