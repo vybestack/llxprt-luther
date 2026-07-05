@@ -734,6 +734,7 @@ pub fn resolve_discovery_config(config: &WorkflowConfig) -> DiscoveryConfig {
         repo,
         include_labels,
         exclude_labels,
+        active_parent_label: raw.active_parent_label.or_else(|| var("luther_label")),
         issue_states,
         assignee_filter,
         milestone_order,
@@ -971,10 +972,6 @@ pub fn validate_workflow_tokens(
 }
 
 /// Validate that every consumed artifact has a producing step.
-///
-/// Existence-only check: the union of all steps' `produces` must cover every
-/// step's `consumes`. Absent/empty `produces`/`consumes` are no-ops, keeping
-/// existing workflows backward-compatible.
 /// @plan:PLAN-20260408-LLXPRT-FIRST.P11
 #[must_use]
 pub fn validate_artifact_dependencies(wf: &WorkflowType) -> Vec<MissingArtifactProducer> {

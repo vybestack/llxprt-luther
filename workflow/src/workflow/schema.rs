@@ -338,6 +338,10 @@ pub struct DiscoveryConfig {
     /// `[variables.luther_label]` when unset.
     #[serde(default)]
     pub exclude_labels: Vec<String>,
+    /// Label that marks a parent issue as actively being orchestrated.
+    /// Defaults to `variables.luther_label`.
+    #[serde(default)]
+    pub active_parent_label: Option<String>,
     /// Issue states to query. Defaults to `["open"]` when unset.
     #[serde(default)]
     pub issue_states: Vec<String>,

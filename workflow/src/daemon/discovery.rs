@@ -253,12 +253,15 @@ fn has_active_parent(
 }
 
 fn parent_has_active_label(cfg: &DiscoveryConfig, parent: &GithubIssue) -> bool {
-    cfg.exclude_labels.iter().any(|active_label| {
-        parent
-            .labels
-            .iter()
-            .any(|label| label.eq_ignore_ascii_case(active_label))
-    })
+    cfg.active_parent_label
+        .as_deref()
+        .filter(|label| !label.is_empty())
+        .is_some_and(|active_label| {
+            parent
+                .labels
+                .iter()
+                .any(|label| label.eq_ignore_ascii_case(active_label))
+        })
 }
 
 fn discovery_database_error(err: rusqlite::Error) -> GithubError {
@@ -291,6 +294,7 @@ mod tests {
             repo: Some("o/r".to_string()),
             include_labels: vec!["OK for Luther".to_string()],
             exclude_labels: vec!["Luther working".to_string()],
+            active_parent_label: Some("Luther working".to_string()),
             issue_states: vec!["open".to_string()],
             assignee_filter: None,
             milestone_order: Some("semver".to_string()),
@@ -525,6 +529,15 @@ mod tests {
         let r = discover(&cfg(), &q, &conn(), 1).unwrap();
         assert_eq!(r.eligible.len(), 1);
         assert_eq!(r.skipped.len(), 1);
+    }
+
+    #[test]
+    fn parent_active_label_ignores_unrelated_excluded_labels() {
+        let mut c = cfg();
+        c.exclude_labels = vec!["not-ready".to_string(), "Luther working".to_string()];
+        let parent = issue(50, &["not-ready"]);
+
+        assert!(!parent_has_active_label(&c, &parent));
     }
 
     #[test]

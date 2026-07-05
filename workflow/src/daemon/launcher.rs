@@ -192,7 +192,7 @@ pub fn prepare_resume_lease(
         lease_id: lease.lease_id.clone(),
         request: LaunchRequest {
             config_id: lease.config_id.clone(),
-            workflow_type_id: Some(workflow_type_id_for_resume(conn, &run_id)?),
+            workflow_type_id: workflow_type_id_for_resume(conn, &run_id)?,
             run_id,
             repo: lease.issue_repo.clone(),
             issue_number: lease.issue_number,
@@ -200,10 +200,13 @@ pub fn prepare_resume_lease(
     }))
 }
 
-fn workflow_type_id_for_resume(conn: &Connection, run_id: &str) -> Result<String, rusqlite::Error> {
+fn workflow_type_id_for_resume(
+    conn: &Connection,
+    run_id: &str,
+) -> Result<Option<String>, rusqlite::Error> {
     Ok(crate::persistence::get_run_with_conn(conn, run_id)?
         .map(|metadata| metadata.workflow_type_id)
-        .unwrap_or_default())
+        .filter(|workflow_type_id| !workflow_type_id.is_empty()))
 }
 
 /// Resume a ready lease using its existing run id/checkpoint.
@@ -236,6 +239,7 @@ mod tests {
             repo: Some("o/r".to_string()),
             include_labels: vec![],
             exclude_labels: vec![],
+            active_parent_label: None,
             issue_states: vec!["open".to_string()],
             assignee_filter: None,
             milestone_order: Some("semver".to_string()),

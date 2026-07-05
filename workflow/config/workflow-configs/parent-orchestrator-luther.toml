@@ -7,7 +7,7 @@ max_retries = 3
 
 [repository]
 workspace_strategy = "temp_clone"
-branch_template = "parent-issue{issue_number}"
+branch_template = "parent-issue-{issue_number}"
 base_branch = "main"
 
 [guards]

@@ -93,6 +93,7 @@ fn cfg(max: u32) -> DiscoveryConfig {
         repo: Some("owner/repo".to_string()),
         include_labels: vec!["OK for Luther".to_string()],
         exclude_labels: vec!["Luther working".to_string()],
+        active_parent_label: Some("Luther working".to_string()),
         issue_states: vec!["open".to_string()],
         assignee_filter: None,
         milestone_order: Some("none".to_string()),

@@ -182,6 +182,12 @@ fn poll_child_workflow(record: &WaitStateRecord, db_path: &std::path::Path) -> P
             );
         }
     };
+    if let Err(err) = conn.busy_timeout(std::time::Duration::from_secs(5)) {
+        return PollDecision::transient(
+            record,
+            json!({"classification": "transient_failure", "error": err.to_string()}),
+        );
+    }
     let metadata = match get_run_with_conn(&conn, child_run_id) {
         Ok(metadata) => metadata,
         Err(err) => {

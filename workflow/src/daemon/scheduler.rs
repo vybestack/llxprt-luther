@@ -465,6 +465,7 @@ mod tests {
             repo: Some("o/r".to_string()),
             include_labels: vec!["ok".to_string()],
             exclude_labels: vec![],
+            active_parent_label: None,
             issue_states: vec!["open".to_string()],
             assignee_filter: None,
             milestone_order: Some("none".to_string()),
