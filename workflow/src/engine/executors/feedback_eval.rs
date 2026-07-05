@@ -124,9 +124,19 @@ impl ProcessFeedbackEvaluatorCommandRunner {
     }
 
     fn timeout(&self) -> Duration {
-        self.timeout
-            .unwrap_or_else(|| Duration::from_secs(DEFAULT_FEEDBACK_EVALUATOR_TIMEOUT_SECONDS))
+        self.timeout.unwrap_or_else(default_evaluator_timeout)
     }
+}
+
+/// Resolve the default evaluator timeout, honoring the
+/// `LUTHER_FEEDBACK_EVALUATOR_TIMEOUT_SECONDS` environment override so
+/// operators can accommodate slower reasoning profiles without a rebuild.
+fn default_evaluator_timeout() -> Duration {
+    let override_seconds = std::env::var("LUTHER_FEEDBACK_EVALUATOR_TIMEOUT_SECONDS")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
+        .filter(|seconds| *seconds > 0);
+    Duration::from_secs(override_seconds.unwrap_or(DEFAULT_FEEDBACK_EVALUATOR_TIMEOUT_SECONDS))
 }
 
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P09
@@ -1328,4 +1338,37 @@ fn stable_json_hash(value: &Value) -> String {
 
 fn feedback_eval_error(message: impl Into<String>) -> EngineError {
     EngineError::InvalidState(format!("feedback evaluator: {}", message.into()))
+}
+
+#[cfg(test)]
+mod evaluator_timeout_tests {
+    use super::*;
+
+    // Env-var tests mutate process state; keep them in one test so they
+    // cannot race each other under the parallel test runner.
+    #[test]
+    fn default_evaluator_timeout_honors_env_override_and_rejects_invalid() {
+        std::env::remove_var("LUTHER_FEEDBACK_EVALUATOR_TIMEOUT_SECONDS");
+        assert_eq!(
+            default_evaluator_timeout(),
+            Duration::from_secs(DEFAULT_FEEDBACK_EVALUATOR_TIMEOUT_SECONDS)
+        );
+
+        std::env::set_var("LUTHER_FEEDBACK_EVALUATOR_TIMEOUT_SECONDS", "1800");
+        assert_eq!(default_evaluator_timeout(), Duration::from_secs(1800));
+
+        std::env::set_var("LUTHER_FEEDBACK_EVALUATOR_TIMEOUT_SECONDS", "0");
+        assert_eq!(
+            default_evaluator_timeout(),
+            Duration::from_secs(DEFAULT_FEEDBACK_EVALUATOR_TIMEOUT_SECONDS)
+        );
+
+        std::env::set_var("LUTHER_FEEDBACK_EVALUATOR_TIMEOUT_SECONDS", "not-a-number");
+        assert_eq!(
+            default_evaluator_timeout(),
+            Duration::from_secs(DEFAULT_FEEDBACK_EVALUATOR_TIMEOUT_SECONDS)
+        );
+
+        std::env::remove_var("LUTHER_FEEDBACK_EVALUATOR_TIMEOUT_SECONDS");
+    }
 }
