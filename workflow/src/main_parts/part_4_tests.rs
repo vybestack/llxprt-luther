@@ -170,11 +170,38 @@ fn wait_poll_identity_reads_child_workflow_wait_run_id() {
     assert_eq!(identity.head_sha.as_deref(), Some("child-run-63"));
 }
 
-#[test]
-fn persist_external_wait_state_stores_child_run_id_identity() {
+struct ChildWorkflowWaitFixture {
+    _tmp: tempfile::TempDir,
+    db_path: std::path::PathBuf,
+    conn: rusqlite::Connection,
+    config: WorkflowConfig,
+    request: luther_workflow::daemon::launcher::LaunchRequest,
+}
+
+fn child_workflow_wait_fixture() -> ChildWorkflowWaitFixture {
     let tmp = tempfile::tempdir().unwrap();
     let artifact_root = tmp.path().join("artifacts");
     std::fs::create_dir_all(&artifact_root).unwrap();
+    write_child_workflow_wait_artifact(&artifact_root);
+    let db_path = tmp.path().join("checkpoints.db");
+    luther_workflow::persistence::init_database(&db_path).unwrap();
+    let conn = rusqlite::Connection::open(&db_path).unwrap();
+    luther_workflow::persistence::sqlite::init_runs_schema(&conn).unwrap();
+    save_child_workflow_checkpoint(&conn, &artifact_root);
+    let mut config = workflow_config(&artifact_root);
+    config.workflow_type_id = "parent-issue-orchestrator-v1".to_string();
+    config.config_id = "parent-orchestrator-luther".to_string();
+    let request = child_workflow_wait_request();
+    ChildWorkflowWaitFixture {
+        _tmp: tmp,
+        db_path,
+        conn,
+        config,
+        request,
+    }
+}
+
+fn write_child_workflow_wait_artifact(artifact_root: &std::path::Path) {
     std::fs::write(
         artifact_root.join("child-workflow-wait.json"),
         serde_json::to_vec(&serde_json::json!({
@@ -186,44 +213,55 @@ fn persist_external_wait_state_stores_child_run_id_identity() {
         .unwrap(),
     )
     .unwrap();
-    let db_path = tmp.path().join("checkpoints.db");
-    luther_workflow::persistence::init_database(&db_path).unwrap();
-    let conn = rusqlite::Connection::open(&db_path).unwrap();
-    luther_workflow::persistence::sqlite::init_runs_schema(&conn).unwrap();
+}
+
+fn save_child_workflow_checkpoint(conn: &rusqlite::Connection, artifact_root: &std::path::Path) {
     let checkpoint = luther_workflow::persistence::checkpoint::Checkpoint::new(
         "parent-run-62",
         "launch_or_resume_child_workflow",
     );
-    luther_workflow::persistence::checkpoint::save_checkpoint_with_conn(&conn, &checkpoint)
-        .unwrap();
+    luther_workflow::persistence::checkpoint::save_checkpoint_with_conn(conn, &checkpoint).unwrap();
     let mut metadata = RunMetadata::new(
         "parent-run-62",
         "parent-issue-orchestrator-v1",
         "parent-orchestrator-luther",
     );
     metadata.artifact_root = Some(artifact_root.to_string_lossy().to_string());
-    persist_run_with_conn(&conn, &metadata).unwrap();
-    let mut config = workflow_config(&artifact_root);
-    config.workflow_type_id = "parent-issue-orchestrator-v1".to_string();
-    config.config_id = "parent-orchestrator-luther".to_string();
-    let request = luther_workflow::daemon::launcher::LaunchRequest {
+    persist_run_with_conn(conn, &metadata).unwrap();
+}
+
+fn child_workflow_wait_request() -> luther_workflow::daemon::launcher::LaunchRequest {
+    luther_workflow::daemon::launcher::LaunchRequest {
         config_id: "parent-orchestrator-luther".to_string(),
         workflow_type_id: Some("parent-issue-orchestrator-v1".to_string()),
         run_id: "parent-run-62".to_string(),
         repo: "owner/repo".to_string(),
         issue_number: 62,
-    };
+    }
+}
+
+#[test]
+fn persist_external_wait_state_stores_child_run_id_identity() {
+    let fixture = child_workflow_wait_fixture();
 
     persist_external_wait_state(
-        &request,
-        &config,
-        &db_path,
+        &fixture.request,
+        &fixture.config,
+        &fixture.db_path,
         "launch_or_resume_child_workflow",
         "child workflow waiting",
     )
     .unwrap();
 
-    let record = get_wait_state(&conn, "parent-run-62").unwrap().unwrap();
+    let record = get_wait_state(&fixture.conn, "parent-run-62")
+        .unwrap()
+        .unwrap();
+    assert_child_workflow_wait_record(&record);
+}
+
+fn assert_child_workflow_wait_record(
+    record: &luther_workflow::persistence::wait_state::WaitStateRecord,
+) {
     assert_eq!(record.wait_kind, WaitKind::DependencyChildWorkflow);
     assert_eq!(record.head_sha.as_deref(), Some("child-run-63"));
     assert_eq!(
