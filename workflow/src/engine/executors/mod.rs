@@ -22,6 +22,7 @@ pub mod github_feedback;
 pub mod github_pr;
 pub mod llxprt;
 pub mod noop;
+pub mod parent_orchestration;
 pub mod pr_check_wait;
 pub mod pr_followup_artifacts;
 pub mod pr_followup_types;
@@ -54,6 +55,11 @@ pub use github_pr::{
 };
 pub use llxprt::{LlxprtExecutor, LlxprtExecutorWithDetector};
 pub use noop::NoOpExecutor;
+pub use parent_orchestration::model::{
+    classify_child, next_actionable_child, order_subissues, ChildIssueState, ChildTerminalState,
+    ParentIssueOrchestrationState,
+};
+pub use parent_orchestration::{ParentOrchestrationExecutor, ParentOrchestrationExecutorWithQuery};
 pub use pr_followup_artifacts::{
     ArtifactWriter, ClockSleeper, PrFollowupArtifactStore, PrFollowupFilesystem,
     SystemClockSleeper, SystemPrFollowupFilesystem,

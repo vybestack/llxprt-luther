@@ -372,6 +372,10 @@ impl ExecutorRegistry {
             Box::new(crate::engine::executors::WorkflowAuthPreflightExecutor),
         );
         self.register("noop", Box::new(crate::engine::executors::NoOpExecutor));
+        self.register(
+            "parent_orchestration",
+            Box::new(crate::engine::executors::ParentOrchestrationExecutor),
+        );
     }
 
     fn register_github_followup_executors(&mut self) {

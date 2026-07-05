@@ -508,7 +508,11 @@ fn launch_daemon_workflow(
     let config_root = std::path::PathBuf::from("config");
     let mut config = resolve_workflow_config(config_id, &config_root)
         .map_err(|e| format!("resolve config '{config_id}': {e}"))?;
-    let workflow_type = resolve_workflow_type(&config.workflow_type_id, &config_root)
+    let workflow_type_id = request
+        .workflow_type_id
+        .as_deref()
+        .unwrap_or(&config.workflow_type_id);
+    let workflow_type = resolve_workflow_type(workflow_type_id, &config_root)
         .map_err(|e| format!("resolve workflow type: {e}"))?;
     let overrides = TargetProfileOverrides {
         repo: Some(request.repo.clone()),
@@ -603,7 +607,7 @@ fn persist_external_wait_state(
     record.repository = request.repo.clone();
     record.issue_number = request.issue_number;
     record.pr_number = identity.pr_number;
-    record.head_sha = identity.head_sha;
+    record.head_sha = identity.head_sha.clone();
     record.wait_kind = wait_kind;
     let step_params = resolved_wait_step_parameters(config, step_id)?;
     record.wait_condition = wait_condition_payload(
@@ -613,6 +617,11 @@ fn persist_external_wait_state(
         wait_kind,
         &step_params,
     )?;
+    if wait_kind == WaitKind::DependencyChildWorkflow {
+        if let Some(child_run_id) = identity.head_sha {
+            record.wait_condition["child_run_id"] = serde_json::Value::String(child_run_id);
+        }
+    }
     record.last_observed_state = serde_json::json!({
         "classification": "suspended",
         "step_id": step_id,
@@ -624,7 +633,9 @@ fn persist_external_wait_state(
         .and_then(|d| d.poll_interval_secs)
         .unwrap_or(300);
     record.poll_interval_seconds = poll_interval;
-    record.next_poll_at = chrono::Utc::now() + chrono::Duration::seconds(poll_interval as i64);
+    record.max_wait_seconds = max_wait_seconds_for_wait(config, wait_kind);
+    let poll_interval_seconds = i64::try_from(poll_interval).unwrap_or(i64::MAX);
+    record.next_poll_at = chrono::Utc::now() + chrono::Duration::seconds(poll_interval_seconds);
     record.resume_step = checkpoint.step_id.clone();
     record.checkpoint_id = luther_workflow::engine::continuation::checkpoint_identity(&checkpoint);
     upsert_wait_state(&conn, &record).map_err(|e| e.to_string())?;
@@ -636,6 +647,15 @@ fn persist_external_wait_state(
     }
     Ok(())
 }
+
+fn max_wait_seconds_for_wait(config: &WorkflowConfig, wait_kind: WaitKind) -> Option<u64> {
+    match wait_kind {
+        WaitKind::DependencyChildMerge => config.parent_orchestration.max_child_merge_wait_seconds,
+        WaitKind::DependencyChildWorkflow => config.parent_orchestration.max_child_merge_wait_seconds,
+        _ => None,
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct WaitPollIdentity {
     pr_number: Option<u64>,
@@ -685,10 +705,16 @@ fn wait_poll_identity(
     let artifact_head_sha = artifact_identity
         .as_ref()
         .and_then(|value| string_field(value, "head_sha"));
-    let identity = WaitPollIdentity {
+    let mut identity = WaitPollIdentity {
         pr_number: artifact_pr_number.or_else(|| metadata_pr_number(metadata)),
         head_sha: artifact_head_sha.or_else(|| metadata.and_then(|md| md.head_sha.clone())),
     };
+    if matches!(
+        wait_kind,
+        WaitKind::DependencyChildMerge | WaitKind::DependencyChildWorkflow
+    ) {
+        fill_parent_dependency_wait_identity(wait_kind, &mut identity, artifact_root.as_deref())?;
+    }
     validate_wait_poll_identity(wait_kind, &identity)?;
     Ok(identity)
 }
@@ -711,6 +737,11 @@ fn validate_wait_poll_identity(
                 return Err(format!("missing PR number for {wait_kind} wait state"));
             }
         }
+        WaitKind::DependencyChildWorkflow => {
+            if identity.head_sha.is_none() {
+                return Err(format!("missing child run ID for {wait_kind} wait state"));
+            }
+        }
         WaitKind::RateLimitBackoff => {}
     }
     Ok(())
@@ -720,6 +751,33 @@ fn metadata_pr_number(metadata: Option<&RunMetadata>) -> Option<u64> {
     metadata
         .and_then(|md| md.pr_number)
         .and_then(|number| u64::try_from(number).ok())
+}
+
+fn fill_parent_dependency_wait_identity(
+    wait_kind: WaitKind,
+    identity: &mut WaitPollIdentity,
+    artifact_root: Option<&std::path::Path>,
+) -> Result<(), String> {
+    match wait_kind {
+        WaitKind::DependencyChildMerge if identity.pr_number.is_none() => {
+            identity.pr_number = artifact_root
+                .map(read_child_merge_wait_artifact)
+                .transpose()?
+                .flatten();
+        }
+        WaitKind::DependencyChildWorkflow => {
+            if let Some(value) = artifact_root
+                .map(read_child_workflow_wait_artifact)
+                .transpose()?
+                .flatten()
+            {
+                identity.pr_number = value.get("pr_number").and_then(serde_json::Value::as_u64);
+                identity.head_sha = string_field(&value, "child_run_id");
+            }
+        }
+        _ => {}
+    }
+    Ok(())
 }
 
 fn wait_artifact_root(
@@ -794,6 +852,28 @@ fn is_config_token_name(token: &str) -> bool {
         }
     }
     true
+}
+fn read_child_workflow_wait_artifact(
+    artifact_root: &std::path::Path,
+) -> Result<Option<serde_json::Value>, String> {
+    let path = artifact_root.join("child-workflow-wait.json");
+    if !path.exists() {
+        return Ok(None);
+    }
+    read_json_path(&path).map(Some)
+}
+
+
+fn read_child_merge_wait_artifact(artifact_root: &std::path::Path) -> Result<Option<u64>, String> {
+    let path = artifact_root.join("child-merge-wait.json");
+    if !path.exists() {
+        return Ok(None);
+    }
+    let value = read_json_path(&path)?;
+    Ok(value
+        .get("pr")
+        .and_then(|pr| pr.get("number"))
+        .and_then(serde_json::Value::as_u64))
 }
 
 const CONFIG_TOKEN_UNDERSCORE: u8 = 95;
@@ -938,6 +1018,7 @@ fn wait_condition_payload(
     });
     match wait_kind {
         WaitKind::PrChecks => add_required_pr_check_wait_parameters(&mut payload, step_params)?,
+        WaitKind::DependencyChildWorkflow => add_child_workflow_wait_parameters(&mut payload, request)?,
         _ => add_optional_wait_parameters(&mut payload, step_params),
     }
     Ok(payload)
@@ -953,6 +1034,29 @@ fn add_required_pr_check_wait_parameters(
     set_required_wait_parameter(payload, step_params, "head_ref")?;
     set_required_wait_parameter(payload, step_params, "base_ref")?;
     set_required_wait_parameter(payload, step_params, "base_sha")?;
+    Ok(())
+}
+
+fn add_child_workflow_wait_parameters(
+    payload: &mut Value,
+    request: &luther_workflow::daemon::launcher::LaunchRequest,
+) -> Result<(), String> {
+    let artifact_root = payload
+        .get("artifact_root")
+        .and_then(Value::as_str)
+        .map(std::path::PathBuf::from);
+    let Some(artifact_root) = artifact_root else {
+        return Ok(());
+    };
+    if let Some(wait) = read_child_workflow_wait_artifact(&artifact_root)? {
+        payload["child_run_id"] = wait.get("child_run_id").cloned().unwrap_or(Value::Null);
+        payload["child_issue_number"] = wait
+            .get("child_issue_number")
+            .cloned()
+            .unwrap_or(Value::Null);
+        payload["child_lease_id"] = wait.get("child_lease_id").cloned().unwrap_or(Value::Null);
+        payload["parent_run_id"] = Value::String(request.run_id.clone());
+    }
     Ok(())
 }
 

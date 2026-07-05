@@ -28,7 +28,11 @@
       "open"
     ],
     "max_concurrent_runs": 1,
-    "poll_interval_secs": 300
+    "poll_interval_secs": 300,
+    "route_parent_issues": true,
+    "parent_workflow_type_id": "parent-issue-orchestrator-v1",
+    "parent_config_id": "parent-orchestrator-code",
+    "skip_children_of_active_parents": true
   },
   "variables": {
     "primary_issue_number": "0",
@@ -134,27 +138,26 @@
   "command_manifest": {
     "commands": [
       {
+        "id": "install_dependencies_when_missing",
         "argv": [
           "npm",
           "ci",
           "--ignore-scripts"
         ],
         "timeout_seconds": 900,
-        "failure_outcome": "fatal",
-        "id": "install_dependencies_when_missing",
         "run_if_missing_any": [
           "node_modules"
-        ]
+        ],
+        "failure_outcome": "fatal"
       },
       {
+        "id": "reinstall_dependencies_when_incomplete",
         "argv": [
           "npm",
           "ci",
           "--ignore-scripts"
         ],
         "timeout_seconds": 900,
-        "failure_outcome": "fatal",
-        "id": "reinstall_dependencies_when_incomplete",
         "run_if_present_all": [
           "node_modules"
         ],
@@ -166,7 +169,8 @@
         ],
         "remove_before_run": [
           "node_modules"
-        ]
+        ],
+        "failure_outcome": "fatal"
       },
       {
         "id": "repair_node_bin_permissions",

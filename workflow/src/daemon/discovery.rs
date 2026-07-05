@@ -24,6 +24,7 @@ pub enum SkipReason {
     AssigneeMismatch(String),
     HasActiveLease,
     HasOpenPr,
+    ChildOfActiveParent,
     ConcurrencyLimitReached,
     InvalidLeaseState,
 }
@@ -37,6 +38,9 @@ impl std::fmt::Display for SkipReason {
             SkipReason::AssigneeMismatch(a) => write!(f, "assignee mismatch (wanted '{a}')"),
             SkipReason::HasActiveLease => write!(f, "issue already has an in-progress lease"),
             SkipReason::HasOpenPr => write!(f, "issue already has an open PR"),
+            SkipReason::ChildOfActiveParent => {
+                write!(f, "child issue is owned by an active parent orchestrator")
+            }
             SkipReason::ConcurrencyLimitReached => {
                 write!(f, "per-config concurrency limit reached")
             }
@@ -54,6 +58,7 @@ impl SkipReason {
             SkipReason::MissingRequiredLabel(_) => "missing_required_label",
             SkipReason::HasExcludedLabel(_) => "has_excluded_label",
             SkipReason::WrongState(_) => "wrong_state",
+            SkipReason::ChildOfActiveParent => "child_of_active_parent",
             SkipReason::AssigneeMismatch(_) => "assignee_mismatch",
             SkipReason::HasActiveLease => "has_active_lease",
             SkipReason::HasOpenPr => "has_open_pr",
@@ -67,8 +72,33 @@ impl SkipReason {
 /// @plan:PLAN-20260415-DAEMON-DISCOVERY.P04
 #[derive(Debug, Clone, Default)]
 pub struct DiscoveryResult {
-    pub eligible: Vec<GithubIssue>,
+    pub eligible: Vec<RoutedIssue>,
     pub skipped: Vec<(GithubIssue, SkipReason)>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RoutedIssue {
+    pub issue: GithubIssue,
+    pub workflow_type_id: Option<String>,
+    pub config_id: Option<String>,
+}
+
+impl RoutedIssue {
+    fn ordinary(issue: GithubIssue) -> Self {
+        Self {
+            issue,
+            workflow_type_id: None,
+            config_id: None,
+        }
+    }
+
+    fn parent(issue: GithubIssue, cfg: &DiscoveryConfig) -> Self {
+        Self {
+            issue,
+            workflow_type_id: cfg.parent_workflow_type_id.clone(),
+            config_id: cfg.parent_config_id.clone(),
+        }
+    }
 }
 
 /// Check label/state/assignee filters; return the first failing skip reason.
@@ -174,7 +204,8 @@ pub fn discover(
                 .push((issue, SkipReason::ConcurrencyLimitReached));
             continue;
         }
-        result.eligible.push(issue);
+        let routed = route_issue(cfg, q, &issue, repo)?;
+        result.eligible.push(routed);
     }
 
     Ok(result)
@@ -183,12 +214,15 @@ pub fn discover(
 /// Check the dynamic (DB/network) skip reasons: active lease, then open PR.
 /// @plan:PLAN-20260415-DAEMON-DISCOVERY.P04
 fn dynamic_skip(
-    _cfg: &DiscoveryConfig,
+    cfg: &DiscoveryConfig,
     q: &dyn GithubIssueQuery,
     conn: &Connection,
     issue: &GithubIssue,
     repo: &str,
 ) -> Result<Option<SkipReason>, GithubError> {
+    if cfg.skip_children_of_active_parents && has_active_parent(cfg, q, repo, issue, conn)? {
+        return Ok(Some(SkipReason::ChildOfActiveParent));
+    }
     if let Ok(Some(lease)) = get_lease_for_issue(conn, repo, issue.number) {
         if lease.status.blocks_duplicate_work() {
             return Ok(Some(SkipReason::HasActiveLease));
@@ -200,6 +234,52 @@ fn dynamic_skip(
     Ok(None)
 }
 
+fn has_active_parent(
+    cfg: &DiscoveryConfig,
+    q: &dyn GithubIssueQuery,
+    repo: &str,
+    issue: &GithubIssue,
+    conn: &Connection,
+) -> Result<bool, GithubError> {
+    let Some(parent) = q.get_parent_issue(repo, issue.number)? else {
+        return Ok(false);
+    };
+    if parent_has_active_label(cfg, &parent.issue) {
+        return Ok(true);
+    }
+    get_lease_for_issue(conn, repo, parent.issue.number)
+        .map(|lease| lease.is_some_and(|lease| lease.status.blocks_duplicate_work()))
+        .map_err(discovery_database_error)
+}
+
+fn parent_has_active_label(cfg: &DiscoveryConfig, parent: &GithubIssue) -> bool {
+    cfg.exclude_labels.iter().any(|active_label| {
+        parent
+            .labels
+            .iter()
+            .any(|label| label.eq_ignore_ascii_case(active_label))
+    })
+}
+
+fn discovery_database_error(err: rusqlite::Error) -> GithubError {
+    GithubError::CommandFailed {
+        argv: vec!["sqlite".to_string(), "issue_leases".to_string()],
+        exit_code: None,
+        stderr: format!("lease database error: {err}"),
+    }
+}
+
+fn route_issue(
+    cfg: &DiscoveryConfig,
+    q: &dyn GithubIssueQuery,
+    issue: &GithubIssue,
+    repo: &str,
+) -> Result<RoutedIssue, GithubError> {
+    if cfg.route_parent_issues && !q.list_sub_issues(repo, issue.number)?.is_empty() {
+        return Ok(RoutedIssue::parent(issue.clone(), cfg));
+    }
+    Ok(RoutedIssue::ordinary(issue.clone()))
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -219,6 +299,10 @@ mod tests {
             max_concurrent_active_runs: None,
             max_concurrent_runs_per_repository: None,
             max_concurrent_runs_per_config: None,
+            route_parent_issues: true,
+            parent_workflow_type_id: Some("parent-issue-orchestrator-v1".to_string()),
+            parent_config_id: Some("parent-orchestrator-luther".to_string()),
+            skip_children_of_active_parents: true,
         }
     }
 
@@ -230,6 +314,7 @@ mod tests {
             labels: labels.iter().map(|s| (*s).to_string()).collect(),
             assignee: None,
             milestone: None,
+            body: None,
         }
     }
 
@@ -237,6 +322,8 @@ mod tests {
     struct MockQuery {
         issues: Vec<GithubIssue>,
         open_pr_for: Vec<u64>,
+        sub_issue_parent_numbers: Vec<u64>,
+        active_parent_for: Vec<u64>,
     }
 
     impl GithubIssueQuery for MockQuery {
@@ -254,6 +341,33 @@ mod tests {
         fn list_milestones(&self, _repo: &str) -> Result<Vec<String>, GithubError> {
             Ok(vec![])
         }
+        fn list_sub_issues(
+            &self,
+            _repo: &str,
+            number: u64,
+        ) -> Result<Vec<crate::adapters::github_issues::GithubSubIssue>, GithubError> {
+            if self.sub_issue_parent_numbers.contains(&number) {
+                return Ok(vec![crate::adapters::github_issues::GithubSubIssue {
+                    issue: issue(99, &["OK for Luther"]),
+                    position: Some(0),
+                    source: crate::adapters::github_issues::SubIssueSource::Native,
+                }]);
+            }
+            Ok(vec![])
+        }
+        fn get_parent_issue(
+            &self,
+            _repo: &str,
+            number: u64,
+        ) -> Result<Option<crate::adapters::github_issues::GithubParentIssue>, GithubError>
+        {
+            if self.active_parent_for.contains(&number) {
+                return Ok(Some(crate::adapters::github_issues::GithubParentIssue {
+                    issue: issue(50, &["Luther working"]),
+                }));
+            }
+            Ok(None)
+        }
     }
 
     fn conn() -> Connection {
@@ -267,6 +381,8 @@ mod tests {
         let q = MockQuery {
             issues: vec![issue(1, &[])],
             open_pr_for: vec![],
+            sub_issue_parent_numbers: vec![],
+            active_parent_for: vec![],
         };
         let r = discover(&cfg(), &q, &conn(), 0).unwrap();
         assert!(r.eligible.is_empty());
@@ -281,6 +397,8 @@ mod tests {
         let q = MockQuery {
             issues: vec![issue(1, &["OK for Luther", "Luther working"])],
             open_pr_for: vec![],
+            sub_issue_parent_numbers: vec![],
+            active_parent_for: vec![],
         };
         let r = discover(&cfg(), &q, &conn(), 0).unwrap();
         assert_eq!(
@@ -296,6 +414,8 @@ mod tests {
         let q = MockQuery {
             issues: vec![i],
             open_pr_for: vec![],
+            sub_issue_parent_numbers: vec![],
+            active_parent_for: vec![],
         };
         let r = discover(&cfg(), &q, &conn(), 0).unwrap();
         assert_eq!(r.skipped[0].1, SkipReason::WrongState("closed".to_string()));
@@ -308,6 +428,8 @@ mod tests {
         let q = MockQuery {
             issues: vec![issue(1, &["OK for Luther"])],
             open_pr_for: vec![],
+            sub_issue_parent_numbers: vec![],
+            active_parent_for: vec![],
         };
         let r = discover(&c, &q, &conn(), 0).unwrap();
         assert_eq!(
@@ -323,6 +445,8 @@ mod tests {
         let q = MockQuery {
             issues: vec![issue(1, &["OK for Luther"])],
             open_pr_for: vec![],
+            sub_issue_parent_numbers: vec![],
+            active_parent_for: vec![],
         };
         let r = discover(&cfg(), &q, &c, 0).unwrap();
         assert_eq!(r.skipped[0].1, SkipReason::HasActiveLease);
@@ -342,6 +466,8 @@ mod tests {
         let q = MockQuery {
             issues: vec![issue(1, &["OK for Luther"]), issue(2, &["OK for Luther"])],
             open_pr_for: vec![],
+            sub_issue_parent_numbers: vec![],
+            active_parent_for: vec![],
         };
         let mut cfg = cfg();
         cfg.max_concurrent_runs = Some(1);
@@ -352,7 +478,7 @@ mod tests {
         assert_eq!(
             r.eligible
                 .iter()
-                .map(|issue| issue.number)
+                .map(|routed| routed.issue.number)
                 .collect::<Vec<_>>(),
             vec![2]
         );
@@ -362,6 +488,8 @@ mod tests {
         let q = MockQuery {
             issues: vec![issue(1, &["OK for Luther"])],
             open_pr_for: vec![1],
+            sub_issue_parent_numbers: vec![],
+            active_parent_for: vec![],
         };
         let r = discover(&cfg(), &q, &conn(), 0).unwrap();
         assert_eq!(r.skipped[0].1, SkipReason::HasOpenPr);
@@ -376,6 +504,8 @@ mod tests {
                 issue(3, &["OK for Luther"]),
             ],
             open_pr_for: vec![],
+            sub_issue_parent_numbers: vec![],
+            active_parent_for: vec![],
         };
         // max=2, active=0 => 2 eligible, 1 over limit.
         let r = discover(&cfg(), &q, &conn(), 0).unwrap();
@@ -388,6 +518,8 @@ mod tests {
         let q = MockQuery {
             issues: vec![issue(1, &["OK for Luther"]), issue(2, &["OK for Luther"])],
             open_pr_for: vec![],
+            sub_issue_parent_numbers: vec![],
+            active_parent_for: vec![],
         };
         // max=2, active=1 => only 1 eligible.
         let r = discover(&cfg(), &q, &conn(), 1).unwrap();
@@ -408,9 +540,11 @@ mod tests {
         let q = MockQuery {
             issues: vec![i1, i2, i3],
             open_pr_for: vec![],
+            sub_issue_parent_numbers: vec![],
+            active_parent_for: vec![],
         };
         let r = discover(&c, &q, &conn(), 0).unwrap();
-        let order: Vec<u64> = r.eligible.iter().map(|i| i.number).collect();
+        let order: Vec<u64> = r.eligible.iter().map(|i| i.issue.number).collect();
         // v1.0.0 issues (5, 20) before v2.0.0 (10); within milestone by number.
         assert_eq!(order, vec![5, 20, 10]);
     }

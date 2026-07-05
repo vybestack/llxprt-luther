@@ -10,6 +10,7 @@ pub enum WaitKind {
     HumanReview,
     PrMerge,
     RateLimitBackoff,
+    DependencyChildWorkflow,
     DependencyChildMerge,
 }
 
@@ -21,6 +22,7 @@ impl std::fmt::Display for WaitKind {
             WaitKind::HumanReview => "human_review",
             WaitKind::PrMerge => "pr_merge",
             WaitKind::RateLimitBackoff => "rate_limit_backoff",
+            WaitKind::DependencyChildWorkflow => "dependency_child_workflow",
             WaitKind::DependencyChildMerge => "dependency_child_merge",
         };
         write!(f, "{s}")
@@ -37,6 +39,7 @@ impl std::str::FromStr for WaitKind {
             "human_review" => Ok(WaitKind::HumanReview),
             "pr_merge" => Ok(WaitKind::PrMerge),
             "rate_limit_backoff" => Ok(WaitKind::RateLimitBackoff),
+            "dependency_child_workflow" => Ok(WaitKind::DependencyChildWorkflow),
             "dependency_child_merge" => Ok(WaitKind::DependencyChildMerge),
             _ => Err(format!("Unknown wait kind: {s}")),
         }
@@ -404,6 +407,7 @@ mod tests {
             WaitKind::HumanReview,
             WaitKind::PrMerge,
             WaitKind::RateLimitBackoff,
+            WaitKind::DependencyChildWorkflow,
             WaitKind::DependencyChildMerge,
         ] {
             assert_eq!(kind.to_string().parse::<WaitKind>().unwrap(), kind);

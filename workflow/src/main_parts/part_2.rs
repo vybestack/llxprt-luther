@@ -4,6 +4,9 @@ fn wait_kind_for_step(step_id: &str) -> WaitKind {
         "watch_pr_checks" => WaitKind::PrChecks,
         "collect_coderabbit_feedback" => WaitKind::CoderabbitReview,
         "merge_pr" | "wait_for_merge" => WaitKind::PrMerge,
+        "launch_or_resume_child_workflow" | "dependency_child_workflow" => {
+            WaitKind::DependencyChildWorkflow
+        }
         "dependency_child_merge" | "wait_for_child_merge" => WaitKind::DependencyChildMerge,
         "rate_limit_backoff" | "github_rate_limit_backoff" => WaitKind::RateLimitBackoff,
         other => {
@@ -625,11 +628,13 @@ fn print_discovery_json(result: &DiscoveryResult) {
     let eligible: Vec<serde_json::Value> = result
         .eligible
         .iter()
-        .map(|i| {
+        .map(|routed| {
             serde_json::json!({
-                "number": i.number,
-                "title": i.title,
-                "labels": i.labels,
+                "number": routed.issue.number,
+                "title": routed.issue.title,
+                "labels": routed.issue.labels,
+                "workflow_type_id": routed.workflow_type_id,
+                "config_id": routed.config_id,
             })
         })
         .collect();
@@ -656,12 +661,14 @@ fn print_discovery_json(result: &DiscoveryResult) {
 /// @plan:PLAN-20260415-DAEMON-DISCOVERY.P05
 fn print_discovery_text(result: &DiscoveryResult) {
     println!("Eligible issues ({}):", result.eligible.len());
-    for issue in &result.eligible {
+    for routed in &result.eligible {
         println!(
-            "  #{} {} [{}]",
-            issue.number,
-            issue.title,
-            issue.labels.join(", ")
+            "  #{} {} [{}] workflow={} config={}",
+            routed.issue.number,
+            routed.issue.title,
+            routed.issue.labels.join(", "),
+            routed.workflow_type_id.as_deref().unwrap_or("default"),
+            routed.config_id.as_deref().unwrap_or("default")
         );
     }
     println!("Skipped issues ({}):", result.skipped.len());

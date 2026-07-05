@@ -47,6 +47,7 @@ pub trait ExternalWaitPoller {
 /// Production poller backed by statically constructed `gh` argv calls.
 pub struct SystemExternalWaitPoller<R = SystemGithubCommandRunner> {
     runner: R,
+    db_path: std::path::PathBuf,
 }
 
 impl SystemExternalWaitPoller<SystemGithubCommandRunner> {
@@ -54,6 +55,7 @@ impl SystemExternalWaitPoller<SystemGithubCommandRunner> {
     pub fn new() -> Self {
         Self {
             runner: SystemGithubCommandRunner,
+            db_path: child_workflow_db_path(),
         }
     }
 }
@@ -67,7 +69,18 @@ impl Default for SystemExternalWaitPoller<SystemGithubCommandRunner> {
 impl<R> SystemExternalWaitPoller<R> {
     #[must_use]
     pub fn with_runner(runner: R) -> Self {
-        Self { runner }
+        Self {
+            runner,
+            db_path: child_workflow_db_path(),
+        }
+    }
+
+    #[must_use]
+    pub fn with_runner_and_db_path(runner: R, db_path: impl Into<std::path::PathBuf>) -> Self {
+        Self {
+            runner,
+            db_path: db_path.into(),
+        }
     }
 }
 
@@ -79,6 +92,7 @@ impl<R: GithubCommandRunner> ExternalWaitPoller for SystemExternalWaitPoller<R> 
         match record.wait_kind {
             WaitKind::PrChecks => poll_pr_checks(record, &self.runner),
             WaitKind::CoderabbitReview => poll_coderabbit_review(record, &self.runner),
+            WaitKind::DependencyChildWorkflow => poll_child_workflow(record, &self.db_path),
             WaitKind::PrMerge | WaitKind::DependencyChildMerge => {
                 poll_pr_merge(record, &self.runner)
             }
@@ -148,6 +162,62 @@ fn timeout_decision(record: &WaitStateRecord) -> Option<PollDecision> {
             "max_wait_seconds": record.max_wait_seconds,
         }),
     })
+}
+fn child_workflow_db_path() -> std::path::PathBuf {
+    crate::runtime_paths::get_data_dir().join("checkpoints.db")
+}
+
+fn poll_child_workflow(record: &WaitStateRecord, db_path: &std::path::Path) -> PollDecision {
+    // DependencyChildWorkflow records store the child run id in head_sha so the
+    // existing wait-state identity schema can resume parent runs without a DB migration.
+    let Some(child_run_id) = record.head_sha.as_deref() else {
+        return terminal_failure(record, missing_identity_state(record));
+    };
+    let conn = match rusqlite::Connection::open(db_path) {
+        Ok(conn) => conn,
+        Err(err) => {
+            return PollDecision::transient(
+                record,
+                json!({"classification": "transient_failure", "error": err.to_string()}),
+            );
+        }
+    };
+    let metadata = match get_run_with_conn(&conn, child_run_id) {
+        Ok(metadata) => metadata,
+        Err(err) => {
+            return PollDecision::transient(
+                record,
+                json!({"classification": "transient_failure", "error": err.to_string()}),
+            );
+        }
+    };
+    let Some(metadata) = metadata else {
+        return PollDecision::still_waiting_with_state(
+            record,
+            json!({
+                "classification": "still_waiting",
+                "wait_kind": record.wait_kind,
+                "child_run_id": child_run_id,
+                "reason": "child_run_metadata_missing"
+            }),
+        );
+    };
+    let observed_state = json!({
+        "classification": "observed",
+        "wait_kind": record.wait_kind,
+        "child_run_id": child_run_id,
+        "child_status": metadata.status.to_string(),
+        "child_current_step": metadata.current_step
+    });
+    match metadata.status {
+        RunStatus::Completed
+        | RunStatus::Merged
+        | RunStatus::ReadyToResume
+        | RunStatus::Failed
+        | RunStatus::Abandoned
+        | RunStatus::Cancelled => PollDecision::ready(record, observed_state),
+        _ => PollDecision::still_waiting_with_state(record, observed_state),
+    }
 }
 
 fn poll_pr_checks(record: &WaitStateRecord, runner: &dyn GithubCommandRunner) -> PollDecision {

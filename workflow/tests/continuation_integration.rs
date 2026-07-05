@@ -140,6 +140,7 @@ fn followup_config() -> WorkflowConfig {
         },
         variables: HashMap::new(),
         discovery: None,
+        parent_orchestration: Default::default(),
         command_manifest: None,
         target_profile: None,
     }

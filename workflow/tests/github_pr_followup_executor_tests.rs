@@ -925,6 +925,15 @@ fn registry_registers_all_post_pr_step_types_by_introspection() {
     }
 }
 
+#[test]
+fn registry_registers_parent_orchestration_step_type() {
+    let registry = ExecutorRegistry::with_defaults();
+    assert!(
+        registry.contains_step_type("parent_orchestration"),
+        "missing step type: parent_orchestration"
+    );
+}
+
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P03
 /// @requirement:REQ-PRFU-020
 /// @pseudocode lines 1-53

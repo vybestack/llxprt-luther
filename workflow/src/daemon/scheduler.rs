@@ -135,14 +135,11 @@ fn collect_resume_units(
     limits: &CapacityLimits,
 ) -> Result<Vec<DispatchUnit>, rusqlite::Error> {
     let mut units = Vec::new();
-    for target in targets {
-        let ready_leases = match list_ready_to_resume_leases(conn, &target.config_id) {
+    for (resume_config_id, target) in resume_config_targets(targets) {
+        let ready_leases = match list_ready_to_resume_leases(conn, &resume_config_id) {
             Ok(leases) => leases,
             Err(e) => {
-                eprintln!(
-                    "resume discovery error for config={}: {e}",
-                    target.config_id
-                );
+                eprintln!("resume discovery error for config={resume_config_id}: {e}");
                 continue;
             }
         };
@@ -150,7 +147,7 @@ fn collect_resume_units(
             if !has_capacity(
                 conn,
                 &target.discovery,
-                &target.config_id,
+                &resume_config_id,
                 &lease.issue_repo,
                 limits,
             )? {
@@ -160,16 +157,49 @@ fn collect_resume_units(
                 Ok(Some(unit)) => units.push(unit),
                 Ok(None) => eprintln!(
                     "resume claim skipped for config={} issue={}#{}: invalid lease state",
-                    target.config_id, lease.issue_repo, lease.issue_number
+                    resume_config_id, lease.issue_repo, lease.issue_number
                 ),
                 Err(e) => eprintln!(
                     "resume claim skipped for config={} issue={}#{}: {e}",
-                    target.config_id, lease.issue_repo, lease.issue_number
+                    resume_config_id, lease.issue_repo, lease.issue_number
                 ),
             }
         }
     }
     Ok(units)
+}
+
+fn resume_config_targets(targets: &[SchedulerTarget]) -> Vec<(String, &SchedulerTarget)> {
+    let mut seen = std::collections::BTreeSet::new();
+    let mut config_targets = Vec::new();
+    for target in targets {
+        push_resume_config_target(
+            &mut config_targets,
+            &mut seen,
+            target.config_id.clone(),
+            target,
+        );
+        if let Some(parent_config_id) = target.discovery.parent_config_id.as_ref() {
+            push_resume_config_target(
+                &mut config_targets,
+                &mut seen,
+                parent_config_id.clone(),
+                target,
+            );
+        }
+    }
+    config_targets
+}
+
+fn push_resume_config_target<'a>(
+    config_targets: &mut Vec<(String, &'a SchedulerTarget)>,
+    seen: &mut std::collections::BTreeSet<String>,
+    config_id: String,
+    target: &'a SchedulerTarget,
+) {
+    if seen.insert(config_id.clone()) {
+        config_targets.push((config_id, target));
+    }
 }
 
 fn prepare_resume_unit(
@@ -205,22 +235,26 @@ fn collect_launch_units(
             }
         };
         summary.eligible += result.eligible.len();
-        for issue in &result.eligible {
+        for routed in &result.eligible {
             if !has_capacity(conn, &target.discovery, &target.config_id, repo, limits)? {
                 summary.skipped += 1;
                 continue;
             }
-            match claim_for_launch(issue, &target.discovery, conn, &target.config_id) {
-                Ok(Ok(claimed)) => units.push(DispatchUnit {
-                    lease_id: claimed.lease_id,
-                    request: claimed.request,
-                    resume: false,
-                }),
+            let launch_config_id = routed.config_id.as_deref().unwrap_or(&target.config_id);
+            match claim_for_launch(&routed.issue, &target.discovery, conn, launch_config_id) {
+                Ok(Ok(mut claimed)) => {
+                    claimed.request.workflow_type_id = routed.workflow_type_id.clone();
+                    units.push(DispatchUnit {
+                        lease_id: claimed.lease_id,
+                        request: claimed.request,
+                        resume: false,
+                    })
+                }
                 Ok(Err(_)) => summary.skipped += 1,
                 Err(e) => {
                     eprintln!(
                         "claim error for config={} issue={}#{}: {e}",
-                        target.config_id, repo, issue.number
+                        target.config_id, repo, routed.issue.number
                     );
                     summary.failed += 1;
                 }
@@ -439,6 +473,10 @@ mod tests {
             max_concurrent_active_runs: None,
             max_concurrent_runs_per_repository: None,
             max_concurrent_runs_per_config: None,
+            route_parent_issues: false,
+            parent_workflow_type_id: Some("parent-issue-orchestrator-v1".to_string()),
+            parent_config_id: None,
+            skip_children_of_active_parents: false,
         }
     }
 
@@ -450,6 +488,7 @@ mod tests {
             labels: vec!["ok".to_string()],
             assignee: None,
             milestone: None,
+            body: None,
         }
     }
 

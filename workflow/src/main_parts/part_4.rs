@@ -811,6 +811,7 @@ mod tests {
                 artifact_dir.to_string_lossy().to_string(),
             )]),
             discovery: None,
+            parent_orchestration: Default::default(),
             command_manifest: None,
         target_profile: None,
         }
@@ -842,6 +843,7 @@ mod tests {
         .unwrap();
         let request = luther_workflow::daemon::launcher::LaunchRequest {
             config_id: "cfg".to_string(),
+            workflow_type_id: None,
             run_id: "run-identity".to_string(),
             repo: "owner/repo".to_string(),
             issue_number: 62,
@@ -863,6 +865,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let request = luther_workflow::daemon::launcher::LaunchRequest {
             config_id: "cfg".to_string(),
+            workflow_type_id: None,
             run_id: "run-missing".to_string(),
             repo: "owner/repo".to_string(),
             issue_number: 62,
@@ -879,6 +882,134 @@ mod tests {
         assert!(err.contains("missing PR number or head SHA"));
     }
 
+
+    #[test]
+    fn wait_poll_identity_requires_child_run_id_for_child_workflow_wait() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("child-workflow-wait.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "waiting": true,
+                "child_issue_number": 63,
+                "child_run_id": null
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let request = luther_workflow::daemon::launcher::LaunchRequest {
+            config_id: "cfg".to_string(),
+            workflow_type_id: Some("parent-issue-orchestrator-v1".to_string()),
+            run_id: "run-parent".to_string(),
+            repo: "owner/repo".to_string(),
+            issue_number: 62,
+        };
+
+        let err = wait_poll_identity(
+            &request,
+            &workflow_config(tmp.path()),
+            None,
+            WaitKind::DependencyChildWorkflow,
+        )
+        .unwrap_err();
+
+        assert!(err.contains("missing child run ID"));
+    }
+
+    #[test]
+    fn wait_poll_identity_reads_child_workflow_wait_run_id() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("child-workflow-wait.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "waiting": true,
+                "child_issue_number": 63,
+                "child_run_id": "child-run-63"
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let request = luther_workflow::daemon::launcher::LaunchRequest {
+            config_id: "cfg".to_string(),
+            workflow_type_id: Some("parent-issue-orchestrator-v1".to_string()),
+            run_id: "run-parent".to_string(),
+            repo: "owner/repo".to_string(),
+            issue_number: 62,
+        };
+
+        let identity = wait_poll_identity(
+            &request,
+            &workflow_config(tmp.path()),
+            None,
+            WaitKind::DependencyChildWorkflow,
+        )
+        .unwrap();
+
+        assert_eq!(identity.head_sha.as_deref(), Some("child-run-63"));
+    }
+
+    #[test]
+    fn persist_external_wait_state_stores_child_run_id_identity() {
+        let tmp = tempfile::tempdir().unwrap();
+        let artifact_root = tmp.path().join("artifacts");
+        std::fs::create_dir_all(&artifact_root).unwrap();
+        std::fs::write(
+            artifact_root.join("child-workflow-wait.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "waiting": true,
+                "child_issue_number": 63,
+                "child_run_id": "child-run-63"
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let db_path = tmp.path().join("checkpoints.db");
+        luther_workflow::persistence::init_database(&db_path).unwrap();
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        luther_workflow::persistence::sqlite::init_runs_schema(&conn).unwrap();
+        let checkpoint = luther_workflow::persistence::checkpoint::Checkpoint::new(
+            "parent-run-62",
+            "launch_or_resume_child_workflow",
+        );
+        luther_workflow::persistence::checkpoint::save_checkpoint_with_conn(&conn, &checkpoint)
+            .unwrap();
+        let mut metadata = RunMetadata::new(
+            "parent-run-62",
+            "parent-issue-orchestrator-v1",
+            "parent-orchestrator-luther",
+        );
+        metadata.artifact_root = Some(artifact_root.to_string_lossy().to_string());
+        persist_run_with_conn(&conn, &metadata).unwrap();
+        let mut config = workflow_config(&artifact_root);
+        config.workflow_type_id = "parent-issue-orchestrator-v1".to_string();
+        config.config_id = "parent-orchestrator-luther".to_string();
+        let request = luther_workflow::daemon::launcher::LaunchRequest {
+            config_id: "parent-orchestrator-luther".to_string(),
+            workflow_type_id: Some("parent-issue-orchestrator-v1".to_string()),
+            run_id: "parent-run-62".to_string(),
+            repo: "owner/repo".to_string(),
+            issue_number: 62,
+        };
+
+        persist_external_wait_state(
+            &request,
+            &config,
+            &db_path,
+            "launch_or_resume_child_workflow",
+            "child workflow waiting",
+        )
+        .unwrap();
+
+        let record = get_wait_state(&conn, "parent-run-62").unwrap().unwrap();
+        assert_eq!(record.wait_kind, WaitKind::DependencyChildWorkflow);
+        assert_eq!(record.head_sha.as_deref(), Some("child-run-63"));
+        assert_eq!(
+            record
+                .wait_condition
+                .get("child_run_id")
+                .and_then(serde_json::Value::as_str),
+            Some("child-run-63")
+        );
+    }
     #[test]
     fn persist_run_poll_identity_updates_stale_or_empty_metadata() {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
@@ -925,6 +1056,7 @@ mod tests {
         .unwrap();
         let request = luther_workflow::daemon::launcher::LaunchRequest {
             config_id: "cfg".to_string(),
+            workflow_type_id: None,
             run_id: "run-stale".to_string(),
             repo: "owner/repo".to_string(),
             issue_number: 62,

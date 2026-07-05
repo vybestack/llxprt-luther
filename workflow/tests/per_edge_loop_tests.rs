@@ -117,6 +117,7 @@ fn make_config(max_iterations: Option<u32>) -> WorkflowConfig {
         },
         variables: std::collections::HashMap::new(),
         discovery: None,
+        parent_orchestration: Default::default(),
         command_manifest: None,
         target_profile: None,
     }

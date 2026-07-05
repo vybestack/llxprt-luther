@@ -39,6 +39,7 @@ fn test_config() -> WorkflowConfig {
         .map(|(key, value)| (key.to_string(), value.to_string()))
         .collect(),
         discovery: None,
+        parent_orchestration: Default::default(),
         command_manifest: None,
         target_profile: None,
     }

@@ -10,12 +10,14 @@
 use std::sync::Mutex;
 
 use luther_workflow::adapters::github::GithubError;
-use luther_workflow::adapters::github_issues::{GithubIssue, GithubIssueQuery};
+use luther_workflow::adapters::github_issues::{
+    GithubIssue, GithubIssueQuery, GithubSubIssue, SubIssueSource,
+};
 use luther_workflow::daemon::launcher::{LaunchRequest, WorkflowLaunchResult, WorkflowLauncher};
 use luther_workflow::daemon::scheduler::run_once;
 use luther_workflow::persistence::leases::{
     count_active_leases_for_config, init_leases_table, list_all_leases, mark_stale_leases,
-    update_lease_status, LeaseStatus,
+    try_claim, update_lease_status, LeaseStatus,
 };
 use luther_workflow::workflow::config_loader::parse_daemon_scheduler_config_toml;
 use luther_workflow::workflow::schema::DiscoveryConfig;
@@ -23,6 +25,7 @@ use rusqlite::Connection;
 
 struct MockQuery {
     issues: Vec<GithubIssue>,
+    parent_issue_numbers: Vec<u64>,
 }
 
 impl GithubIssueQuery for MockQuery {
@@ -42,17 +45,32 @@ impl GithubIssueQuery for MockQuery {
     fn list_milestones(&self, _repo: &str) -> Result<Vec<String>, GithubError> {
         Ok(vec![])
     }
+
+    fn list_sub_issues(
+        &self,
+        _repo: &str,
+        number: u64,
+    ) -> Result<Vec<GithubSubIssue>, GithubError> {
+        if self.parent_issue_numbers.contains(&number) {
+            return Ok(vec![GithubSubIssue {
+                issue: issue(99),
+                position: Some(0),
+                source: SubIssueSource::Native,
+            }]);
+        }
+        Ok(vec![])
+    }
 }
 
 /// Records every launch request and always reports success.
 #[derive(Default)]
 struct RecordingLauncher {
-    launched: Mutex<Vec<u64>>,
+    launched: Mutex<Vec<LaunchRequest>>,
 }
 
 impl WorkflowLauncher for RecordingLauncher {
     fn launch(&self, request: &LaunchRequest) -> Result<WorkflowLaunchResult, String> {
-        self.launched.lock().unwrap().push(request.issue_number);
+        self.launched.lock().unwrap().push(request.clone());
         Ok(WorkflowLaunchResult::CompletedSuccess)
     }
 }
@@ -65,6 +83,7 @@ fn issue(number: u64) -> GithubIssue {
         labels: vec!["OK for Luther".to_string()],
         assignee: None,
         milestone: None,
+        body: None,
     }
 }
 
@@ -82,11 +101,16 @@ fn cfg(max: u32) -> DiscoveryConfig {
         max_concurrent_active_runs: None,
         max_concurrent_runs_per_repository: None,
         max_concurrent_runs_per_config: None,
+        route_parent_issues: false,
+        parent_workflow_type_id: Some("parent-issue-orchestrator-v1".to_string()),
+        parent_config_id: None,
+        skip_children_of_active_parents: false,
     }
 }
 
 fn memory_db() -> Connection {
     let conn = Connection::open_in_memory().expect("open db");
+    luther_workflow::persistence::sqlite::init_runs_schema(&conn).expect("init runs");
     init_leases_table(&conn).expect("init");
     luther_workflow::persistence::wait_state::init_wait_states_table(&conn).expect("init waits");
     conn
@@ -96,6 +120,7 @@ fn memory_db() -> Connection {
 fn run_once_launches_up_to_concurrency_limit() {
     let query = MockQuery {
         issues: vec![issue(1), issue(2), issue(3)],
+        parent_issue_numbers: vec![],
     };
     let launcher = RecordingLauncher::default();
     let conn = memory_db();
@@ -115,6 +140,7 @@ fn run_once_launches_up_to_concurrency_limit() {
 fn second_pass_does_not_duplicate_completed_work() {
     let query = MockQuery {
         issues: vec![issue(1)],
+        parent_issue_numbers: vec![],
     };
     let launcher = RecordingLauncher::default();
     let conn = memory_db();
@@ -133,14 +159,100 @@ fn second_pass_does_not_duplicate_completed_work() {
 }
 
 #[test]
+fn parent_routing_launches_with_parent_config_and_workflow_type() {
+    let query = MockQuery {
+        issues: vec![issue(61)],
+        parent_issue_numbers: vec![61],
+    };
+    let launcher = RecordingLauncher::default();
+    let conn = memory_db();
+    let mut discovery = cfg(1);
+    discovery.route_parent_issues = true;
+    discovery.parent_config_id = Some("parent-orchestrator-luther".to_string());
+    discovery.parent_workflow_type_id = Some("parent-issue-orchestrator-v1".to_string());
+
+    let summary = run_once(&discovery, &query, &conn, &launcher, "llxprt-luther")
+        .expect("run once with routed parent issue");
+
+    assert_eq!(summary.launched, 1);
+    let launched = launcher.launched.lock().unwrap();
+    assert_eq!(launched.len(), 1);
+    assert_eq!(launched[0].issue_number, 61);
+    assert_eq!(launched[0].config_id, "parent-orchestrator-luther");
+    assert_eq!(
+        launched[0].workflow_type_id.as_deref(),
+        Some("parent-issue-orchestrator-v1")
+    );
+}
+#[test]
+fn parent_routed_ready_lease_resumes_from_originating_scheduler_target() {
+    let query = MockQuery {
+        issues: vec![],
+        parent_issue_numbers: vec![],
+    };
+    let launcher = RecordingLauncher::default();
+    let conn = memory_db();
+    let mut discovery = cfg(1);
+    discovery.route_parent_issues = true;
+    discovery.parent_config_id = Some("parent-orchestrator-luther".to_string());
+    discovery.parent_workflow_type_id = Some("parent-issue-orchestrator-v1".to_string());
+    let lease = try_claim(&conn, "owner/repo", 61, "parent-orchestrator-luther")
+        .expect("claim parent lease")
+        .expect("parent lease won");
+    update_lease_status(
+        &conn,
+        &lease.lease_id,
+        LeaseStatus::ReadyToResume,
+        Some("run-parent-61"),
+    )
+    .expect("mark parent ready");
+    let mut metadata = luther_workflow::persistence::RunMetadata::new(
+        "run-parent-61",
+        "parent-issue-orchestrator-v1",
+        "parent-orchestrator-luther",
+    );
+    metadata.status = luther_workflow::persistence::RunStatus::ReadyToResume;
+    metadata.set_current_step("wait_for_child_merge");
+    metadata.repository = Some("owner/repo".to_string());
+    metadata.issue_number = Some(61);
+    luther_workflow::persistence::persist_run_with_conn(&conn, &metadata)
+        .expect("persist parent metadata");
+    luther_workflow::persistence::checkpoint::save_checkpoint_with_conn(
+        &conn,
+        &luther_workflow::persistence::checkpoint::Checkpoint::new(
+            "run-parent-61",
+            "wait_for_child_merge",
+        ),
+    )
+    .expect("persist parent checkpoint");
+
+    let summary = run_once(&discovery, &query, &conn, &launcher, "llxprt-luther")
+        .expect("run once resumes parent lease");
+
+    assert_eq!(summary.resumed, 1);
+    assert_eq!(summary.launched, 0);
+    let launched = launcher.launched.lock().unwrap();
+    assert_eq!(launched.len(), 1);
+    assert_eq!(launched[0].config_id, "parent-orchestrator-luther");
+    assert_eq!(launched[0].run_id, "run-parent-61");
+    assert_eq!(launched[0].issue_number, 61);
+    assert_eq!(
+        launched[0].workflow_type_id.as_deref(),
+        Some("parent-issue-orchestrator-v1")
+    );
+}
+
+#[test]
 fn mark_stale_recovers_lease_on_restart() {
     let query = MockQuery {
         issues: vec![issue(5)],
+        parent_issue_numbers: vec![],
     };
     let launcher = RecordingLauncher::default();
     let conn = memory_db();
 
     // First pass launches issue 5; force its lease back to Running so it counts
+
     // as active for the stale sweep.
     run_once(&cfg(1), &query, &conn, &launcher, "cfg-a").expect("pass 1");
     let lease = &list_all_leases(&conn).expect("leases")[0];

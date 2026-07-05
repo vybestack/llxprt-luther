@@ -742,6 +742,13 @@ pub fn resolve_discovery_config(config: &WorkflowConfig) -> DiscoveryConfig {
         max_concurrent_active_runs: raw.max_concurrent_active_runs,
         max_concurrent_runs_per_repository: raw.max_concurrent_runs_per_repository,
         max_concurrent_runs_per_config: raw.max_concurrent_runs_per_config,
+        route_parent_issues: raw.route_parent_issues,
+        parent_workflow_type_id: Some(
+            raw.parent_workflow_type_id
+                .unwrap_or_else(|| "parent-issue-orchestrator-v1".to_string()),
+        ),
+        parent_config_id: raw.parent_config_id,
+        skip_children_of_active_parents: raw.skip_children_of_active_parents,
     }
 }
 

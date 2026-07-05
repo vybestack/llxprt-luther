@@ -39,6 +39,9 @@ pub struct WorkflowConfig {
     /// @requirement:REQ-DAEMON-DISCOVERY-001
     #[serde(default)]
     pub discovery: Option<DiscoveryConfig>,
+    /// Parent/sub-issue orchestration policy (built-in defaults when unset).
+    #[serde(default)]
+    pub parent_orchestration: ParentOrchestrationConfig,
     /// Optional argv-only command manifest for repository-specific gates.
     #[serde(default)]
     pub command_manifest: Option<CommandManifest>,
@@ -280,7 +283,33 @@ pub struct GuardLimits {
     pub max_iterations: Option<u32>,
     pub max_file_changes: Option<u32>,
     pub max_tokens: Option<u64>,
+
     pub max_cost: Option<f64>,
+}
+
+/// Parent/sub-issue orchestration policy for parent issue workflows.
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct ParentOrchestrationConfig {
+    pub auto_merge_children: bool,
+    pub wait_for_human_merge: bool,
+    pub merge_poll_interval_seconds: u64,
+    pub max_child_merge_wait_seconds: Option<u64>,
+    pub child_workflow_type_id: String,
+    pub child_config_id: String,
+}
+
+impl Default for ParentOrchestrationConfig {
+    fn default() -> Self {
+        Self {
+            auto_merge_children: false,
+            wait_for_human_merge: true,
+            merge_poll_interval_seconds: 300,
+            max_child_merge_wait_seconds: None,
+            child_workflow_type_id: "llxprt-issue-fix-v1".to_string(),
+            child_config_id: "llxprt-code".to_string(),
+        }
+    }
 }
 
 /// Daemon issue-discovery rules describing how to find eligible issues for a
@@ -336,6 +365,18 @@ pub struct DiscoveryConfig {
     /// takes precedence over legacy `max_concurrent_runs`.
     #[serde(default)]
     pub max_concurrent_runs_per_config: Option<u32>,
+    /// Route parent issues with native sub-issues to the parent orchestrator.
+    #[serde(default)]
+    pub route_parent_issues: bool,
+    /// Workflow type used when a parent issue is discovered.
+    #[serde(default)]
+    pub parent_workflow_type_id: Option<String>,
+    /// Workflow config used when a parent issue is discovered.
+    #[serde(default)]
+    pub parent_config_id: Option<String>,
+    /// Skip child issues when their parent already has the Luther working label.
+    #[serde(default)]
+    pub skip_children_of_active_parents: bool,
 }
 
 /// Supervisor-level configuration for the multi-target daemon scheduler.
