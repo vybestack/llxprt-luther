@@ -165,4 +165,3 @@ fn parse_first_sub_issue_page(json: &str) -> Result<ParsedSubIssuePage, GithubEr
         next_cursor,
     })
 }
-

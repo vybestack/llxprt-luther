@@ -755,4 +755,3 @@ fn run_child_workflow(
     let outcome = runner.run().map_err(|err| err.to_string())?;
     child_result_from_run_outcome(outcome, request, &config, &db_path)
 }
-

@@ -532,4 +532,3 @@ fn record_observed_child_pr_merge_wait(
     update_rollup(state, child, None, "observing_existing_child_pr", pr)?;
     Ok(StepOutcome::Wait)
 }
-

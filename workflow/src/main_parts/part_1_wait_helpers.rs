@@ -216,4 +216,3 @@ fn set_required_wait_parameter(
 fn set_optional_wait_parameter(payload: &mut Value, step_params: &Value, key: &str) {
     payload[key] = step_params.get(key).cloned().unwrap_or(Value::Null);
 }
-
