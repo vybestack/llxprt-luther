@@ -18,6 +18,7 @@
 pub mod change_detection;
 pub mod command_manifest;
 pub mod feedback_eval;
+pub mod feedback_eval_timeout;
 pub mod github_feedback;
 pub mod github_pr;
 pub mod llxprt;
