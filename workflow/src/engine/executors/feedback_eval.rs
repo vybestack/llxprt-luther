@@ -46,7 +46,7 @@ pub fn default_feedback_evaluator_argv() -> Vec<String> {
 
 const MAX_ATTEMPTS_PER_ITEM: u64 = 3;
 const RAW_RESPONSE_LIMIT_BYTES: usize = 16 * 1024;
-const DEFAULT_FEEDBACK_EVALUATOR_TIMEOUT_SECONDS: u64 = 300;
+pub(super) const DEFAULT_FEEDBACK_EVALUATOR_TIMEOUT_SECONDS: u64 = 300;
 
 /// Single-item feedback evaluation request.
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P03
@@ -125,7 +125,7 @@ impl ProcessFeedbackEvaluatorCommandRunner {
 
     fn timeout(&self) -> Duration {
         self.timeout
-            .unwrap_or_else(|| Duration::from_secs(DEFAULT_FEEDBACK_EVALUATOR_TIMEOUT_SECONDS))
+            .unwrap_or_else(super::feedback_eval_timeout::default_evaluator_timeout)
     }
 }
 
