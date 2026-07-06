@@ -646,12 +646,13 @@ fn reusable_evaluation(
         if entry.get("reuse_eligible").and_then(Value::as_bool) != Some(true) {
             return ReuseLookup::NoMatch;
         }
-        let Some(accepted) = entry.get("accepted_evaluation").cloned() else {
+        let Some(mut accepted) = entry.get("accepted_evaluation").cloned() else {
             return ReuseLookup::Fatal("missing_accepted_evaluation".to_string());
         };
         if validate_reusable_accepted(binding, item, &accepted).is_err() {
             return ReuseLookup::Fatal("malformed_or_unbindable_accepted_evaluation".to_string());
         }
+        apply_low_confidence_accepted_policy(item, &mut accepted);
         return ReuseLookup::Reuse(accepted);
     }
     ReuseLookup::NoMatch
@@ -703,7 +704,7 @@ fn validate_response(
         }
     }
 
-    let response = FeedbackEvaluationResponse {
+    let mut response = FeedbackEvaluationResponse {
         item_id: required_value_string(&value, "item_id")?,
         stable_marker_key: required_value_string(&value, "stable_marker_key")?,
         body_hash: required_value_string(&value, "body_hash")?,
@@ -724,6 +725,7 @@ fn validate_response(
             .unwrap_or_default()
             .to_string(),
     };
+    apply_low_confidence_needs_judgment_policy(request, &mut response);
     if response.item_id != request.item_id {
         return Err(reject("wrong_item_id", &value));
     }
@@ -758,6 +760,64 @@ fn validate_response(
         return Err(reject("missing_response_text", &value));
     }
     Ok(response)
+}
+fn apply_low_confidence_accepted_policy(item: &FeedbackItem, accepted: &mut Value) {
+    if accepted.get("decision").and_then(Value::as_str) != Some("needs_user_judgment")
+        || !is_low_confidence_optional_feedback(&item.body)
+    {
+        return;
+    }
+    if let Some(object) = accepted.as_object_mut() {
+        object.insert("decision".to_string(), json!("out_of_scope"));
+        object.insert(
+            "reason".to_string(),
+            json!("This is a low-confidence optional nitpick/speculative suggestion, not a concrete product or scope decision requiring maintainer judgment."),
+        );
+        object.insert(
+            "recommended_action".to_string(),
+            json!("Do not block PR follow-up on this item; leave it for optional future design documentation if maintainers want to expand the scope."),
+        );
+        object.insert(
+            "response_text".to_string(),
+            json!("This item is not being treated as needs-user-judgment because it is framed as an optional/speculative nitpick rather than a concrete blocker. It can be revisited as optional design documentation outside this PR follow-up, but it should not block automated remediation."),
+        );
+    }
+}
+
+fn apply_low_confidence_needs_judgment_policy(
+    request: &FeedbackEvaluationRequest,
+    response: &mut FeedbackEvaluationResponse,
+) {
+    if response.decision != "needs_user_judgment"
+        || !is_low_confidence_optional_feedback(&request.body)
+    {
+        return;
+    }
+
+    response.decision = "out_of_scope".to_string();
+    response.reason = "This is a low-confidence optional nitpick/speculative suggestion, not a concrete product or scope decision requiring maintainer judgment.".to_string();
+    response.recommended_action = Some(
+        "Do not block PR follow-up on this item; leave it for optional future design documentation if maintainers want to expand the scope."
+            .to_string(),
+    );
+    response.response_text = "This item is not being treated as needs-user-judgment because it is framed as an optional/speculative nitpick rather than a concrete blocker. It can be revisited as optional design documentation outside this PR follow-up, but it should not block automated remediation.".to_string();
+}
+
+fn is_low_confidence_optional_feedback(body: &str) -> bool {
+    let lower = body.to_ascii_lowercase();
+    let low_priority = lower.contains("_🧹 nitpick_")
+        || lower.contains("nitpick")
+        || lower.contains("cr-indicator-types:nitpick")
+        || lower.contains("trivial");
+    let speculative = lower.contains(" if ")
+        || lower.contains("could")
+        || lower.contains("should consider")
+        || lower.contains("confirm")
+        || lower.contains("clarify")
+        || lower.contains("otherwise document")
+        || lower.contains("future")
+        || lower.contains("potential");
+    low_priority && speculative
 }
 
 fn parse_feedback_evaluator_json(raw: &str) -> Result<Value, serde_json::Error> {

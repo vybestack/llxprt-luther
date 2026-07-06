@@ -3906,6 +3906,65 @@ fn feedback_evaluation_reuses_unchanged_accepted_state_without_reinvoking_adapte
     );
 }
 
+#[test]
+fn feedback_evaluation_downranks_reused_low_confidence_nitpick_needs_judgment() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut item = p09_feedback_item("item-nitpick", "thread-nitpick", "hash-nitpick");
+    item["body"] = serde_json::json!(
+        "_🧹 Nitpick_ | _🔵 Trivial_\n\nClarify timeout semantics if suspend/resume waits could count against parent orchestration runtime.\n\n<!-- cr-indicator-types:nitpick -->"
+    );
+    write_p09_feedback(
+        &temp,
+        serde_json::json!([item]),
+        serde_json::json!([{
+            "item_id": "item-nitpick",
+            "stable_marker_key": "thread-nitpick",
+            "body_hash": "hash-nitpick",
+            "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "evaluation_status": "accepted",
+            "accepted_evaluation": {
+                "item_id": "item-nitpick",
+                "stable_marker_key": "thread-nitpick",
+                "body_hash": "hash-nitpick",
+                "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "repository_owner": "example",
+                "repository_name": "workflow",
+                "pr_number": 1910,
+                "decision": "needs_user_judgment",
+                "reason": "Timeout semantics require maintainer judgment.",
+                "recommended_action": "Ask a maintainer to decide timeout semantics.",
+                "response_text": "This needs maintainer judgment.",
+                "accepted_at": "2026-04-30T00:00:00Z",
+                "attempt_count": 1,
+                "source": "new",
+                "reuse_state": "not_reused"
+            },
+            "reuse_eligible": true,
+            "stale": false,
+            "superseded": false
+        }]),
+    );
+    let adapter = ScriptedFeedbackEvaluationAdapter::with_responses(vec![]);
+    let mut context = p09_context(&temp);
+    let outcome = FeedbackEvaluatorExecutor::new(adapter.clone(), FixedClock)
+        .execute(&mut context, &p09_params(&temp))
+        .expect("feedback evaluation reuse downrank");
+    let artifact = read_json(&p09_evaluations_path(&temp));
+
+    assert_expected_outcome(
+        outcome,
+        StepOutcome::Success,
+        "reused optional nitpick evaluations must not keep blocking as needs_user_judgment",
+    );
+    assert!(adapter.requests().is_empty());
+    assert_eq!(
+        artifact
+            .pointer("/accepted_results/0/decision")
+            .and_then(serde_json::Value::as_str),
+        Some("out_of_scope")
+    );
+}
+
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P09
 /// @requirement:REQ-PRFU-011,REQ-PRFU-012
 /// @pseudocode lines 5-7,16-20
@@ -9350,6 +9409,44 @@ fn feedback_evaluator_default_argv_downranks_speculative_nits() {
             && prompt.contains("low-value nits")
             && prompt.contains("needs_user_judgment only"),
         "feedback evaluator prompt should not block workflows on speculative optional CodeRabbit nits: {prompt}"
+    );
+}
+
+#[test]
+fn feedback_evaluator_downranks_low_confidence_nitpick_needs_judgment() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut item = p09_feedback_item("item-nitpick", "thread-nitpick", "hash-nitpick");
+    item["body"] = serde_json::json!(
+        "_🧹 Nitpick_ | _🔵 Trivial_\n\nConfirm timeout semantics don't penalize long child-merge waits. If the timeout is measured across suspend/resume cycles, it could terminate a parent orchestration waiting for human PR merges.\n\n<!-- cr-indicator-types:nitpick -->"
+    );
+    write_p09_feedback(&temp, serde_json::json!([item]), serde_json::json!([]));
+    let adapter = ScriptedFeedbackEvaluationAdapter::with_responses(vec![serde_json::json!({
+        "item_id": "item-nitpick",
+        "stable_marker_key": "thread-nitpick",
+        "body_hash": "hash-nitpick",
+        "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "decision": "needs_user_judgment",
+        "reason": "Timeout semantics require maintainer judgment.",
+        "recommended_action": "Ask the maintainer to decide timeout semantics.",
+        "response_text": "This needs maintainer judgment."
+    })
+    .to_string()]);
+    let mut context = p09_context(&temp);
+    let outcome = FeedbackEvaluatorExecutor::new(adapter, FixedClock)
+        .execute(&mut context, &p09_params(&temp))
+        .expect("feedback evaluator should downrank optional nitpick");
+    let artifact = read_json(&p09_evaluations_path(&temp));
+
+    assert_expected_outcome(
+        outcome,
+        StepOutcome::Success,
+        "low-confidence nitpick feedback must not block PR follow-up as needs_user_judgment",
+    );
+    assert_eq!(
+        artifact
+            .pointer("/accepted_results/0/decision")
+            .and_then(serde_json::Value::as_str),
+        Some("out_of_scope")
     );
 }
 
