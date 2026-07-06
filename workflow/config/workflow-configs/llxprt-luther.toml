@@ -71,7 +71,7 @@ review = "review"
 full = "full"
 
 [target_profile.pr_checks]
-required = ["PR Quality"]
+required = ["Tests (lib + integration)", "Format (rustfmt)", "Lint (clippy + structural)", "Release readiness (release build)", "Coverage (llvm-cov gate)", "Docs (cargo doc)", "Security (cargo audit)", "OpenCodeReview"]
 ignored = ["CodeRabbit"]
 
 [target_profile.auth]
@@ -164,6 +164,6 @@ failure_outcome = "fatal"
 
 [command_manifest.groups]
 local = ["format", "check", "build", "test", "clippy", "ocr_review"]
-post_pr = ["test"]
+post_pr = ["test", "coverage"]
 review = ["ocr_review"]
 full = ["format", "check", "build", "test", "clippy", "coverage", "docs", "audit", "release_readiness", "ocr_review"]

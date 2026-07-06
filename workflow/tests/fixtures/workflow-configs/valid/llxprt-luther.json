@@ -80,7 +80,14 @@
     },
     "pr_checks": {
       "required": [
-        "PR Quality"
+        "Tests (lib + integration)",
+        "Format (rustfmt)",
+        "Lint (clippy + structural)",
+        "Release readiness (release build)",
+        "Coverage (llvm-cov gate)",
+        "Docs (cargo doc)",
+        "Security (cargo audit)",
+        "OpenCodeReview"
       ],
       "ignored": [
         "CodeRabbit"
@@ -235,7 +242,8 @@
         "ocr_review"
       ],
       "post_pr": [
-        "test"
+        "test",
+        "coverage"
       ],
       "review": [
         "ocr_review"
