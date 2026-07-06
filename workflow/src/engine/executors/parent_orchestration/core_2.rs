@@ -98,10 +98,9 @@ fn prepare_child_lease_with_conn(
                     ChildLeaseAction::Resume(lease)
                 }
             }
-            LeaseStatus::Failed | LeaseStatus::Abandoned => {
+            LeaseStatus::Failed | LeaseStatus::Abandoned | LeaseStatus::Stale => {
                 prepare_relaunchable_child(conn, &lease)?
             }
-            LeaseStatus::Stale => prepare_relaunchable_child(conn, &lease)?,
             LeaseStatus::WaitingExternal | LeaseStatus::Claimed | LeaseStatus::Running => {
                 ChildLeaseAction::Wait {
                     lease,
