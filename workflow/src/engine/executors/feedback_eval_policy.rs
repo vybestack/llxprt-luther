@@ -89,6 +89,13 @@ pub fn parse_feedback_evaluator_json(raw: &str) -> Result<Value, serde_json::Err
 fn is_low_confidence_optional_feedback(body: &str) -> bool {
     let lower = body.to_ascii_lowercase();
     low_priority_feedback(&lower) && speculative_feedback(&lower)
+        || conditional_design_feedback(&lower)
+}
+
+fn conditional_design_feedback(lower: &str) -> bool {
+    lower.contains("<!-- luther-ocr-inline -->")
+        && speculative_feedback(lower)
+        && optional_intent_feedback(lower)
 }
 
 fn low_priority_feedback(lower: &str) -> bool {
@@ -96,6 +103,16 @@ fn low_priority_feedback(lower: &str) -> bool {
         || lower.contains("nitpick")
         || lower.contains("cr-indicator-types:nitpick")
         || lower.contains("trivial")
+}
+
+fn optional_intent_feedback(lower: &str) -> bool {
+    lower.contains("if cross-repo")
+        || lower.contains("if this function is intended")
+        || lower.contains("if it is only used internally")
+        || lower.contains("if the intent")
+        || lower.contains("if the current behavior")
+        || lower.contains("intended for external consumption")
+        || lower.contains("current behavior") && lower.contains("intentional")
 }
 
 fn speculative_feedback(lower: &str) -> bool {
@@ -107,6 +124,7 @@ fn speculative_feedback(lower: &str) -> bool {
         || lower.contains("otherwise document")
         || lower.contains("future")
         || lower.contains("potential")
+        || lower.contains("consider whether")
 }
 
 fn optional_value_string(value: &Value, field: &str) -> String {

@@ -9471,6 +9471,43 @@ fn feedback_evaluator_downranks_low_confidence_nitpick_needs_judgment() {
 }
 
 #[test]
+fn feedback_evaluator_downranks_conditional_ocr_design_judgment() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut item = p09_feedback_item("item-ocr", "thread-ocr", "hash-ocr");
+    item["body"] = serde_json::json!(
+        "<!-- luther-ocr-inline -->\n> If the current behavior is intentional, a comment clarifying this would help maintainers. If the intent is to continue processing remaining actionable children within the same run, consider adding a transition."
+    );
+    write_p09_feedback(&temp, serde_json::json!([item]), serde_json::json!([]));
+    let adapter = ScriptedFeedbackEvaluationAdapter::with_responses(vec![serde_json::json!({
+        "item_id": "item-ocr",
+        "stable_marker_key": "thread-ocr",
+        "body_hash": "hash-ocr",
+        "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "decision": "needs_user_judgment",
+        "reason": "The intended orchestration behavior needs maintainer judgment.",
+        "recommended_action": "Ask maintainers to confirm the intended behavior.",
+        "response_text": "This needs maintainer judgment."
+    })
+    .to_string()]);
+    let mut context = p09_context(&temp);
+    let outcome = FeedbackEvaluatorExecutor::new(adapter, FixedClock)
+        .execute(&mut context, &p09_params(&temp))
+        .expect("feedback evaluator should downrank conditional OCR design feedback");
+    let artifact = read_json(&p09_evaluations_path(&temp));
+
+    assert_expected_outcome(
+        outcome,
+        StepOutcome::Success,
+        "conditional OCR design feedback must not block PR follow-up as needs_user_judgment",
+    );
+    assert_eq!(
+        artifact
+            .pointer("/accepted_results/0/decision")
+            .and_then(serde_json::Value::as_str),
+        Some("out_of_scope")
+    );
+}
+#[test]
 fn feedback_evaluator_command_errors_consume_budget_without_panicking() {
     let temp = tempfile::tempdir().expect("tempdir");
     write_p09_feedback(
