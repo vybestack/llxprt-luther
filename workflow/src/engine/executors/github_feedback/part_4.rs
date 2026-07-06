@@ -744,6 +744,7 @@ fn item_json(item: &FeedbackItem) -> Value {
         "comment_database_id": item.comment_database_id,
         "review_id": item.review_id,
         "author_login": item.author_login,
+        "author_kind": item.author_kind,
         "author_association": null,
         "bot_identity": item.author_login,
         "path": item.path,

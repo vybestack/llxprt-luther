@@ -97,6 +97,7 @@
       "requirements": [
         "gh",
         "git",
+        "cargo",
         "cargo-llvm-cov",
         "cargo-audit",
         "workflow scope for workflow-file changes"
@@ -181,6 +182,7 @@
         "id": "coverage",
         "argv": [
           "cargo",
+          "xtask",
           "coverage"
         ],
         "project_subdirectory": "workflow",

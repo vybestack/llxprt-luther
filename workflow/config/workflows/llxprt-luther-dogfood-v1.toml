@@ -573,8 +573,35 @@ mode = "prefix"
 pattern = "CodeRabbit"
 
 [[steps.parameters.check_policy.required]]
-mode = "prefix"
-pattern = "PR Quality"
+pattern = "Tests (lib + integration)"
+allow_skipped = false
+
+[[steps.parameters.check_policy.required]]
+pattern = "Format (rustfmt)"
+allow_skipped = false
+
+[[steps.parameters.check_policy.required]]
+pattern = "Lint (clippy + structural)"
+allow_skipped = false
+
+[[steps.parameters.check_policy.required]]
+pattern = "Release readiness (release build)"
+allow_skipped = false
+
+[[steps.parameters.check_policy.required]]
+pattern = "Coverage (llvm-cov gate)"
+allow_skipped = false
+
+[[steps.parameters.check_policy.required]]
+pattern = "Docs (cargo doc)"
+allow_skipped = false
+
+[[steps.parameters.check_policy.required]]
+pattern = "Security (cargo audit)"
+allow_skipped = false
+
+[[steps.parameters.check_policy.required]]
+pattern = "OpenCodeReview"
 allow_skipped = false
 
 # @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P17

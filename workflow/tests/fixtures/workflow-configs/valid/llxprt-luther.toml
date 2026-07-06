@@ -75,7 +75,7 @@ required = ["Tests (lib + integration)", "Format (rustfmt)", "Lint (clippy + str
 ignored = ["CodeRabbit"]
 
 [target_profile.auth]
-requirements = ["gh", "git", "cargo-llvm-cov", "cargo-audit", "workflow scope for workflow-file changes"]
+requirements = ["gh", "git", "cargo", "cargo-llvm-cov", "cargo-audit", "workflow scope for workflow-file changes"]
 
 [target_profile.preflight]
 expectations = ["verify workflow auth before editing .github/workflows"]
@@ -129,7 +129,7 @@ failure_outcome = "fixable"
 
 [[command_manifest.commands]]
 id = "coverage"
-argv = ["cargo", "coverage"]
+argv = ["cargo", "xtask", "coverage"]
 project_subdirectory = "workflow"
 timeout_seconds = 1200
 failure_outcome = "fixable"

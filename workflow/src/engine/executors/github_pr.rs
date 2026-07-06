@@ -307,14 +307,9 @@ fn watch_pr_checks(
     let store = PrFollowupArtifactStore::new(artifact_root);
     let target = resolve_pr_view_target(context, params, &store)?;
     let identity = capture_pr_identity_via_gh(&target, context, params, runner, clock, &store)?;
-    let pr_value =
-        read_json_without_store_validation(&store.canonical_path(&identity.binding, "pr"))?;
-    let binding = binding_from_artifact(&pr_value)?;
-    let pr_url = pr_value
-        .get("pr_url")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_string();
+    let CapturedPrIdentity {
+        binding, pr_url, ..
+    } = identity;
     let config = config_from_value(params).map_err(github_pr_error)?;
     let counters = read_matching_check_status_counters(&store, &binding);
     let observed_at = clock.now_rfc3339();

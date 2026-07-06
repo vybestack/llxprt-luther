@@ -2893,7 +2893,7 @@ fn human_reviewer_graph_page() -> serde_json::Value {
                     "url": "https://github.com/example/workflow/pull/1910#discussion_r8200",
                     "path": "src/lib.rs",
                     "line": 12,
-                    "author": { "login": "octocat" },
+                    "author": { "login": "octocat", "__typename": "User" },
                     "createdAt": "2026-04-30T00:00:00Z",
                     "updatedAt": "2026-04-30T00:00:00Z",
                     "commit": { "oid": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }
@@ -2904,7 +2904,7 @@ fn human_reviewer_graph_page() -> serde_json::Value {
                     "url": "https://github.com/example/workflow/pull/1910#discussion_r8201",
                     "path": "src/lib.rs",
                     "line": 12,
-                    "author": { "login": "octocat" },
+                    "author": { "login": "octocat", "__typename": "User" },
                     "createdAt": "2026-04-30T00:01:00Z",
                     "updatedAt": "2026-04-30T00:01:00Z",
                     "commit": { "oid": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }
@@ -2984,11 +2984,22 @@ fn collector_includes_non_coderabbit_reviewer_only_when_flag_set() {
         "human reviewer thread must be collected when include_all_reviewers is set"
     );
     let item = all_artifact
-        .pointer("/items/0")
-        .expect("collected reviewer item");
+        .get("items")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|items| {
+            items.iter().find(|item| {
+                item.get("source").and_then(serde_json::Value::as_str)
+                    == Some("graphql_review_thread")
+            })
+        })
+        .expect("collected reviewer thread item");
     assert_eq!(
         item.get("author_login").and_then(serde_json::Value::as_str),
         Some("octocat")
+    );
+    assert_eq!(
+        item.get("author_kind").and_then(serde_json::Value::as_str),
+        Some("User")
     );
     assert_eq!(
         item.get("comment_database_id")
@@ -3376,6 +3387,7 @@ fn p09_feedback_item(item_id: &str, key: &str, hash: &str) -> serde_json::Value 
         "comment_id": item_id,
         "review_id": null,
         "author_login": "coderabbitai[bot]",
+        "author_kind": "Bot",
         "author_association": "NONE",
         "bot_identity": "coderabbitai[bot]",
         "path": "src/lib.rs",
@@ -3982,6 +3994,24 @@ fn feedback_evaluation_downranks_reused_low_confidence_nitpick_needs_judgment() 
             .pointer("/accepted_results/0/decision")
             .and_then(serde_json::Value::as_str),
         Some("out_of_scope")
+    );
+    assert_eq!(
+        artifact
+            .pointer("/accepted_results/0/reason")
+            .and_then(serde_json::Value::as_str),
+        Some("This is a low-confidence optional nitpick/speculative suggestion, not a concrete product or scope decision requiring maintainer judgment.")
+    );
+    assert_eq!(
+        artifact
+            .pointer("/accepted_results/0/recommended_action")
+            .and_then(serde_json::Value::as_str),
+        Some("Do not block PR follow-up on this item; leave it for optional future design documentation if maintainers want to expand the scope.")
+    );
+    assert_eq!(
+        artifact
+            .pointer("/accepted_results/0/response_text")
+            .and_then(serde_json::Value::as_str),
+        Some("This item is not being treated as needs-user-judgment because it is framed as an optional/speculative nitpick rather than a concrete blocker. It can be revisited as optional design documentation outside this PR follow-up, but it should not block automated remediation.")
     );
 }
 
@@ -9474,6 +9504,8 @@ fn feedback_evaluator_downranks_low_confidence_nitpick_needs_judgment() {
 fn feedback_evaluator_downranks_conditional_ocr_design_judgment() {
     let temp = tempfile::tempdir().expect("tempdir");
     let mut item = p09_feedback_item("item-ocr", "thread-ocr", "hash-ocr");
+    item["author_login"] = serde_json::json!("github-actions");
+    item["author_kind"] = serde_json::json!("Bot");
     item["body"] = serde_json::json!(
         "<!-- luther-ocr-inline -->\n> If the current behavior is intentional, a comment clarifying this would help maintainers. If the intent is to continue processing remaining actionable children within the same run, consider adding a transition."
     );

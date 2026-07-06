@@ -3,14 +3,30 @@ use serde_json::{json, Value};
 use super::feedback_eval::{
     required_value_string, FeedbackEvaluationRequest, FeedbackEvaluationResponse, RejectReason,
 };
+use crate::engine::runner::EngineError;
+
+/// LLM invocation adapter seam for feedback evaluation behavior.
+/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P03
+/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P09
+/// @requirement:REQ-PRFU-011,REQ-PRFU-012,REQ-PRFU-017,REQ-PRFU-020
+/// @pseudocode lines 8-17
+pub trait FeedbackEvaluationAdapter: Send + Sync {
+    fn evaluate(&self, request: &FeedbackEvaluationRequest) -> Result<String, EngineError>;
+}
 
 const DOWNRANK_REASON: &str = "This is a low-confidence optional nitpick/speculative suggestion, not a concrete product or scope decision requiring maintainer judgment.";
+const MAX_EMBEDDED_JSON_CANDIDATES: usize = 1024;
 const DOWNRANK_ACTION: &str = "Do not block PR follow-up on this item; leave it for optional future design documentation if maintainers want to expand the scope.";
 const DOWNRANK_RESPONSE: &str = "This item is not being treated as needs-user-judgment because it is framed as an optional/speculative nitpick rather than a concrete blocker. It can be revisited as optional design documentation outside this PR follow-up, but it should not block automated remediation.";
 
-pub fn apply_low_confidence_accepted_policy(body: &str, accepted: &mut Value) {
+pub(super) fn apply_low_confidence_accepted_policy(
+    body: &str,
+    author_login: &str,
+    author_kind: Option<&str>,
+    accepted: &mut Value,
+) {
     if accepted.get("decision").and_then(Value::as_str) != Some("needs_user_judgment")
-        || !is_low_confidence_optional_feedback(body)
+        || !is_low_confidence_optional_feedback(body, author_login, author_kind)
     {
         return;
     }
@@ -22,12 +38,16 @@ pub fn apply_low_confidence_accepted_policy(body: &str, accepted: &mut Value) {
     }
 }
 
-pub fn apply_low_confidence_needs_judgment_policy(
+pub(super) fn apply_low_confidence_needs_judgment_policy(
     request: &FeedbackEvaluationRequest,
     response: &mut FeedbackEvaluationResponse,
 ) {
     if response.decision != "needs_user_judgment"
-        || !is_low_confidence_optional_feedback(&request.body)
+        || !is_low_confidence_optional_feedback(
+            &request.body,
+            &request.author_login,
+            request.author_kind.as_deref(),
+        )
     {
         return;
     }
@@ -38,7 +58,7 @@ pub fn apply_low_confidence_needs_judgment_policy(
     response.response_text = DOWNRANK_RESPONSE.to_string();
 }
 
-pub fn is_forbidden_response_field(field: &str, field_value: &Value) -> bool {
+pub(super) fn is_forbidden_response_field(field: &str, field_value: &Value) -> bool {
     let lower = field.to_ascii_lowercase();
     let is_allowed_identity = matches!(
         field,
@@ -51,7 +71,7 @@ pub fn is_forbidden_response_field(field: &str, field_value: &Value) -> bool {
             || lower.contains("head_sha")
             || lower.contains("marker_key"));
     let is_batch_field = matches!(
-        field,
+        lower.as_str(),
         "items"
             | "item_ids"
             | "feedback_items"
@@ -79,30 +99,46 @@ pub(super) fn feedback_response_from_value(
     })
 }
 
-pub fn parse_feedback_evaluator_json(raw: &str) -> Result<Value, serde_json::Error> {
+pub(super) fn parse_feedback_evaluator_json(raw: &str) -> Result<Value, serde_json::Error> {
     match serde_json::from_str(raw) {
         Ok(value) => Ok(value),
         Err(original) => parse_embedded_json_object(raw).ok_or(original),
     }
 }
 
-fn is_low_confidence_optional_feedback(body: &str) -> bool {
+fn is_low_confidence_optional_feedback(
+    body: &str,
+    author_login: &str,
+    author_kind: Option<&str>,
+) -> bool {
     let lower = body.to_ascii_lowercase();
-    low_priority_feedback(&lower) && speculative_feedback(&lower)
-        || conditional_design_feedback(&lower)
+    (trusted_low_priority_author(author_login, author_kind)
+        && low_priority_feedback(&lower)
+        && speculative_feedback(&lower))
+        || conditional_design_feedback(&lower, author_login, author_kind)
 }
 
-fn conditional_design_feedback(lower: &str) -> bool {
-    lower.contains("<!-- luther-ocr-inline -->")
+fn trusted_low_priority_author(author_login: &str, author_kind: Option<&str>) -> bool {
+    matches!(
+        author_login,
+        "coderabbitai" | "coderabbitai[bot]" | "coderabbit[bot]"
+    ) && matches!(author_kind, Some("Bot"))
+}
+
+fn conditional_design_feedback(lower: &str, author_login: &str, author_kind: Option<&str>) -> bool {
+    trusted_inline_marker_author(author_login, author_kind)
+        && lower.contains("<!-- luther-ocr-inline -->")
         && speculative_feedback(lower)
         && optional_intent_feedback(lower)
 }
 
+fn trusted_inline_marker_author(author_login: &str, author_kind: Option<&str>) -> bool {
+    matches!(author_login, "github-actions" | "github-actions[bot]")
+        && matches!(author_kind, Some("Bot"))
+}
+
 fn low_priority_feedback(lower: &str) -> bool {
-    lower.contains("_🧹 nitpick_")
-        || lower.contains("nitpick")
-        || lower.contains("cr-indicator-types:nitpick")
-        || lower.contains("trivial")
+    lower.contains("nitpick") || lower.contains("trivial")
 }
 
 fn optional_intent_feedback(lower: &str) -> bool {
@@ -112,19 +148,20 @@ fn optional_intent_feedback(lower: &str) -> bool {
         || lower.contains("if the intent")
         || lower.contains("if the current behavior")
         || lower.contains("intended for external consumption")
-        || lower.contains("current behavior") && lower.contains("intentional")
+        || (lower.contains("current behavior") && lower.contains("intentional"))
 }
 
 fn speculative_feedback(lower: &str) -> bool {
-    lower.contains(" if ")
-        || lower.contains("could")
-        || lower.contains("should consider")
-        || lower.contains("confirm")
-        || lower.contains("clarify")
-        || lower.contains("otherwise document")
-        || lower.contains("future")
-        || lower.contains("potential")
+    lower.contains("should consider")
         || lower.contains("consider whether")
+        || lower.contains("consider adding a")
+        || lower.contains("otherwise document")
+        || lower.contains("could potentially")
+        || lower.contains("if this becomes")
+        || lower.contains("future hardening")
+        || lower.contains("optional future")
+        || ((lower.contains(" if ") || lower.starts_with("if ") || lower.contains("\nif "))
+            && (lower.contains("could") || lower.contains("clarify") || lower.contains("confirm")))
 }
 
 fn optional_value_string(value: &Value, field: &str) -> String {
@@ -143,13 +180,141 @@ fn optional_value_string_opt(value: &Value, field: &str) -> Option<String> {
 }
 
 fn parse_embedded_json_object(raw: &str) -> Option<Value> {
-    for (index, _) in raw.match_indices('{') {
+    let mut first_object = None;
+    let mut search_from = 0usize;
+    let mut candidates_seen = 0usize;
+    while candidates_seen < MAX_EMBEDDED_JSON_CANDIDATES && search_from < raw.len() {
+        let Some(offset) = raw[search_from..].find('{') else {
+            break;
+        };
+        let index = search_from + offset;
+        candidates_seen += 1;
         let mut stream = serde_json::Deserializer::from_str(&raw[index..]).into_iter::<Value>();
-        if let Some(Ok(value)) = stream.next() {
-            if value.is_object() {
-                return Some(value);
-            }
+        let parsed = stream.next();
+        search_from = index + stream.byte_offset().max(1);
+        let Some(Ok(value)) = parsed else {
+            continue;
+        };
+        if !value.is_object() {
+            continue;
         }
+        if value.get("item_id").is_some() && value.get("decision").is_some() {
+            return Some(value);
+        }
+        first_object.get_or_insert(value);
     }
-    None
+    first_object
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn inline_marker_downrank_requires_trusted_author() {
+        let body = "<!-- luther-ocr-inline --> if the current behavior is intentional, should consider documenting it";
+        let mut accepted = json!({
+            "decision": "needs_user_judgment",
+            "reason": "model requested judgment"
+        });
+
+        apply_low_confidence_accepted_policy(body, "octocat", Some("User"), &mut accepted);
+
+        assert_eq!(
+            accepted.get("decision").and_then(Value::as_str),
+            Some("needs_user_judgment")
+        );
+    }
+
+    #[test]
+    fn low_priority_downrank_requires_trusted_bot_author() {
+        let body = "_🧹 Nitpick_ | _🔵 Trivial_\n\nIf this could affect future orchestration, clarify the timeout semantics.";
+        let mut accepted = json!({
+            "decision": "needs_user_judgment",
+            "reason": "model requested judgment"
+        });
+
+        apply_low_confidence_accepted_policy(body, "octocat", Some("User"), &mut accepted);
+
+        assert_eq!(
+            accepted.get("decision").and_then(Value::as_str),
+            Some("needs_user_judgment")
+        );
+
+        apply_low_confidence_accepted_policy(body, "coderabbitai", Some("Bot"), &mut accepted);
+
+        assert_eq!(
+            accepted.get("decision").and_then(Value::as_str),
+            Some("out_of_scope")
+        );
+    }
+
+    #[test]
+    fn inline_marker_downrank_rejects_spoofed_github_actions_user() {
+        let body = "<!-- luther-ocr-inline --> if the current behavior is intentional, should consider documenting it";
+        let mut accepted = json!({
+            "decision": "needs_user_judgment",
+            "reason": "model requested judgment"
+        });
+
+        apply_low_confidence_accepted_policy(body, "github-actions", Some("User"), &mut accepted);
+
+        assert_eq!(
+            accepted.get("decision").and_then(Value::as_str),
+            Some("needs_user_judgment")
+        );
+    }
+
+    #[test]
+    fn inline_marker_downranks_for_trusted_bot_author() {
+        let body = "<!-- luther-ocr-inline --> if the current behavior is intentional, should consider documenting it";
+        let mut accepted = json!({
+            "decision": "needs_user_judgment",
+            "reason": "model requested judgment"
+        });
+
+        apply_low_confidence_accepted_policy(body, "github-actions", Some("Bot"), &mut accepted);
+
+        assert_eq!(
+            accepted.get("decision").and_then(Value::as_str),
+            Some("out_of_scope")
+        );
+    }
+
+    #[test]
+    fn inline_marker_downranks_for_trusted_bracketed_bot_author() {
+        let body = "<!-- luther-ocr-inline --> if the current behavior is intentional, should consider documenting it";
+        let mut accepted = json!({
+            "decision": "needs_user_judgment",
+            "reason": "model requested judgment"
+        });
+
+        apply_low_confidence_accepted_policy(
+            body,
+            "github-actions[bot]",
+            Some("Bot"),
+            &mut accepted,
+        );
+
+        assert_eq!(
+            accepted.get("decision").and_then(Value::as_str),
+            Some("out_of_scope")
+        );
+    }
+
+    #[test]
+    fn forbidden_response_field_rejects_case_insensitive_batch_fields() {
+        assert!(is_forbidden_response_field("RESULTS", &json!("value")));
+        assert!(is_forbidden_response_field("Evaluations", &json!("value")));
+    }
+
+    #[test]
+    fn embedded_json_parser_prefers_feedback_shaped_object() {
+        let parsed = parse_embedded_json_object(
+            r#"progress {"note":"not the response"} done {"item_id":"i","decision":"valid"}"#,
+        )
+        .expect("embedded object");
+
+        assert_eq!(parsed.get("item_id").and_then(Value::as_str), Some("i"));
+    }
 }

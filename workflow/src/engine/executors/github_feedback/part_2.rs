@@ -53,7 +53,7 @@ query($owner: String!, $name: String!, $number: Int!, $page: String) {
               id
               databaseId
               body
-              author { login }
+              author { login __typename }
               url
               path
               line

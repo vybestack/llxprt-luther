@@ -18,6 +18,7 @@ use crate::engine::executor::{interpolate_string, StepContext, StepExecutor};
 use crate::engine::executors::feedback_eval_policy::{
     apply_low_confidence_accepted_policy, apply_low_confidence_needs_judgment_policy,
     feedback_response_from_value, is_forbidden_response_field, parse_feedback_evaluator_json,
+    FeedbackEvaluationAdapter,
 };
 use crate::engine::executors::pr_followup_artifacts::{
     ArtifactWriter, ClockSleeper, PrFollowupArtifactStore, SystemPrFollowupFilesystem,
@@ -66,6 +67,8 @@ pub struct FeedbackEvaluationRequest {
     pub repository_owner: String,
     pub repository_name: String,
     pub pr_number: u64,
+    pub author_login: String,
+    pub author_kind: Option<String>,
     pub body: String,
     pub path: Option<String>,
     pub url: Option<String>,
@@ -87,15 +90,6 @@ pub struct FeedbackEvaluationResponse {
     pub reason: String,
     pub recommended_action: Option<String>,
     pub response_text: String,
-}
-
-/// LLM invocation adapter seam for feedback evaluation behavior.
-/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P03
-/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P09
-/// @requirement:REQ-PRFU-011,REQ-PRFU-012,REQ-PRFU-017,REQ-PRFU-020
-/// @pseudocode lines 8-17
-pub trait FeedbackEvaluationAdapter: Send + Sync {
-    fn evaluate(&self, request: &FeedbackEvaluationRequest) -> Result<String, EngineError>;
 }
 
 /// Argv-safe command runner seam for the production feedback evaluator adapter.
@@ -306,6 +300,8 @@ struct FeedbackItem {
     stable_marker_key: String,
     body_hash: String,
     head_sha: String,
+    author_login: String,
+    author_kind: Option<String>,
     body: String,
     path: Option<String>,
     url: Option<String>,
@@ -656,7 +652,12 @@ fn reusable_evaluation(
         if validate_reusable_accepted(binding, item, &accepted).is_err() {
             return ReuseLookup::Fatal("malformed_or_unbindable_accepted_evaluation".to_string());
         }
-        apply_low_confidence_accepted_policy(&item.body, &mut accepted);
+        apply_low_confidence_accepted_policy(
+            &item.body,
+            &item.author_login,
+            item.author_kind.as_deref(),
+            &mut accepted,
+        );
         return ReuseLookup::Reuse(accepted);
     }
     ReuseLookup::NoMatch
@@ -785,6 +786,15 @@ fn feedback_items(feedback: &Value) -> Result<Vec<FeedbackItem>, EngineError> {
                         feedback_eval_error("feedback item missing commit_sha/head_sha")
                     })?
                     .to_string(),
+                author_login: item
+                    .get("author_login")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+                author_kind: item
+                    .get("author_kind")
+                    .and_then(Value::as_str)
+                    .map(ToString::to_string),
                 body: require_string(item, "body")?,
                 path: item
                     .get("path")
@@ -810,7 +820,9 @@ fn build_request(binding: &PrFollowupBinding, item: &FeedbackItem) -> FeedbackEv
         head_sha: item.head_sha.clone(),
         repository_owner: binding.repository_owner.clone(),
         repository_name: binding.repository_name.clone(),
+        author_kind: item.author_kind.clone(),
         pr_number: binding.pr_number,
+        author_login: item.author_login.clone(),
         body: item.body.clone(),
         path: item.path.clone(),
         url: item.url.clone(),

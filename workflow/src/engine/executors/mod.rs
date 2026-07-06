@@ -35,10 +35,11 @@ pub mod write_file;
 
 // Re-export executor implementations for tests
 pub use feedback_eval::{
-    default_feedback_evaluator_argv, CommandFeedbackEvaluationAdapter, FeedbackEvaluationAdapter,
-    FeedbackEvaluationRequest, FeedbackEvaluationResponse, FeedbackEvaluatorCommandRunner,
-    FeedbackEvaluatorExecutor, ProcessFeedbackEvaluatorCommandRunner,
+    default_feedback_evaluator_argv, CommandFeedbackEvaluationAdapter, FeedbackEvaluationRequest,
+    FeedbackEvaluationResponse, FeedbackEvaluatorCommandRunner, FeedbackEvaluatorExecutor,
+    ProcessFeedbackEvaluatorCommandRunner,
 };
+pub use feedback_eval_policy::FeedbackEvaluationAdapter;
 
 pub use change_detection::{ChangeDetectionMode, ChangedPathDetector, GitChangedPathDetector};
 pub use command_manifest::{

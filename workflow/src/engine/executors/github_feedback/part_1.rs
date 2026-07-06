@@ -205,6 +205,7 @@ struct FeedbackItem {
     comment_database_id: Option<i64>,
     review_id: Option<String>,
     author_login: String,
+    author_kind: Option<String>,
     path: Option<String>,
     line: Option<u64>,
     side: Option<String>,
@@ -657,12 +658,17 @@ fn normalize_graphql_thread(
         .get("isOutdated")
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    let Some(comment) = graphql_thread_comments(thread).into_iter().next() else {
+    // Review-thread actions are anchored to the root comment; REST comment scans cover individual replies separately.
+    let Some(comment) = thread
+        .pointer("/comments/nodes")
+        .and_then(Value::as_array)
+        .and_then(|nodes| nodes.first())
+    else {
         return;
     };
     normalize_graphql_thread_comment(
         thread,
-        &comment,
+        comment,
         GraphqlThreadState { resolved, outdated },
         binding,
         identities,
@@ -674,14 +680,6 @@ fn normalize_graphql_thread(
 struct GraphqlThreadState {
     resolved: bool,
     outdated: bool,
-}
-
-fn graphql_thread_comments(thread: &Value) -> Vec<Value> {
-    thread
-        .pointer("/comments/nodes")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default()
 }
 
 fn normalize_graphql_thread_comment(
@@ -744,6 +742,10 @@ fn graphql_feedback_item(
         comment_database_id: comment.get("databaseId").and_then(Value::as_i64),
         review_id: None,
         author_login: author.to_string(),
+        author_kind: comment
+            .pointer("/author/__typename")
+            .and_then(Value::as_str)
+            .map(ToString::to_string),
         path: opt_string(comment, "path").or_else(|| opt_string(thread, "path")),
         line: comment
             .get("line")
@@ -778,7 +780,7 @@ fn normalize_rest_review_comment(
         .pointer("/user/login")
         .and_then(Value::as_str)
         .unwrap_or_default();
-    if !is_explicit_reviewer_identity(author, identities) {
+    if !is_coderabbit(author, identities) {
         observation
             .noise
             .push(json!({ "source": "rest_review_comment", "author_login": author }));
@@ -815,6 +817,10 @@ fn normalize_rest_review_comment(
             .and_then(Value::as_u64)
             .map(|id| id.to_string()),
         author_login: author.to_string(),
+        author_kind: comment
+            .pointer("/user/type")
+            .and_then(Value::as_str)
+            .map(ToString::to_string),
         path: opt_string(comment, "path"),
         line: comment
             .get("line")
@@ -857,6 +863,8 @@ fn normalize_issue_comment(
         .pointer("/user/login")
         .and_then(Value::as_str)
         .unwrap_or_default();
+    // Issue comments are bot status/summary surfaces, not review-thread feedback;
+    // keep them limited to explicitly configured bot identities.
     if !is_explicit_reviewer_identity(author, identities) {
         observation
             .noise
@@ -885,6 +893,10 @@ fn normalize_issue_comment(
         comment_database_id: None,
         review_id: None,
         author_login: author.to_string(),
+        author_kind: comment
+            .pointer("/user/type")
+            .and_then(Value::as_str)
+            .map(ToString::to_string),
         path: None,
         line: None,
         side: None,
