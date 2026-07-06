@@ -129,7 +129,7 @@ fn unique_child_issue_number() -> u64 {
 fn child_run_registry_status_overrides_zero_exit_waiting_child() {
     assert_eq!(
         classify_child_run_result(
-            ChildWorkflowRunResult::CompletedSuccess,
+            &ChildWorkflowRunResult::CompletedSuccess,
             Some(&RunStatus::WaitingExternal)
         ),
         ChildWorkflowRunResult::WaitingExternal

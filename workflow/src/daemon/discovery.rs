@@ -28,6 +28,7 @@ pub enum SkipReason {
     ChildOfActiveParent,
     ConcurrencyLimitReached,
     InvalidLeaseState,
+    RoutingFailed,
 }
 
 impl std::fmt::Display for SkipReason {
@@ -46,6 +47,7 @@ impl std::fmt::Display for SkipReason {
                 write!(f, "per-config concurrency limit reached")
             }
             SkipReason::InvalidLeaseState => write!(f, "invalid lease state"),
+            SkipReason::RoutingFailed => write!(f, "parent issue routing failed"),
         }
     }
 }
@@ -65,6 +67,7 @@ impl SkipReason {
             SkipReason::HasOpenPr => "has_open_pr",
             SkipReason::ConcurrencyLimitReached => "concurrency_limit_reached",
             SkipReason::InvalidLeaseState => "invalid_lease_state",
+            SkipReason::RoutingFailed => "routing_failed",
         }
     }
 }
@@ -224,9 +227,7 @@ pub fn discover(
                 Ok(routed) => result.eligible.push(routed),
                 Err(err) => {
                     eprintln!("route issue error for {repo}: {err}");
-                    result
-                        .skipped
-                        .push((*err.issue, SkipReason::InvalidLeaseState));
+                    result.skipped.push((*err.issue, SkipReason::RoutingFailed));
                 }
             }
         } else {

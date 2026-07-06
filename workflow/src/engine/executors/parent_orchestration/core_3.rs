@@ -284,12 +284,10 @@ fn evaluate_parent_completion(
     let native_subissues_closed_or_non_actionable = active_children.is_empty();
     let required_prs_merged_or_superseded = required_prs_satisfied(&states, &rollup);
     let no_active_child_runs = active_runs.is_empty();
-    let no_parent_followup_remaining = acceptance.remaining_work.is_empty();
     let complete = native_subissues_closed_or_non_actionable
         && required_prs_merged_or_superseded
         && no_active_child_runs
         && acceptance.satisfied
-        && no_parent_followup_remaining
         && blocked_children.is_empty();
     write_json(
         &state.artifact_root,
@@ -300,7 +298,7 @@ fn evaluate_parent_completion(
             "required_child_prs_merged_or_superseded": required_prs_merged_or_superseded,
             "no_active_child_workflow_runs": no_active_child_runs,
             "parent_acceptance_criteria_satisfied": acceptance.satisfied,
-            "no_parent_followup_remaining": no_parent_followup_remaining,
+            "no_parent_followup_remaining": acceptance.remaining_work.is_empty(),
             "acceptance_criteria_satisfied": acceptance.satisfied,
             "acceptance_criteria_evidence": acceptance.evidence,
             "active_child_issues": active_children,

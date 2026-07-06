@@ -519,7 +519,7 @@ fn finish_child_launch(
     completion: ChildLaunchCompletion<'_>,
 ) -> Result<StepOutcome, EngineError> {
     let effective_result =
-        classify_child_run_result(completion.result.clone(), completion.run_status.as_ref());
+        classify_child_run_result(&completion.result, completion.run_status.as_ref());
     let outcome = match effective_result {
         ChildWorkflowRunResult::CompletedSuccess => "completed_success",
         ChildWorkflowRunResult::CompletedFailure => "completed_failure",
@@ -623,7 +623,7 @@ fn record_terminal_child_failure(
 }
 
 fn classify_child_run_result(
-    process_result: ChildWorkflowRunResult,
+    process_result: &ChildWorkflowRunResult,
     run_status: Option<&RunStatus>,
 ) -> ChildWorkflowRunResult {
     match run_status {
@@ -634,7 +634,7 @@ fn classify_child_run_result(
         Some(RunStatus::Failed | RunStatus::Abandoned | RunStatus::Cancelled) => {
             ChildWorkflowRunResult::CompletedFailure
         }
-        Some(_) | None => process_result,
+        Some(_) | None => process_result.clone(),
     }
 }
 

@@ -182,9 +182,10 @@ struct OrchestrationState {
 impl OrchestrationState {
     fn from_context(context: &StepContext, params: &Value) -> Result<Self, EngineError> {
         let artifact_root = artifact_root(context, params)?;
+        let artifact_dir = artifact_root.join("children");
         Ok(Self {
             current_step: required_context(context, "current_step_id")?,
-            artifact_root: artifact_root.clone(),
+            artifact_root,
             repo: required_context(context, "target_repo")?,
             parent_issue_number: parent_issue_number(context)?,
             luther_label: context
@@ -221,7 +222,7 @@ impl OrchestrationState {
                 true,
             ),
             work_dir: context.get("work_dir").map(PathBuf::from),
-            artifact_dir: Some(artifact_root.join("children")),
+            artifact_dir: Some(artifact_dir),
         })
     }
 }
