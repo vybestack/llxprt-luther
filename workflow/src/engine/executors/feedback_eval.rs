@@ -15,6 +15,10 @@ use std::time::{Duration, Instant};
 use serde_json::{json, Value};
 
 use crate::engine::executor::{interpolate_string, StepContext, StepExecutor};
+use crate::engine::executors::feedback_eval_policy::{
+    apply_low_confidence_accepted_policy, apply_low_confidence_needs_judgment_policy,
+    feedback_response_from_value, is_forbidden_response_field, parse_feedback_evaluator_json,
+};
 use crate::engine::executors::pr_followup_artifacts::{
     ArtifactWriter, ClockSleeper, PrFollowupArtifactStore, SystemPrFollowupFilesystem,
 };
@@ -596,7 +600,7 @@ fn evaluate_coderabbit_feedback(
 }
 
 #[derive(Debug)]
-struct RejectReason {
+pub(super) struct RejectReason {
     reason: String,
     parsed_decision: Option<String>,
     observed_head_sha: Option<String>,
@@ -652,7 +656,7 @@ fn reusable_evaluation(
         if validate_reusable_accepted(binding, item, &accepted).is_err() {
             return ReuseLookup::Fatal("malformed_or_unbindable_accepted_evaluation".to_string());
         }
-        apply_low_confidence_accepted_policy(item, &mut accepted);
+        apply_low_confidence_accepted_policy(&item.body, &mut accepted);
         return ReuseLookup::Reuse(accepted);
     }
     ReuseLookup::NoMatch
@@ -670,61 +674,9 @@ fn validate_response(
         parsed_decision: None,
         observed_head_sha: None,
     })?;
-    if value.is_array() {
-        return Err(reject("response_array_or_batch", &value));
-    }
-    let object = value
-        .as_object()
-        .ok_or_else(|| reject("response_not_object", &value))?;
-    for (field, field_value) in object {
-        let lower = field.to_ascii_lowercase();
-        let is_allowed_identity = matches!(
-            field.as_str(),
-            "item_id" | "stable_marker_key" | "body_hash" | "head_sha"
-        );
-        let is_extra_identity = !is_allowed_identity
-            && (lower.contains("item")
-                || lower.contains("stable_marker")
-                || lower.contains("body_hash")
-                || lower.contains("head_sha")
-                || lower.contains("marker_key"));
-        let is_batch_field = matches!(
-            field.as_str(),
-            "items"
-                | "item_ids"
-                | "feedback_items"
-                | "feedback_item_ids"
-                | "batch"
-                | "batches"
-                | "results"
-                | "evaluations"
-        );
-        if is_batch_field || is_extra_identity || field_value.is_array() {
-            return Err(reject("batch_or_extra_item_ids", &value));
-        }
-    }
+    reject_batch_response_fields(&value)?;
 
-    let mut response = FeedbackEvaluationResponse {
-        item_id: required_value_string(&value, "item_id")?,
-        stable_marker_key: required_value_string(&value, "stable_marker_key")?,
-        body_hash: required_value_string(&value, "body_hash")?,
-        head_sha: required_value_string(&value, "head_sha")?,
-        decision: required_value_string(&value, "decision")?,
-        reason: value
-            .get("reason")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string(),
-        recommended_action: value
-            .get("recommended_action")
-            .and_then(Value::as_str)
-            .map(ToString::to_string),
-        response_text: value
-            .get("response_text")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string(),
-    };
+    let mut response = feedback_response_from_value(&value)?;
     apply_low_confidence_needs_judgment_policy(request, &mut response);
     if response.item_id != request.item_id {
         return Err(reject("wrong_item_id", &value));
@@ -761,81 +713,20 @@ fn validate_response(
     }
     Ok(response)
 }
-fn apply_low_confidence_accepted_policy(item: &FeedbackItem, accepted: &mut Value) {
-    if accepted.get("decision").and_then(Value::as_str) != Some("needs_user_judgment")
-        || !is_low_confidence_optional_feedback(&item.body)
-    {
-        return;
+
+fn reject_batch_response_fields(value: &Value) -> Result<(), RejectReason> {
+    if value.is_array() {
+        return Err(reject("response_array_or_batch", value));
     }
-    if let Some(object) = accepted.as_object_mut() {
-        object.insert("decision".to_string(), json!("out_of_scope"));
-        object.insert(
-            "reason".to_string(),
-            json!("This is a low-confidence optional nitpick/speculative suggestion, not a concrete product or scope decision requiring maintainer judgment."),
-        );
-        object.insert(
-            "recommended_action".to_string(),
-            json!("Do not block PR follow-up on this item; leave it for optional future design documentation if maintainers want to expand the scope."),
-        );
-        object.insert(
-            "response_text".to_string(),
-            json!("This item is not being treated as needs-user-judgment because it is framed as an optional/speculative nitpick rather than a concrete blocker. It can be revisited as optional design documentation outside this PR follow-up, but it should not block automated remediation."),
-        );
-    }
-}
-
-fn apply_low_confidence_needs_judgment_policy(
-    request: &FeedbackEvaluationRequest,
-    response: &mut FeedbackEvaluationResponse,
-) {
-    if response.decision != "needs_user_judgment"
-        || !is_low_confidence_optional_feedback(&request.body)
-    {
-        return;
-    }
-
-    response.decision = "out_of_scope".to_string();
-    response.reason = "This is a low-confidence optional nitpick/speculative suggestion, not a concrete product or scope decision requiring maintainer judgment.".to_string();
-    response.recommended_action = Some(
-        "Do not block PR follow-up on this item; leave it for optional future design documentation if maintainers want to expand the scope."
-            .to_string(),
-    );
-    response.response_text = "This item is not being treated as needs-user-judgment because it is framed as an optional/speculative nitpick rather than a concrete blocker. It can be revisited as optional design documentation outside this PR follow-up, but it should not block automated remediation.".to_string();
-}
-
-fn is_low_confidence_optional_feedback(body: &str) -> bool {
-    let lower = body.to_ascii_lowercase();
-    let low_priority = lower.contains("_🧹 nitpick_")
-        || lower.contains("nitpick")
-        || lower.contains("cr-indicator-types:nitpick")
-        || lower.contains("trivial");
-    let speculative = lower.contains(" if ")
-        || lower.contains("could")
-        || lower.contains("should consider")
-        || lower.contains("confirm")
-        || lower.contains("clarify")
-        || lower.contains("otherwise document")
-        || lower.contains("future")
-        || lower.contains("potential");
-    low_priority && speculative
-}
-
-fn parse_feedback_evaluator_json(raw: &str) -> Result<Value, serde_json::Error> {
-    match serde_json::from_str(raw) {
-        Ok(value) => Ok(value),
-        Err(original) => {
-            for (index, _) in raw.match_indices('{') {
-                let mut stream =
-                    serde_json::Deserializer::from_str(&raw[index..]).into_iter::<Value>();
-                if let Some(Ok(value)) = stream.next() {
-                    if value.is_object() {
-                        return Ok(value);
-                    }
-                }
-            }
-            Err(original)
+    let object = value
+        .as_object()
+        .ok_or_else(|| reject("response_not_object", value))?;
+    for (field, field_value) in object {
+        if is_forbidden_response_field(field, field_value) {
+            return Err(reject("batch_or_extra_item_ids", value));
         }
     }
+    Ok(())
 }
 
 fn deterministic_feedback_evaluation(item: &FeedbackItem, accepted_at: String) -> Option<Value> {
@@ -1129,7 +1020,7 @@ fn reject(reason: &str, value: &Value) -> RejectReason {
     }
 }
 
-fn required_value_string(value: &Value, field: &str) -> Result<String, RejectReason> {
+pub(super) fn required_value_string(value: &Value, field: &str) -> Result<String, RejectReason> {
     value
         .get(field)
         .and_then(Value::as_str)
