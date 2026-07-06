@@ -226,7 +226,7 @@ pub fn discover(
                     eprintln!("route issue error for {repo}: {err}");
                     result
                         .skipped
-                        .push((err.issue, SkipReason::InvalidLeaseState));
+                        .push((*err.issue, SkipReason::InvalidLeaseState));
                 }
             }
         } else {
@@ -290,19 +290,12 @@ fn parent_has_active_label(cfg: &DiscoveryConfig, parent: &GithubIssue) -> bool 
         })
 }
 
+#[derive(Debug, thiserror::Error)]
+#[error("issue #{issue_number} routing failed: {source}")]
 struct RouteIssueError {
-    issue: GithubIssue,
-    source: GithubError,
-}
-
-impl std::fmt::Display for RouteIssueError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "issue #{} routing failed: {}",
-            self.issue.number, self.source
-        )
-    }
+    issue_number: u64,
+    issue: Box<GithubIssue>,
+    source: Box<GithubError>,
 }
 
 fn route_issue(
@@ -316,7 +309,11 @@ fn route_issue(
             Ok(RoutedIssue::parent(issue, cfg))
         }
         Ok(_) => Ok(RoutedIssue::ordinary(issue)),
-        Err(source) => Err(RouteIssueError { issue, source }),
+        Err(source) => Err(RouteIssueError {
+            issue_number: issue.number,
+            issue: Box::new(issue),
+            source: Box::new(source),
+        }),
     }
 }
 
