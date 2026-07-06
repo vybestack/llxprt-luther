@@ -129,8 +129,7 @@ fn persist_child_interrupted_state(
     });
     record.poll_interval_seconds = child_wait_poll_interval(config);
     record.max_wait_seconds = None;
-    let interval_seconds = i64::try_from(record.poll_interval_seconds).unwrap_or(i64::MAX);
-    record.next_poll_at = Utc::now() + Duration::seconds(interval_seconds);
+    record.next_poll_at = crate::polling::next_poll_time(record.poll_interval_seconds);
     record.resume_step = checkpoint.step_id.clone();
     record.checkpoint_id = crate::engine::continuation::checkpoint_identity(&checkpoint);
     upsert_wait_state(&conn, &record).map_err(|err| err.to_string())?;
@@ -178,8 +177,7 @@ fn persist_child_external_wait_state(
     });
     record.poll_interval_seconds = child_wait_poll_interval(config);
     record.max_wait_seconds = None;
-    let interval_seconds = i64::try_from(record.poll_interval_seconds).unwrap_or(i64::MAX);
-    record.next_poll_at = Utc::now() + Duration::seconds(interval_seconds);
+    record.next_poll_at = crate::polling::next_poll_time(record.poll_interval_seconds);
     record.resume_step = checkpoint.step_id.clone();
     record.checkpoint_id = crate::engine::continuation::checkpoint_identity(&checkpoint);
     upsert_wait_state(&conn, &record).map_err(|err| err.to_string())?;

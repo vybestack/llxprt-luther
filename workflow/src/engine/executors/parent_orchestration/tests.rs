@@ -179,6 +179,33 @@ fn failed_child_lease_relaunches_fresh_workflow() {
 }
 
 #[test]
+fn child_lease_claim_contention_waits_without_error() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut context = context(temp.path());
+    context.set("current_step_id", "launch_or_resume_child_workflow");
+    let state = OrchestrationState::from_context(&context, &json!({})).unwrap();
+    let db_path = temp.path().join("checkpoints.db");
+    crate::persistence::init_database(&db_path).unwrap();
+    let conn = open_parent_orchestration_connection(&db_path).unwrap();
+
+    let action = claim_child_lease(&state, unique_child_issue_number(), &conn).unwrap();
+
+    match action {
+        ChildLeaseAction::Launch(lease) => {
+            let contended = claim_child_lease(&state, lease.issue_number, &conn).unwrap();
+            match contended {
+                ChildLeaseAction::Wait { lease, reason } => {
+                    assert!(lease.is_none());
+                    assert_eq!(reason, "child_lease_claim_contended");
+                }
+                _ => panic!("lost child lease claim should wait"),
+            }
+        }
+        _ => panic!("first child lease claim should launch"),
+    }
+}
+
+#[test]
 fn parent_completion_rejects_closed_child_without_explicit_non_actionable_reason() {
     let states = vec![ChildIssueState {
         issue_number: 7,

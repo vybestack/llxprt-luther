@@ -217,7 +217,7 @@ fn launch_child_workflow(
     }
     match prepare_child_lease(state, child)? {
         ChildLeaseAction::Wait { lease, reason } => {
-            wait_for_existing_child(state, child, &lease, &reason)
+            wait_for_existing_child(state, child, lease.as_ref(), &reason)
         }
         ChildLeaseAction::Resume(lease) => {
             resume_child_workflow(context, state, query, runner, child, &lease)
@@ -283,12 +283,11 @@ fn observe_existing_child_pr(
 fn wait_for_existing_child(
     state: &OrchestrationState,
     child: u64,
-    lease: &crate::persistence::leases::IssueLease,
+    lease: Option<&crate::persistence::leases::IssueLease>,
     reason: &str,
 ) -> Result<StepOutcome, EngineError> {
     let run_status = lease
-        .run_id
-        .as_deref()
+        .and_then(|lease| lease.run_id.as_deref())
         .map(child_run_status_from_registry)
         .transpose()
         .map_err(parent_error)?
@@ -300,15 +299,15 @@ fn wait_for_existing_child(
                 "launched": false,
                 "child_issue_number": child,
                 "reason": "child_workflow_completed_waiting_for_pr_merge",
-                "existing_run_id": lease.run_id,
-                "lease_status": lease.status.to_string(),
+                "existing_run_id": lease.and_then(|lease| lease.run_id.as_deref()),
+                "lease_status": lease.map(|lease| lease.status.to_string()),
                 "run_status": run_status.map(|status| status.to_string())
             }),
         )?;
         update_rollup(
             state,
             child,
-            lease.run_id.as_deref(),
+            lease.and_then(|lease| lease.run_id.as_deref()),
             "child_workflow_completed_waiting_for_pr_merge",
             None,
         )?;
@@ -320,20 +319,22 @@ fn wait_for_existing_child(
             "launched": false,
             "child_issue_number": child,
             "reason": reason,
-            "existing_run_id": lease.run_id,
-            "lease_status": lease.status.to_string(),
+            "existing_run_id": lease.and_then(|lease| lease.run_id.as_deref()),
+            "lease_status": lease.map(|lease| lease.status.to_string()),
             "run_status": run_status.as_ref().map(ToString::to_string)
         }),
     )?;
-    write_child_workflow_wait_artifact(
-        state,
-        child,
-        lease,
-        lease.run_id.as_deref(),
-        reason,
-        run_status.as_ref(),
-    )?;
-    update_rollup(state, child, lease.run_id.as_deref(), reason, None)?;
+    if let Some(lease) = lease {
+        write_child_workflow_wait_artifact(
+            state,
+            child,
+            lease,
+            lease.run_id.as_deref(),
+            reason,
+            run_status.as_ref(),
+        )?;
+        update_rollup(state, child, lease.run_id.as_deref(), reason, None)?;
+    }
     Ok(StepOutcome::Wait)
 }
 

@@ -68,7 +68,7 @@ enum ChildLeaseAction {
     Launch(crate::persistence::leases::IssueLease),
     Resume(crate::persistence::leases::IssueLease),
     Wait {
-        lease: crate::persistence::leases::IssueLease,
+        lease: Option<crate::persistence::leases::IssueLease>,
         reason: String,
     },
 }
@@ -91,7 +91,7 @@ fn prepare_child_lease_with_conn(
             LeaseStatus::ReadyToResume => {
                 if child_workflow_completed(&lease)? {
                     ChildLeaseAction::Wait {
-                        lease,
+                        lease: Some(lease),
                         reason: "child_workflow_completed_waiting_for_pr_merge".to_string(),
                     }
                 } else {
@@ -103,19 +103,31 @@ fn prepare_child_lease_with_conn(
             }
             LeaseStatus::WaitingExternal | LeaseStatus::Claimed | LeaseStatus::Running => {
                 ChildLeaseAction::Wait {
-                    lease,
+                    lease: Some(lease),
                     reason: "active_child_lease".to_string(),
                 }
             }
             LeaseStatus::Pending | LeaseStatus::Completed => ChildLeaseAction::Wait {
-                lease,
+                lease: Some(lease),
                 reason: "non_actionable_child_lease".to_string(),
             },
         });
     }
-    let lease = try_claim(conn, &state.repo, child, &state.child_config_id)
-        .map_err(sql_error)?
-        .ok_or_else(|| parent_error("child lease claim lost to concurrent worker".to_string()))?;
+    claim_child_lease(state, child, conn)
+}
+
+fn claim_child_lease(
+    state: &OrchestrationState,
+    child: u64,
+    conn: &rusqlite::Connection,
+) -> Result<ChildLeaseAction, EngineError> {
+    let Some(lease) = try_claim(conn, &state.repo, child, &state.child_config_id).map_err(sql_error)?
+    else {
+        return Ok(ChildLeaseAction::Wait {
+            lease: None,
+            reason: "child_lease_claim_contended".to_string(),
+        });
+    };
     Ok(ChildLeaseAction::Launch(lease))
 }
 
