@@ -181,7 +181,7 @@
         "id": "coverage",
         "argv": [
           "cargo",
-          "llvm-cov"
+          "coverage"
         ],
         "project_subdirectory": "workflow",
         "timeout_seconds": 1200,

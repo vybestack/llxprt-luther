@@ -129,7 +129,7 @@ failure_outcome = "fixable"
 
 [[command_manifest.commands]]
 id = "coverage"
-argv = ["cargo", "llvm-cov"]
+argv = ["cargo", "coverage"]
 project_subdirectory = "workflow"
 timeout_seconds = 1200
 failure_outcome = "fixable"
