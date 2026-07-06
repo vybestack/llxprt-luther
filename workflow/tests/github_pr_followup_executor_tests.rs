@@ -2038,6 +2038,84 @@ fn pr_checks_default_watch_budget_is_twelve_observations_without_real_sleep() {
 }
 
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P04
+/// @requirement:REQ-PRFU-004
+/// @pseudocode lines 16-33
+#[test]
+fn pr_checks_refreshes_pr_identity_before_classifying_current_head_checks() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let artifact_dir = temp
+        .path()
+        .join("artifacts")
+        .join("pr-followup")
+        .join("current")
+        .join("run-p06")
+        .join("example")
+        .join("workflow")
+        .join("1910");
+    std::fs::create_dir_all(&artifact_dir).expect("create pr artifact dir");
+    std::fs::write(
+        artifact_dir.join("pr.json"),
+        serde_json::to_string(&serde_json::json!({
+            "schema_version": 1,
+            "run_id": "run-p06",
+            "repository_owner": "example",
+            "repository_name": "workflow",
+            "pr_number": 1910,
+            "pr_url": "https://github.com/example/workflow/pull/1910",
+            "head_ref": "luther/issue-1234",
+            "head_sha": "cccccccccccccccccccccccccccccccccccccccc",
+            "base_ref": "main",
+            "base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "capture_state": "captured",
+            "captured_at": "2026-04-30T00:00:00Z",
+            "source": "gh_pr_view",
+            "producer_step_id": "capture_pr_identity",
+            "step_order_index": 1
+        }))
+        .expect("serialize stale pr artifact"),
+    )
+    .expect("write stale pr artifact");
+    let runner = ScriptedGithubRunner::new(
+        serde_json::json!([
+            { "name": "build", "state": "SUCCESS", "bucket": "pass", "headSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }
+        ]),
+        serde_json::json!({ "total_count": 0, "check_runs": [] }),
+    );
+    let clock = RecordingClock::default();
+    let mut context = p06_context(&temp);
+    let outcome = GithubPrChecksExecutorWithRunner::new(runner.clone(), clock)
+        .execute(&mut context, &p06_check_params(&temp, 12))
+        .expect("watch pr checks");
+    let artifact = read_json(&p06_pr_check_status_path(&temp));
+    let pr_artifact = read_json(&artifact_dir.join("pr.json"));
+
+    assert_expected_outcome(
+        outcome,
+        StepOutcome::Success,
+        "watch_pr_checks must refresh PR identity so stale cached heads cannot misclassify current checks",
+    );
+    assert!(
+        runner
+            .calls()
+            .iter()
+            .any(|call| call.iter().any(|arg| arg == "view")),
+        "watch_pr_checks must call gh pr view instead of trusting cached pr.json"
+    );
+    assert_eq!(
+        artifact.get("head_sha").and_then(serde_json::Value::as_str),
+        Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+        "pr-check-status must be bound to the refreshed PR head"
+    );
+    assert_eq!(
+        pr_artifact
+            .get("head_sha")
+            .and_then(serde_json::Value::as_str),
+        Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+        "canonical pr.json must be refreshed for downstream follow-up steps"
+    );
+}
+
+/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P04
 /// @requirement:REQ-PRFU-005
 /// @pseudocode lines 16-33
 #[test]

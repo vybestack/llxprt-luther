@@ -305,7 +305,10 @@ fn watch_pr_checks(
 ) -> Result<StepOutcome, EngineError> {
     let artifact_root = artifact_root(context, params)?;
     let store = PrFollowupArtifactStore::new(artifact_root);
-    let pr_value = read_or_capture_pr_identity(context, params, runner, clock, &store)?;
+    let target = resolve_pr_view_target(context, params, &store)?;
+    let identity = capture_pr_identity_via_gh(&target, context, params, runner, clock, &store)?;
+    let pr_value =
+        read_json_without_store_validation(&store.canonical_path(&identity.binding, "pr"))?;
     let binding = binding_from_artifact(&pr_value)?;
     let pr_url = pr_value
         .get("pr_url")
