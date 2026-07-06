@@ -115,7 +115,7 @@ fn persist_child_interrupted_state(
     record.config_id = config.config_id.clone();
     record.repository = request.repo.clone();
     record.issue_number = request.issue_number;
-    record.wait_kind = WaitKind::HumanReview;
+    record.wait_kind = child_wait_kind_for_step(step_id);
     record.wait_condition = json!({
         "step_id": step_id,
         "reason": "child_workflow_interrupted",

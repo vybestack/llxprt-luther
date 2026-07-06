@@ -10,6 +10,7 @@ pub mod engine;
 pub mod monitor;
 /// @plan:PLAN-20260404-INITIAL-RUNTIME.P05
 pub mod persistence;
+pub mod polling;
 /// @plan:PLAN-20260404-INITIAL-RUNTIME.P09
 pub mod repo;
 /// @plan:PLAN-20260404-INITIAL-RUNTIME.P10

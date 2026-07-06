@@ -78,7 +78,15 @@ fn prepare_child_lease(
     child: u64,
 ) -> Result<ChildLeaseAction, EngineError> {
     let conn = daemon_connection()?;
-    if let Some(lease) = get_lease_for_issue(&conn, &state.repo, child).map_err(sql_error)? {
+    prepare_child_lease_with_conn(state, child, &conn)
+}
+
+fn prepare_child_lease_with_conn(
+    state: &OrchestrationState,
+    child: u64,
+    conn: &rusqlite::Connection,
+) -> Result<ChildLeaseAction, EngineError> {
+    if let Some(lease) = get_lease_for_issue(conn, &state.repo, child).map_err(sql_error)? {
         return Ok(match lease.status {
             LeaseStatus::ReadyToResume => {
                 if child_workflow_completed(&lease)? {
@@ -91,9 +99,9 @@ fn prepare_child_lease(
                 }
             }
             LeaseStatus::Failed | LeaseStatus::Abandoned => {
-                prepare_relaunchable_child(&conn, &lease)?
+                prepare_relaunchable_child(conn, &lease)?
             }
-            LeaseStatus::Stale => prepare_relaunchable_child(&conn, &lease)?,
+            LeaseStatus::Stale => prepare_relaunchable_child(conn, &lease)?,
             LeaseStatus::WaitingExternal | LeaseStatus::Claimed | LeaseStatus::Running => {
                 ChildLeaseAction::Wait {
                     lease,
@@ -106,7 +114,7 @@ fn prepare_child_lease(
             },
         });
     }
-    let lease = try_claim(&conn, &state.repo, child, &state.child_config_id)
+    let lease = try_claim(conn, &state.repo, child, &state.child_config_id)
         .map_err(sql_error)?
         .ok_or_else(|| parent_error("child lease claim lost to concurrent worker".to_string()))?;
     Ok(ChildLeaseAction::Launch(lease))

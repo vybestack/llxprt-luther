@@ -2,6 +2,7 @@ use super::*;
 use crate::persistence::leases::{get_lease_for_issue, init_leases_table, try_claim};
 use crate::persistence::sqlite::{init_runs_schema, persist_run_with_conn};
 use crate::persistence::wait_state::{get_wait_state, init_wait_states_table, upsert_wait_state};
+use chrono::Duration;
 use serde_json::json;
 
 fn conn() -> Connection {

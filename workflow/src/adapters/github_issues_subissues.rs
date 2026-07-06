@@ -40,6 +40,30 @@ struct GraphqlSubIssuePageConnection {
     page_info: GraphqlPageInfo,
 }
 
+const SUB_ISSUE_PAGE_LIMIT_PREFIX: &str = "sub-issue GraphQL pagination exceeded ";
+
+fn is_native_sub_issue_page_limit_error(error: &GithubError) -> bool {
+    matches!(
+        error,
+        GithubError::CommandFailed { stderr, .. }
+            if stderr.starts_with(SUB_ISSUE_PAGE_LIMIT_PREFIX)
+    )
+}
+
+fn native_sub_issue_page_limit_error(repo: &str, number: u64, cursor: &str) -> GithubError {
+    GithubError::CommandFailed {
+        argv: graphql_sub_issue_page_argv(repo, number, cursor).unwrap_or_else(|_| {
+            vec![
+                "gh".to_string(),
+                "api".to_string(),
+                "graphql".to_string(),
+            ]
+        }),
+        exit_code: None,
+        stderr: format!("{SUB_ISSUE_PAGE_LIMIT_PREFIX}{MAX_NATIVE_SUB_ISSUE_PAGES} pages"),
+    }
+}
+
 fn graphql_sub_issue_page_argv(
     repo: &str,
     number: u64,

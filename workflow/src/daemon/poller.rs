@@ -1,4 +1,4 @@
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Utc};
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -877,11 +877,7 @@ fn mark_run_status(
 }
 
 fn next_poll_time(record: &WaitStateRecord) -> DateTime<Utc> {
-    const MAX_POLL_INTERVAL_SECONDS: i64 = 86_400;
-    let seconds = i64::try_from(record.poll_interval_seconds)
-        .unwrap_or(MAX_POLL_INTERVAL_SECONDS)
-        .clamp(1, MAX_POLL_INTERVAL_SECONDS);
-    Utc::now() + Duration::seconds(seconds)
+    crate::polling::next_poll_time(record.poll_interval_seconds)
 }
 
 #[cfg(test)]

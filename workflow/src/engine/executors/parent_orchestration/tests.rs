@@ -152,7 +152,9 @@ fn failed_child_lease_relaunches_fresh_workflow() {
     let mut context = context(temp.path());
     context.set("current_step_id", "launch_or_resume_child_workflow");
     let state = OrchestrationState::from_context(&context, &json!({})).unwrap();
-    let conn = daemon_connection().unwrap();
+    let db_path = temp.path().join("checkpoints.db");
+    crate::persistence::init_database(&db_path).unwrap();
+    let conn = open_parent_orchestration_connection(&db_path).unwrap();
     let child = unique_child_issue_number();
     let lease = try_claim(&conn, &state.repo, child, &state.child_config_id)
         .unwrap()
@@ -165,7 +167,7 @@ fn failed_child_lease_relaunches_fresh_workflow() {
     )
     .unwrap();
 
-    let action = prepare_child_lease(&state, child).unwrap();
+    let action = prepare_child_lease_with_conn(&state, child, &conn).unwrap();
 
     match action {
         ChildLeaseAction::Launch(lease) => {
@@ -564,6 +566,7 @@ fn child_wait_identity_accepts_required_metadata() {
 
     assert_eq!(identity.pr_number, Some(17));
     assert_eq!(identity.head_sha.as_deref(), Some("abc123"));
+
     assert!(child_wait_poll_identity(Some(&metadata), WaitKind::DependencyChildWorkflow).is_ok());
 }
 
@@ -716,6 +719,7 @@ fn parent_completion_executor_reports_remaining_work() {
 fn close_or_report_parent_records_completion_result() {
     let temp = tempfile::tempdir().unwrap();
     let mut context = context(temp.path());
+
     context.set_current_step_id("close_or_report_parent");
     let state = OrchestrationState::from_context(&context, &json!({})).unwrap();
     write_json(
@@ -778,6 +782,76 @@ fn assert_observed_pr_artifacts(artifact_root: &Path) {
         Some("observing_existing_child_pr")
     );
 }
+#[test]
+fn interrupted_child_workflow_uses_step_wait_kind() {
+    let temp = tempfile::tempdir().unwrap();
+    let db_path = temp.path().join("checkpoints.db");
+    crate::persistence::init_database(&db_path).unwrap();
+    let conn = open_parent_orchestration_connection(&db_path).unwrap();
+    let request = ChildWorkflowLaunchRequest {
+        workflow_type_id: "llxprt-issue-fix-v1".to_string(),
+        config_id: "llxprt-code".to_string(),
+        run_id: "child-interrupted-run".to_string(),
+        repo: "owner/repo".to_string(),
+        issue_number: unique_child_issue_number(),
+        work_dir: None,
+        artifact_dir: None,
+    };
+    let config = workflow_config(&request);
+    crate::persistence::checkpoint::save_checkpoint_with_conn(
+        &conn,
+        &crate::persistence::Checkpoint::new(&request.run_id, "launch_or_resume_child_workflow"),
+    )
+    .unwrap();
+
+    persist_child_interrupted_state(
+        &request,
+        &config,
+        &db_path,
+        "launch_or_resume_child_workflow",
+    )
+    .unwrap();
+
+    let record = crate::persistence::get_wait_state(&conn, &request.run_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(record.wait_kind, WaitKind::DependencyChildWorkflow);
+}
+
+fn workflow_config(request: &ChildWorkflowLaunchRequest) -> WorkflowConfig {
+    WorkflowConfig {
+        config_id: request.config_id.clone(),
+        workflow_type_id: request.workflow_type_id.clone(),
+        runtime: crate::workflow::schema::RuntimeConfig {
+            timeout_seconds: 3600,
+            max_retries: 3,
+            parallel_steps: None,
+            log_level: None,
+        },
+        repo: crate::workflow::schema::RepoConfig {
+            workspace_strategy: "temp".to_string(),
+            branch_template: "test-{run_id}".to_string(),
+            base_branch: Some("main".to_string()),
+            workspace_root: None,
+            project_subdir: None,
+            artifact_path_base: None,
+            diff_path_base: None,
+            diff_path_normalization: crate::workflow::schema::DiffPathNormalization::RepoRelative,
+        },
+        guard_limits: crate::workflow::schema::GuardLimits {
+            max_iterations: Some(3),
+            max_file_changes: Some(50),
+            max_tokens: Some(10_000),
+            max_cost: Some(10.0),
+        },
+        variables: std::collections::HashMap::new(),
+        discovery: None,
+        parent_orchestration: Default::default(),
+        command_manifest: None,
+        target_profile: None,
+    }
+}
+
 #[test]
 fn load_parent_issue_accepts_daemon_primary_issue_number() {
     let temp = tempfile::tempdir().unwrap();

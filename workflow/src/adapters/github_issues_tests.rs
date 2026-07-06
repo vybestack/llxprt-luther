@@ -232,22 +232,92 @@ fn list_sub_issues_uses_body_fallback_when_native_query_fails() {
 }
 
 #[test]
+fn list_sub_issues_stops_after_native_page_limit() {
+    let first_page = r#"{
+        "data": {"repository": {"issue": {
+            "number": 1,
+            "subIssues": {
+                "edges": [],
+                "pageInfo": {"hasNextPage": true, "endCursor": "cursor-first"}
+            }
+        }}}
+    }"#;
+    let next_page = r#"{
+        "data": {"repository": {"issue": {
+            "subIssues": {
+                "edges": [],
+                "pageInfo": {"hasNextPage": true, "endCursor": "cursor-next"}
+            }
+        }}}
+    }"#;
+    let mut results = vec![Ok(first_page.to_string())];
+    results.extend((1..(MAX_NATIVE_SUB_ISSUE_PAGES + 5)).map(|_| Ok(next_page.to_string())));
+    let runner = MockRunner::new(results);
+    let q = SystemGithubIssueQuery::new(runner);
+
+    let err = q.list_sub_issues("o/r", 1).unwrap_err();
+
+    assert!(err.to_string().contains("pagination exceeded"));
+    assert_eq!(q.runner.calls.borrow().len(), MAX_NATIVE_SUB_ISSUE_PAGES);
+}
+
+#[test]
 fn enable_pr_auto_merge_uses_allowed_merge_method() {
-    let runner = MockRunner::new(vec![
-        Ok(
-            r#"{"mergeCommitAllowed":true,"rebaseMergeAllowed":false,"squashMergeAllowed":false}"#
-                .to_string(),
-        ),
-        Ok(String::new()),
-    ]);
+    assert_auto_merge_method(
+        r#"{"mergeCommitAllowed":true,"rebaseMergeAllowed":false,"squashMergeAllowed":false}"#,
+        "--merge",
+    );
+}
+
+#[test]
+fn enable_pr_auto_merge_falls_back_to_rebase_when_only_rebase_allowed() {
+    assert_auto_merge_method(
+        r#"{"mergeCommitAllowed":false,"rebaseMergeAllowed":true,"squashMergeAllowed":false}"#,
+        "--rebase",
+    );
+}
+
+#[test]
+fn enable_pr_auto_merge_falls_back_to_squash_when_only_squash_allowed() {
+    assert_auto_merge_method(
+        r#"{"mergeCommitAllowed":false,"rebaseMergeAllowed":false,"squashMergeAllowed":true}"#,
+        "--squash",
+    );
+}
+
+#[test]
+fn enable_pr_auto_merge_prefers_viewer_default_method() {
+    assert_auto_merge_method(
+        r#"{"mergeCommitAllowed":true,"rebaseMergeAllowed":true,"squashMergeAllowed":true,"viewerDefaultMergeMethod":"REBASE"}"#,
+        "--rebase",
+    );
+}
+
+#[test]
+fn enable_pr_auto_merge_ignores_unrecognized_viewer_default() {
+    assert_auto_merge_method(
+        r#"{"mergeCommitAllowed":true,"rebaseMergeAllowed":false,"squashMergeAllowed":false,"viewerDefaultMergeMethod":"UNKNOWN"}"#,
+        "--merge",
+    );
+}
+
+#[test]
+fn enable_pr_auto_merge_uses_squash_when_no_allowed_flags_are_reported() {
+    assert_auto_merge_method(
+        r#"{"mergeCommitAllowed":false,"rebaseMergeAllowed":false,"squashMergeAllowed":false}"#,
+        "--squash",
+    );
+}
+
+fn assert_auto_merge_method(repo_view_json: &str, expected_method: &str) {
+    let runner = MockRunner::new(vec![Ok(repo_view_json.to_string()), Ok(String::new())]);
     let q = SystemGithubIssueQuery::new(runner);
 
     q.enable_pr_auto_merge("o/r", 17).unwrap();
 
     let calls = q.runner.calls.borrow();
     assert_eq!(calls.len(), 2);
-    assert!(calls[1].contains(&"--merge".to_string()));
-    assert!(!calls[1].contains(&"--squash".to_string()));
+    assert!(calls[1].contains(&expected_method.to_string()));
 }
 
 #[test]

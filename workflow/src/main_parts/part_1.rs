@@ -650,7 +650,7 @@ fn persist_external_wait_state(
         .unwrap_or(300);
     record.poll_interval_seconds = poll_interval;
     record.max_wait_seconds = max_wait_seconds_for_wait(config, wait_kind);
-    record.next_poll_at = next_poll_time(poll_interval);
+    record.next_poll_at = luther_workflow::polling::next_poll_time(poll_interval);
     record.resume_step = checkpoint.step_id.clone();
     record.checkpoint_id = luther_workflow::engine::continuation::checkpoint_identity(&checkpoint);
     upsert_wait_state(&conn, &record).map_err(|e| e.to_string())?;
@@ -675,17 +675,6 @@ fn max_wait_seconds_for_wait(config: &WorkflowConfig, wait_kind: WaitKind) -> Op
     }
 }
 
-fn next_poll_time(poll_interval: u64) -> chrono::DateTime<chrono::Utc> {
-    let Ok(poll_interval_seconds) = i64::try_from(poll_interval) else {
-        return chrono::DateTime::<chrono::Utc>::MAX_UTC;
-    };
-    let Some(duration) = chrono::Duration::try_seconds(poll_interval_seconds) else {
-        return chrono::DateTime::<chrono::Utc>::MAX_UTC;
-    };
-    chrono::Utc::now()
-        .checked_add_signed(duration)
-        .unwrap_or(chrono::DateTime::<chrono::Utc>::MAX_UTC)
-}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct WaitPollIdentity {

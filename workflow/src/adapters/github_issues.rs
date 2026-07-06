@@ -14,6 +14,17 @@ use serde::{Deserialize, Serialize};
 
 use crate::adapters::github::{GithubCommandRunner, GithubError};
 
+fn default_merge_method_flag(method: &str) -> Option<&'static str> {
+    match method {
+        "MERGE" | "merge" => Some("--merge"),
+        "REBASE" | "rebase" => Some("--rebase"),
+        "SQUASH" | "squash" => Some("--squash"),
+        _ => None,
+    }
+}
+
+const MAX_NATIVE_SUB_ISSUE_PAGES: usize = 100;
+
 /// A GitHub issue as needed by discovery/eligibility.
 /// @plan:PLAN-20260415-DAEMON-DISCOVERY.P03
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -662,6 +673,7 @@ impl<R: GithubCommandRunner> GithubIssueQuery for SystemGithubIssueQuery<R> {
         match self.native_sub_issues(repo, number) {
             Ok(children) if children.is_empty() => self.issue_body_reference_children(repo, number),
             Ok(children) => Ok(children),
+            Err(err) if is_native_sub_issue_page_limit_error(&err) => Err(err),
             Err(_) => self.issue_body_reference_children(repo, number),
         }
     }
@@ -798,11 +810,16 @@ impl<R: GithubCommandRunner> SystemGithubIssueQuery<R> {
             .iter()
             .map(|child| child.issue.number)
             .collect::<BTreeSet<_>>();
+        let mut page_count = 1;
         while let Some(cursor) = page.next_cursor {
+            if page_count >= MAX_NATIVE_SUB_ISSUE_PAGES {
+                return Err(native_sub_issue_page_limit_error(repo, number, &cursor));
+            }
             let argv = graphql_sub_issue_page_argv(repo, number, &cursor)?;
             let out = self.runner.run(&argv)?;
             page.next_cursor =
                 parse_sub_issue_page_response(&out, &mut seen, &mut page.children, &argv)?;
+            page_count += 1;
         }
         Ok(page.children)
     }
@@ -814,7 +831,8 @@ impl<R: GithubCommandRunner> SystemGithubIssueQuery<R> {
             "view".to_string(),
             repo.to_string(),
             "--json".to_string(),
-            "mergeCommitAllowed,rebaseMergeAllowed,squashMergeAllowed".to_string(),
+            "mergeCommitAllowed,rebaseMergeAllowed,squashMergeAllowed,viewerDefaultMergeMethod"
+                .to_string(),
         ];
         let out = self.runner.run(&argv)?;
         let value: serde_json::Value =
@@ -823,6 +841,13 @@ impl<R: GithubCommandRunner> SystemGithubIssueQuery<R> {
                 exit_code: None,
                 stderr: format!("failed to parse gh repo view JSON: {e}"),
             })?;
+        if let Some(method) = value
+            .get("viewerDefaultMergeMethod")
+            .and_then(serde_json::Value::as_str)
+            .and_then(default_merge_method_flag)
+        {
+            return Ok(method);
+        }
         if value
             .get("mergeCommitAllowed")
             .and_then(serde_json::Value::as_bool)
