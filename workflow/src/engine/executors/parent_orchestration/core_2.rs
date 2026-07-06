@@ -34,12 +34,27 @@ fn bool_context_default(
 
 fn daemon_connection() -> Result<rusqlite::Connection, EngineError> {
     let db_path = crate::runtime_paths::get_data_dir().join("checkpoints.db");
-    crate::persistence::init_database(&db_path)
-        .map_err(|err| parent_error(format!("initialize daemon database: {err}")))?;
+    ensure_daemon_database_initialized(&db_path)?;
     let conn = rusqlite::Connection::open(&db_path)
         .map_err(|err| parent_error(format!("open daemon database: {err}")))?;
     configure_parent_orchestration_connection(&conn)?;
     Ok(conn)
+}
+
+fn ensure_daemon_database_initialized(db_path: &Path) -> Result<(), EngineError> {
+    static INITIALIZED_DATABASES: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::BTreeSet<PathBuf>>,
+    > = std::sync::OnceLock::new();
+    let initialized = INITIALIZED_DATABASES.get_or_init(Default::default);
+    let mut initialized = initialized
+        .lock()
+        .map_err(|err| parent_error(format!("lock daemon database init guard: {err}")))?;
+    if !initialized.contains(db_path) {
+        crate::persistence::init_database(db_path)
+            .map_err(|err| parent_error(format!("initialize daemon database: {err}")))?;
+        initialized.insert(db_path.to_path_buf());
+    }
+    Ok(())
 }
 
 fn configure_parent_orchestration_connection(
