@@ -538,6 +538,212 @@ fn unordered_children() -> Vec<GithubSubIssue> {
     ]
 }
 
+#[test]
+fn child_wait_kind_mapping_covers_known_steps() {
+    for (step, wait_kind) in [
+        ("watch_pr_checks", WaitKind::PrChecks),
+        ("collect_coderabbit_feedback", WaitKind::CoderabbitReview),
+        ("merge_pr", WaitKind::PrMerge),
+        (
+            "dependency_child_workflow",
+            WaitKind::DependencyChildWorkflow,
+        ),
+        ("dependency_child_merge", WaitKind::DependencyChildMerge),
+        ("github_rate_limit_backoff", WaitKind::RateLimitBackoff),
+        ("other", WaitKind::HumanReview),
+    ] {
+        assert_eq!(child_wait_kind_for_step(step), wait_kind);
+    }
+}
+
+#[test]
+fn child_wait_identity_accepts_required_metadata() {
+    let metadata = child_run_metadata(Some(17), Some("abc123"));
+
+    let identity = child_wait_poll_identity(Some(&metadata), WaitKind::PrChecks).unwrap();
+
+    assert_eq!(identity.pr_number, Some(17));
+    assert_eq!(identity.head_sha.as_deref(), Some("abc123"));
+    assert!(child_wait_poll_identity(Some(&metadata), WaitKind::DependencyChildWorkflow).is_ok());
+}
+
+#[test]
+fn child_wait_identity_rejects_missing_pr_context() {
+    let metadata = child_run_metadata(None, Some("abc123"));
+
+    assert!(child_wait_poll_identity(Some(&metadata), WaitKind::CoderabbitReview).is_err());
+    assert!(child_wait_poll_identity(None, WaitKind::HumanReview).is_err());
+    assert!(child_wait_poll_identity(None, WaitKind::RateLimitBackoff).is_ok());
+}
+
+#[test]
+fn child_wait_identity_rejects_missing_check_head_sha() {
+    let metadata = child_run_metadata(Some(17), None);
+
+    assert!(child_wait_poll_identity(Some(&metadata), WaitKind::PrChecks).is_err());
+}
+
+fn child_run_metadata(pr_number: Option<i64>, head_sha: Option<&str>) -> RunMetadata {
+    let mut metadata = RunMetadata::new("child-run", "llxprt-issue-fix-v1", "llxprt-code");
+    metadata.pr_number = pr_number;
+    metadata.head_sha = head_sha.map(str::to_string);
+    metadata
+}
+
+#[test]
+fn parent_completion_executor_writes_complete_evaluation() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut context = context(temp.path());
+    context.set_current_step_id("evaluate_parent_completion");
+    let state = OrchestrationState::from_context(&context, &json!({})).unwrap();
+    let child = unique_child_issue_number();
+    write_json(
+        &state.artifact_root,
+        "subissue-state-snapshot.json",
+        &vec![ChildIssueState {
+            issue_number: child,
+            terminal_state: ChildTerminalState::Merged,
+            pr_number: Some(17),
+        }],
+    )
+    .unwrap();
+    write_json(
+        &state.artifact_root,
+        "parent-orchestration-rollup.json",
+        &ParentOrchestrationRollup {
+            parent_issue_number: 42,
+            children: vec![ChildRollupEntry {
+                child_issue_number: child,
+                child_run_id: Some("child-run".to_string()),
+                child_artifact_dir: Some("/tmp/child-run".to_string()),
+                pr_number: Some(17),
+                pr_state: Some("merged".to_string()),
+                merge_sha: Some("abc123".to_string()),
+                outcome: Some("merged".to_string()),
+                non_actionable_reason: None,
+            }],
+        },
+    )
+    .unwrap();
+    let query = MockQuery {
+        issue: Some(GithubIssue {
+            body: Some("- [x] Parent acceptance".to_string()),
+            ..issue(42, "open")
+        }),
+        children: Vec::new(),
+        pr: None,
+    };
+
+    let outcome = evaluate_parent_completion(&mut context, &state, &query).unwrap();
+
+    assert_eq!(outcome, StepOutcome::Success);
+    assert_eq!(context.get("parent_complete"), Some(&"true".to_string()));
+    let evaluation: Value = read_json(
+        &state
+            .artifact_root
+            .join("parent-completion-evaluation.json"),
+    )
+    .unwrap();
+    assert_eq!(
+        evaluation.get("complete").and_then(Value::as_bool),
+        Some(true)
+    );
+    assert_eq!(
+        evaluation
+            .get("required_child_prs_merged_or_superseded")
+            .and_then(Value::as_bool),
+        Some(true)
+    );
+}
+
+#[test]
+fn parent_completion_executor_reports_remaining_work() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut context = context(temp.path());
+    context.set_current_step_id("evaluate_parent_completion");
+    let state = OrchestrationState::from_context(&context, &json!({})).unwrap();
+    let child = unique_child_issue_number();
+    write_json(
+        &state.artifact_root,
+        "subissue-state-snapshot.json",
+        &vec![ChildIssueState {
+            issue_number: child,
+            terminal_state: ChildTerminalState::Closed,
+            pr_number: None,
+        }],
+    )
+    .unwrap();
+    write_json(
+        &state.artifact_root,
+        "parent-orchestration-rollup.json",
+        &ParentOrchestrationRollup {
+            parent_issue_number: 42,
+            children: Vec::new(),
+        },
+    )
+    .unwrap();
+    let query = MockQuery {
+        issue: Some(GithubIssue {
+            body: Some("- [ ] Parent acceptance".to_string()),
+            ..issue(42, "open")
+        }),
+        children: Vec::new(),
+        pr: None,
+    };
+
+    let outcome = evaluate_parent_completion(&mut context, &state, &query).unwrap();
+
+    assert_eq!(outcome, StepOutcome::Fixable);
+    let evaluation: Value = read_json(
+        &state
+            .artifact_root
+            .join("parent-completion-evaluation.json"),
+    )
+    .unwrap();
+    let remaining = evaluation
+        .get("remaining_work")
+        .and_then(Value::as_array)
+        .unwrap();
+    assert!(remaining.iter().any(|work| work
+        .as_str()
+        .is_some_and(|work| work.contains("remain unchecked"))));
+    assert!(remaining.iter().any(|work| work
+        .as_str()
+        .is_some_and(|work| work.contains("explicit non-actionable reason"))));
+}
+
+#[test]
+fn close_or_report_parent_records_completion_result() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut context = context(temp.path());
+    context.set_current_step_id("close_or_report_parent");
+    let state = OrchestrationState::from_context(&context, &json!({})).unwrap();
+    write_json(
+        &state.artifact_root,
+        "parent-completion-evaluation.json",
+        &json!({
+            "complete": true,
+            "blocked_child_issues": [],
+            "remaining_work": []
+        }),
+    )
+    .unwrap();
+    let query = MockQuery {
+        issue: Some(issue(42, "open")),
+        children: Vec::new(),
+        pr: None,
+    };
+
+    let outcome = close_or_report_parent(&mut context, &state, &query).unwrap();
+
+    assert_eq!(outcome, StepOutcome::Success);
+    let result: Value = read_json(&state.artifact_root.join("parent-close-result.json")).unwrap();
+    assert_eq!(result.get("closed").and_then(Value::as_bool), Some(true));
+    assert_eq!(
+        result.get("parent_issue_number").and_then(Value::as_u64),
+        Some(42)
+    );
+}
 fn open_pr(number: u64) -> GithubIssuePrState {
     GithubIssuePrState {
         number,
