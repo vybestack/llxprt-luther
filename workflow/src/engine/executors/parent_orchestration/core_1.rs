@@ -9,7 +9,7 @@ fn load_parent_issue(
     let issue = query
         .get_issue(&state.repo, state.parent_issue_number)
         .map_err(github_error)?
-        .unwrap_or_else(|| fallback_issue(state.parent_issue_number));
+        .ok_or_else(|| parent_error("parent issue could not be loaded".to_string()))?;
     write_json(&state.artifact_root, "parent-issue.json", &issue)?;
     context.set("parent_issue_number", &issue.number.to_string());
     Ok(StepOutcome::Success)
@@ -384,8 +384,14 @@ fn start_child_workflow(
     )
     .map_err(sql_error)?;
     let result = runner.launch_child(&request).map_err(|err| {
-        let _ =
-            restore_child_lease_after_runner_error(lease, lease.status, lease.run_id.as_deref());
+        if let Err(restore_err) =
+            restore_child_lease_after_runner_error(lease, lease.status, lease.run_id.as_deref())
+        {
+            return parent_error(format!(
+                "{err}; failed to restore child lease {}: {restore_err}",
+                lease.lease_id
+            ));
+        }
         parent_error(err)
     })?;
     let run_status = runner.run_status(&request.run_id).map_err(parent_error)?;
@@ -434,7 +440,12 @@ fn resume_child_workflow(
     )
     .map_err(sql_error)?;
     let result = runner.resume_child(&request).map_err(|err| {
-        let _ = restore_child_lease_after_runner_error(lease, lease.status, Some(&run_id));
+        if let Err(restore_err) = restore_child_lease_after_runner_error(lease, lease.status, Some(&run_id)) {
+            return parent_error(format!(
+                "{err}; failed to restore child lease {}: {restore_err}",
+                lease.lease_id
+            ));
+        }
         parent_error(err)
     })?;
     let run_status = runner.run_status(&request.run_id).map_err(parent_error)?;

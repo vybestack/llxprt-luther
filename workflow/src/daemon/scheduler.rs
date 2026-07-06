@@ -197,9 +197,11 @@ fn push_resume_config_target<'a>(
     config_id: String,
     target: &'a SchedulerTarget,
 ) {
-    if seen.insert(config_id.clone()) {
-        config_targets.push((config_id, target));
+    if seen.contains(&config_id) {
+        return;
     }
+    seen.insert(config_id.clone());
+    config_targets.push((config_id, target));
 }
 
 fn prepare_resume_unit(
@@ -236,11 +238,11 @@ fn collect_launch_units(
         };
         summary.eligible += result.eligible.len();
         for routed in &result.eligible {
-            if !has_capacity(conn, &target.discovery, &target.config_id, repo, limits)? {
+            let launch_config_id = routed.config_id.as_deref().unwrap_or(&target.config_id);
+            if !has_capacity(conn, &target.discovery, launch_config_id, repo, limits)? {
                 summary.skipped += 1;
                 continue;
             }
-            let launch_config_id = routed.config_id.as_deref().unwrap_or(&target.config_id);
             match claim_for_launch(&routed.issue, &target.discovery, conn, launch_config_id) {
                 Ok(Ok(mut claimed)) => {
                     claimed.request.workflow_type_id = routed.workflow_type_id.clone();
@@ -254,7 +256,7 @@ fn collect_launch_units(
                 Err(e) => {
                     eprintln!(
                         "claim error for config={} issue={}#{}: {e}",
-                        target.config_id, repo, routed.issue.number
+                        launch_config_id, repo, routed.issue.number
                     );
                     summary.failed += 1;
                 }

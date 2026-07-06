@@ -198,10 +198,10 @@ fn poll_child_workflow(record: &WaitStateRecord, db_path: &std::path::Path) -> P
         }
     };
     let Some(metadata) = metadata else {
-        return PollDecision::still_waiting_with_state(
+        return terminal_failure(
             record,
             json!({
-                "classification": "still_waiting",
+                "classification": "terminal_failure",
                 "wait_kind": record.wait_kind,
                 "child_run_id": child_run_id,
                 "reason": "child_run_metadata_missing"
@@ -222,7 +222,15 @@ fn poll_child_workflow(record: &WaitStateRecord, db_path: &std::path::Path) -> P
         | RunStatus::Failed
         | RunStatus::Abandoned
         | RunStatus::Cancelled => PollDecision::ready(record, observed_state),
-        _ => PollDecision::still_waiting_with_state(record, observed_state),
+        RunStatus::Queued
+        | RunStatus::Initialized
+        | RunStatus::Starting
+        | RunStatus::Running
+        | RunStatus::WaitingForChecks
+        | RunStatus::WaitingExternal
+        | RunStatus::Remediating
+        | RunStatus::Blocked
+        | RunStatus::Paused => PollDecision::still_waiting_with_state(record, observed_state),
     }
 }
 

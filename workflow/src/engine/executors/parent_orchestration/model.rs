@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeSet, HashMap};
 
 use serde::{Deserialize, Serialize};
 
@@ -75,10 +75,12 @@ pub fn classify_child(issue: &GithubIssue, pr: Option<&GithubIssuePrState>) -> C
 /// Select the first child that can still be worked in the validated order.
 /// Closed children without completion evidence are skipped here and reported by
 /// parent completion evaluation instead of being relaunched blindly.
+/// ActiveRun is intentionally not blocked here; launch_child_workflow rechecks
+/// active leases before starting a run so recovery paths can still be selected.
 pub fn next_actionable_child(states: &[ChildIssueState], order: &[u64]) -> Option<u64> {
-    let states_by_number: BTreeMap<u64, ChildTerminalState> = states
+    let states_by_number: HashMap<u64, &ChildTerminalState> = states
         .iter()
-        .map(|state| (state.issue_number, state.terminal_state.clone()))
+        .map(|state| (state.issue_number, &state.terminal_state))
         .collect();
     order.iter().copied().find(|number| {
         states_by_number
@@ -88,14 +90,11 @@ pub fn next_actionable_child(states: &[ChildIssueState], order: &[u64]) -> Optio
 }
 
 pub fn missing_ordered_child_states(states: &[ChildIssueState], order: &[u64]) -> Vec<u64> {
-    let states_by_number: BTreeMap<u64, ChildTerminalState> = states
-        .iter()
-        .map(|state| (state.issue_number, state.terminal_state.clone()))
-        .collect();
+    let state_numbers: BTreeSet<u64> = states.iter().map(|state| state.issue_number).collect();
     order
         .iter()
         .copied()
-        .filter(|number| !states_by_number.contains_key(number))
+        .filter(|number| !state_numbers.contains(number))
         .collect()
 }
 

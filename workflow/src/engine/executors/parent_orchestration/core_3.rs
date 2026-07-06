@@ -342,14 +342,16 @@ fn blocked_child_numbers(states: &[ChildIssueState]) -> Vec<u64> {
 }
 
 fn required_prs_satisfied(states: &[ChildIssueState], rollup: &ParentOrchestrationRollup) -> bool {
-    states.iter().all(|child| match child.terminal_state {
-        ChildTerminalState::Merged => true,
-        ChildTerminalState::Closed => child_has_explicit_non_actionable_reason(child, rollup),
-        _ => false,
-    }) && !rollup
-        .children
-        .iter()
-        .any(unresolved_rollup_outcome_requires_pr)
+    !states.is_empty()
+        && states.iter().all(|child| match child.terminal_state {
+            ChildTerminalState::Merged => true,
+            ChildTerminalState::Closed => child_has_explicit_non_actionable_reason(child, rollup),
+            _ => false,
+        })
+        && !rollup
+            .children
+            .iter()
+            .any(unresolved_rollup_outcome_requires_pr)
 }
 
 fn child_completion_satisfied(child: &ChildIssueState, rollup: &ParentOrchestrationRollup) -> bool {
@@ -496,7 +498,10 @@ fn evaluate_acceptance_criteria(
 
 fn count_unchecked_acceptance_criteria(body: &str) -> usize {
     body.lines()
-        .filter(|line| line.trim_start().starts_with("- [ ]"))
+        .filter(|line| {
+            let trimmed = line.trim_start();
+            trimmed.starts_with("- [ ]") || trimmed.starts_with("* [ ]")
+        })
         .count()
 }
 
@@ -507,7 +512,7 @@ fn refresh_parent_completion_evidence(
     let issue = query
         .get_issue(&state.repo, state.parent_issue_number)
         .map_err(github_error)?
-        .unwrap_or_else(|| fallback_issue(state.parent_issue_number));
+        .ok_or_else(|| parent_error("parent issue could not be loaded".to_string()))?;
     write_json(&state.artifact_root, "parent-issue.json", &issue)
 }
 
@@ -518,6 +523,9 @@ fn count_acceptance_criteria(body: &str) -> usize {
             trimmed.starts_with("- [x]")
                 || trimmed.starts_with("- [X]")
                 || trimmed.starts_with("- [ ]")
+                || trimmed.starts_with("* [x]")
+                || trimmed.starts_with("* [X]")
+                || trimmed.starts_with("* [ ]")
         })
         .count()
 }
@@ -642,7 +650,8 @@ fn write_json<T: serde::Serialize>(
     let path = artifact_root.join(name);
     let bytes = serde_json::to_vec_pretty(value)
         .map_err(|err| parent_error(format!("serialize {name}: {err}")))?;
-    let temp_path = path.with_extension(format!("{}.tmp", std::process::id()));
+    let write_id = ARTIFACT_WRITE_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let temp_path = path.with_extension(format!("{}.{}.tmp", std::process::id(), write_id));
     fs::write(&temp_path, bytes)
         .map_err(|err| parent_error(format!("write {}: {err}", temp_path.display())))?;
     fs::rename(&temp_path, &path).map_err(|err| {
@@ -681,17 +690,6 @@ fn selected_child(artifact_root: &Path) -> Result<Option<u64>, EngineError> {
     Ok(selected.get("issue_number").and_then(Value::as_u64))
 }
 
-fn fallback_issue(number: u64) -> GithubIssue {
-    GithubIssue {
-        number,
-        title: String::new(),
-        state: "open".to_string(),
-        labels: Vec::new(),
-        assignee: None,
-        milestone: None,
-        body: None,
-    }
-}
 
 fn github_error(err: GithubError) -> EngineError {
     parent_error(err.to_string())

@@ -11,6 +11,7 @@ use rusqlite::Connection;
 
 use crate::adapters::github::GithubError;
 use crate::adapters::github_issues::{GithubIssue, GithubIssueQuery};
+use crate::engine::runner::EngineError;
 use crate::persistence::leases::get_lease_for_issue;
 use crate::workflow::schema::DiscoveryConfig;
 
@@ -65,6 +66,20 @@ impl SkipReason {
             SkipReason::ConcurrencyLimitReached => "concurrency_limit_reached",
             SkipReason::InvalidLeaseState => "invalid_lease_state",
         }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum DiscoveryError {
+    #[error(transparent)]
+    Github(#[from] GithubError),
+    #[error(transparent)]
+    Database(#[from] rusqlite::Error),
+}
+
+impl From<DiscoveryError> for EngineError {
+    fn from(error: DiscoveryError) -> Self {
+        EngineError::InvalidState(error.to_string())
     }
 }
 
@@ -178,7 +193,7 @@ pub fn discover(
     q: &dyn GithubIssueQuery,
     conn: &Connection,
     active_count: usize,
-) -> Result<DiscoveryResult, GithubError> {
+) -> Result<DiscoveryResult, DiscoveryError> {
     let repo = cfg.repo.as_deref().unwrap_or("");
     let mut issues = q.list_issues(repo, &cfg.include_labels, &cfg.issue_states)?;
     order_issues(cfg, &mut issues);
@@ -204,8 +219,19 @@ pub fn discover(
                 .push((issue, SkipReason::ConcurrencyLimitReached));
             continue;
         }
-        let routed = route_issue(cfg, q, &issue, repo)?;
-        result.eligible.push(routed);
+        if cfg.route_parent_issues {
+            match route_issue(cfg, q, issue, repo) {
+                Ok(routed) => result.eligible.push(routed),
+                Err(err) => {
+                    eprintln!("route issue error for {repo}: {err}");
+                    result
+                        .skipped
+                        .push((err.issue, SkipReason::InvalidLeaseState));
+                }
+            }
+        } else {
+            result.eligible.push(RoutedIssue::ordinary(issue));
+        }
     }
 
     Ok(result)
@@ -219,11 +245,11 @@ fn dynamic_skip(
     conn: &Connection,
     issue: &GithubIssue,
     repo: &str,
-) -> Result<Option<SkipReason>, GithubError> {
+) -> Result<Option<SkipReason>, DiscoveryError> {
     if cfg.skip_children_of_active_parents && has_active_parent(cfg, q, repo, issue, conn)? {
         return Ok(Some(SkipReason::ChildOfActiveParent));
     }
-    if let Ok(Some(lease)) = get_lease_for_issue(conn, repo, issue.number) {
+    if let Some(lease) = get_lease_for_issue(conn, repo, issue.number)? {
         if lease.status.blocks_duplicate_work() {
             return Ok(Some(SkipReason::HasActiveLease));
         }
@@ -240,7 +266,7 @@ fn has_active_parent(
     repo: &str,
     issue: &GithubIssue,
     conn: &Connection,
-) -> Result<bool, GithubError> {
+) -> Result<bool, DiscoveryError> {
     let Some(parent) = q.get_parent_issue(repo, issue.number)? else {
         return Ok(false);
     };
@@ -249,7 +275,7 @@ fn has_active_parent(
     }
     get_lease_for_issue(conn, repo, parent.issue.number)
         .map(|lease| lease.is_some_and(|lease| lease.status.blocks_duplicate_work()))
-        .map_err(discovery_database_error)
+        .map_err(DiscoveryError::from)
 }
 
 fn parent_has_active_label(cfg: &DiscoveryConfig, parent: &GithubIssue) -> bool {
@@ -264,25 +290,36 @@ fn parent_has_active_label(cfg: &DiscoveryConfig, parent: &GithubIssue) -> bool 
         })
 }
 
-fn discovery_database_error(err: rusqlite::Error) -> GithubError {
-    GithubError::CommandFailed {
-        argv: vec!["sqlite".to_string(), "issue_leases".to_string()],
-        exit_code: None,
-        stderr: format!("lease database error: {err}"),
+struct RouteIssueError {
+    issue: GithubIssue,
+    source: GithubError,
+}
+
+impl std::fmt::Display for RouteIssueError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "issue #{} routing failed: {}",
+            self.issue.number, self.source
+        )
     }
 }
 
 fn route_issue(
     cfg: &DiscoveryConfig,
     q: &dyn GithubIssueQuery,
-    issue: &GithubIssue,
+    issue: GithubIssue,
     repo: &str,
-) -> Result<RoutedIssue, GithubError> {
-    if cfg.route_parent_issues && !q.list_sub_issues(repo, issue.number)?.is_empty() {
-        return Ok(RoutedIssue::parent(issue.clone(), cfg));
+) -> Result<RoutedIssue, RouteIssueError> {
+    match q.list_sub_issues(repo, issue.number) {
+        Ok(children) if cfg.route_parent_issues && !children.is_empty() => {
+            Ok(RoutedIssue::parent(issue, cfg))
+        }
+        Ok(_) => Ok(RoutedIssue::ordinary(issue)),
+        Err(source) => Err(RouteIssueError { issue, source }),
     }
-    Ok(RoutedIssue::ordinary(issue.clone()))
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;

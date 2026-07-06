@@ -11,6 +11,7 @@
 use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
+use tracing::warn;
 
 use crate::adapters::github::{GithubCommandRunner, GithubError};
 
@@ -20,6 +21,27 @@ fn default_merge_method_flag(method: &str) -> Option<&'static str> {
         "REBASE" | "rebase" => Some("--rebase"),
         "SQUASH" | "squash" => Some("--squash"),
         _ => None,
+    }
+}
+
+fn merge_method_allowed(value: &serde_json::Value, method: &str) -> bool {
+    let key = match method {
+        "--merge" => "mergeCommitAllowed",
+        "--rebase" => "rebaseMergeAllowed",
+        "--squash" => "squashMergeAllowed",
+        _ => return false,
+    };
+    value
+        .get(key)
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+}
+
+fn no_supported_merge_method_error(argv: &[String]) -> GithubError {
+    GithubError::CommandFailed {
+        argv: argv.to_vec(),
+        exit_code: None,
+        stderr: "repository does not report any enabled auto-merge method".to_string(),
     }
 }
 
@@ -433,8 +455,8 @@ pub fn parse_body_issue_references(body: &str) -> Vec<u64> {
 
 fn is_subissue_reference_line(line: &str) -> bool {
     let trimmed = line.trim_start();
-    if trimmed.starts_with("- [") || trimmed.starts_with("* [") {
-        return true;
+    if let Some(item) = checklist_item(trimmed) {
+        return issue_reference_tokens(item) == 1;
     }
     let lower = trimmed.to_ascii_lowercase();
     lower.starts_with("sub-issue")
@@ -442,6 +464,18 @@ fn is_subissue_reference_line(line: &str) -> bool {
         || lower.starts_with("child issue")
         || lower.starts_with("child:")
         || lower.starts_with("children:")
+}
+
+fn checklist_item(trimmed: &str) -> Option<&str> {
+    ["- [ ]", "- [x]", "- [X]", "* [ ]", "* [x]", "* [X]"]
+        .into_iter()
+        .find_map(|prefix| trimmed.strip_prefix(prefix).map(str::trim))
+}
+
+fn issue_reference_tokens(item: &str) -> usize {
+    item.split(|c: char| c.is_whitespace() || c == ')' || c == ']' || c == ',')
+        .filter(|token| token.trim_start_matches(['-', '*', '[']).starts_with('#'))
+        .count()
 }
 
 fn collect_issue_references_from_line(line: &str, seen: &mut BTreeSet<u64>, refs: &mut Vec<u64>) {
@@ -671,10 +705,17 @@ impl<R: GithubCommandRunner> GithubIssueQuery for SystemGithubIssueQuery<R> {
 
     fn list_sub_issues(&self, repo: &str, number: u64) -> Result<Vec<GithubSubIssue>, GithubError> {
         match self.native_sub_issues(repo, number) {
-            Ok(children) if children.is_empty() => self.issue_body_reference_children(repo, number),
             Ok(children) => Ok(children),
-            Err(err) if is_native_sub_issue_page_limit_error(&err) => Err(err),
-            Err(_) => self.issue_body_reference_children(repo, number),
+            Err(err) if is_native_sub_issue_fallback_error(&err) => {
+                warn!(
+                    repo,
+                    issue_number = number,
+                    error = %err,
+                    "falling back to issue body references after native sub-issue lookup failed"
+                );
+                self.issue_body_reference_children(repo, number)
+            }
+            Err(err) => Err(err),
         }
     }
 
@@ -845,24 +886,16 @@ impl<R: GithubCommandRunner> SystemGithubIssueQuery<R> {
             .get("viewerDefaultMergeMethod")
             .and_then(serde_json::Value::as_str)
             .and_then(default_merge_method_flag)
+            .filter(|method| merge_method_allowed(&value, method))
         {
             return Ok(method);
         }
-        if value
-            .get("mergeCommitAllowed")
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false)
-        {
-            return Ok("--merge");
+        for method in ["--merge", "--rebase", "--squash"] {
+            if merge_method_allowed(&value, method) {
+                return Ok(method);
+            }
         }
-        if value
-            .get("rebaseMergeAllowed")
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false)
-        {
-            return Ok("--rebase");
-        }
-        Ok("--squash")
+        Err(no_supported_merge_method_error(&argv))
     }
 
     fn issue_body_reference_children(

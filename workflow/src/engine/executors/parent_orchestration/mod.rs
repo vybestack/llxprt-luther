@@ -2,6 +2,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use chrono::{Duration, Utc};
 use serde_json::{json, Value};
@@ -12,6 +13,8 @@ use crate::adapters::github_issues::{
 };
 use crate::engine::executor::{interpolate_string, StepContext, StepExecutor};
 use crate::engine::instance::WorkflowInstance;
+static ARTIFACT_WRITE_COUNTER: AtomicU64 = AtomicU64::new(0);
+
 use crate::engine::runner::EngineError;
 use crate::engine::transition::StepOutcome;
 use crate::engine::{EngineRunner, RunContext, RunOutcome};
@@ -55,13 +58,13 @@ pub trait ChildWorkflowRunner: Send + Sync {
 
     fn resume_child(
         &self,
-        request: &ChildWorkflowLaunchRequest,
+        _request: &ChildWorkflowLaunchRequest,
     ) -> Result<ChildWorkflowRunResult, String> {
-        self.launch_child(request)
+        Err("child workflow runner does not support resume_child".to_string())
     }
 
-    fn run_status(&self, run_id: &str) -> Result<Option<RunStatus>, String> {
-        child_run_status_from_registry(run_id)
+    fn run_status(&self, _run_id: &str) -> Result<Option<RunStatus>, String> {
+        Err("child workflow runner does not support run_status".to_string())
     }
 }
 
@@ -80,6 +83,10 @@ impl ChildWorkflowRunner for SystemChildWorkflowRunner {
         request: &ChildWorkflowLaunchRequest,
     ) -> Result<ChildWorkflowRunResult, String> {
         resume_child_process(request)
+    }
+
+    fn run_status(&self, run_id: &str) -> Result<Option<RunStatus>, String> {
+        child_run_status_from_registry(run_id)
     }
 }
 

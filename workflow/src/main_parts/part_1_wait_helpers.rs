@@ -14,10 +14,12 @@ fn read_child_merge_wait_artifact(artifact_root: &std::path::Path) -> Result<Opt
         return Ok(None);
     }
     let value = read_json_path(&path)?;
-    Ok(value
+    value
         .get("pr")
         .and_then(|pr| pr.get("number"))
-        .and_then(serde_json::Value::as_u64))
+        .and_then(serde_json::Value::as_u64)
+        .map(Some)
+        .ok_or_else(|| format!("malformed child merge wait artifact at {}: missing numeric pr.number", path.display()))
 }
 
 const CONFIG_TOKEN_UNDERSCORE: u8 = 95;
@@ -45,7 +47,12 @@ fn read_pr_identity_artifact(
         0 => Ok(None),
         1 => Ok(Some(matches.remove(0).1)),
         _ => Err(format!(
-            "multiple PR identity artifacts found for run {run_id}; cannot choose poll identity"
+            "multiple PR identity artifacts found for run {run_id}; cannot choose poll identity; matched paths: {}",
+            matches
+                .iter()
+                .map(|(path, _)| path.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
         )),
     }
 }
@@ -55,10 +62,27 @@ fn collect_pr_identity_artifacts(
     run_id: &str,
     matches: &mut Vec<(std::path::PathBuf, serde_json::Value)>,
 ) -> Result<(), String> {
+    collect_pr_identity_artifacts_at_depth(dir, run_id, matches, 0)
+}
+
+fn collect_pr_identity_artifacts_at_depth(
+    dir: &std::path::Path,
+    run_id: &str,
+    matches: &mut Vec<(std::path::PathBuf, serde_json::Value)>,
+    depth: usize,
+) -> Result<(), String> {
+    if depth > 32 {
+        return Err(format!("PR identity artifact traversal exceeded depth limit at {}", dir.display()));
+    }
     for entry in std::fs::read_dir(dir).map_err(|e| e.to_string())? {
-        let path = entry.map_err(|e| e.to_string())?.path();
-        if path.is_dir() {
-            collect_pr_identity_artifacts(&path, run_id, matches)?;
+        let entry = entry.map_err(|e| e.to_string())?;
+        let file_type = entry.file_type().map_err(|e| e.to_string())?;
+        if file_type.is_symlink() {
+            continue;
+        }
+        let path = entry.path();
+        if file_type.is_dir() {
+            collect_pr_identity_artifacts_at_depth(&path, run_id, matches, depth + 1)?;
         } else if path.file_name().and_then(|name| name.to_str()) == Some("pr.json") {
             let value = read_json_path(&path)?;
             if value.get("run_id").and_then(serde_json::Value::as_str) == Some(run_id)

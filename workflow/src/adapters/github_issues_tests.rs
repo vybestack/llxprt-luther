@@ -302,11 +302,16 @@ fn enable_pr_auto_merge_ignores_unrecognized_viewer_default() {
 }
 
 #[test]
-fn enable_pr_auto_merge_uses_squash_when_no_allowed_flags_are_reported() {
-    assert_auto_merge_method(
-        r#"{"mergeCommitAllowed":false,"rebaseMergeAllowed":false,"squashMergeAllowed":false}"#,
-        "--squash",
-    );
+fn enable_pr_auto_merge_errors_when_no_allowed_flags_are_reported() {
+    let runner = MockRunner::new(vec![Ok(
+        r#"{"mergeCommitAllowed":false,"rebaseMergeAllowed":false,"squashMergeAllowed":false}"#
+            .to_string(),
+    )]);
+    let q = SystemGithubIssueQuery::new(runner);
+
+    let err = q.enable_pr_auto_merge("o/r", 17).unwrap_err();
+
+    assert!(err.to_string().contains("enabled auto-merge method"));
 }
 
 fn assert_auto_merge_method(repo_view_json: &str, expected_method: &str) {

@@ -1,8 +1,3 @@
-#[derive(Debug, Deserialize)]
-struct GraphqlSubIssuePageEdge {
-    node: GraphqlIssue,
-}
-
 #[derive(Debug, Default, Deserialize)]
 struct GraphqlPageInfo {
     #[serde(default, rename = "hasNextPage")]
@@ -29,24 +24,18 @@ struct GraphqlSubIssuePageRepository {
 #[derive(Debug, Deserialize)]
 struct GraphqlSubIssuePageIssue {
     #[serde(default, rename = "subIssues")]
-    sub_issues: GraphqlSubIssuePageConnection,
-}
-
-#[derive(Debug, Default, Deserialize)]
-struct GraphqlSubIssuePageConnection {
-    #[serde(default)]
-    edges: Vec<GraphqlSubIssuePageEdge>,
-    #[serde(default, rename = "pageInfo")]
-    page_info: GraphqlPageInfo,
+    sub_issues: GraphqlSubIssueConnection,
 }
 
 const SUB_ISSUE_PAGE_LIMIT_PREFIX: &str = "sub-issue GraphQL pagination exceeded ";
 
-fn is_native_sub_issue_page_limit_error(error: &GithubError) -> bool {
+fn is_native_sub_issue_fallback_error(error: &GithubError) -> bool {
     matches!(
         error,
         GithubError::CommandFailed { stderr, .. }
-            if stderr.starts_with(SUB_ISSUE_PAGE_LIMIT_PREFIX)
+            if stderr.contains("Field 'subIssues' doesn't exist")
+                || stderr.contains("Cannot query field \"subIssues\"")
+                || stderr.contains("subIssues unavailable")
     )
 }
 
@@ -87,19 +76,7 @@ struct ParsedSubIssuePage {
 }
 
 pub fn parse_sub_issue_response(json: &str) -> Result<Vec<GithubSubIssue>, GithubError> {
-    let response: GraphqlResponse =
-        serde_json::from_str(json).map_err(|e| GithubError::CommandFailed {
-            argv: vec!["gh".into(), "api".into(), "graphql".into()],
-            exit_code: None,
-            stderr: format!("failed to parse sub-issue GraphQL JSON: {e}"),
-        })?;
-    let Some(issue) = response.data.repository.issue else {
-        return Ok(Vec::new());
-    };
-    let mut seen = BTreeSet::new();
-    let mut children = Vec::new();
-    append_sub_issue_edges(issue.sub_issues.edges, &mut seen, &mut children);
-    Ok(children)
+    parse_first_sub_issue_page(json).map(|page| page.children)
 }
 
 fn parse_sub_issue_page_response(
@@ -117,16 +94,7 @@ fn parse_sub_issue_page_response(
     let Some(issue) = response.data.repository.issue else {
         return Ok(None);
     };
-    for edge in issue.sub_issues.edges {
-        let number = edge.node.number;
-        if seen.insert(number) {
-            children.push(GithubSubIssue {
-                issue: graphql_issue_to_issue(edge.node),
-                position: Some(children.len() as u64),
-                source: SubIssueSource::Native,
-            });
-        }
-    }
+    append_sub_issue_edges(issue.sub_issues.edges, seen, children);
     if issue.sub_issues.page_info.has_next_page {
         return issue
             .sub_issues
