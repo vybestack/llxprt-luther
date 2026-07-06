@@ -657,16 +657,17 @@ fn normalize_graphql_thread(
         .get("isOutdated")
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    for comment in graphql_thread_comments(thread) {
-        normalize_graphql_thread_comment(
-            thread,
-            &comment,
-            GraphqlThreadState { resolved, outdated },
-            binding,
-            identities,
-            observation,
-        );
-    }
+    let Some(comment) = graphql_thread_comments(thread).into_iter().next() else {
+        return;
+    };
+    normalize_graphql_thread_comment(
+        thread,
+        &comment,
+        GraphqlThreadState { resolved, outdated },
+        binding,
+        identities,
+        observation,
+    );
 }
 
 #[derive(Clone, Copy)]
@@ -777,7 +778,7 @@ fn normalize_rest_review_comment(
         .pointer("/user/login")
         .and_then(Value::as_str)
         .unwrap_or_default();
-    if !is_coderabbit(author, identities) {
+    if !is_explicit_reviewer_identity(author, identities) {
         observation
             .noise
             .push(json!({ "source": "rest_review_comment", "author_login": author }));
@@ -856,7 +857,7 @@ fn normalize_issue_comment(
         .pointer("/user/login")
         .and_then(Value::as_str)
         .unwrap_or_default();
-    if !is_coderabbit(author, identities) {
+    if !is_explicit_reviewer_identity(author, identities) {
         observation
             .noise
             .push(json!({ "source": "issue_comment", "author_login": author }));

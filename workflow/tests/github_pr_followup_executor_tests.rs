@@ -2897,6 +2897,17 @@ fn human_reviewer_graph_page() -> serde_json::Value {
                     "createdAt": "2026-04-30T00:00:00Z",
                     "updatedAt": "2026-04-30T00:00:00Z",
                     "commit": { "oid": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }
+                }, {
+                    "id": "PRRC_followup",
+                    "databaseId": 8201,
+                    "body": "Follow-up reply that must not become a second feedback item.",
+                    "url": "https://github.com/example/workflow/pull/1910#discussion_r8201",
+                    "path": "src/lib.rs",
+                    "line": 12,
+                    "author": { "login": "octocat" },
+                    "createdAt": "2026-04-30T00:01:00Z",
+                    "updatedAt": "2026-04-30T00:01:00Z",
+                    "commit": { "oid": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }
                 }] }
             }],
             "pageInfo": { "hasNextPage": false }
@@ -2947,7 +2958,15 @@ fn collector_includes_non_coderabbit_reviewer_only_when_flag_set() {
     let runner_all = P08FeedbackRunner::with_pages(
         vec![human_reviewer_graph_page()],
         vec![serde_json::json!([])],
-        vec![serde_json::json!([])],
+        vec![serde_json::json!([{
+            "id": 9200,
+            "node_id": "IC_human",
+            "body": "Human issue comment should not be collected as review feedback.",
+            "html_url": "https://github.com/example/workflow/pull/1910#issuecomment-9200",
+            "user": { "login": "octocat" },
+            "created_at": "2026-04-30T00:02:00Z",
+            "updated_at": "2026-04-30T00:02:00Z"
+        }])],
         check_runs,
     );
     let mut context_all = p08_context(&temp_all);
