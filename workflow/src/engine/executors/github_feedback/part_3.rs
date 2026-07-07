@@ -357,17 +357,17 @@ fn post_marker_reply_via_rest_review_comment(
         binding.repository_owner, binding.repository_name, binding.pr_number, comment_database_id
     );
     let parsed = post_marker_reply_rest(runner, endpoint, body_path)?;
-    Ok(marker_reply_record(
+    Ok(marker_reply_record(MarkerReplyRecordInput {
         action,
         comment_key,
         body,
         body_path,
-        parsed.get("id").cloned().unwrap_or(Value::Null),
-        parsed.get("html_url").cloned().unwrap_or(Value::Null),
-        true,
-        parsed.get("in_reply_to_id").cloned().unwrap_or(Value::Null),
-        json!([]),
-    ))
+        comment_id: parsed.get("id").cloned().unwrap_or(Value::Null),
+        comment_url: parsed.get("html_url").cloned().unwrap_or(Value::Null),
+        in_thread_reply: true,
+        in_reply_to_id: parsed.get("in_reply_to_id").cloned().unwrap_or(Value::Null),
+        warnings: json!([]),
+    }))
 }
 
 fn post_marker_reply_via_issue_comment(
@@ -383,17 +383,17 @@ fn post_marker_reply_via_issue_comment(
         binding.repository_owner, binding.repository_name, binding.pr_number
     );
     let parsed = post_marker_reply_rest(runner, endpoint, body_path)?;
-    Ok(marker_reply_record(
+    Ok(marker_reply_record(MarkerReplyRecordInput {
         action,
         comment_key,
         body,
         body_path,
-        parsed.get("id").cloned().unwrap_or(Value::Null),
-        parsed.get("html_url").cloned().unwrap_or(Value::Null),
-        false,
-        Value::Null,
-        json!(["no_review_thread_identity_posted_top_level_comment"]),
-    ))
+        comment_id: parsed.get("id").cloned().unwrap_or(Value::Null),
+        comment_url: parsed.get("html_url").cloned().unwrap_or(Value::Null),
+        in_thread_reply: false,
+        in_reply_to_id: Value::Null,
+        warnings: json!(["no_review_thread_identity_posted_top_level_comment"]),
+    }))
 }
 
 fn post_marker_reply_rest(
@@ -452,40 +452,42 @@ fn post_marker_reply_via_graphql_thread(
     if comment_url.is_none() {
         warnings.push("missing_url_in_graphql_thread_reply_response");
     }
-    Ok(marker_reply_record(
+    Ok(marker_reply_record(MarkerReplyRecordInput {
         action,
         comment_key,
         body,
         body_path,
-        comment_id.unwrap_or(Value::Null),
-        comment_url.unwrap_or(Value::Null),
-        true,
-        Value::Null,
-        json!(warnings),
-    ))
+        comment_id: comment_id.unwrap_or(Value::Null),
+        comment_url: comment_url.unwrap_or(Value::Null),
+        in_thread_reply: true,
+        in_reply_to_id: Value::Null,
+        warnings: json!(warnings),
+    }))
 }
 
-fn marker_reply_record(
-    action: &PendingMarkerAction,
-    comment_key: &str,
-    body: &str,
-    body_path: &Path,
+struct MarkerReplyRecordInput<'a> {
+    action: &'a PendingMarkerAction,
+    comment_key: &'a str,
+    body: &'a str,
+    body_path: &'a Path,
     comment_id: Value,
     comment_url: Value,
     in_thread_reply: bool,
     in_reply_to_id: Value,
     warnings: Value,
-) -> Value {
+}
+
+fn marker_reply_record(input: MarkerReplyRecordInput<'_>) -> Value {
     json!({
-        "idempotency_key": comment_key,
-        "comment_id": comment_id,
-        "comment_url": comment_url,
-        "in_thread_reply": in_thread_reply,
-        "in_reply_to_id": in_reply_to_id,
-        "body_hash": stable_hash(body),
-        "body_path": body_path.display().to_string(),
-        "action_id": action.value.get("action_id").cloned().unwrap_or(Value::Null),
-        "warnings": warnings,
+        "idempotency_key": input.comment_key,
+        "comment_id": input.comment_id,
+        "comment_url": input.comment_url,
+        "in_thread_reply": input.in_thread_reply,
+        "in_reply_to_id": input.in_reply_to_id,
+        "body_hash": stable_hash(input.body),
+        "body_path": input.body_path.display().to_string(),
+        "action_id": input.action.value.get("action_id").cloned().unwrap_or(Value::Null),
+        "warnings": input.warnings,
         "source": "posted"
     })
 }
