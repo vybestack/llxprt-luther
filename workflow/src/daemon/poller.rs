@@ -143,7 +143,7 @@ impl PollDecision {
 }
 
 fn timeout_decision(record: &WaitStateRecord) -> Option<PollDecision> {
-    let max_wait_seconds = record.max_wait_seconds?;
+    let max_wait_seconds = effective_max_wait_seconds(record)?;
     let max_wait_seconds = i64::try_from(max_wait_seconds).unwrap_or(i64::MAX);
     if Utc::now()
         .signed_duration_since(record.created_at)
@@ -159,10 +159,24 @@ fn timeout_decision(record: &WaitStateRecord) -> Option<PollDecision> {
         observed_state: json!({
             "classification": "timed_out",
             "wait_kind": record.wait_kind,
-            "max_wait_seconds": record.max_wait_seconds,
+            "max_wait_seconds": max_wait_seconds,
         }),
     })
 }
+
+fn effective_max_wait_seconds(record: &WaitStateRecord) -> Option<u64> {
+    record.max_wait_seconds.or(match record.wait_kind {
+        WaitKind::DependencyChildWorkflow => Some(
+            record
+                .poll_interval_seconds
+                .saturating_mul(DEFAULT_CHILD_WORKFLOW_MAX_POLLS),
+        ),
+        _ => None,
+    })
+}
+
+const DEFAULT_CHILD_WORKFLOW_MAX_POLLS: u64 = 3;
+
 fn child_workflow_db_path() -> std::path::PathBuf {
     crate::runtime_paths::get_data_dir().join("checkpoints.db")
 }
@@ -198,10 +212,10 @@ fn poll_child_workflow(record: &WaitStateRecord, db_path: &std::path::Path) -> P
         }
     };
     let Some(metadata) = metadata else {
-        return terminal_failure(
+        return PollDecision::transient(
             record,
             json!({
-                "classification": "terminal_failure",
+                "classification": "transient_failure",
                 "wait_kind": record.wait_kind,
                 "child_run_id": child_run_id,
                 "reason": "child_run_metadata_missing"

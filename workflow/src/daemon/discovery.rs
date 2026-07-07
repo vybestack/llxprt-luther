@@ -8,6 +8,7 @@
 //! @requirement:REQ-DAEMON-DISCOVERY-004
 
 use rusqlite::Connection;
+use tracing::error;
 
 use crate::adapters::github::GithubError;
 use crate::adapters::github_issues::{GithubIssue, GithubIssueQuery};
@@ -84,7 +85,10 @@ impl From<DiscoveryError> for EngineError {
     fn from(error: DiscoveryError) -> Self {
         match error {
             DiscoveryError::Database(err) => EngineError::PersistenceError(err.to_string()),
-            DiscoveryError::Github(err) => EngineError::InvalidState(err.to_string()),
+            DiscoveryError::Github(err) => EngineError::StepExecutionError {
+                step_id: "github_issue_discovery".to_string(),
+                message: err.to_string(),
+            },
         }
     }
 }
@@ -215,7 +219,11 @@ pub fn discover(
             result.skipped.push((issue, reason));
             continue;
         }
-        if let Some(reason) = dynamic_skip(cfg, q, conn, &issue, repo)? {
+        if let Some(reason) = local_dynamic_skip(conn, &issue, repo)? {
+            result.skipped.push((issue, reason));
+            continue;
+        }
+        if let Some(reason) = remote_dynamic_skip(cfg, q, conn, &issue, repo)? {
             result.skipped.push((issue, reason));
             continue;
         }
@@ -229,7 +237,7 @@ pub fn discover(
             match route_issue(cfg, q, issue, repo) {
                 Ok(routed) => result.eligible.push(routed),
                 Err(err) => {
-                    eprintln!("route issue error for {repo}: {err}");
+                    error!(repo, error = %err, "route issue error");
                     result.skipped.push((
                         *err.issue,
                         SkipReason::RoutingFailed(err.source.to_string()),
@@ -244,9 +252,24 @@ pub fn discover(
     Ok(result)
 }
 
-/// Check the dynamic (DB/network) skip reasons: active lease, then open PR.
+/// Check local dynamic skip reasons before any network-backed lookups.
 /// @plan:PLAN-20260415-DAEMON-DISCOVERY.P04
-fn dynamic_skip(
+fn local_dynamic_skip(
+    conn: &Connection,
+    issue: &GithubIssue,
+    repo: &str,
+) -> Result<Option<SkipReason>, DiscoveryError> {
+    if let Some(lease) = get_lease_for_issue(conn, repo, issue.number)? {
+        if lease.status.blocks_duplicate_work() {
+            return Ok(Some(SkipReason::HasActiveLease));
+        }
+    }
+    Ok(None)
+}
+
+/// Check network-backed dynamic skip reasons after cheaper local filters.
+/// @plan:PLAN-20260415-DAEMON-DISCOVERY.P04
+fn remote_dynamic_skip(
     cfg: &DiscoveryConfig,
     q: &dyn GithubIssueQuery,
     conn: &Connection,
@@ -255,11 +278,6 @@ fn dynamic_skip(
 ) -> Result<Option<SkipReason>, DiscoveryError> {
     if cfg.skip_children_of_active_parents && has_active_parent(cfg, q, repo, issue, conn)? {
         return Ok(Some(SkipReason::ChildOfActiveParent));
-    }
-    if let Some(lease) = get_lease_for_issue(conn, repo, issue.number)? {
-        if lease.status.blocks_duplicate_work() {
-            return Ok(Some(SkipReason::HasActiveLease));
-        }
     }
     if q.has_open_pr_for_issue(repo, issue.number)? {
         return Ok(Some(SkipReason::HasOpenPr));
@@ -298,9 +316,8 @@ fn parent_has_active_label(cfg: &DiscoveryConfig, parent: &GithubIssue) -> bool 
 }
 
 #[derive(Debug, thiserror::Error)]
-#[error("issue #{issue_number} routing failed: {source}")]
+#[error("issue #{number} routing failed: {source}", number = issue.number)]
 struct RouteIssueError {
-    issue_number: u64,
     issue: Box<GithubIssue>,
     source: Box<GithubError>,
 }
@@ -315,7 +332,6 @@ fn route_issue(
         Ok(children) if !children.is_empty() => Ok(RoutedIssue::parent(issue, cfg)),
         Ok(_) => Ok(RoutedIssue::ordinary(issue)),
         Err(source) => Err(RouteIssueError {
-            issue_number: issue.number,
             issue: Box::new(issue),
             source: Box::new(source),
         }),

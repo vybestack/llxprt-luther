@@ -11,7 +11,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Mutex;
 
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Serialize};
 use tracing::warn;
 
 use crate::adapters::github::{GithubCommandRunner, GithubError};
@@ -49,6 +49,20 @@ fn auto_merge_cache_lock_error<T>(err: std::sync::PoisonError<T>) -> GithubError
     GithubError::CacheLock {
         context: "resolving auto-merge method".to_string(),
         error: err.to_string(),
+    }
+}
+
+fn is_issue_not_found_error(error: &GithubError) -> bool {
+    match error {
+        GithubError::CommandFailed {
+            stderr, exit_code, ..
+        } => {
+            *exit_code == Some(1)
+                && ["not found", "could not resolve", "no issue found"]
+                    .iter()
+                    .any(|needle| stderr.to_ascii_lowercase().contains(needle))
+        }
+        _ => false,
     }
 }
 
@@ -343,13 +357,35 @@ fn graphql_issue_argv(repo: &str, number: u64, query: &str) -> Result<Vec<String
     ])
 }
 
+fn graphql_response_error(argv: &[String], errors: &[GraphqlError]) -> Option<GithubError> {
+    if errors.is_empty() {
+        return None;
+    }
+    Some(GithubError::CommandFailed {
+        argv: argv.to_vec(),
+        exit_code: None,
+        stderr: format!(
+            "GitHub GraphQL returned errors: {}",
+            errors
+                .iter()
+                .map(|error| error.message.as_str())
+                .collect::<Vec<_>>()
+                .join("; ")
+        ),
+    })
+}
+
 pub fn parse_parent_issue_response(json: &str) -> Result<Option<GithubParentIssue>, GithubError> {
+    let argv = vec!["gh".into(), "api".into(), "graphql".into()];
     let response: GraphqlParentResponse =
         serde_json::from_str(json).map_err(|e| GithubError::CommandFailed {
-            argv: vec!["gh".into(), "api".into(), "graphql".into()],
+            argv: argv.clone(),
             exit_code: None,
             stderr: format!("failed to parse parent-issue GraphQL JSON: {e}"),
         })?;
+    if let Some(err) = graphql_response_error(&argv, &response.errors) {
+        return Err(err);
+    }
     Ok(response
         .data
         .and_then(|data| data.repository.issue)
@@ -379,6 +415,29 @@ fn is_subissue_reference_line(line: &str) -> bool {
         || lower.starts_with("child issue")
         || lower.starts_with("child:")
         || lower.starts_with("children:")
+}
+
+fn parse_body_reference_children<F>(
+    repo: &str,
+    body: &str,
+    mut lookup: F,
+) -> Result<Vec<GithubSubIssue>, GithubError>
+where
+    F: FnMut(u64) -> Result<Option<GithubIssue>, GithubError>,
+{
+    let mut children = Vec::new();
+    for (idx, child_number) in parse_body_issue_references(body).into_iter().enumerate() {
+        let Some(issue) = lookup(child_number)? else {
+            warn!(repo, child_number, "fallback child issue was not found");
+            continue;
+        };
+        children.push(GithubSubIssue {
+            issue,
+            position: Some(idx as u64),
+            source: SubIssueSource::FallbackChecklist,
+        });
+    }
+    Ok(children)
 }
 
 fn checklist_item(trimmed: &str) -> Option<&str> {
@@ -423,7 +482,7 @@ fn parse_pr_state(json: &str, argv: &[String]) -> Result<Option<GithubIssuePrSta
 fn parse_issue_pr_references(
     json: &str,
     argv: &[String],
-) -> Result<Option<GithubIssuePrState>, GithubError> {
+) -> Result<Vec<GithubIssuePrState>, GithubError> {
     let refs: RawIssuePrReferences =
         serde_json::from_str(json).map_err(|e| GithubError::CommandFailed {
             argv: argv.to_vec(),
@@ -433,8 +492,8 @@ fn parse_issue_pr_references(
     Ok(refs
         .closed_by_pull_requests_references
         .into_iter()
-        .next()
-        .map(raw_pr_state_to_issue_pr_state))
+        .map(raw_pr_state_to_issue_pr_state)
+        .collect())
 }
 
 fn raw_pr_state_to_issue_pr_state(pr: RawPrState) -> GithubIssuePrState {
@@ -621,7 +680,11 @@ impl<R: GithubCommandRunner> GithubIssueQuery for SystemGithubIssueQuery<R> {
             "--json".to_string(),
             "number,title,state,labels,assignees,milestone,body".to_string(),
         ];
-        let out = self.runner.run(&argv)?;
+        let out = match self.runner.run(&argv) {
+            Ok(out) => out,
+            Err(err) if is_issue_not_found_error(&err) => return Ok(None),
+            Err(err) => return Err(err),
+        };
         let raw: RawIssueView =
             serde_json::from_str(&out).map_err(|e| GithubError::CommandFailed {
                 argv: argv.clone(),
@@ -701,26 +764,12 @@ impl<R: GithubCommandRunner> GithubIssueQuery for SystemGithubIssueQuery<R> {
             "closedByPullRequestsReferences".to_string(),
         ];
         let issue_refs_out = self.runner.run(&issue_refs_argv)?;
-        if let Some(pr) = parse_issue_pr_references(&issue_refs_out, &issue_refs_argv)? {
+        let issue_refs = parse_issue_pr_references(&issue_refs_out, &issue_refs_argv)?;
+        if let Some(pr) = issue_refs.into_iter().next() {
             return Ok(Some(pr));
         }
 
-        let search_argv = vec![
-            "gh".to_string(),
-            "pr".to_string(),
-            "list".to_string(),
-            "--repo".to_string(),
-            repo.to_string(),
-            "--state".to_string(),
-            "all".to_string(),
-            "--search".to_string(),
-            format!("issue:{number}"),
-            "--json".to_string(),
-            "number,state,merged,mergeCommit,reviewDecision,statusCheckRollup".to_string(),
-        ];
-
-        let search_out = self.runner.run(&search_argv)?;
-        parse_pr_state(&search_out, &search_argv)
+        Ok(None)
     }
 
     fn comment_issue(&self, repo: &str, number: u64, body: &str) -> Result<(), GithubError> {
@@ -861,28 +910,11 @@ impl<R: GithubCommandRunner> SystemGithubIssueQuery<R> {
                 exit_code: None,
                 stderr: format!("failed to parse gh issue body JSON: {e}"),
             })?;
-        let mut children = Vec::new();
-        for (idx, child_number) in
-            parse_body_issue_references(raw.body.as_deref().unwrap_or_default())
-                .into_iter()
-                .enumerate()
-        {
-            match self.get_issue(repo, child_number) {
-                Ok(Some(issue)) => children.push(GithubSubIssue {
-                    issue,
-                    position: Some(idx as u64),
-                    source: SubIssueSource::FallbackChecklist,
-                }),
-                Ok(None) => warn!(repo, child_number, "fallback child issue was not found"),
-                Err(err) => warn!(
-                    repo,
-                    child_number,
-                    error = %err,
-                    "skipping fallback child issue after lookup failed"
-                ),
-            }
-        }
-        Ok(children)
+        parse_body_reference_children(
+            repo,
+            raw.body.as_deref().unwrap_or_default(),
+            |child_number| self.get_issue(repo, child_number),
+        )
     }
 }
 

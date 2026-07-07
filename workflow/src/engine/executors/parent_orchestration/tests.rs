@@ -483,7 +483,7 @@ impl ChildWorkflowRunner for WaitingChildRunner {
     fn launch_child(
         &self,
         request: &ChildWorkflowLaunchRequest,
-    ) -> Result<ChildWorkflowRunResult, String> {
+    ) -> Result<ChildWorkflowRunResult, ChildWorkflowRunnerError> {
         assert_eq!(request.workflow_type_id, "llxprt-issue-fix-v1");
         Ok(ChildWorkflowRunResult::WaitingExternal)
     }
@@ -496,7 +496,7 @@ impl ChildWorkflowRunner for MockChildRunner {
     fn launch_child(
         &self,
         request: &ChildWorkflowLaunchRequest,
-    ) -> Result<ChildWorkflowRunResult, String> {
+    ) -> Result<ChildWorkflowRunResult, ChildWorkflowRunnerError> {
         assert_eq!(request.workflow_type_id, "llxprt-issue-fix-v1");
         Ok(ChildWorkflowRunResult::CompletedSuccess)
     }
@@ -508,7 +508,7 @@ impl ChildWorkflowRunner for NoLaunchRunner {
     fn launch_child(
         &self,
         _request: &ChildWorkflowLaunchRequest,
-    ) -> Result<ChildWorkflowRunResult, String> {
+    ) -> Result<ChildWorkflowRunResult, ChildWorkflowRunnerError> {
         panic!("parent orchestrator must not duplicate a child with an existing PR");
     }
 }
@@ -585,7 +585,7 @@ fn child_wait_kind_mapping_covers_known_steps() {
 
 #[test]
 fn child_wait_identity_accepts_required_metadata() {
-    let metadata = child_run_metadata(Some(17), Some("abc123"));
+    let mut metadata = child_run_metadata(Some(17), Some("abc123"));
 
     let identity = child_wait_poll_identity(Some(&metadata), WaitKind::PrChecks).unwrap();
 
@@ -593,6 +593,8 @@ fn child_wait_identity_accepts_required_metadata() {
     assert_eq!(identity.head_sha.as_deref(), Some("abc123"));
 
     assert!(child_wait_poll_identity(Some(&metadata), WaitKind::DependencyChildWorkflow).is_ok());
+    metadata.head_sha = None;
+    assert!(child_wait_poll_identity(Some(&metadata), WaitKind::DependencyChildWorkflow).is_err());
 }
 
 #[test]

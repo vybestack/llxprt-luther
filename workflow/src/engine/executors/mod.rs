@@ -56,10 +56,12 @@ pub use github_pr::{
 pub use llxprt::{LlxprtExecutor, LlxprtExecutorWithDetector};
 pub use noop::NoOpExecutor;
 pub use parent_orchestration::model::{
-    classify_child, missing_ordered_child_states, next_actionable_child, order_subissues,
-    ChildIssueState, ChildTerminalState, ParentIssueOrchestrationState,
+    classify_child, next_actionable_child, order_subissues, ChildIssueState, ChildTerminalState,
+    ParentIssueOrchestrationState,
 };
-pub use parent_orchestration::{ParentOrchestrationExecutor, ParentOrchestrationExecutorWithQuery};
+pub use parent_orchestration::{
+    missing_ordered_child_states, ParentOrchestrationExecutor, ParentOrchestrationExecutorWithQuery,
+};
 pub use pr_followup_artifacts::{
     ArtifactWriter, ClockSleeper, PrFollowupArtifactStore, PrFollowupFilesystem,
     SystemClockSleeper, SystemPrFollowupFilesystem,

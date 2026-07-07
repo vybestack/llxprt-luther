@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use chrono::{Duration, Utc};
 use serde_json::{json, Value};
+use tracing::warn;
 
 use crate::adapters::github::{GithubError, SystemGithubCommandRunner};
 use crate::adapters::github_issues::{
@@ -32,9 +33,10 @@ use crate::workflow::target_profile::{apply_target_profile_overrides, TargetProf
 pub mod model;
 
 use model::{
-    classify_child, missing_ordered_child_states, next_actionable_child, order_subissues,
-    ChildIssueState, ChildTerminalState,
+    classify_child, next_actionable_child, order_subissues, ChildIssueState, ChildTerminalState,
 };
+
+pub use model::missing_ordered_child_states;
 
 /// Dispatches every parent orchestration workflow step using the current step id.
 pub struct ParentOrchestrationExecutor;
@@ -50,17 +52,44 @@ impl StepExecutor for ParentOrchestrationExecutor {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ChildWorkflowRunnerError {
+    LaunchFailed(String),
+    ResumeFailed(String),
+    Unsupported(String),
+}
+
+impl std::fmt::Display for ChildWorkflowRunnerError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ChildWorkflowRunnerError::LaunchFailed(message) => {
+                write!(f, "child workflow launch failed: {message}")
+            }
+            ChildWorkflowRunnerError::ResumeFailed(message) => {
+                write!(f, "child workflow resume failed: {message}")
+            }
+            ChildWorkflowRunnerError::Unsupported(message) => {
+                write!(f, "unsupported child workflow operation: {message}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for ChildWorkflowRunnerError {}
+
 pub trait ChildWorkflowRunner: Send + Sync {
     fn launch_child(
         &self,
         request: &ChildWorkflowLaunchRequest,
-    ) -> Result<ChildWorkflowRunResult, String>;
+    ) -> Result<ChildWorkflowRunResult, ChildWorkflowRunnerError>;
 
     fn resume_child(
         &self,
         _request: &ChildWorkflowLaunchRequest,
-    ) -> Result<ChildWorkflowRunResult, String> {
-        Err("child workflow runner does not support resume_child".to_string())
+    ) -> Result<ChildWorkflowRunResult, ChildWorkflowRunnerError> {
+        Err(ChildWorkflowRunnerError::Unsupported(
+            "child workflow runner does not support resume_child".to_string(),
+        ))
     }
 
     fn run_status(&self, _run_id: &str) -> Result<Option<RunStatus>, EngineError> {
@@ -76,15 +105,15 @@ impl ChildWorkflowRunner for SystemChildWorkflowRunner {
     fn launch_child(
         &self,
         request: &ChildWorkflowLaunchRequest,
-    ) -> Result<ChildWorkflowRunResult, String> {
-        launch_child_process(request)
+    ) -> Result<ChildWorkflowRunResult, ChildWorkflowRunnerError> {
+        launch_child_process(request).map_err(ChildWorkflowRunnerError::LaunchFailed)
     }
 
     fn resume_child(
         &self,
         request: &ChildWorkflowLaunchRequest,
-    ) -> Result<ChildWorkflowRunResult, String> {
-        resume_child_process(request)
+    ) -> Result<ChildWorkflowRunResult, ChildWorkflowRunnerError> {
+        resume_child_process(request).map_err(ChildWorkflowRunnerError::ResumeFailed)
     }
 
     fn run_status(&self, run_id: &str) -> Result<Option<RunStatus>, EngineError> {
@@ -196,16 +225,18 @@ impl OrchestrationState {
                 .get("luther_label")
                 .cloned()
                 .unwrap_or_else(|| "Luther working".to_string()),
-            child_workflow_type_id: context
-                .get("parent_orchestration.child_workflow_type_id")
-                .or_else(|| context.get("child_workflow_type_id"))
-                .cloned()
-                .unwrap_or_else(|| "llxprt-issue-fix-v1".to_string()),
-            child_config_id: context
-                .get("parent_orchestration.child_config_id")
-                .or_else(|| context.get("child_config_id"))
-                .cloned()
-                .unwrap_or_else(|| "llxprt-code".to_string()),
+            child_workflow_type_id: context_value_with_warned_default(
+                context,
+                "parent_orchestration.child_workflow_type_id",
+                "child_workflow_type_id",
+                "llxprt-issue-fix-v1",
+            ),
+            child_config_id: context_value_with_warned_default(
+                context,
+                "parent_orchestration.child_config_id",
+                "child_config_id",
+                "llxprt-code",
+            ),
             merge_poll_interval_seconds: context
                 .get("parent_orchestration.merge_poll_interval_seconds")
                 .or_else(|| context.get("merge_poll_interval_seconds"))
@@ -232,7 +263,17 @@ impl OrchestrationState {
                 .get("config_root")
                 .or_else(|| context.get("config_dir"))
                 .map(PathBuf::from)
-                .unwrap_or_else(|| PathBuf::from("config")),
+                .or_else(|| {
+                    context
+                        .get("work_dir")
+                        .map(|work_dir| PathBuf::from(work_dir).join("config"))
+                })
+                .unwrap_or_else(|| {
+                    warn!(
+                        "parent orchestration config_root/config_dir missing; falling back to relative config root"
+                    );
+                    PathBuf::from("config")
+                }),
         })
     }
 }

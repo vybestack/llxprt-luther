@@ -43,9 +43,10 @@ fn classify_subissues(
     query: &dyn GithubIssueQuery,
 ) -> Result<StepOutcome, EngineError> {
     let children = read_children(&state.artifact_root)?;
+    let conn = daemon_connection()?;
     let states = children
         .iter()
-        .map(|child| classify_child_with_run_state(state, query, &child.issue))
+        .map(|child| classify_child_with_run_state(state, query, &conn, &child.issue))
         .collect::<Result<Vec<_>, _>>()?;
     write_json(
         &state.artifact_root,
@@ -59,24 +60,25 @@ fn classify_subissues(
 fn classify_child_with_run_state(
     state: &OrchestrationState,
     query: &dyn GithubIssueQuery,
+    conn: &rusqlite::Connection,
     issue: &GithubIssue,
 ) -> Result<ChildIssueState, EngineError> {
     let pr = query
         .pr_state_for_issue(&state.repo, issue.number)
         .map_err(github_error)?;
     let mut child = classify_child(issue, pr.as_ref());
-    apply_child_run_state(state, issue, &mut child)?;
+    apply_child_run_state(state, conn, issue, &mut child)?;
     Ok(child)
 }
 
 fn apply_child_run_state(
     state: &OrchestrationState,
+    conn: &rusqlite::Connection,
     issue: &GithubIssue,
     child: &mut ChildIssueState,
 ) -> Result<(), EngineError> {
-    let conn = daemon_connection()?;
     if let Some(lease) =
-        get_lease_for_issue(&conn, &state.repo, child.issue_number).map_err(sql_error)?
+        get_lease_for_issue(conn, &state.repo, child.issue_number).map_err(sql_error)?
     {
         match lease.status {
             LeaseStatus::Failed | LeaseStatus::Abandoned | LeaseStatus::Stale
@@ -92,7 +94,7 @@ fn apply_child_run_state(
                     && issue.state.eq_ignore_ascii_case("open")
                 {
                     child.terminal_state = ChildTerminalState::StaleRun;
-                } else if !child_workflow_completed(&conn, &lease)? {
+                } else if !child_workflow_completed(conn, &lease)? {
                     child.terminal_state = ChildTerminalState::ActiveRun;
                 }
             }
@@ -182,7 +184,7 @@ fn select_next_child(
     let order_plan: Value = read_json(&state.artifact_root.join("subissue-order-plan.json"))?;
     let order: Vec<u64> = serde_json::from_value(order_plan["order"].clone())
         .map_err(|err| parent_error(format!("parse subissue order artifact: {err}")))?;
-    let missing_states = missing_ordered_child_states(&states, &order);
+    let missing_states = model::missing_ordered_child_states(&states, &order);
     if !missing_states.is_empty() {
         write_json(
             &state.artifact_root,
@@ -395,8 +397,9 @@ fn start_child_workflow(
         .add_label(&state.repo, child, &state.luther_label)
         .map_err(github_error)?;
     let request = child_launch_request(state, child);
+    let conn = daemon_connection()?;
     update_lease_status(
-        &daemon_connection()?,
+        &conn,
         &lease.lease_id,
         LeaseStatus::Running,
         Some(&request.run_id),
@@ -411,12 +414,9 @@ fn start_child_workflow(
                 lease.lease_id
             ));
         }
-        parent_error(err)
+        parent_error(err.to_string())
     })?;
-    let run_status = runner.run_status(&request.run_id)?;
-    let pr = query
-        .pr_state_for_issue(&state.repo, child)
-        .map_err(github_error)?;
+    let (run_status, pr) = post_launch_metadata(state, query, runner, child, lease, &request)?;
     finish_child_launch(
         state,
         context,
@@ -451,8 +451,9 @@ fn resume_child_workflow(
         return Ok(StepOutcome::Fixable);
     };
     let request = child_resume_request(state, child, run_id.clone());
+    let conn = daemon_connection()?;
     update_lease_status(
-        &daemon_connection()?,
+        &conn,
         &lease.lease_id,
         LeaseStatus::Running,
         Some(&request.run_id),
@@ -465,12 +466,9 @@ fn resume_child_workflow(
                 lease.lease_id
             ));
         }
-        parent_error(err)
+        parent_error(err.to_string())
     })?;
-    let run_status = runner.run_status(&request.run_id)?;
-    let pr = query
-        .pr_state_for_issue(&state.repo, child)
-        .map_err(github_error)?;
+    let (run_status, pr) = post_launch_metadata(state, query, runner, child, lease, &request)?;
     finish_child_launch(
         state,
         context,
@@ -492,6 +490,41 @@ fn restore_child_lease_after_runner_error(
     run_id: Option<&str>,
 ) -> Result<(), EngineError> {
     update_lease_status(&daemon_connection()?, &lease.lease_id, status, run_id).map_err(sql_error)
+}
+
+fn post_launch_metadata(
+    state: &OrchestrationState,
+    query: &dyn GithubIssueQuery,
+    runner: &dyn ChildWorkflowRunner,
+    child: u64,
+    lease: &crate::persistence::leases::IssueLease,
+    request: &ChildWorkflowLaunchRequest,
+) -> Result<(Option<RunStatus>, Option<GithubIssuePrState>), EngineError> {
+    let run_status = runner.run_status(&request.run_id).map_err(|err| {
+        restore_after_post_launch_metadata_error(lease, err, "read child run status")
+    })?;
+    let pr = query
+        .pr_state_for_issue(&state.repo, child)
+        .map_err(|err| {
+            restore_after_post_launch_metadata_error(lease, github_error(err), "read child PR state")
+        })?;
+    Ok((run_status, pr))
+}
+
+fn restore_after_post_launch_metadata_error(
+    lease: &crate::persistence::leases::IssueLease,
+    err: EngineError,
+    action: &str,
+) -> EngineError {
+    match restore_child_lease_after_runner_error(lease, lease.status, lease.run_id.as_deref()) {
+        Ok(()) => parent_error(format!(
+            "{action} after child launch failed and child lease was restored: {err}"
+        )),
+        Err(restore_err) => parent_error(format!(
+            "{action} after child launch failed: {err}; failed to restore child lease {}: {restore_err}",
+            lease.lease_id
+        )),
+    }
 }
 
 fn wait_for_child_merge(

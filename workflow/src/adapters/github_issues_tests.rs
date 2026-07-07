@@ -357,28 +357,16 @@ fn pr_state_for_issue_prefers_closing_pr_references() {
 }
 
 #[test]
-fn pr_state_for_issue_falls_back_to_search_when_issue_has_no_closing_pr() {
+fn pr_state_for_issue_reports_none_when_issue_has_no_closing_pr() {
     let issue_refs = r#"{"closedByPullRequestsReferences": []}"#;
-    let pr_search = r#"[{
-        "number": 19,
-        "state": "OPEN",
-        "merged": false,
-        "mergeCommit": null,
-        "reviewDecision": null,
-        "statusCheckRollup": [{"conclusion": "FAILURE"}]
-    }]"#;
-    let runner = MockRunner::new(vec![Ok(issue_refs.to_string()), Ok(pr_search.to_string())]);
+    let runner = MockRunner::new(vec![Ok(issue_refs.to_string())]);
     let q = SystemGithubIssueQuery::new(runner);
 
-    let pr = q.pr_state_for_issue("o/r", 7).unwrap().unwrap();
+    assert!(q.pr_state_for_issue("o/r", 7).unwrap().is_none());
 
-    assert_eq!(pr.number, 19);
-    assert_eq!(pr.state, "open");
-    assert!(!pr.merged);
-    assert_eq!(pr.status_check_rollup.as_deref(), Some("failed"));
     let calls = q.runner.calls.borrow();
-    assert_eq!(calls.len(), 2);
-    assert!(calls[1].contains(&"issue:7".to_string()));
+    assert_eq!(calls.len(), 1);
+    assert!(calls[0].contains(&"closedByPullRequestsReferences".to_string()));
 }
 
 #[test]
@@ -432,11 +420,23 @@ fn status_check_rollup_treats_terminal_failure_conclusions_as_failed() {
 }
 
 #[test]
+fn pr_state_for_issue_does_not_select_unrelated_search_mentions() {
+    let issue_refs = r#"{"closedByPullRequestsReferences": []}"#;
+    let runner = MockRunner::new(vec![Ok(issue_refs.to_string())]);
+    let q = SystemGithubIssueQuery::new(runner);
+
+    assert!(q.pr_state_for_issue("o/r", 7).unwrap().is_none());
+
+    let calls = q.runner.calls.borrow();
+    assert_eq!(calls.len(), 1);
+    assert!(!calls[0].contains(&"--search".to_string()));
+}
+
+#[test]
 fn pr_state_for_issue_reports_absent_pr_when_no_reference_or_search_hit() {
-    let runner = MockRunner::new(vec![
-        Ok(r#"{"closedByPullRequestsReferences": []}"#.to_string()),
-        Ok("[]".to_string()),
-    ]);
+    let runner = MockRunner::new(vec![Ok(
+        r#"{"closedByPullRequestsReferences": []}"#.to_string()
+    )]);
     let q = SystemGithubIssueQuery::new(runner);
 
     assert!(q.pr_state_for_issue("o/r", 7).unwrap().is_none());
@@ -461,6 +461,18 @@ fn body_reference_fallback_requires_checklist_or_subissue_context() {
     let body = "This ordinary issue mentions #12 in discussion.\n- [ ] #13 child work\nSub-issue: #14\nchild issue #15";
 
     assert_eq!(parse_body_issue_references(body), vec![13, 14, 15]);
+}
+#[test]
+fn fallback_child_lookup_failure_is_reported() {
+    let result = parse_body_reference_children("o/r", "- [ ] #13", |_| {
+        Err(GithubError::CommandFailed {
+            argv: vec!["gh".to_string(), "issue".to_string(), "view".to_string()],
+            exit_code: Some(1),
+            stderr: "lookup failed".to_string(),
+        })
+    });
+
+    assert!(result.is_err());
 }
 
 #[test]

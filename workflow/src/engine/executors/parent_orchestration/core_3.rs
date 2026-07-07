@@ -130,7 +130,7 @@ fn persist_child_interrupted_state(
         "reason": "child_workflow_interrupted"
     });
     record.poll_interval_seconds = child_wait_poll_interval(config);
-    record.max_wait_seconds = None;
+    record.max_wait_seconds = child_wait_max_wait_seconds(config, record.wait_kind);
     record.next_poll_at = crate::polling::next_poll_time(record.poll_interval_seconds);
     record.resume_step = checkpoint.step_id.clone();
     record.checkpoint_id = crate::engine::continuation::checkpoint_identity(&checkpoint);
@@ -178,7 +178,7 @@ fn persist_child_external_wait_state(
         "reason": reason
     });
     record.poll_interval_seconds = child_wait_poll_interval(config);
-    record.max_wait_seconds = None;
+    record.max_wait_seconds = child_wait_max_wait_seconds(config, record.wait_kind);
     record.next_poll_at = crate::polling::next_poll_time(record.poll_interval_seconds);
     record.resume_step = checkpoint.step_id.clone();
     record.checkpoint_id = crate::engine::continuation::checkpoint_identity(&checkpoint);
@@ -222,6 +222,9 @@ fn child_wait_poll_identity(
         WaitKind::PrChecks if identity.pr_number.is_none() || identity.head_sha.is_none() => {
             Err("missing child PR number or head SHA for PR checks wait state".to_string())
         }
+        WaitKind::DependencyChildWorkflow if identity.head_sha.is_none() => {
+            Err("missing child run id for dependency child workflow wait state".to_string())
+        }
         WaitKind::CoderabbitReview
         | WaitKind::HumanReview
         | WaitKind::PrMerge
@@ -242,6 +245,16 @@ fn child_wait_poll_interval(config: &WorkflowConfig) -> u64 {
         .as_ref()
         .and_then(|discovery| discovery.poll_interval_secs)
         .unwrap_or(300)
+}
+
+fn child_wait_max_wait_seconds(config: &WorkflowConfig, wait_kind: WaitKind) -> Option<u64> {
+    match wait_kind {
+        WaitKind::DependencyChildWorkflow => config
+            .parent_orchestration
+            .max_child_merge_wait_seconds
+            .or_else(|| child_wait_poll_interval(config).checked_mul(3)),
+        _ => None,
+    }
 }
 
 fn child_lease_id(
@@ -613,6 +626,27 @@ fn required_context(context: &StepContext, key: &str) -> Result<String, EngineEr
         .get(key)
         .cloned()
         .ok_or_else(|| parent_error(format!("missing context value '{key}'")))
+}
+
+fn context_value_with_warned_default(
+    context: &StepContext,
+    primary: &str,
+    fallback: &str,
+    default: &str,
+) -> String {
+    context
+        .get(primary)
+        .or_else(|| context.get(fallback))
+        .cloned()
+        .unwrap_or_else(|| {
+            warn!(
+                primary,
+                fallback,
+                default,
+                "parent orchestration context missing; using compatibility default"
+            );
+            default.to_string()
+        })
 }
 
 fn parent_issue_number(context: &StepContext) -> Result<u64, EngineError> {

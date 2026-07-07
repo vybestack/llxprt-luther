@@ -132,6 +132,10 @@ fn discover_skips_issue_with_open_pr() {
         "issue with open PR is not eligible"
     );
     assert_eq!(result.skipped.len(), 1);
+    assert!(
+        !result.skipped.is_empty(),
+        "open PR should produce a skipped issue"
+    );
     assert!(matches!(result.skipped[0].1, SkipReason::HasOpenPr));
 }
 
@@ -194,6 +198,10 @@ fn discover_skips_child_when_parent_has_active_lease() {
         result.eligible.is_empty(),
         "child owned by parent lease is skipped"
     );
+    assert!(
+        !result.skipped.is_empty(),
+        "active parent lease should produce a skipped child issue"
+    );
     assert!(matches!(
         result.skipped[0].1,
         SkipReason::ChildOfActiveParent
@@ -216,6 +224,10 @@ fn discover_skips_child_when_parent_has_luther_working_label() {
     assert!(
         result.eligible.is_empty(),
         "child owned by labeled active parent is skipped"
+    );
+    assert!(
+        !result.skipped.is_empty(),
+        "active parent label should produce a skipped child issue"
     );
     assert!(matches!(
         result.skipped[0].1,

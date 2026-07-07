@@ -6,8 +6,11 @@ struct GraphqlPageInfo {
     end_cursor: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
 struct GraphqlSubIssuePageResponse {
     data: Option<GraphqlSubIssuePageData>,
+    #[serde(default)]
+    errors: Vec<GraphqlError>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -26,22 +29,6 @@ struct GraphqlSubIssuePageIssue {
     sub_issues: GraphqlSubIssueConnection,
 }
 
-impl<'de> Deserialize<'de> for GraphqlSubIssuePageResponse {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        struct Response {
-            data: Option<GraphqlSubIssuePageData>,
-        }
-
-        let response = Response::deserialize(deserializer)?;
-        Ok(Self {
-            data: response.data,
-        })
-    }
-}
 
 const SUB_ISSUE_PAGE_LIMIT_PREFIX: &str = "sub-issue GraphQL pagination exceeded ";
 
@@ -119,6 +106,9 @@ fn parse_sub_issue_page_response(
             exit_code: None,
             stderr: format!("failed to parse sub-issue GraphQL page JSON: {e}"),
         })?;
+    if let Some(err) = graphql_response_error(argv, &response.errors) {
+        return Err(err);
+    }
     let Some(issue) = response.data.and_then(|data| data.repository.issue) else {
         return Err(missing_sub_issue_parent_error(argv));
     };
@@ -152,13 +142,19 @@ fn append_sub_issue_edges(
     }
 }
 
-fn parse_first_sub_issue_page(json: &str, argv: &[String]) -> Result<ParsedSubIssuePage, GithubError> {
+fn parse_first_sub_issue_page(
+    json: &str,
+    argv: &[String],
+) -> Result<ParsedSubIssuePage, GithubError> {
     let response: GraphqlResponse =
         serde_json::from_str(json).map_err(|e| GithubError::CommandFailed {
             argv: argv.to_vec(),
             exit_code: None,
             stderr: format!("failed to parse sub-issue GraphQL JSON: {e}"),
         })?;
+    if let Some(err) = graphql_response_error(argv, &response.errors) {
+        return Err(err);
+    }
     let Some(issue) = response.data.and_then(|data| data.repository.issue) else {
         return Err(missing_sub_issue_parent_error(argv));
     };
