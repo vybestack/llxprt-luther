@@ -148,7 +148,6 @@ fn optional_intent_feedback(lower: &str) -> bool {
         || lower.contains("if the intent")
         || lower.contains("if the current behavior")
         || lower.contains("if they are used directly")
-        || lower.contains("if they are used directly as-is")
         || lower.contains("unless overridden")
         || lower.contains("intended for external consumption")
         || (lower.contains("current behavior") && lower.contains("intentional"))
