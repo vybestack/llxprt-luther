@@ -482,9 +482,22 @@ pub fn commit_continuation(
     step_id: &str,
 ) -> Result<RunMetadata, ContinuationError> {
     let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
-    let metadata = commit_continuation_in_transaction(&tx, request, step_id)?;
-    tx.commit()?;
-    Ok(metadata)
+    match commit_continuation_in_transaction(&tx, request, step_id) {
+        Ok(metadata) => {
+            tx.commit()?;
+            Ok(metadata)
+        }
+        Err(err) => {
+            if let Err(rollback_err) = tx.rollback() {
+                tracing::warn!(
+                    error = %err,
+                    rollback_error = %rollback_err,
+                    "rollback failed after continuation commit error"
+                );
+            }
+            Err(err)
+        }
+    }
 }
 
 fn commit_continuation_in_transaction(

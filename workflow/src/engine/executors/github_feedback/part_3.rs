@@ -423,12 +423,15 @@ fn post_marker_reply_via_graphql_thread(
         .get("errors")
         .and_then(Value::as_array)
         .is_some_and(|errors| !errors.is_empty());
+    if graphql_errors_present {
+        return Err(github_feedback_error(format!(
+            "GraphQL addPullRequestReviewThreadReply returned errors despite a comment object for thread {thread_id}; reply may have been posted, inspect response before retrying; {}",
+            graphql_error_summary(&parsed)
+        )));
+    }
     let comment_id = comment.get("databaseId").cloned();
     let comment_url = comment.get("url").cloned();
     let mut warnings = vec!["posted_review_thread_reply_via_graphql"];
-    if graphql_errors_present {
-        warnings.push("graphql_errors_present_with_posted_thread_reply");
-    }
     if comment_id.is_none() {
         warnings.push("missing_database_id_in_graphql_thread_reply_response");
     }
@@ -560,6 +563,17 @@ fn validate_marker_actions_before_mutation(actions: &[PendingMarkerAction]) -> O
                 "stable_marker_key": action.stable_marker_key,
                 "action_kind": action.action_kind,
                 "violation": "resolution_required_without_thread_id"
+            }));
+        }
+        if marker_action_claims_review_thread_identity(action)
+            && action.comment_database_id.is_none()
+            && action.thread_id.is_none()
+        {
+            violations.push(json!({
+                "item_id": action.item_id,
+                "stable_marker_key": action.stable_marker_key,
+                "action_kind": action.action_kind,
+                "violation": "review_thread_identity_without_reply_target"
             }));
         }
     }

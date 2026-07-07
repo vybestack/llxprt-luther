@@ -29,14 +29,27 @@ fn graphql_error_summary(parsed: &Value) -> String {
     let summary = parsed
         .get("errors")
         .and_then(Value::as_array)
-        .map(|errors| {
-            errors
-                .iter()
-                .filter_map(|error| error.get("message").and_then(Value::as_str))
-                .collect::<Vec<_>>()
-                .join("; ")
-        })
+        .map(|errors| graphql_error_messages(errors))
         .filter(|summary| !summary.is_empty())
+        .or_else(|| graphql_parse_error_summary(parsed))
         .unwrap_or_else(|| "no GraphQL error message returned".to_string());
     summary.chars().take(500).collect()
+}
+
+fn graphql_error_messages(errors: &[Value]) -> String {
+    errors
+        .iter()
+        .filter_map(|error| error.get("message").and_then(Value::as_str))
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+fn graphql_parse_error_summary(parsed: &Value) -> Option<String> {
+    let parse_error = parsed.get("parse_error").and_then(Value::as_str)?;
+    let raw_response = parsed.get("raw_response").and_then(Value::as_str).unwrap_or("");
+    Some(format!(
+        "response parse error: {parse_error}; raw_response_hash={}; raw_response_bytes={}",
+        stable_hash(raw_response),
+        raw_response.len()
+    ))
 }
