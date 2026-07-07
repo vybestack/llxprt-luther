@@ -39,6 +39,10 @@ const ALL_REVIEWERS_SENTINEL: &str = "*";
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P15
 /// @requirement:REQ-PRFU-016
 const RESOLVE_REVIEW_THREAD_MUTATION: &str = "mutation resolveReviewThread($threadId:ID!){ resolveReviewThread(input:{threadId:$threadId}) { thread { id isResolved } } }";
+/// Real GraphQL mutation used to post a reply on a PR review thread.
+/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P15
+/// @requirement:REQ-PRFU-016
+const ADD_REVIEW_THREAD_REPLY_MUTATION: &str = "mutation addPullRequestReviewThreadReply($threadId:ID!,$body:String!){ addPullRequestReviewThreadReply(input:{pullRequestReviewThreadId:$threadId,body:$body}) { comment { id databaseId url } } }";
 
 /// Remote marker discovery record for feedback marker idempotency.
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P08

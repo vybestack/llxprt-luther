@@ -2372,15 +2372,15 @@ fn pr_checks_api_error_is_retryable_without_in_process_retry_loop() {
 /// @requirement:REQ-PRFU-007
 /// @pseudocode lines 1-21
 #[test]
-fn ci_failure_failed_pending_collects_logs_preserves_pending_and_routes_terminal() {
+fn ci_failure_failed_pending_collects_logs_preserves_pending_and_continues_to_planning() {
     let outcome = execute_step(GithubCheckFailuresExecutorWithRunner::new(
         FixtureGithubPrCommandRunner,
         FixedClock,
     ));
     assert_expected_outcome(
         outcome,
-        StepOutcome::Fatal,
-        "failed+pending CI collection must collect concrete failure logs, preserve pending_or_unknown, and route terminal",
+        StepOutcome::Success,
+        "failed+pending CI collection must collect concrete failure logs, preserve pending_or_unknown, and continue to remediation planning",
     );
 }
 
@@ -4887,7 +4887,7 @@ fn pending_marker_actions_invalid_out_of_scope_have_no_remediation_output_head_a
 /// @requirement:REQ-PRFU-013
 /// @pseudocode lines 4,8,10-11
 #[test]
-fn remediation_plan_needs_user_judgment_returns_fatal() {
+fn remediation_plan_with_must_fix_defers_user_judgment_and_remediates_actionable_items() {
     let temp = tempfile::tempdir().expect("tempdir");
     write_p10_inputs(
         &temp,
@@ -4905,13 +4905,69 @@ fn remediation_plan_needs_user_judgment_returns_fatal() {
     let mut context = p10_context(&temp);
     let outcome = PrRemediationPlanExecutor
         .execute(&mut context, &p10_params(&temp))
+        .expect("build remediation plan with actionable items");
+    let artifact = read_json(&p10_plan_path(&temp));
+
+    assert_expected_outcome(
+        outcome,
+        StepOutcome::Fixable,
+        "actionable must_fix items should still be remediated while user-judgment items remain out of scope",
+    );
+    assert_eq!(
+        artifact
+            .get("plan_state")
+            .and_then(serde_json::Value::as_str),
+        Some("needs_remediation")
+    );
+    let must_fix = artifact
+        .get("must_fix")
+        .and_then(serde_json::Value::as_array)
+        .expect("must_fix");
+    assert!(
+        !must_fix.is_empty(),
+        "must_fix should contain actionable items: {artifact}"
+    );
+    assert!(must_fix.iter().all(|item| {
+        item.get("source_type").and_then(serde_json::Value::as_str) != Some("ci_pending_or_unknown")
+            && item.get("decision").and_then(serde_json::Value::as_str)
+                != Some("needs_user_judgment")
+    }));
+    assert!(!artifact
+        .get("needs_user_judgment")
+        .and_then(serde_json::Value::as_array)
+        .expect("needs_user_judgment")
+        .is_empty());
+}
+
+/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P10
+/// @requirement:REQ-PRFU-013
+/// @pseudocode lines 4,8,10-11
+#[test]
+fn remediation_plan_needs_user_judgment_only_returns_fatal() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_p10_inputs(
+        &temp,
+        serde_json::json!([]),
+        serde_json::json!([]),
+        serde_json::json!([p10_accepted(
+            "cr-judge",
+            "thread-judge",
+            "hash-judge",
+            "needs_user_judgment"
+        )]),
+        serde_json::json!([]),
+        serde_json::json!([]),
+    );
+    let mut context = p10_context(&temp);
+    let outcome = PrRemediationPlanExecutor
+        .execute(&mut context, &p10_params(&temp))
         .expect("build blocked remediation plan");
     let artifact = read_json(&p10_plan_path(&temp));
 
     assert_expected_outcome(
         outcome,
         StepOutcome::Fatal,
-        "needs_user_judgment and pending_or_unknown evidence must route fatal",
+        "needs_user_judgment-only plans still require human intervention",
     );
     assert_eq!(
         artifact
@@ -4923,13 +4979,7 @@ fn remediation_plan_needs_user_judgment_returns_fatal() {
         .get("must_fix")
         .and_then(serde_json::Value::as_array)
         .expect("must_fix")
-        .iter()
-        .all(|item| {
-            item.get("source_type").and_then(serde_json::Value::as_str)
-                != Some("ci_pending_or_unknown")
-                && item.get("decision").and_then(serde_json::Value::as_str)
-                    != Some("needs_user_judgment")
-        }));
+        .is_empty());
     assert!(!artifact
         .get("needs_user_judgment")
         .and_then(serde_json::Value::as_array)
@@ -8015,6 +8065,12 @@ impl GithubPrCommandRunner for P15MarkerRunner {
         } else if argv.iter().any(|arg| arg.contains("/issues/1910/comments")) {
             Ok(serde_json::json!({ "id": 9001, "html_url": "https://github.com/example/workflow/pull/1910#issuecomment-9001" }).to_string())
         } else if argv.iter().any(|arg| arg == "graphql") {
+            if argv
+                .iter()
+                .any(|arg| arg.contains("addPullRequestReviewThreadReply"))
+            {
+                return Ok(serde_json::json!({ "data": { "addPullRequestReviewThreadReply": { "comment": { "id": "PRRC_reply_9101", "databaseId": 9101, "url": "https://github.com/example/workflow/pull/1910#discussion_r9101" } } } }).to_string());
+            }
             if self.fail_resolution {
                 return Err(
                     luther_workflow::engine::runner::EngineError::StepExecutionError {
@@ -9066,13 +9122,13 @@ fn marker_posts_comment_only_for_rest_review_action_without_thread_id() {
     );
 }
 
-/// Review-thread marker actions without a numeric review-comment id must fail
-/// validation before any GitHub mutation instead of posting to the PR timeline.
+/// Review-thread marker actions without a numeric REST review-comment id can
+/// still post an in-thread reply through GraphQL when the thread id is known.
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P15
 /// @requirement:REQ-PRFU-015,REQ-PRFU-016
 /// @pseudocode lines 41-49
 #[test]
-fn marker_rejects_review_thread_action_when_database_id_missing() {
+fn marker_posts_graphql_thread_reply_when_database_id_missing() {
     let temp = tempfile::tempdir().expect("tempdir");
     write_p15_validated_fixed_pending_with_database_id(&temp, 7001);
     let path = p11_current_artifact_path(&temp, "pending-feedback-marker-actions");
@@ -9094,26 +9150,229 @@ fn marker_rejects_review_thread_action_when_database_id_missing() {
     let mut context = p11_context(&temp);
     let outcome = GithubFeedbackMarkerExecutorWithRunner::new(runner.clone(), FixedClock)
         .execute(&mut context, &p11_params(&temp))
-        .expect("reject fixed feedback without database id");
+        .expect("mark fixed feedback without database id");
     assert_expected_outcome(
         outcome,
-        StepOutcome::Fatal,
-        "review-thread marker actions without comment_database_id must fail before mutation",
+        StepOutcome::Success,
+        "thread-id marker actions without comment_database_id should use GraphQL replies",
+    );
+    let calls = runner.calls();
+    assert!(
+        calls.iter().any(|call| call
+            .iter()
+            .any(|arg| arg.contains("addPullRequestReviewThreadReply"))),
+        "missing-database-id thread replies must use GraphQL: {calls:?}"
     );
     assert!(
-        runner.calls().is_empty(),
-        "no GitHub command may run when review-thread reply validation fails: {:?}",
-        runner.calls()
+        calls.iter().any(|call| {
+            call.iter()
+                .any(|arg| arg.contains("addPullRequestReviewThreadReply"))
+                && call.iter().any(|arg| arg == "threadId=thread-valid")
+        }),
+        "GraphQL thread reply must target the original review thread: {calls:?}"
+    );
+    assert!(
+        calls
+            .iter()
+            .any(|call| call.iter().any(|arg| arg.contains("resolveReviewThread"))),
+        "fixed feedback should still resolve the thread: {calls:?}"
+    );
+    assert!(
+        !calls.iter().any(|call| {
+            call.iter()
+                .any(|arg| arg.contains("/comments/") && arg.contains("/replies"))
+        }),
+        "REST replies endpoint must not be used when comment_database_id is missing: {calls:?}"
     );
     let report = read_json(&p11_current_artifact_path(
         &temp,
         "pr-feedback-marker-report",
     ));
-    assert!(
+    assert_eq!(
         report
-            .to_string()
-            .contains("review_thread_reply_without_comment_database_id"),
-        "validation artifact must name the missing comment_database_id violation: {report}"
+            .get("marker_state")
+            .and_then(serde_json::Value::as_str),
+        Some("complete")
+    );
+    let has_graphql_reply_audit = report
+        .get("action_audit")
+        .and_then(serde_json::Value::as_array)
+        .expect("action_audit array")
+        .iter()
+        .any(|entry| {
+            entry
+                .get("in_thread_reply")
+                .and_then(serde_json::Value::as_bool)
+                == Some(true)
+                && entry
+                    .get("reply_comment_id")
+                    .and_then(serde_json::Value::as_i64)
+                    == Some(9101)
+        });
+    assert!(
+        has_graphql_reply_audit,
+        "GraphQL thread reply should be recorded as an in-thread reply with its comment id"
+    );
+}
+
+/// CodeRabbit GraphQL feedback may encode only the review-thread node id in the
+/// stable marker key. The marker step must hydrate that id instead of treating
+/// the action as unresolvable before mutation.
+/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P15
+/// @requirement:REQ-PRFU-015,REQ-PRFU-016
+/// @pseudocode lines 41-49
+#[test]
+fn marker_derives_thread_id_from_thread_stable_marker_key() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_p15_validated_fixed_pending_with_database_id(&temp, 7001);
+    let path = p11_current_artifact_path(&temp, "pending-feedback-marker-actions");
+    let mut pending = read_json(&path);
+    let action = pending["pending_actions"][0]
+        .as_object_mut()
+        .expect("pending action object");
+    action.insert(
+        "stable_marker_key".to_string(),
+        serde_json::json!("thread:PRRT_thread_node:sha256:body"),
+    );
+    action.remove("thread_id");
+    action.remove("comment_database_id");
+    let identity = action
+        .get_mut("original_feedback_identity")
+        .and_then(serde_json::Value::as_object_mut)
+        .expect("original feedback identity object");
+    identity.insert(
+        "stable_marker_key".to_string(),
+        serde_json::json!("thread:PRRT_thread_node:sha256:body"),
+    );
+    identity.remove("thread_id");
+    identity.remove("comment_database_id");
+    std::fs::write(
+        &path,
+        serde_json::to_vec_pretty(&pending).expect("pending without explicit thread id"),
+    )
+    .expect("write pending without explicit thread id");
+    let result_path = p11_current_artifact_path(&temp, "pr-remediation-result");
+    let mut result = read_json(&result_path);
+    let result_item = result["results"]
+        .as_array_mut()
+        .and_then(|items| {
+            items.iter_mut().find(|item| {
+                item.get("source_type").and_then(serde_json::Value::as_str)
+                    == Some("coderabbit_feedback")
+            })
+        })
+        .and_then(serde_json::Value::as_object_mut)
+        .expect("coderabbit remediation result object");
+    result_item.insert(
+        "stable_marker_key".to_string(),
+        serde_json::json!("thread:PRRT_thread_node:sha256:body"),
+    );
+    result_item.remove("thread_id");
+    std::fs::write(
+        result_path,
+        serde_json::to_vec_pretty(&result).expect("result with thread marker key"),
+    )
+    .expect("write result with thread marker key");
+
+    let runner = P15MarkerRunner::default();
+    let mut context = p11_context(&temp);
+    let outcome = GithubFeedbackMarkerExecutorWithRunner::new(runner.clone(), FixedClock)
+        .execute(&mut context, &p11_params(&temp))
+        .expect("mark fixed feedback with stable-marker thread id");
+
+    assert_expected_outcome(
+        outcome,
+        StepOutcome::Success,
+        "thread stable marker keys should provide the review-thread node id",
+    );
+    let calls = runner.calls();
+    assert!(
+        calls
+            .iter()
+            .any(|call| call.iter().any(|arg| arg == "threadId=PRRT_thread_node")),
+        "derived thread id must be passed to GraphQL: {calls:?}"
+    );
+}
+
+#[test]
+fn marker_derives_thread_id_from_later_graphql_identity_candidate() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_p15_validated_fixed_pending_with_database_id(&temp, 7001);
+    let path = p11_current_artifact_path(&temp, "pending-feedback-marker-actions");
+    let mut pending = read_json(&path);
+    let action = pending["pending_actions"][0]
+        .as_object_mut()
+        .expect("pending action object");
+    action.insert(
+        "stable_marker_key".to_string(),
+        serde_json::json!("threadless"),
+    );
+    action.insert(
+        "source_id".to_string(),
+        serde_json::json!("graphql:PRRT_later_thread:PRRC_comment"),
+    );
+    action.remove("thread_id");
+    action.remove("comment_database_id");
+    let identity = action
+        .get_mut("original_feedback_identity")
+        .and_then(serde_json::Value::as_object_mut)
+        .expect("original feedback identity object");
+    identity.insert(
+        "stable_marker_key".to_string(),
+        serde_json::json!("threadless"),
+    );
+    identity.insert(
+        "item_id".to_string(),
+        serde_json::json!("graphql:PRRC_comment"),
+    );
+    identity.remove("thread_id");
+    identity.remove("comment_database_id");
+    std::fs::write(
+        &path,
+        serde_json::to_vec_pretty(&pending).expect("pending with source thread id"),
+    )
+    .expect("write pending with source thread id");
+
+    let result_path = p11_current_artifact_path(&temp, "pr-remediation-result");
+    let mut result = read_json(&result_path);
+    let result_item = result["results"]
+        .as_array_mut()
+        .and_then(|items| {
+            items.iter_mut().find(|item| {
+                item.get("source_type").and_then(serde_json::Value::as_str)
+                    == Some("coderabbit_feedback")
+            })
+        })
+        .and_then(serde_json::Value::as_object_mut)
+        .expect("coderabbit remediation result object");
+    result_item.insert(
+        "stable_marker_key".to_string(),
+        serde_json::json!("threadless"),
+    );
+    result_item.remove("thread_id");
+    std::fs::write(
+        result_path,
+        serde_json::to_vec_pretty(&result).expect("result with threadless marker key"),
+    )
+    .expect("write result with threadless marker key");
+
+    let runner = P15MarkerRunner::default();
+    let mut context = p11_context(&temp);
+    let outcome = GithubFeedbackMarkerExecutorWithRunner::new(runner.clone(), FixedClock)
+        .execute(&mut context, &p11_params(&temp))
+        .expect("mark fixed feedback with source graphQL thread id");
+
+    assert_expected_outcome(
+        outcome,
+        StepOutcome::Success,
+        "later GraphQL identity candidates should be considered when earlier candidates do not contain a thread id",
+    );
+    let calls = runner.calls();
+    assert!(
+        calls
+            .iter()
+            .any(|call| call.iter().any(|arg| arg == "threadId=PRRT_later_thread")),
+        "derived source thread id must be passed to GraphQL: {calls:?}"
     );
 }
 

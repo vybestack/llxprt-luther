@@ -141,7 +141,6 @@ pub(super) fn collect_ci_failures(
     let failure =
         ci_failures_artifact_failure(&payload, collection_state, typed_check_status.overall_state);
     let is_fatal = matches!(collection_state, CollectionState::Fatal);
-    let has_pending = pending_or_unknown_count(&payload) > 0;
     let failure_ref = failure.as_ref().map(|item| {
         (
             item.state.as_str(),
@@ -160,7 +159,7 @@ pub(super) fn collect_ci_failures(
         clock,
     )?;
 
-    if is_fatal || has_pending {
+    if is_fatal {
         Ok(StepOutcome::Fatal)
     } else {
         Ok(StepOutcome::Success)

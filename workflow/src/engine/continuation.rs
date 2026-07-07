@@ -23,6 +23,7 @@ use crate::persistence::{
     append_typed_event_with_conn, get_checkpoint_for_step, get_run_with_conn,
     is_resumable_checkpoint_status, list_checkpoints, load_checkpoint_before_step,
     persist_run_with_conn, set_resume_point, Checkpoint, EventType, PersistenceError, RunMetadata,
+    RunStatus,
 };
 use crate::workflow::target_profile::TargetProfileOverrides;
 
@@ -234,14 +235,32 @@ fn check_workflow_resolvable(metadata: &RunMetadata) -> SafetyCheck {
 
 /// Refuse to reopen terminal non-failed runs (Completed/Merged/Abandoned/
 /// Cancelled). `Failed` is the single intentional terminal exception, encoded in
-/// `RunStatus::is_resumable`. This refusal is NOT bypassable by `--force`, which
-/// only relaxes the safe-step whitelist.
+/// `RunStatus::is_resumable`. A `Running` run is accepted when its recorded
+/// workflow PID is stale or unrecorded, or when `--force` is specified for
+/// operator recovery from PID recycling; all other terminal refusals remain
+/// non-bypassable.
 /// @plan:PLAN-20260623-LUTHER-CONTINUATION
-fn check_resumable_status(metadata: &RunMetadata) -> SafetyCheck {
+fn check_resumable_status(metadata: &RunMetadata, force: bool) -> SafetyCheck {
     if metadata.status.is_resumable() {
         pass(
             "resumable_status",
             format!("run status {} is resumable", metadata.status),
+        )
+    } else if running_claim_is_available(metadata) {
+        pass(
+            "resumable_status",
+            format!(
+                "run status {} is resumable because recorded workflow PID is stale or unrecorded",
+                metadata.status
+            ),
+        )
+    } else if metadata.status == RunStatus::Running && force {
+        pass(
+            "resumable_status",
+            format!(
+                "run status {} is resumable because --force was specified",
+                metadata.status
+            ),
         )
     } else {
         fail(
@@ -329,7 +348,7 @@ pub fn validate_continuation(
         return Ok(ContinuationValidation::from_checks(checks));
     };
     checks.push(check_workflow_resolvable(&metadata));
-    checks.push(check_resumable_status(&metadata));
+    checks.push(check_resumable_status(&metadata, request.force));
     checks.push(check_identity_recoverable(&metadata));
     checks.push(check_workspace(&metadata));
     let selection = select_checkpoint(conn, request, &metadata);
@@ -462,36 +481,77 @@ pub fn commit_continuation(
     request: &ContinuationRequest,
     step_id: &str,
 ) -> Result<RunMetadata, ContinuationError> {
-    set_resume_point(conn, &request.run_id, step_id)?;
-    reopen_run(conn, &request.run_id, &request.kind, step_id)
+    let tx = conn.unchecked_transaction()?;
+    set_resume_point(&tx, &request.run_id, step_id)?;
+    let metadata = reopen_run(&tx, request, step_id)?;
+    tx.commit()?;
+    Ok(metadata)
 }
 
 fn reopen_run(
     conn: &Connection,
-    run_id: &str,
-    kind: &ContinuationKind,
+    request: &ContinuationRequest,
     step_id: &str,
 ) -> Result<RunMetadata, ContinuationError> {
-    let mut metadata = get_run_with_conn(conn, run_id)?
-        .ok_or_else(|| ContinuationError::RunNotFound(run_id.to_string()))?;
+    let mut metadata = get_run_with_conn(conn, &request.run_id)?
+        .ok_or_else(|| ContinuationError::RunNotFound(request.run_id.clone()))?;
+    ensure_reopen_claim_is_available(&metadata, request)?;
     let prior_status = metadata.status.to_string();
     metadata.reopen();
     metadata.set_current_step(step_id);
     persist_run_with_conn(conn, &metadata)?;
     let detail = format!(
         "continuation={} from_status={prior_status} resume_step={step_id}",
-        kind.verb()
+        request.kind.verb()
     );
-    let _ = append_typed_event_with_conn(
+    append_typed_event_with_conn(
         conn,
-        run_id,
+        &request.run_id,
         step_id,
         "reopened",
         EventType::StepStart,
         Some(&detail),
         Utc::now(),
-    );
+    )?;
     Ok(metadata)
+}
+
+fn ensure_reopen_claim_is_available(
+    metadata: &RunMetadata,
+    request: &ContinuationRequest,
+) -> Result<(), ContinuationError> {
+    if !reopen_status_is_allowed(metadata) {
+        return Err(ContinuationError::InvalidTarget(format!(
+            "run {} status {} is not resumable; terminal states other than failed cannot be continued",
+            request.run_id, metadata.status
+        )));
+    }
+    if !request.force {
+        if let Some(pid) = live_running_claim_pid(metadata) {
+            return Err(ContinuationError::InvalidTarget(format!(
+                "run {} is already running with live workflow PID {pid}; retry with --force only if that process is unrelated",
+                request.run_id
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn reopen_status_is_allowed(metadata: &RunMetadata) -> bool {
+    metadata.status.is_resumable() || metadata.status == RunStatus::Running
+}
+
+fn running_claim_is_available(metadata: &RunMetadata) -> bool {
+    metadata.status == RunStatus::Running
+        && (metadata.is_process_stale() || metadata.process_pid.is_none())
+}
+
+fn live_running_claim_pid(metadata: &RunMetadata) -> Option<u32> {
+    if metadata.status == RunStatus::Running && !metadata.is_process_stale() {
+        metadata.process_pid
+    } else {
+        None
+    }
 }
 
 /// Directory under which continuation artifacts for a run are written.
@@ -1013,6 +1073,177 @@ mod tests {
                 validation.failure_reasons()
             );
         }
+    }
+
+    #[cfg(unix)]
+    fn short_lived_process() -> std::io::Result<std::process::Child> {
+        std::process::Command::new("true").spawn()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn validation_accepts_stale_running_resume_point() {
+        // @plan:PLAN-20260623-LUTHER-CONTINUATION
+        let conn = test_conn();
+        seed_run(
+            &conn,
+            "stale-running",
+            RunStatus::Running,
+            "watch_pr_checks",
+        );
+        let mut md = get_run_with_conn(&conn, "stale-running")
+            .expect("load run")
+            .expect("run exists");
+        let mut stale_process = short_lived_process().expect("spawn short-lived process");
+        let stale_pid = stale_process.id();
+        stale_process.wait().expect("wait for short-lived process");
+        md.process_pid = Some(stale_pid);
+        persist_run_with_conn(&conn, &md).expect("persist stale pid");
+        seed_checkpoint(
+            &conn,
+            "stale-running",
+            "watch_pr_checks",
+            CHECKPOINT_STATUS_WAITING,
+        );
+        let req = request("stale-running", ContinuationKind::Resume, false);
+        let validation = validate_continuation(&conn, &req).expect("validate");
+        assert!(
+            validation.ok,
+            "stale running run should be resumable; reasons: {:?}",
+            validation.failure_reasons()
+        );
+    }
+
+    #[test]
+    fn validation_accepts_unrecorded_pid_running_resume_point() {
+        // @plan:PLAN-20260623-LUTHER-CONTINUATION
+        let conn = test_conn();
+        seed_run(
+            &conn,
+            "unrecorded-running",
+            RunStatus::Running,
+            "watch_pr_checks",
+        );
+        seed_checkpoint(
+            &conn,
+            "unrecorded-running",
+            "watch_pr_checks",
+            CHECKPOINT_STATUS_WAITING,
+        );
+        let req = request("unrecorded-running", ContinuationKind::Resume, false);
+        let validation = validate_continuation(&conn, &req).expect("validate");
+        assert!(
+            validation.ok,
+            "running run with no recorded PID should be resumable; reasons: {:?}",
+            validation.failure_reasons()
+        );
+    }
+
+    #[test]
+    fn validation_allows_live_running_resume_point_with_force() {
+        // @plan:PLAN-20260623-LUTHER-CONTINUATION
+        let conn = test_conn();
+        seed_run(
+            &conn,
+            "force-live-running",
+            RunStatus::Running,
+            "watch_pr_checks",
+        );
+        let mut md = get_run_with_conn(&conn, "force-live-running")
+            .expect("load run")
+            .expect("run exists");
+        md.process_pid = Some(std::process::id());
+        persist_run_with_conn(&conn, &md).expect("persist live pid");
+        seed_checkpoint(
+            &conn,
+            "force-live-running",
+            "watch_pr_checks",
+            CHECKPOINT_STATUS_WAITING,
+        );
+        let req = request("force-live-running", ContinuationKind::Resume, true);
+        let validation = validate_continuation(&conn, &req).expect("validate");
+        assert!(
+            validation.ok,
+            "--force should allow an operator to recover a running record whose PID may have been recycled; reasons: {:?}",
+            validation.failure_reasons()
+        );
+    }
+
+    #[test]
+    fn validation_rejects_live_running_resume_point() {
+        // @plan:PLAN-20260623-LUTHER-CONTINUATION
+        let conn = test_conn();
+        seed_run(&conn, "live-running", RunStatus::Running, "watch_pr_checks");
+        let mut md = get_run_with_conn(&conn, "live-running")
+            .expect("load run")
+            .expect("run exists");
+        md.process_pid = Some(std::process::id());
+        persist_run_with_conn(&conn, &md).expect("persist live pid");
+        seed_checkpoint(
+            &conn,
+            "live-running",
+            "watch_pr_checks",
+            CHECKPOINT_STATUS_WAITING,
+        );
+        let req = request("live-running", ContinuationKind::Resume, false);
+        let validation = validate_continuation(&conn, &req).expect("validate");
+        assert!(!validation.ok);
+        assert!(validation
+            .failure_reasons()
+            .iter()
+            .any(|r| r.contains("resumable_status")));
+    }
+
+    #[test]
+    fn commit_rejects_live_running_resume_point_without_force() {
+        // @plan:PLAN-20260623-LUTHER-CONTINUATION
+        let conn = test_conn();
+        seed_run(
+            &conn,
+            "commit-live-running",
+            RunStatus::Running,
+            "watch_pr_checks",
+        );
+        let mut md = get_run_with_conn(&conn, "commit-live-running")
+            .expect("load run")
+            .expect("run exists");
+        md.process_pid = Some(std::process::id());
+        persist_run_with_conn(&conn, &md).expect("persist live pid");
+        seed_checkpoint(
+            &conn,
+            "commit-live-running",
+            "watch_pr_checks",
+            CHECKPOINT_STATUS_WAITING,
+        );
+        let req = request("commit-live-running", ContinuationKind::Resume, false);
+        let err = commit_continuation(&conn, &req, "watch_pr_checks")
+            .expect_err("live running claim must be rejected");
+        assert!(err
+            .to_string()
+            .contains("already running with live workflow PID"));
+    }
+
+    #[test]
+    fn commit_accepts_unrecorded_pid_running_resume_point() {
+        // @plan:PLAN-20260623-LUTHER-CONTINUATION
+        let conn = test_conn();
+        seed_run(
+            &conn,
+            "commit-unrecorded-running",
+            RunStatus::Running,
+            "watch_pr_checks",
+        );
+        seed_checkpoint(
+            &conn,
+            "commit-unrecorded-running",
+            "watch_pr_checks",
+            CHECKPOINT_STATUS_WAITING,
+        );
+        let req = request("commit-unrecorded-running", ContinuationKind::Resume, false);
+        let metadata = commit_continuation(&conn, &req, "watch_pr_checks")
+            .expect("unrecorded running claim should reopen");
+        assert_eq!(metadata.status, RunStatus::Running);
+        assert_eq!(metadata.process_pid, Some(std::process::id()));
     }
 
     #[test]
