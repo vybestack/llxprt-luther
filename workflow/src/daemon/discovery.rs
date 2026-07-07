@@ -7,6 +7,8 @@
 //! @plan:PLAN-20260415-DAEMON-DISCOVERY.P04
 //! @requirement:REQ-DAEMON-DISCOVERY-004
 
+use std::collections::BTreeMap;
+
 use rusqlite::Connection;
 use tracing::error;
 
@@ -213,6 +215,7 @@ pub fn discover(
         .or(cfg.max_concurrent_runs)
         .unwrap_or(1) as usize;
     let mut result = DiscoveryResult::default();
+    let mut cache = DiscoveryLookupCache::default();
 
     for issue in issues {
         if let Some(reason) = static_filter(cfg, &issue) {
@@ -223,7 +226,7 @@ pub fn discover(
             result.skipped.push((issue, reason));
             continue;
         }
-        if let Some(reason) = remote_dynamic_skip(cfg, q, conn, &issue, repo)? {
+        if let Some(reason) = remote_dynamic_skip(cfg, q, conn, &mut cache, &issue, repo)? {
             result.skipped.push((issue, reason));
             continue;
         }
@@ -234,7 +237,7 @@ pub fn discover(
             continue;
         }
         if cfg.route_parent_issues {
-            match route_issue(cfg, q, issue, repo) {
+            match route_issue(cfg, q, &mut cache, issue, repo) {
                 Ok(routed) => result.eligible.push(routed),
                 Err(err) => {
                     error!(repo, error = %err, "route issue error");
@@ -273,10 +276,11 @@ fn remote_dynamic_skip(
     cfg: &DiscoveryConfig,
     q: &dyn GithubIssueQuery,
     conn: &Connection,
+    cache: &mut DiscoveryLookupCache,
     issue: &GithubIssue,
     repo: &str,
 ) -> Result<Option<SkipReason>, DiscoveryError> {
-    if cfg.skip_children_of_active_parents && has_active_parent(cfg, q, repo, issue, conn)? {
+    if cfg.skip_children_of_active_parents && has_active_parent(cfg, q, cache, repo, issue, conn)? {
         return Ok(Some(SkipReason::ChildOfActiveParent));
     }
     if q.has_open_pr_for_issue(repo, issue.number)? {
@@ -288,11 +292,12 @@ fn remote_dynamic_skip(
 fn has_active_parent(
     cfg: &DiscoveryConfig,
     q: &dyn GithubIssueQuery,
+    cache: &mut DiscoveryLookupCache,
     repo: &str,
     issue: &GithubIssue,
     conn: &Connection,
 ) -> Result<bool, DiscoveryError> {
-    let Some(parent) = q.get_parent_issue(repo, issue.number)? else {
+    let Some(parent) = cache.parent_issue(q, repo, issue.number)? else {
         return Ok(false);
     };
     if parent_has_active_label(cfg, &parent.issue) {
@@ -315,6 +320,44 @@ fn parent_has_active_label(cfg: &DiscoveryConfig, parent: &GithubIssue) -> bool 
         })
 }
 
+#[derive(Default)]
+struct DiscoveryLookupCache {
+    parents: BTreeMap<(String, u64), Option<crate::adapters::github_issues::GithubParentIssue>>,
+    sub_issues: BTreeMap<(String, u64), Vec<crate::adapters::github_issues::GithubSubIssue>>,
+}
+
+impl DiscoveryLookupCache {
+    fn parent_issue(
+        &mut self,
+        q: &dyn GithubIssueQuery,
+        repo: &str,
+        number: u64,
+    ) -> Result<Option<crate::adapters::github_issues::GithubParentIssue>, GithubError> {
+        let key = (repo.to_string(), number);
+        if let Some(parent) = self.parents.get(&key) {
+            return Ok(parent.clone());
+        }
+        let parent = q.get_parent_issue(repo, number)?;
+        self.parents.insert(key, parent.clone());
+        Ok(parent)
+    }
+
+    fn sub_issues(
+        &mut self,
+        q: &dyn GithubIssueQuery,
+        repo: &str,
+        number: u64,
+    ) -> Result<Vec<crate::adapters::github_issues::GithubSubIssue>, GithubError> {
+        let key = (repo.to_string(), number);
+        if let Some(children) = self.sub_issues.get(&key) {
+            return Ok(children.clone());
+        }
+        let children = q.list_sub_issues(repo, number)?;
+        self.sub_issues.insert(key, children.clone());
+        Ok(children)
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 #[error("issue #{number} routing failed: {source}", number = issue.number)]
 struct RouteIssueError {
@@ -325,10 +368,11 @@ struct RouteIssueError {
 fn route_issue(
     cfg: &DiscoveryConfig,
     q: &dyn GithubIssueQuery,
+    cache: &mut DiscoveryLookupCache,
     issue: GithubIssue,
     repo: &str,
 ) -> Result<RoutedIssue, RouteIssueError> {
-    match q.list_sub_issues(repo, issue.number) {
+    match cache.sub_issues(q, repo, issue.number) {
         Ok(children) if !children.is_empty() => Ok(RoutedIssue::parent(issue, cfg)),
         Ok(_) => Ok(RoutedIssue::ordinary(issue)),
         Err(source) => Err(RouteIssueError {

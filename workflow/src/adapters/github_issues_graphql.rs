@@ -1,40 +1,31 @@
 #[derive(Debug, Deserialize)]
-struct GraphqlResponse {
-    data: Option<GraphqlData>,
+struct GraphqlResponse<Issue> {
+    data: Option<GraphqlData<Issue>>,
     #[serde(default)]
     errors: Vec<GraphqlError>,
 }
 
 #[derive(Debug, Deserialize)]
-struct GraphqlData {
-    repository: GraphqlRepository,
+struct GraphqlData<Issue> {
+    repository: GraphqlRepository<Issue>,
 }
 
 #[derive(Debug, Deserialize)]
-struct GraphqlRepository {
-    issue: Option<GraphqlIssue>,
+struct GraphqlRepository<Issue> {
+    issue: Option<Issue>,
 }
 
-#[derive(Debug, Deserialize)]
-struct GraphqlParentResponse {
-    data: Option<GraphqlParentData>,
-    #[serde(default)]
-    errors: Vec<GraphqlError>,
-}
+type GraphqlParentResponse = GraphqlResponse<GraphqlParentLinkIssue>;
 
 #[derive(Debug, Deserialize)]
 struct GraphqlError {
     message: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct GraphqlParentData {
-    repository: GraphqlParentRepository,
-}
-
-#[derive(Debug, Deserialize)]
-struct GraphqlParentRepository {
-    issue: Option<GraphqlParentLinkIssue>,
+    #[serde(default)]
+    path: Option<serde_json::Value>,
+    #[serde(default)]
+    locations: Option<serde_json::Value>,
+    #[serde(default)]
+    extensions: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]

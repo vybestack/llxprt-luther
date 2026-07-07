@@ -218,6 +218,7 @@ fn launch_child_workflow(
     query: &dyn GithubIssueQuery,
     runner: &dyn ChildWorkflowRunner,
 ) -> Result<StepOutcome, EngineError> {
+    let conn = daemon_connection()?;
     let Some(child) = selected_child(&state.artifact_root)? else {
         write_launch_artifact(
             state,
@@ -229,19 +230,19 @@ fn launch_child_workflow(
         .pr_state_for_issue(&state.repo, child)
         .map_err(github_error)?;
     if let Some(pr) = pr.filter(is_observable_existing_pr) {
-        if !has_active_or_recoverable_child_lease(state, child)? {
+        if !has_active_or_recoverable_child_lease(state, child, &conn)? {
             return observe_existing_child_pr(context, state, query, child, &pr);
         }
     }
-    match prepare_child_lease(state, child)? {
+    match prepare_child_lease(state, child, &conn)? {
         ChildLeaseAction::Wait { lease, reason } => {
             wait_for_existing_child(state, child, lease.as_ref(), &reason)
         }
         ChildLeaseAction::Resume(lease) => {
-            resume_child_workflow(context, state, query, runner, child, &lease)
+            resume_child_workflow(context, state, query, runner, child, &lease, &conn)
         }
         ChildLeaseAction::Launch(lease) => {
-            start_child_workflow(context, state, query, runner, child, &lease)
+            start_child_workflow(context, state, query, runner, child, &lease, &conn)
         }
     }
 }
@@ -249,9 +250,9 @@ fn launch_child_workflow(
 fn has_active_or_recoverable_child_lease(
     state: &OrchestrationState,
     child: u64,
+    conn: &rusqlite::Connection,
 ) -> Result<bool, EngineError> {
-    let conn = daemon_connection()?;
-    Ok(get_lease_for_issue(&conn, &state.repo, child)
+    Ok(get_lease_for_issue(conn, &state.repo, child)
         .map_err(sql_error)?
         .is_some_and(|lease| {
             matches!(
@@ -392,14 +393,14 @@ fn start_child_workflow(
     runner: &dyn ChildWorkflowRunner,
     child: u64,
     lease: &crate::persistence::leases::IssueLease,
+    conn: &rusqlite::Connection,
 ) -> Result<StepOutcome, EngineError> {
     query
         .add_label(&state.repo, child, &state.luther_label)
         .map_err(github_error)?;
     let request = child_launch_request(state, child);
-    let conn = daemon_connection()?;
     update_lease_status(
-        &conn,
+        conn,
         &lease.lease_id,
         LeaseStatus::Running,
         Some(&request.run_id),
@@ -421,6 +422,7 @@ fn start_child_workflow(
         state,
         context,
         query,
+        conn,
         ChildLaunchCompletion {
             child,
             lease,
@@ -439,21 +441,31 @@ fn resume_child_workflow(
     runner: &dyn ChildWorkflowRunner,
     child: u64,
     lease: &crate::persistence::leases::IssueLease,
+    conn: &rusqlite::Connection,
 ) -> Result<StepOutcome, EngineError> {
     let Some(run_id) = lease.run_id.clone() else {
         update_lease_status(
-            &daemon_connection()?,
+            conn,
             &lease.lease_id,
             LeaseStatus::Failed,
             None,
         )
         .map_err(sql_error)?;
+        write_launch_artifact(
+            state,
+            json!({
+                "launched": false,
+                "child_issue_number": child,
+                "reason": "missing_child_run_id",
+                "lease_id": lease.lease_id,
+                "lease_status": lease.status.to_string()
+            }),
+        )?;
         return Ok(StepOutcome::Fixable);
     };
     let request = child_resume_request(state, child, run_id.clone());
-    let conn = daemon_connection()?;
     update_lease_status(
-        &conn,
+        conn,
         &lease.lease_id,
         LeaseStatus::Running,
         Some(&request.run_id),
@@ -473,6 +485,7 @@ fn resume_child_workflow(
         state,
         context,
         query,
+        conn,
         ChildLaunchCompletion {
             child,
             lease,
@@ -497,34 +510,22 @@ fn post_launch_metadata(
     query: &dyn GithubIssueQuery,
     runner: &dyn ChildWorkflowRunner,
     child: u64,
-    lease: &crate::persistence::leases::IssueLease,
+    _lease: &crate::persistence::leases::IssueLease,
     request: &ChildWorkflowLaunchRequest,
 ) -> Result<(Option<RunStatus>, Option<GithubIssuePrState>), EngineError> {
-    let run_status = runner.run_status(&request.run_id).map_err(|err| {
-        restore_after_post_launch_metadata_error(lease, err, "read child run status")
-    })?;
+    let run_status = runner
+        .run_status(&request.run_id)
+        .map_err(|err| post_launch_metadata_error(err, "read child run status"))?;
     let pr = query
         .pr_state_for_issue(&state.repo, child)
-        .map_err(|err| {
-            restore_after_post_launch_metadata_error(lease, github_error(err), "read child PR state")
-        })?;
+        .map_err(|err| post_launch_metadata_error(github_error(err), "read child PR state"))?;
     Ok((run_status, pr))
 }
 
-fn restore_after_post_launch_metadata_error(
-    lease: &crate::persistence::leases::IssueLease,
-    err: EngineError,
-    action: &str,
-) -> EngineError {
-    match restore_child_lease_after_runner_error(lease, lease.status, lease.run_id.as_deref()) {
-        Ok(()) => parent_error(format!(
-            "{action} after child launch failed and child lease was restored: {err}"
-        )),
-        Err(restore_err) => parent_error(format!(
-            "{action} after child launch failed: {err}; failed to restore child lease {}: {restore_err}",
-            lease.lease_id
-        )),
-    }
+fn post_launch_metadata_error(err: EngineError, action: &str) -> EngineError {
+    parent_error(format!(
+        "{action} after child launch failed; child lease remains Running for the launched run: {err}"
+    ))
 }
 
 fn wait_for_child_merge(

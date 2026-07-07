@@ -9,7 +9,7 @@
 //! @requirement:REQ-DAEMON-DISCOVERY-003
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 use tracing::warn;
@@ -56,14 +56,17 @@ fn is_issue_not_found_error(error: &GithubError) -> bool {
     match error {
         GithubError::CommandFailed {
             stderr, exit_code, ..
-        } => {
-            *exit_code == Some(1)
-                && ["not found", "could not resolve", "no issue found"]
-                    .iter()
-                    .any(|needle| stderr.to_ascii_lowercase().contains(needle))
-        }
+        } => *exit_code == Some(1) && issue_not_found_stderr(stderr),
         _ => false,
     }
+}
+
+fn issue_not_found_stderr(stderr: &str) -> bool {
+    let trimmed = stderr.trim();
+    trimmed == "not found"
+        || trimmed.starts_with("GraphQL: Could not resolve to an Issue with the number of ")
+        || trimmed.starts_with("could not resolve to issue or pull request ")
+        || trimmed.starts_with("no issue found for ")
 }
 
 const MAX_NATIVE_SUB_ISSUE_PAGES: usize = 100;
@@ -192,7 +195,7 @@ pub trait GithubIssueQuery {
 /// @plan:PLAN-20260415-DAEMON-DISCOVERY.P03
 pub struct SystemGithubIssueQuery<R: GithubCommandRunner> {
     runner: R,
-    auto_merge_methods: Mutex<BTreeMap<String, &'static str>>,
+    auto_merge_methods: Mutex<BTreeMap<String, Arc<Mutex<Option<&'static str>>>>>,
 }
 
 impl<R: GithubCommandRunner> SystemGithubIssueQuery<R> {
@@ -271,6 +274,8 @@ struct RawPrState {
     state: String,
     #[serde(default)]
     merged: bool,
+    #[serde(default, rename = "updatedAt")]
+    updated_at: Option<String>,
     #[serde(default, rename = "mergeCommit")]
     merge_commit: Option<RawCommit>,
     #[serde(default, rename = "reviewDecision")]
@@ -368,11 +373,35 @@ fn graphql_response_error(argv: &[String], errors: &[GraphqlError]) -> Option<Gi
             "GitHub GraphQL returned errors: {}",
             errors
                 .iter()
-                .map(|error| error.message.as_str())
+                .map(graphql_error_context)
                 .collect::<Vec<_>>()
                 .join("; ")
         ),
     })
+}
+
+fn graphql_error_context(error: &GraphqlError) -> String {
+    let mut parts = vec![error.message.clone()];
+    if let Some(path) = non_empty_json(&error.path) {
+        parts.push(format!("path={path}"));
+    }
+    if let Some(locations) = non_empty_json(&error.locations) {
+        parts.push(format!("locations={locations}"));
+    }
+    if let Some(extensions) = non_empty_json(&error.extensions) {
+        parts.push(format!("extensions={extensions}"));
+    }
+    parts.join(" ")
+}
+
+fn non_empty_json(value: &Option<serde_json::Value>) -> Option<String> {
+    let value = value.as_ref()?;
+    match value {
+        serde_json::Value::Null => None,
+        serde_json::Value::Array(values) if values.is_empty() => None,
+        serde_json::Value::Object(values) if values.is_empty() => None,
+        _ => Some(value.to_string()),
+    }
 }
 
 pub fn parse_parent_issue_response(json: &str) -> Result<Option<GithubParentIssue>, GithubError> {
@@ -476,7 +505,7 @@ fn parse_pr_state(json: &str, argv: &[String]) -> Result<Option<GithubIssuePrSta
             exit_code: None,
             stderr: format!("failed to parse gh pr list JSON: {e}"),
         })?;
-    Ok(prs.into_iter().next().map(raw_pr_state_to_issue_pr_state))
+    Ok(select_relevant_pr(prs).map(raw_pr_state_to_issue_pr_state))
 }
 
 fn parse_issue_pr_references(
@@ -494,6 +523,27 @@ fn parse_issue_pr_references(
         .into_iter()
         .map(raw_pr_state_to_issue_pr_state)
         .collect())
+}
+
+fn select_relevant_pr(mut prs: Vec<RawPrState>) -> Option<RawPrState> {
+    prs.sort_by(|left, right| {
+        pr_relevance_key(right)
+            .cmp(&pr_relevance_key(left))
+            .then_with(|| right.updated_at.cmp(&left.updated_at))
+            .then_with(|| right.number.cmp(&left.number))
+    });
+    prs.into_iter().next()
+}
+
+fn pr_relevance_key(pr: &RawPrState) -> u8 {
+    let state = normalize_state(&pr.state);
+    if state == "open" {
+        2
+    } else if pr.merged || state == "merged" {
+        1
+    } else {
+        0
+    }
 }
 
 fn raw_pr_state_to_issue_pr_state(pr: RawPrState) -> GithubIssuePrState {
@@ -631,7 +681,14 @@ impl<R: GithubCommandRunner> GithubIssueQuery for SystemGithubIssueQuery<R> {
     ) -> Result<Vec<GithubIssue>, GithubError> {
         let argv = build_issue_list_argv(repo, include_labels, states);
         let out = self.runner.run(&argv)?;
-        parse_issue_list(&out)
+        let issues = parse_issue_list(&out)?;
+        if states.len() <= 1 {
+            return Ok(issues);
+        }
+        Ok(issues
+            .into_iter()
+            .filter(|issue| states.contains(&issue.state))
+            .collect())
     }
 
     fn has_open_pr_for_issue(&self, repo: &str, number: u64) -> Result<bool, GithubError> {
@@ -646,7 +703,7 @@ impl<R: GithubCommandRunner> GithubIssueQuery for SystemGithubIssueQuery<R> {
             "--search".to_string(),
             format!("issue:{number}"),
             "--json".to_string(),
-            "number,state".to_string(),
+            "number,state,updatedAt".to_string(),
         ];
         let out = self.runner.run(&argv)?;
         parse_pr_state(&out, &argv).map(|pr| pr.is_some())
@@ -843,16 +900,28 @@ impl<R: GithubCommandRunner> SystemGithubIssueQuery<R> {
     }
 
     fn cached_auto_merge_method(&self, repo: &str) -> Result<&'static str, GithubError> {
+        let entry = self.auto_merge_cache_entry(repo)?;
+        let mut method = entry.lock().map_err(auto_merge_cache_lock_error)?;
+        if let Some(method) = *method {
+            return Ok(method);
+        }
+        let computed = self.auto_merge_method(repo)?;
+        *method = Some(computed);
+        Ok(computed)
+    }
+
+    fn auto_merge_cache_entry(
+        &self,
+        repo: &str,
+    ) -> Result<Arc<Mutex<Option<&'static str>>>, GithubError> {
         let mut methods = self
             .auto_merge_methods
             .lock()
             .map_err(auto_merge_cache_lock_error)?;
-        if let Some(method) = methods.get(repo).copied() {
-            return Ok(method);
-        }
-        let method = self.auto_merge_method(repo)?;
-        methods.insert(repo.to_string(), method);
-        Ok(method)
+        Ok(methods
+            .entry(repo.to_string())
+            .or_insert_with(|| Arc::new(Mutex::new(None)))
+            .clone())
     }
 
     fn auto_merge_method(&self, repo: &str) -> Result<&'static str, GithubError> {

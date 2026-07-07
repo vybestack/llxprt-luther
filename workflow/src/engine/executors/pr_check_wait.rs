@@ -441,7 +441,13 @@ fn aggregate_match_state(
 }
 
 fn classify_check(check: &PrCheckObservation, allow_skipped: bool) -> String {
-    if check.bucket == "skipped" || (check.bucket == "failed" && allow_skipped) {
+    if check.bucket == "skipped" {
+        if allow_skipped {
+            "passed".to_string()
+        } else {
+            "failed".to_string()
+        }
+    } else if check.bucket == "failed" && allow_skipped {
         "passed".to_string()
     } else {
         check.bucket.clone()
@@ -552,20 +558,33 @@ mod tests {
     }
 
     #[test]
-    fn skipped_and_neutral_are_non_blocking() {
-        let config = PrCheckWaitConfig {
+    fn skipped_requires_explicit_allow_skipped() {
+        let blocking_config = PrCheckWaitConfig {
             required: vec![definition("ci")],
             ..PrCheckWaitConfig::default()
         };
-        for bucket in ["skipped", "passed"] {
-            let result = classify_pr_checks(
-                "h",
-                vec![check("ci", bucket)],
-                &config,
-                PrCheckWaitCounters::default(),
-            );
-            assert_eq!(result.overall_state, OverallState::Passed);
-        }
+        let blocking_result = classify_pr_checks(
+            "h",
+            vec![check("ci", "skipped")],
+            &blocking_config,
+            PrCheckWaitCounters::default(),
+        );
+        assert_eq!(blocking_result.overall_state, OverallState::Failed);
+
+        let allowed_config = PrCheckWaitConfig {
+            required: vec![PrCheckDefinition {
+                allow_skipped: Some(true),
+                ..definition("ci")
+            }],
+            ..PrCheckWaitConfig::default()
+        };
+        let allowed_result = classify_pr_checks(
+            "h",
+            vec![check("ci", "skipped")],
+            &allowed_config,
+            PrCheckWaitCounters::default(),
+        );
+        assert_eq!(allowed_result.overall_state, OverallState::Passed);
     }
 
     fn definition(pattern: &str) -> PrCheckDefinition {

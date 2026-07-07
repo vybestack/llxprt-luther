@@ -6,29 +6,13 @@ struct GraphqlPageInfo {
     end_cursor: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
-struct GraphqlSubIssuePageResponse {
-    data: Option<GraphqlSubIssuePageData>,
-    #[serde(default)]
-    errors: Vec<GraphqlError>,
-}
-
-#[derive(Debug, Deserialize)]
-struct GraphqlSubIssuePageData {
-    repository: GraphqlSubIssuePageRepository,
-}
-
-#[derive(Debug, Deserialize)]
-struct GraphqlSubIssuePageRepository {
-    issue: Option<GraphqlSubIssuePageIssue>,
-}
+type GraphqlSubIssuePageResponse = GraphqlResponse<GraphqlSubIssuePageIssue>;
 
 #[derive(Debug, Deserialize)]
 struct GraphqlSubIssuePageIssue {
     #[serde(default, rename = "subIssues")]
     sub_issues: GraphqlSubIssueConnection,
 }
-
 
 const SUB_ISSUE_PAGE_LIMIT_PREFIX: &str = "sub-issue GraphQL pagination exceeded ";
 
@@ -52,7 +36,9 @@ fn native_sub_issue_page_limit_error(repo: &str, number: u64, cursor: &str) -> G
             ]
         }),
         exit_code: None,
-        stderr: format!("{SUB_ISSUE_PAGE_LIMIT_PREFIX}{MAX_NATIVE_SUB_ISSUE_PAGES} pages"),
+        stderr: format!(
+            "{SUB_ISSUE_PAGE_LIMIT_PREFIX}{MAX_NATIVE_SUB_ISSUE_PAGES} pages for {repo} issue #{number}"
+        ),
     }
 }
 
@@ -146,7 +132,7 @@ fn parse_first_sub_issue_page(
     json: &str,
     argv: &[String],
 ) -> Result<ParsedSubIssuePage, GithubError> {
-    let response: GraphqlResponse =
+    let response: GraphqlResponse<GraphqlIssue> =
         serde_json::from_str(json).map_err(|e| GithubError::CommandFailed {
             argv: argv.to_vec(),
             exit_code: None,
@@ -163,11 +149,14 @@ fn parse_first_sub_issue_page(
     append_sub_issue_edges(issue.sub_issues.edges, &mut seen, &mut children);
     let page_info = issue.sub_issues.page_info;
     let next_cursor = if page_info.has_next_page {
-        Some(page_info.end_cursor.ok_or_else(|| GithubError::CommandFailed {
-            argv: argv.to_vec(),
-            exit_code: None,
-            stderr: "sub-issue GraphQL page indicated another page without an endCursor".to_string(),
-        })?)
+        match page_info.end_cursor {
+            Some(cursor) => Ok(Some(cursor)),
+            None => Err(GithubError::CommandFailed {
+                argv: argv.to_vec(),
+                exit_code: None,
+                stderr: "sub-issue GraphQL page indicated another page without an endCursor".to_string(),
+            }),
+        }?
     } else {
         None
     };

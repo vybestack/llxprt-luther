@@ -56,9 +56,6 @@ pub fn classify_child(issue: &GithubIssue, pr: Option<&GithubIssuePrState>) -> C
     let terminal_state = match pr {
         Some(pr) if pr.merged && issue_closed => ChildTerminalState::Merged,
         Some(pr) if pr.merged => ChildTerminalState::MergedIssueOpen,
-        Some(pr) if issue_closed && pr.state.eq_ignore_ascii_case("closed") => {
-            ChildTerminalState::ClosedUnmerged
-        }
         Some(pr) if pr.state.eq_ignore_ascii_case("superseded") => ChildTerminalState::Superseded,
         Some(pr) if pr.state.eq_ignore_ascii_case("closed") => ChildTerminalState::ClosedUnmerged,
         Some(_) => ChildTerminalState::ActiveRun,
@@ -75,6 +72,8 @@ pub fn classify_child(issue: &GithubIssue, pr: Option<&GithubIssuePrState>) -> C
 /// Select the first child that can still be worked in the validated order.
 /// Closed children without completion evidence are skipped here and reported by
 /// parent completion evaluation instead of being relaunched blindly.
+/// Children missing from `states` are non-actionable here; callers must check
+/// `missing_ordered_child_states` first when missing state is meaningful.
 /// ActiveRun is intentionally not blocked here; launch_child_workflow rechecks
 /// active leases before starting a run so recovery paths can still be selected.
 pub fn next_actionable_child(states: &[ChildIssueState], order: &[u64]) -> Option<u64> {

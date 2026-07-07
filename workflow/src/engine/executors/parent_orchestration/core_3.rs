@@ -249,10 +249,12 @@ fn child_wait_poll_interval(config: &WorkflowConfig) -> u64 {
 
 fn child_wait_max_wait_seconds(config: &WorkflowConfig, wait_kind: WaitKind) -> Option<u64> {
     match wait_kind {
-        WaitKind::DependencyChildWorkflow => config
-            .parent_orchestration
-            .max_child_merge_wait_seconds
-            .or_else(|| child_wait_poll_interval(config).checked_mul(3)),
+        WaitKind::DependencyChildWorkflow => Some(
+            config
+                .parent_orchestration
+                .max_child_merge_wait_seconds
+                .unwrap_or(crate::workflow::schema::DEFAULT_MAX_CHILD_MERGE_WAIT_SECONDS),
+        ),
         _ => None,
     }
 }

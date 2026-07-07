@@ -92,9 +92,9 @@ enum ChildLeaseAction {
 fn prepare_child_lease(
     state: &OrchestrationState,
     child: u64,
+    conn: &rusqlite::Connection,
 ) -> Result<ChildLeaseAction, EngineError> {
-    let conn = daemon_connection()?;
-    prepare_child_lease_with_conn(state, child, &conn)
+    prepare_child_lease_with_conn(state, child, conn)
 }
 
 fn prepare_child_lease_with_conn(
@@ -164,16 +164,23 @@ fn clear_child_lease_for_relaunch(
     conn: &rusqlite::Connection,
     lease: &crate::persistence::leases::IssueLease,
 ) -> Result<(), EngineError> {
-    conn.execute(
-        "UPDATE issue_leases SET status = ?1, run_id = NULL, updated_at = ?2 WHERE lease_id = ?3",
-        rusqlite::params![
-            LeaseStatus::Claimed.to_string(),
-            Utc::now().to_rfc3339(),
+    let updated = conn
+        .execute(
+            "UPDATE issue_leases SET status = ?1, run_id = NULL, updated_at = ?2 WHERE lease_id = ?3",
+            rusqlite::params![
+                LeaseStatus::Claimed.to_string(),
+                Utc::now().to_rfc3339(),
+                lease.lease_id
+            ],
+        )
+        .map_err(sql_error)?;
+    if updated == 0 {
+        return Err(parent_error(format!(
+            "child lease {} was not updated while preparing relaunch",
             lease.lease_id
-        ],
-    )
-    .map(|_| ())
-    .map_err(sql_error)
+        )));
+    }
+    Ok(())
 }
 
 enum ChildPrWait {
@@ -536,6 +543,7 @@ fn finish_child_launch(
     state: &OrchestrationState,
     context: &mut StepContext,
     query: &dyn GithubIssueQuery,
+    conn: &rusqlite::Connection,
     completion: ChildLaunchCompletion<'_>,
 ) -> Result<StepOutcome, EngineError> {
     let effective_result =
@@ -550,9 +558,8 @@ fn finish_child_launch(
         ChildWorkflowRunResult::CompletedFailure => LeaseStatus::Failed,
         ChildWorkflowRunResult::WaitingExternal => LeaseStatus::WaitingExternal,
     };
-    let conn = daemon_connection()?;
     update_lease_status(
-        &conn,
+        conn,
         &completion.lease.lease_id,
         status,
         Some(&completion.request.run_id),
@@ -756,17 +763,20 @@ fn child_is_blocked(child: &ChildIssueState) -> bool {
 }
 
 fn parent_summary_comment(complete: bool, evaluation: &Value) -> String {
+    let evaluation_json = parent_summary_evaluation_json(evaluation);
     if complete {
-        format!(
-            "Parent orchestration complete. Evidence:\n{}",
-            serde_json::to_string_pretty(evaluation).unwrap_or_else(|_| "{}".to_string())
-        )
+        format!("Parent orchestration complete. Evidence:\n{evaluation_json}")
     } else {
-        format!(
-            "Parent orchestration is incomplete or blocked. Current state:\n{}",
-            serde_json::to_string_pretty(evaluation).unwrap_or_else(|_| "{}".to_string())
-        )
+        format!("Parent orchestration is incomplete or blocked. Current state:\n{evaluation_json}")
     }
+}
+
+fn parent_summary_evaluation_json(evaluation: &Value) -> String {
+    serde_json::to_string_pretty(evaluation).unwrap_or_else(|err| {
+        format!(
+            "Parent orchestration evaluation serialization failed; diagnostic context could not be encoded as JSON: {err}"
+        )
+    })
 }
 
 fn resume_child_process(

@@ -287,6 +287,9 @@ pub struct GuardLimits {
     pub max_cost: Option<f64>,
 }
 
+/// Default upper bound for waiting on child workflow/merge progress.
+pub const DEFAULT_MAX_CHILD_MERGE_WAIT_SECONDS: u64 = 86_400;
+
 /// Parent/sub-issue orchestration policy for parent issue workflows.
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize, PartialEq, Eq)]
 #[serde(default)]

@@ -20,6 +20,7 @@ use crate::persistence::wait_state::{
 use crate::persistence::{
     write_poll_result_artifact, write_resume_decision_artifact, write_wait_state_artifact,
 };
+use crate::workflow::schema::DEFAULT_MAX_CHILD_MERGE_WAIT_SECONDS;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -159,23 +160,18 @@ fn timeout_decision(record: &WaitStateRecord) -> Option<PollDecision> {
         observed_state: json!({
             "classification": "timed_out",
             "wait_kind": record.wait_kind,
-            "max_wait_seconds": max_wait_seconds,
+            "max_wait_seconds": record.max_wait_seconds,
+            "effective_max_wait_seconds": max_wait_seconds,
         }),
     })
 }
 
 fn effective_max_wait_seconds(record: &WaitStateRecord) -> Option<u64> {
     record.max_wait_seconds.or(match record.wait_kind {
-        WaitKind::DependencyChildWorkflow => Some(
-            record
-                .poll_interval_seconds
-                .saturating_mul(DEFAULT_CHILD_WORKFLOW_MAX_POLLS),
-        ),
+        WaitKind::DependencyChildWorkflow => Some(DEFAULT_MAX_CHILD_MERGE_WAIT_SECONDS),
         _ => None,
     })
 }
-
-const DEFAULT_CHILD_WORKFLOW_MAX_POLLS: u64 = 3;
 
 fn child_workflow_db_path() -> std::path::PathBuf {
     crate::runtime_paths::get_data_dir().join("checkpoints.db")
@@ -230,12 +226,6 @@ fn poll_child_workflow(record: &WaitStateRecord, db_path: &std::path::Path) -> P
         "child_current_step": metadata.current_step
     });
     match metadata.status {
-        RunStatus::Completed
-        | RunStatus::Merged
-        | RunStatus::ReadyToResume
-        | RunStatus::Failed
-        | RunStatus::Abandoned
-        | RunStatus::Cancelled => PollDecision::ready(record, observed_state),
         RunStatus::Queued
         | RunStatus::Initialized
         | RunStatus::Starting
@@ -245,7 +235,20 @@ fn poll_child_workflow(record: &WaitStateRecord, db_path: &std::path::Path) -> P
         | RunStatus::Remediating
         | RunStatus::Blocked
         | RunStatus::Paused => PollDecision::still_waiting_with_state(record, observed_state),
+        RunStatus::ReadyToResume
+        | RunStatus::Completed
+        | RunStatus::Failed
+        | RunStatus::Abandoned
+        | RunStatus::Merged
+        | RunStatus::Cancelled => {
+            debug_assert!(child_workflow_status_ready(metadata.status));
+            PollDecision::ready(record, observed_state)
+        }
     }
+}
+
+fn child_workflow_status_ready(status: RunStatus) -> bool {
+    status.is_terminal() || status == RunStatus::ReadyToResume
 }
 
 fn poll_pr_checks(record: &WaitStateRecord, runner: &dyn GithubCommandRunner) -> PollDecision {

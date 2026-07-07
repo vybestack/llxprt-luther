@@ -40,10 +40,11 @@ use luther_workflow::workflow::config_loader::{
     resolve_workflow_config, resolve_workflow_type, validate_artifact_dependencies,
     validate_workflow_tokens,
 };
-use luther_workflow::workflow::schema::{StepDef, WorkflowConfig, WorkflowType};
+use luther_workflow::workflow::schema::{
+    StepDef, WorkflowConfig, WorkflowType, DEFAULT_MAX_CHILD_MERGE_WAIT_SECONDS,
+};
 use serde_json::{Map, Value};
 
-const DEFAULT_MAX_CHILD_MERGE_WAIT_SECS: u64 = 86_400;
 use luther_workflow::workflow::target_profile::{
     apply_target_profile_overrides, target_profile_validation_required, validate_target_profile,
     TargetProfileOverrides,
@@ -669,7 +670,7 @@ fn max_wait_seconds_for_wait(config: &WorkflowConfig, wait_kind: WaitKind) -> Op
             config
                 .parent_orchestration
                 .max_child_merge_wait_seconds
-                .unwrap_or(DEFAULT_MAX_CHILD_MERGE_WAIT_SECS),
+                .unwrap_or(DEFAULT_MAX_CHILD_MERGE_WAIT_SECONDS),
         ),
         _ => None,
     }
