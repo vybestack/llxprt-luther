@@ -241,7 +241,7 @@ fn poll_child_workflow(record: &WaitStateRecord, db_path: &std::path::Path) -> P
         | RunStatus::Abandoned
         | RunStatus::Merged
         | RunStatus::Cancelled => {
-            debug_assert!(child_workflow_status_ready(metadata.status));
+            assert!(child_workflow_status_ready(metadata.status));
             PollDecision::ready(record, observed_state)
         }
     }
