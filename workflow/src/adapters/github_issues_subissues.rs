@@ -50,6 +50,14 @@ fn missing_sub_issue_parent_error(argv: &[String]) -> GithubError {
     }
 }
 
+fn missing_sub_issue_end_cursor_error(argv: &[String]) -> GithubError {
+    GithubError::CommandFailed {
+        argv: argv.to_vec(),
+        exit_code: None,
+        stderr: "sub-issue GraphQL page indicated another page without an endCursor".to_string(),
+    }
+}
+
 fn graphql_sub_issue_page_argv(
     repo: &str,
     number: u64,
@@ -102,11 +110,7 @@ fn parse_sub_issue_page_response(
     if issue.sub_issues.page_info.has_next_page {
         return match issue.sub_issues.page_info.end_cursor {
             Some(cursor) => Ok(Some(cursor)),
-            None => Err(GithubError::CommandFailed {
-                argv: argv.to_vec(),
-                exit_code: None,
-                stderr: "sub-issue GraphQL page indicated another page without an endCursor".to_string(),
-            }),
+            None => Err(missing_sub_issue_end_cursor_error(argv)),
         };
     }
     Ok(None)
@@ -154,11 +158,7 @@ fn parse_first_sub_issue_page(
     let next_cursor = if page_info.has_next_page {
         match page_info.end_cursor {
             Some(cursor) => Ok(Some(cursor)),
-            None => Err(GithubError::CommandFailed {
-                argv: argv.to_vec(),
-                exit_code: None,
-                stderr: "sub-issue GraphQL page indicated another page without an endCursor".to_string(),
-            }),
+            None => Err(missing_sub_issue_end_cursor_error(argv)),
         }?
     } else {
         None

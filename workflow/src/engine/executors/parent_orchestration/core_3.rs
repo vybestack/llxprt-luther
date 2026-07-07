@@ -685,12 +685,18 @@ fn parent_config_root(context: &StepContext) -> Result<PathBuf, EngineError> {
 }
 
 fn parent_issue_number(context: &StepContext) -> Result<u64, EngineError> {
-    context
+    let number = context
         .get("primary_issue_number")
         .or_else(|| context.get("issue_number"))
         .ok_or_else(|| parent_error("missing context value 'primary_issue_number'".to_string()))?
         .parse::<u64>()
-        .map_err(|err| parent_error(format!("invalid numeric parent issue context value: {err}")))
+        .map_err(|err| parent_error(format!("invalid numeric parent issue context value: {err}")))?;
+    if number == 0 {
+        return Err(parent_error(
+            "parent orchestration requires launcher-injected primary_issue_number/issue_number; placeholder 0 is invalid at runtime".to_string(),
+        ));
+    }
+    Ok(number)
 }
 
 fn artifact_root(context: &StepContext, params: &Value) -> Result<PathBuf, EngineError> {

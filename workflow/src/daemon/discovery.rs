@@ -141,7 +141,12 @@ fn static_filter(cfg: &DiscoveryConfig, issue: &GithubIssue) -> Option<SkipReaso
             return Some(SkipReason::HasExcludedLabel(excluded.clone()));
         }
     }
-    if !cfg.issue_states.is_empty() && !cfg.issue_states.contains(&issue.state) {
+    if !cfg.issue_states.is_empty()
+        && !cfg
+            .issue_states
+            .iter()
+            .any(|state| state.eq_ignore_ascii_case(&issue.state))
+    {
         return Some(SkipReason::WrongState(issue.state.clone()));
     }
     if let Some(wanted) = &cfg.assignee_filter {
@@ -344,12 +349,11 @@ impl DiscoveryLookupCache {
         number: u64,
     ) -> Result<Option<crate::adapters::github_issues::GithubParentIssue>, GithubError> {
         let key = (repo.to_string(), number);
-        if let Some(parent) = self.parents.get(&key) {
-            return Ok(parent.clone());
+        if !self.parents.contains_key(&key) {
+            let parent = q.get_parent_issue(repo, number)?;
+            self.parents.insert(key.clone(), parent);
         }
-        let parent = q.get_parent_issue(repo, number)?;
-        self.parents.insert(key, parent.clone());
-        Ok(parent)
+        Ok(self.parents.get(&key).cloned().flatten())
     }
 
     fn sub_issues(
@@ -357,14 +361,13 @@ impl DiscoveryLookupCache {
         q: &dyn GithubIssueQuery,
         repo: &str,
         number: u64,
-    ) -> Result<Vec<crate::adapters::github_issues::GithubSubIssue>, GithubError> {
+    ) -> Result<&[crate::adapters::github_issues::GithubSubIssue], GithubError> {
         let key = (repo.to_string(), number);
-        if let Some(children) = self.sub_issues.get(&key) {
-            return Ok(children.clone());
+        if !self.sub_issues.contains_key(&key) {
+            let children = q.list_sub_issues(repo, number)?;
+            self.sub_issues.insert(key.clone(), children);
         }
-        let children = q.list_sub_issues(repo, number)?;
-        self.sub_issues.insert(key, children.clone());
-        Ok(children)
+        Ok(self.sub_issues.get(&key).map(Vec::as_slice).unwrap_or(&[]))
     }
 }
 

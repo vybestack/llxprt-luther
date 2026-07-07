@@ -417,7 +417,17 @@ fn start_child_workflow(
         }
         parent_error(err.to_string())
     })?;
-    let (run_status, pr) = post_launch_metadata(state, query, runner, child, lease, &request)?;
+    let (run_status, pr) = post_launch_metadata(state, query, runner, child, lease, &request).map_err(|err| {
+        if let Err(restore_err) =
+            restore_child_lease_after_runner_error(conn, lease, lease.status, lease.run_id.as_deref())
+        {
+            return parent_error(format!(
+                "{err}; failed to restore child lease {} after metadata error: {restore_err}",
+                lease.lease_id
+            ));
+        }
+        err
+    })?;
     finish_child_launch(
         state,
         context,
@@ -482,7 +492,17 @@ fn resume_child_workflow(
         }
         parent_error(err.to_string())
     })?;
-    let (run_status, pr) = post_launch_metadata(state, query, runner, child, lease, &request)?;
+    let (run_status, pr) = post_launch_metadata(state, query, runner, child, lease, &request).map_err(|err| {
+        if let Err(restore_err) =
+            restore_child_lease_after_runner_error(conn, lease, lease.status, Some(&run_id))
+        {
+            return parent_error(format!(
+                "{err}; failed to restore child lease {} after metadata error: {restore_err}",
+                lease.lease_id
+            ));
+        }
+        err
+    })?;
     finish_child_launch(
         state,
         context,
@@ -513,21 +533,36 @@ fn post_launch_metadata(
     query: &dyn GithubIssueQuery,
     runner: &dyn ChildWorkflowRunner,
     child: u64,
-    _lease: &crate::persistence::leases::IssueLease,
+    lease: &crate::persistence::leases::IssueLease,
     request: &ChildWorkflowLaunchRequest,
 ) -> Result<(Option<RunStatus>, Option<GithubIssuePrState>), EngineError> {
-    let run_status = runner
-        .run_status(&request.run_id)
-        .map_err(|err| post_launch_metadata_error(err, "read child run status"))?;
-    let pr = query
-        .pr_state_for_issue(&state.repo, child)
-        .map_err(|err| post_launch_metadata_error(github_error(err), "read child PR state"))?;
+    let run_status = runner.run_status(&request.run_id).map_err(|err| {
+        post_launch_metadata_error(
+            err,
+            "read child run status",
+            &lease.lease_id,
+            &request.run_id,
+        )
+    })?;
+    let pr = query.pr_state_for_issue(&state.repo, child).map_err(|err| {
+        post_launch_metadata_error(
+            github_error(err),
+            "read child PR state",
+            &lease.lease_id,
+            &request.run_id,
+        )
+    })?;
     Ok((run_status, pr))
 }
 
-fn post_launch_metadata_error(err: EngineError, action: &str) -> EngineError {
+fn post_launch_metadata_error(
+    err: EngineError,
+    action: &str,
+    lease_id: &str,
+    run_id: &str,
+) -> EngineError {
     parent_error(format!(
-        "{action} after child launch failed; child lease remains Running for the launched run: {err}"
+        "{action} after child launch failed for lease {lease_id} run {run_id}: {err}"
     ))
 }
 

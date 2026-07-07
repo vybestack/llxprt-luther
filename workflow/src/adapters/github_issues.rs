@@ -9,7 +9,7 @@
 //! @requirement:REQ-DAEMON-DISCOVERY-003
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 
 use serde::{Deserialize, Serialize};
 use tracing::warn;
@@ -195,7 +195,21 @@ pub trait GithubIssueQuery {
 /// @plan:PLAN-20260415-DAEMON-DISCOVERY.P03
 pub struct SystemGithubIssueQuery<R: GithubCommandRunner> {
     runner: R,
-    auto_merge_methods: Mutex<BTreeMap<String, Arc<Mutex<Option<&'static str>>>>>,
+    auto_merge_methods: Mutex<BTreeMap<String, Arc<AutoMergeMethodCacheEntry>>>,
+}
+
+#[derive(Debug, Default)]
+struct AutoMergeMethodCacheEntry {
+    state: Mutex<AutoMergeMethodCacheState>,
+    ready: Condvar,
+}
+
+#[derive(Debug, Default)]
+enum AutoMergeMethodCacheState {
+    #[default]
+    Empty,
+    Resolving,
+    Ready(&'static str),
 }
 
 impl<R: GithubCommandRunner> SystemGithubIssueQuery<R> {
@@ -508,21 +522,14 @@ fn parse_pr_state(json: &str, argv: &[String]) -> Result<Option<GithubIssuePrSta
     Ok(select_relevant_pr(prs).map(raw_pr_state_to_issue_pr_state))
 }
 
-fn parse_issue_pr_references(
-    json: &str,
-    argv: &[String],
-) -> Result<Vec<GithubIssuePrState>, GithubError> {
+fn parse_issue_pr_references(json: &str, argv: &[String]) -> Result<Vec<RawPrState>, GithubError> {
     let refs: RawIssuePrReferences =
         serde_json::from_str(json).map_err(|e| GithubError::CommandFailed {
             argv: argv.to_vec(),
             exit_code: None,
             stderr: format!("failed to parse gh issue PR references JSON: {e}"),
         })?;
-    Ok(refs
-        .closed_by_pull_requests_references
-        .into_iter()
-        .map(raw_pr_state_to_issue_pr_state)
-        .collect())
+    Ok(refs.closed_by_pull_requests_references)
 }
 
 fn select_relevant_pr(mut prs: Vec<RawPrState>) -> Option<RawPrState> {
@@ -591,8 +598,11 @@ fn status_check_passed(check: &RawStatusCheck) -> bool {
     ) || check_state(check).as_deref() == Some("success")
 }
 
-fn status_check_ignored(_check: &RawStatusCheck) -> bool {
-    false
+fn status_check_ignored(check: &RawStatusCheck) -> bool {
+    matches!(
+        check_conclusion(check).as_deref(),
+        Some("skipped" | "neutral")
+    )
 }
 
 fn check_conclusion(check: &RawStatusCheck) -> Option<String> {
@@ -821,8 +831,8 @@ impl<R: GithubCommandRunner> GithubIssueQuery for SystemGithubIssueQuery<R> {
         ];
         let issue_refs_out = self.runner.run(&issue_refs_argv)?;
         let issue_refs = parse_issue_pr_references(&issue_refs_out, &issue_refs_argv)?;
-        if let Some(pr) = issue_refs.into_iter().next() {
-            return Ok(Some(pr));
+        if let Some(pr) = select_relevant_pr(issue_refs) {
+            return Ok(Some(raw_pr_state_to_issue_pr_state(pr)));
         }
 
         Ok(None)
@@ -900,28 +910,49 @@ impl<R: GithubCommandRunner> SystemGithubIssueQuery<R> {
 
     fn cached_auto_merge_method(&self, repo: &str) -> Result<&'static str, GithubError> {
         let entry = self.auto_merge_cache_entry(repo)?;
-        {
-            let method = entry.lock().map_err(auto_merge_cache_lock_error)?;
-            if let Some(method) = *method {
-                return Ok(method);
+        let mut state = entry.state.lock().map_err(auto_merge_cache_lock_error)?;
+        loop {
+            match *state {
+                AutoMergeMethodCacheState::Ready(method) => return Ok(method),
+                AutoMergeMethodCacheState::Empty => {
+                    *state = AutoMergeMethodCacheState::Resolving;
+                    break;
+                }
+                AutoMergeMethodCacheState::Resolving => {
+                    state = entry
+                        .ready
+                        .wait(state)
+                        .map_err(auto_merge_cache_lock_error)?;
+                }
             }
         }
-        let computed = self.auto_merge_method(repo)?;
-        let mut method = entry.lock().map_err(auto_merge_cache_lock_error)?;
-        Ok(*method.get_or_insert(computed))
+        drop(state);
+        let computed = match self.auto_merge_method(repo) {
+            Ok(method) => method,
+            Err(err) => {
+                let mut state = entry.state.lock().map_err(auto_merge_cache_lock_error)?;
+                *state = AutoMergeMethodCacheState::Empty;
+                entry.ready.notify_all();
+                return Err(err);
+            }
+        };
+        let mut state = entry.state.lock().map_err(auto_merge_cache_lock_error)?;
+        *state = AutoMergeMethodCacheState::Ready(computed);
+        entry.ready.notify_all();
+        Ok(computed)
     }
 
     fn auto_merge_cache_entry(
         &self,
         repo: &str,
-    ) -> Result<Arc<Mutex<Option<&'static str>>>, GithubError> {
+    ) -> Result<Arc<AutoMergeMethodCacheEntry>, GithubError> {
         let mut methods = self
             .auto_merge_methods
             .lock()
             .map_err(auto_merge_cache_lock_error)?;
         Ok(methods
             .entry(repo.to_string())
-            .or_insert_with(|| Arc::new(Mutex::new(None)))
+            .or_insert_with(|| Arc::new(AutoMergeMethodCacheEntry::default()))
             .clone())
     }
 

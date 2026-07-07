@@ -183,13 +183,16 @@ fn resume_config_targets(
             true,
         );
         if let Some(parent_config_id) = target.discovery.parent_config_id.as_ref() {
-            if let Ok(discovery) = parent_capacity_discovery(&target.discovery, limits) {
-                upsert_resume_config_target(
+            match parent_capacity_discovery(&target.discovery, limits) {
+                Ok(discovery) => upsert_resume_config_target(
                     &mut config_targets,
                     parent_config_id.clone(),
                     discovery,
                     false,
-                );
+                ),
+                Err(err) => eprintln!(
+                    "parent resume discovery capacity error for config={parent_config_id}: {err}"
+                ),
             }
         }
     }
@@ -301,8 +304,8 @@ fn parent_capacity_discovery(
         .max_concurrent_runs_per_config
         .or(discovery.max_concurrent_runs)
         .map_or(limits.per_config, |value| value as usize);
-    let limit =
-        u32::try_from(limit).map_err(|_| rusqlite::Error::IntegralValueOutOfRange(0, i64::MAX))?;
+    let limit = u32::try_from(limit)
+        .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(0, limit as i64))?;
     parent.max_concurrent_runs = Some(limit);
     parent.max_concurrent_runs_per_config = Some(limit);
     Ok(parent)

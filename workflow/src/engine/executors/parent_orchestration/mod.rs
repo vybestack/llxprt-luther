@@ -221,10 +221,12 @@ impl OrchestrationState {
             artifact_root,
             repo: required_context(context, "target_repo")?,
             parent_issue_number: parent_issue_number(context)?,
-            luther_label: context
-                .get("luther_label")
-                .cloned()
-                .unwrap_or_else(|| "Luther working".to_string()),
+            luther_label: context_value_with_warned_default(
+                context,
+                "luther_label",
+                "parent_orchestration.active_parent_label",
+                "Luther working",
+            ),
             child_workflow_type_id: context_value_with_warned_default(
                 context,
                 "parent_orchestration.child_workflow_type_id",

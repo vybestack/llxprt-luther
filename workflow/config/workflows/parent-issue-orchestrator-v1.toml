@@ -170,3 +170,8 @@ condition = "success"
 from = "evaluate_parent_completion"
 to = "close_or_report_parent"
 condition = "fixable"
+
+[[transitions]]
+from = "evaluate_parent_completion"
+to = "close_or_report_parent"
+condition = "fatal"

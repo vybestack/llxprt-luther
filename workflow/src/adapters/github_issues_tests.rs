@@ -357,6 +357,23 @@ fn pr_state_for_issue_prefers_closing_pr_references() {
 }
 
 #[test]
+fn pr_state_for_issue_selects_most_relevant_closing_pr() {
+    let issue_refs = r#"{
+        "closedByPullRequestsReferences": [
+            {"number": 17, "state": "CLOSED", "merged": false, "updatedAt": "2026-01-02T00:00:00Z"},
+            {"number": 18, "state": "OPEN", "merged": false, "updatedAt": "2026-01-01T00:00:00Z"}
+        ]
+    }"#;
+    let runner = MockRunner::new(vec![Ok(issue_refs.to_string())]);
+    let q = SystemGithubIssueQuery::new(runner);
+
+    let pr = q.pr_state_for_issue("o/r", 7).unwrap().unwrap();
+
+    assert_eq!(pr.number, 18);
+    assert_eq!(pr.state, "open");
+}
+
+#[test]
 fn pr_state_for_issue_reports_none_when_issue_has_no_closing_pr() {
     let issue_refs = r#"{"closedByPullRequestsReferences": []}"#;
     let runner = MockRunner::new(vec![Ok(issue_refs.to_string())]);
@@ -393,19 +410,26 @@ fn status_check_rollup_accepts_commit_status_states() {
 fn status_check_rollup_ignores_skipped_and_neutral_checks() {
     let argv = vec!["gh".to_string()];
     let pr = parse_pr_state(
-        r#"[{"number":20,"state":"OPEN","merged":false,"statusCheckRollup":[{"conclusion":"SUCCESS"},{"conclusion":"SKIPPED"},{"conclusion":"NEUTRAL"}]}]"#,
+        r#"[{"number":20,"state":"OPEN","merged":false,"statusCheckRollup":[{"conclusion":"SKIPPED"},{"conclusion":"NEUTRAL"}]}]"#,
         &argv,
     )
     .unwrap()
     .unwrap();
 
-    assert_eq!(pr.status_check_rollup.as_deref(), Some("passed"));
+    assert_eq!(pr.status_check_rollup.as_deref(), None);
 }
 
 #[test]
 fn status_check_rollup_treats_terminal_failure_conclusions_as_failed() {
     let argv = vec!["gh".to_string()];
-    for conclusion in ["STARTUP_FAILURE", "CANCELLED", "STALE", "ACTION_REQUIRED"] {
+    for conclusion in [
+        "STARTUP_FAILURE",
+        "CANCELLED",
+        "STALE",
+        "ACTION_REQUIRED",
+        "FAILURE",
+        "TIMED_OUT",
+    ] {
         let pr = parse_pr_state(
             &format!(
                 r#"[{{"number":20,"state":"OPEN","merged":false,"statusCheckRollup":[{{"conclusion":"SUCCESS"}},{{"conclusion":"{conclusion}"}}]}}]"#
