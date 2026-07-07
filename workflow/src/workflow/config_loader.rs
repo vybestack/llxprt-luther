@@ -688,11 +688,6 @@ fn validate_discovery_config(config: &WorkflowConfig) -> Result<()> {
 /// Resolve effective discovery rules for a config, filling unset fields from
 /// the config's `[variables]` table and built-in defaults.
 ///
-/// This preserves parity with the legacy `select_issue` workflow step:
-/// `variables.target_repo` -> repo, `variables.ok_label` -> include label,
-/// `variables.luther_label` -> exclude label, `variables.assignee` ->
-/// assignee filter. Defaults: states `["open"]`, milestone order `"semver"`,
-/// `max_concurrent_runs = 1`, `poll_interval_secs = 300`.
 /// @plan:PLAN-20260415-DAEMON-DISCOVERY.P01
 /// @requirement:REQ-DAEMON-DISCOVERY-001
 #[must_use]

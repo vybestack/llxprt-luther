@@ -6,9 +6,8 @@ struct GraphqlPageInfo {
     end_cursor: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
 struct GraphqlSubIssuePageResponse {
-    data: GraphqlSubIssuePageData,
+    data: Option<GraphqlSubIssuePageData>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -25,6 +24,23 @@ struct GraphqlSubIssuePageRepository {
 struct GraphqlSubIssuePageIssue {
     #[serde(default, rename = "subIssues")]
     sub_issues: GraphqlSubIssueConnection,
+}
+
+impl<'de> Deserialize<'de> for GraphqlSubIssuePageResponse {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Response {
+            data: Option<GraphqlSubIssuePageData>,
+        }
+
+        let response = Response::deserialize(deserializer)?;
+        Ok(Self {
+            data: response.data,
+        })
+    }
 }
 
 const SUB_ISSUE_PAGE_LIMIT_PREFIX: &str = "sub-issue GraphQL pagination exceeded ";
@@ -103,21 +119,19 @@ fn parse_sub_issue_page_response(
             exit_code: None,
             stderr: format!("failed to parse sub-issue GraphQL page JSON: {e}"),
         })?;
-    let Some(issue) = response.data.repository.issue else {
+    let Some(issue) = response.data.and_then(|data| data.repository.issue) else {
         return Err(missing_sub_issue_parent_error(argv));
     };
     append_sub_issue_edges(issue.sub_issues.edges, seen, children);
     if issue.sub_issues.page_info.has_next_page {
-        return issue
-            .sub_issues
-            .page_info
-            .end_cursor
-            .map(Some)
-            .ok_or_else(|| GithubError::CommandFailed {
+        return match issue.sub_issues.page_info.end_cursor {
+            Some(cursor) => Ok(Some(cursor)),
+            None => Err(GithubError::CommandFailed {
                 argv: argv.to_vec(),
                 exit_code: None,
                 stderr: "sub-issue GraphQL page indicated another page without an endCursor".to_string(),
-            });
+            }),
+        };
     }
     Ok(None)
 }
@@ -145,7 +159,7 @@ fn parse_first_sub_issue_page(json: &str, argv: &[String]) -> Result<ParsedSubIs
             exit_code: None,
             stderr: format!("failed to parse sub-issue GraphQL JSON: {e}"),
         })?;
-    let Some(issue) = response.data.repository.issue else {
+    let Some(issue) = response.data.and_then(|data| data.repository.issue) else {
         return Err(missing_sub_issue_parent_error(argv));
     };
     let mut seen = BTreeSet::new();
@@ -154,7 +168,7 @@ fn parse_first_sub_issue_page(json: &str, argv: &[String]) -> Result<ParsedSubIs
     let page_info = issue.sub_issues.page_info;
     let next_cursor = if page_info.has_next_page {
         Some(page_info.end_cursor.ok_or_else(|| GithubError::CommandFailed {
-            argv: vec!["gh".into(), "api".into(), "graphql".into()],
+            argv: argv.to_vec(),
             exit_code: None,
             stderr: "sub-issue GraphQL page indicated another page without an endCursor".to_string(),
         })?)

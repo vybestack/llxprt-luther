@@ -177,13 +177,13 @@ fn still_waiting_missing_wait_state_does_not_write_poll_artifact() {
 }
 
 #[test]
-fn action_required_pr_check_keeps_waiting() {
+fn action_required_pr_check_is_terminal() {
     let record = wait_record(&conn());
     let decision = classify_terminal_or_pending(
         &record,
         vec![json!({ "name": "ci", "conclusion": "action_required" })],
     );
-    assert_eq!(decision.classification, PollClassification::StillWaiting);
+    assert_eq!(decision.classification, PollClassification::ReadyToResume);
 }
 
 #[test]

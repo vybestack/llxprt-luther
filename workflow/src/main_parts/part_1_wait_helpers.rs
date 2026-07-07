@@ -22,8 +22,8 @@ fn read_child_merge_wait_artifact(artifact_root: &std::path::Path) -> Result<Opt
         .ok_or_else(|| format!("malformed child merge wait artifact at {}: missing numeric pr.number", path.display()))
 }
 
-const CONFIG_TOKEN_UNDERSCORE: u8 = 95;
-const CONFIG_TOKEN_DOT: u8 = 46;
+const CONFIG_TOKEN_UNDERSCORE: u8 = b'_';
+const CONFIG_TOKEN_DOT: u8 = b'.';
 
 fn is_config_token_byte(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || byte == CONFIG_TOKEN_UNDERSCORE || byte == CONFIG_TOKEN_DOT

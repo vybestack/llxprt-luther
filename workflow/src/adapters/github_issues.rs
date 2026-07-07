@@ -11,7 +11,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Mutex;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use tracing::warn;
 
 use crate::adapters::github::{GithubCommandRunner, GithubError};
@@ -46,10 +46,9 @@ fn no_supported_merge_method_error(argv: &[String]) -> GithubError {
     }
 }
 fn auto_merge_cache_lock_error<T>(err: std::sync::PoisonError<T>) -> GithubError {
-    GithubError::CommandFailed {
-        argv: vec!["gh".to_string(), "repo".to_string(), "view".to_string()],
-        exit_code: None,
-        stderr: format!("failed to lock auto-merge method cache: {err}"),
+    GithubError::CacheLock {
+        context: "resolving auto-merge method".to_string(),
+        error: err.to_string(),
     }
 }
 
@@ -248,105 +247,8 @@ struct RawIssuePrReferences {
     closed_by_pull_requests_references: Vec<RawPrState>,
 }
 
-#[derive(Debug, Deserialize)]
-struct GraphqlResponse {
-    data: GraphqlData,
-}
-
-#[derive(Debug, Deserialize)]
-struct GraphqlData {
-    repository: GraphqlRepository,
-}
-
-#[derive(Debug, Deserialize)]
-struct GraphqlRepository {
-    issue: Option<GraphqlIssue>,
-}
-
-#[derive(Debug, Deserialize)]
-struct GraphqlParentResponse {
-    data: GraphqlParentData,
-}
-
-#[derive(Debug, Deserialize)]
-struct GraphqlParentData {
-    repository: GraphqlParentRepository,
-}
-
-#[derive(Debug, Deserialize)]
-struct GraphqlParentRepository {
-    issue: Option<GraphqlParentLinkIssue>,
-}
-
-#[derive(Debug, Deserialize)]
-struct GraphqlParentLinkIssue {
-    #[serde(default)]
-    parent: Option<GraphqlIssue>,
-}
-
-#[derive(Debug, Deserialize)]
-struct GraphqlIssue {
-    number: u64,
-    #[serde(default)]
-    title: String,
-    #[serde(default)]
-    state: String,
-    #[serde(default)]
-    body: Option<String>,
-    #[serde(default)]
-    labels: GraphqlNodeList<GraphqlLabel>,
-    #[serde(default)]
-    assignees: GraphqlNodeList<GraphqlAssignee>,
-    #[serde(default)]
-    milestone: Option<GraphqlMilestone>,
-    #[serde(default, rename = "subIssues")]
-    sub_issues: GraphqlSubIssueConnection,
-}
-
-#[derive(Debug, Default, Deserialize)]
-struct GraphqlSubIssueConnection {
-    #[serde(default)]
-    edges: Vec<GraphqlSubIssueEdge>,
-    #[serde(default, rename = "pageInfo")]
-    page_info: GraphqlPageInfo,
-}
-
-#[derive(Debug, Deserialize)]
-struct GraphqlSubIssueEdge {
-    node: GraphqlIssue,
-}
-
+include!("github_issues_graphql.rs");
 include!("github_issues_subissues.rs");
-
-#[derive(Debug, Deserialize)]
-struct GraphqlNodeList<T> {
-    #[serde(default)]
-    nodes: Vec<T>,
-}
-
-impl<T> Default for GraphqlNodeList<T> {
-    fn default() -> Self {
-        Self { nodes: Vec::new() }
-    }
-}
-
-#[derive(Debug, Deserialize, Default)]
-struct GraphqlLabel {
-    #[serde(default)]
-    name: String,
-}
-
-#[derive(Debug, Deserialize, Default)]
-struct GraphqlAssignee {
-    #[serde(default)]
-    login: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct GraphqlMilestone {
-    #[serde(default)]
-    title: String,
-}
 
 #[derive(Debug, Deserialize)]
 struct RawPrState {
@@ -450,8 +352,7 @@ pub fn parse_parent_issue_response(json: &str) -> Result<Option<GithubParentIssu
         })?;
     Ok(response
         .data
-        .repository
-        .issue
+        .and_then(|data| data.repository.issue)
         .and_then(|issue| issue.parent)
         .map(|parent| GithubParentIssue {
             issue: graphql_issue_to_issue(parent),
@@ -567,19 +468,34 @@ fn summarize_status_check_rollup(checks: &[RawStatusCheck]) -> Option<String> {
 
 fn status_check_failed(check: &RawStatusCheck) -> bool {
     matches!(
-        check.conclusion.as_deref(),
+        check_conclusion(check).as_deref(),
         Some(
-            "FAILURE" | "TIMED_OUT" | "ACTION_REQUIRED" | "CANCELLED" | "STALE" | "STARTUP_FAILURE"
+            "failure" | "timed_out" | "action_required" | "cancelled" | "stale" | "startup_failure"
         )
-    ) || matches!(check.state.as_deref(), Some("FAILURE" | "ERROR"))
+    ) || matches!(check_state(check).as_deref(), Some("failure" | "error"))
 }
 
 fn status_check_passed(check: &RawStatusCheck) -> bool {
-    check.conclusion.as_deref() == Some("SUCCESS") || check.state.as_deref() == Some("SUCCESS")
+    check_conclusion(check).as_deref() == Some("success")
+        || check_state(check).as_deref() == Some("success")
 }
 
 fn status_check_ignored(check: &RawStatusCheck) -> bool {
-    matches!(check.conclusion.as_deref(), Some("SKIPPED" | "NEUTRAL"))
+    matches!(
+        check_conclusion(check).as_deref(),
+        Some("skipped" | "neutral")
+    )
+}
+
+fn check_conclusion(check: &RawStatusCheck) -> Option<String> {
+    check
+        .conclusion
+        .as_ref()
+        .map(|value| value.to_ascii_lowercase())
+}
+
+fn check_state(check: &RawStatusCheck) -> Option<String> {
+    check.state.as_ref().map(|value| value.to_ascii_lowercase())
 }
 
 #[derive(Debug, Deserialize)]
@@ -660,8 +576,21 @@ impl<R: GithubCommandRunner> GithubIssueQuery for SystemGithubIssueQuery<R> {
     }
 
     fn has_open_pr_for_issue(&self, repo: &str, number: u64) -> Result<bool, GithubError> {
-        self.pr_state_for_issue(repo, number)
-            .map(|pr| pr.is_some_and(|pr| pr.state.eq_ignore_ascii_case("open")))
+        let argv = vec![
+            "gh".to_string(),
+            "pr".to_string(),
+            "list".to_string(),
+            "--repo".to_string(),
+            repo.to_string(),
+            "--state".to_string(),
+            "open".to_string(),
+            "--search".to_string(),
+            format!("issue:{number}"),
+            "--json".to_string(),
+            "number,state".to_string(),
+        ];
+        let out = self.runner.run(&argv)?;
+        parse_pr_state(&out, &argv).map(|pr| pr.is_some())
     }
 
     fn list_milestones(&self, repo: &str) -> Result<Vec<String>, GithubError> {
@@ -865,20 +794,15 @@ impl<R: GithubCommandRunner> SystemGithubIssueQuery<R> {
     }
 
     fn cached_auto_merge_method(&self, repo: &str) -> Result<&'static str, GithubError> {
-        if let Some(method) = self
+        let mut methods = self
             .auto_merge_methods
             .lock()
-            .map_err(auto_merge_cache_lock_error)?
-            .get(repo)
-            .copied()
-        {
+            .map_err(auto_merge_cache_lock_error)?;
+        if let Some(method) = methods.get(repo).copied() {
             return Ok(method);
         }
         let method = self.auto_merge_method(repo)?;
-        self.auto_merge_methods
-            .lock()
-            .map_err(auto_merge_cache_lock_error)?
-            .insert(repo.to_string(), method);
+        methods.insert(repo.to_string(), method);
         Ok(method)
     }
 

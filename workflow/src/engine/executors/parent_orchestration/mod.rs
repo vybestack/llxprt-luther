@@ -63,8 +63,10 @@ pub trait ChildWorkflowRunner: Send + Sync {
         Err("child workflow runner does not support resume_child".to_string())
     }
 
-    fn run_status(&self, _run_id: &str) -> Result<Option<RunStatus>, String> {
-        Err("child workflow runner does not support run_status".to_string())
+    fn run_status(&self, _run_id: &str) -> Result<Option<RunStatus>, EngineError> {
+        Err(parent_error(
+            "child workflow runner does not support run_status".to_string(),
+        ))
     }
 }
 
@@ -85,7 +87,7 @@ impl ChildWorkflowRunner for SystemChildWorkflowRunner {
         resume_child_process(request)
     }
 
-    fn run_status(&self, run_id: &str) -> Result<Option<RunStatus>, String> {
+    fn run_status(&self, run_id: &str) -> Result<Option<RunStatus>, EngineError> {
         child_run_status_from_registry(run_id)
     }
 }
@@ -99,6 +101,7 @@ pub struct ChildWorkflowLaunchRequest {
     pub issue_number: u64,
     pub work_dir: Option<PathBuf>,
     pub artifact_dir: Option<PathBuf>,
+    pub config_root: PathBuf,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -177,6 +180,7 @@ struct OrchestrationState {
     wait_for_human_merge: bool,
     work_dir: Option<PathBuf>,
     artifact_dir: Option<PathBuf>,
+    config_root: PathBuf,
 }
 
 impl OrchestrationState {
@@ -224,6 +228,11 @@ impl OrchestrationState {
             ),
             work_dir: context.get("work_dir").map(PathBuf::from),
             artifact_dir: Some(artifact_dir),
+            config_root: context
+                .get("config_root")
+                .or_else(|| context.get("config_dir"))
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("config")),
         })
     }
 }

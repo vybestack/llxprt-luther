@@ -72,31 +72,24 @@ fn list_issues_builds_correct_argv() {
 
 #[test]
 fn has_open_pr_true_and_false() {
-    let runner_true = MockRunner::new(vec![
-        Ok(r#"{"closedByPullRequestsReferences": []}"#.to_string()),
-        Ok(r#"[{"number":99,"state":"OPEN","merged":false}]"#.to_string()),
-    ]);
+    let runner_true = MockRunner::new(vec![Ok(
+        r#"[{"number":99,"state":"OPEN","merged":false}]"#.to_string()
+    )]);
     let q_true = SystemGithubIssueQuery::new(runner_true);
     assert!(q_true.has_open_pr_for_issue("o/r", 12).unwrap());
 
-    let runner_false = MockRunner::new(vec![
-        Ok(r#"{"closedByPullRequestsReferences": []}"#.to_string()),
-        Ok("[]".to_string()),
-    ]);
+    let runner_false = MockRunner::new(vec![Ok("[]".to_string())]);
     let q_false = SystemGithubIssueQuery::new(runner_false);
     assert!(!q_false.has_open_pr_for_issue("o/r", 12).unwrap());
 }
 
 #[test]
 fn has_open_pr_builds_search_argv() {
-    let runner = MockRunner::new(vec![
-        Ok(r#"{"closedByPullRequestsReferences": []}"#.to_string()),
-        Ok("[]".to_string()),
-    ]);
+    let runner = MockRunner::new(vec![Ok("[]".to_string())]);
     let q = SystemGithubIssueQuery::new(runner);
     let _ = q.has_open_pr_for_issue("o/r", 7).unwrap();
     let calls = q.runner.calls.borrow();
-    let argv = &calls[1];
+    let argv = &calls[0];
     assert!(argv.contains(&"--search".to_string()));
     assert!(argv.contains(&"issue:7".to_string()));
 }
@@ -163,6 +156,7 @@ fn parse_parent_issue_response_accepts_parent_only_query_shape() {
     assert_eq!(parent.issue.assignee.as_deref(), Some("acoliver"));
     assert_eq!(parent.issue.milestone.as_deref(), Some("v1.0.0"));
 }
+
 #[test]
 fn list_sub_issues_empty_native_empty_body_returns_empty_children() {
     let native_empty = r#"{
@@ -405,6 +399,36 @@ fn status_check_rollup_accepts_commit_status_states() {
     .unwrap()
     .unwrap();
     assert_eq!(failed.status_check_rollup.as_deref(), Some("failed"));
+}
+
+#[test]
+fn status_check_rollup_ignores_skipped_and_neutral_checks() {
+    let argv = vec!["gh".to_string()];
+    let pr = parse_pr_state(
+        r#"[{"number":20,"state":"OPEN","merged":false,"statusCheckRollup":[{"conclusion":"SUCCESS"},{"conclusion":"SKIPPED"},{"conclusion":"NEUTRAL"}]}]"#,
+        &argv,
+    )
+    .unwrap()
+    .unwrap();
+
+    assert_eq!(pr.status_check_rollup.as_deref(), Some("passed"));
+}
+
+#[test]
+fn status_check_rollup_treats_terminal_failure_conclusions_as_failed() {
+    let argv = vec!["gh".to_string()];
+    for conclusion in ["STARTUP_FAILURE", "CANCELLED", "STALE", "ACTION_REQUIRED"] {
+        let pr = parse_pr_state(
+            &format!(
+                r#"[{{"number":20,"state":"OPEN","merged":false,"statusCheckRollup":[{{"conclusion":"SUCCESS"}},{{"conclusion":"{conclusion}"}}]}}]"#
+            ),
+            &argv,
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(pr.status_check_rollup.as_deref(), Some("failed"));
+    }
 }
 
 #[test]

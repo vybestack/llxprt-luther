@@ -3,7 +3,6 @@ use crate::adapters::github_issues::{
     GithubIssuePrState, GithubParentIssue, GithubSubIssue, SubIssueSource,
 };
 
-#[derive(Default)]
 struct MockQuery {
     issue: Option<GithubIssue>,
     children: Vec<GithubSubIssue>,
@@ -489,7 +488,7 @@ impl ChildWorkflowRunner for WaitingChildRunner {
         Ok(ChildWorkflowRunResult::WaitingExternal)
     }
 
-    fn run_status(&self, _run_id: &str) -> Result<Option<RunStatus>, String> {
+    fn run_status(&self, _run_id: &str) -> Result<Option<RunStatus>, EngineError> {
         Ok(Some(RunStatus::WaitingExternal))
     }
 }
@@ -547,7 +546,6 @@ fn fresh_waiting_child_launch_records_child_run_id_in_wait_artifact() {
         wait.get("child_run_id").and_then(Value::as_str),
         Some(launched_run_id.as_str())
     );
-    assert!(wait.get("child_run_id").and_then(Value::as_str).is_some());
 }
 
 fn unordered_children() -> Vec<GithubSubIssue> {
@@ -823,6 +821,7 @@ fn interrupted_child_workflow_uses_step_wait_kind() {
         issue_number: unique_child_issue_number(),
         work_dir: None,
         artifact_dir: None,
+        config_root: PathBuf::from("config"),
     };
     let config = workflow_config(&request);
     crate::persistence::checkpoint::save_checkpoint_with_conn(

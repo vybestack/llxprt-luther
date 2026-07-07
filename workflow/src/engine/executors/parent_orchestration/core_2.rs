@@ -66,17 +66,18 @@ fn configure_parent_orchestration_connection(
 }
 
 fn open_parent_orchestration_connection(path: &Path) -> Result<rusqlite::Connection, String> {
-    let conn = rusqlite::Connection::open(path).map_err(|err| err.to_string())?;
+    let conn = rusqlite::Connection::open(path)
+        .map_err(|err| format!("open parent orchestration database: {err}"))?;
     conn.busy_timeout(std::time::Duration::from_secs(5))
-        .map_err(|err| err.to_string())?;
+        .map_err(|err| format!("set parent orchestration database busy timeout: {err}"))?;
     Ok(conn)
 }
 
-fn child_run_status_from_registry(run_id: &str) -> Result<Option<RunStatus>, String> {
-    let conn = daemon_connection().map_err(|err| err.to_string())?;
+fn child_run_status_from_registry(run_id: &str) -> Result<Option<RunStatus>, EngineError> {
+    let conn = daemon_connection()?;
     get_run_with_conn(&conn, run_id)
         .map(|metadata| metadata.map(|run| run.status))
-        .map_err(|err| err.to_string())
+        .map_err(sql_error)
 }
 
 enum ChildLeaseAction {
@@ -501,6 +502,7 @@ fn child_request_with_run_id(
         issue_number: child,
         work_dir: state.work_dir.clone(),
         artifact_dir,
+        config_root: state.config_root.clone(),
     }
 }
 
@@ -548,8 +550,9 @@ fn finish_child_launch(
         ChildWorkflowRunResult::CompletedFailure => LeaseStatus::Failed,
         ChildWorkflowRunResult::WaitingExternal => LeaseStatus::WaitingExternal,
     };
+    let conn = daemon_connection()?;
     update_lease_status(
-        &daemon_connection()?,
+        &conn,
         &completion.lease.lease_id,
         status,
         Some(&completion.request.run_id),
@@ -646,13 +649,22 @@ fn classify_child_run_result(
 ) -> ChildWorkflowRunResult {
     match run_status {
         Some(
-            RunStatus::WaitingForChecks | RunStatus::WaitingExternal | RunStatus::ReadyToResume,
+            RunStatus::Initialized
+            | RunStatus::Queued
+            | RunStatus::Starting
+            | RunStatus::Running
+            | RunStatus::WaitingForChecks
+            | RunStatus::WaitingExternal
+            | RunStatus::ReadyToResume
+            | RunStatus::Remediating
+            | RunStatus::Blocked
+            | RunStatus::Paused,
         ) => ChildWorkflowRunResult::WaitingExternal,
         Some(RunStatus::Completed | RunStatus::Merged) => ChildWorkflowRunResult::CompletedSuccess,
         Some(RunStatus::Failed | RunStatus::Abandoned | RunStatus::Cancelled) => {
             ChildWorkflowRunResult::CompletedFailure
         }
-        Some(_) | None => process_result.clone(),
+        None => process_result.clone(),
     }
 }
 
@@ -778,12 +790,12 @@ fn run_child_workflow(
     request: &ChildWorkflowLaunchRequest,
     mode: ChildRunMode,
 ) -> Result<ChildWorkflowRunResult, String> {
-    let config_root = PathBuf::from("config");
+    let config_root = &request.config_root;
     let config_id = validated_child_id(&request.config_id, "config id")?;
     let workflow_type_id = validated_child_id(&request.workflow_type_id, "type id")?;
-    let mut config = resolve_workflow_config(config_id, &config_root)
+    let mut config = resolve_workflow_config(config_id, config_root)
         .map_err(|err| format!("resolve child config '{config_id}': {err}"))?;
-    let workflow_type = resolve_workflow_type(workflow_type_id, &config_root)
+    let workflow_type = resolve_workflow_type(workflow_type_id, config_root)
         .map_err(|err| format!("resolve child workflow type: {err}"))?;
     apply_child_overrides(&mut config, request)?;
     let db_path = crate::runtime_paths::get_data_dir().join("checkpoints.db");

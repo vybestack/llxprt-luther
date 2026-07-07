@@ -159,11 +159,15 @@ fn determine_subissue_order(
         &json!({"order": order, "strategy": "native_position_then_issue_number"}),
     )?;
     if state.current_step == "determine_refreshed_subissue_order" {
-        fs::copy(
-            state.artifact_root.join(artifact_name),
-            state.artifact_root.join("subissue-order-plan.json"),
-        )
-        .map_err(|err| parent_error(format!("copy refreshed subissue order artifact: {err}")))?;
+        let source = state.artifact_root.join(artifact_name);
+        let destination = state.artifact_root.join("subissue-order-plan.json");
+        fs::copy(&source, &destination).map_err(|err| {
+            parent_error(format!(
+                "copy refreshed subissue order artifact from {} to {}: {err}",
+                source.display(),
+                destination.display()
+            ))
+        })?;
     }
     context.set("subissue_order", &json!(order).to_string());
     Ok(StepOutcome::Success)
@@ -301,8 +305,7 @@ fn wait_for_existing_child(
     let run_status = lease
         .and_then(|lease| lease.run_id.as_deref())
         .map(child_run_status_from_registry)
-        .transpose()
-        .map_err(parent_error)?
+        .transpose()?
         .flatten();
     if run_status == Some(RunStatus::Merged) {
         write_launch_artifact(
@@ -410,7 +413,7 @@ fn start_child_workflow(
         }
         parent_error(err)
     })?;
-    let run_status = runner.run_status(&request.run_id).map_err(parent_error)?;
+    let run_status = runner.run_status(&request.run_id)?;
     let pr = query
         .pr_state_for_issue(&state.repo, child)
         .map_err(github_error)?;
@@ -464,7 +467,7 @@ fn resume_child_workflow(
         }
         parent_error(err)
     })?;
-    let run_status = runner.run_status(&request.run_id).map_err(parent_error)?;
+    let run_status = runner.run_status(&request.run_id)?;
     let pr = query
         .pr_state_for_issue(&state.repo, child)
         .map_err(github_error)?;
@@ -535,6 +538,7 @@ fn record_observed_child_pr_merge_wait(
     child: u64,
     pr: Option<&GithubIssuePrState>,
 ) -> Result<StepOutcome, EngineError> {
+    let already_recorded = rollup_has_outcome(state, child, "observing_existing_child_pr")?;
     write_json(
         &state.artifact_root,
         "child-merge-wait.json",
@@ -548,15 +552,17 @@ fn record_observed_child_pr_merge_wait(
             "max_child_merge_wait_seconds": state.max_child_merge_wait_seconds
         }),
     )?;
-    query
-        .comment_issue(
-            &state.repo,
-            state.parent_issue_number,
-            &format!(
-                "Child issue #{child} already has an active PR. Parent orchestration will observe it and continue after the PR is merged."
-            ),
-        )
-        .map_err(github_error)?;
+    if !already_recorded {
+        query
+            .comment_issue(
+                &state.repo,
+                state.parent_issue_number,
+                &format!(
+                    "Child issue #{child} already has an active PR. Parent orchestration will observe it and continue after the PR is merged."
+                ),
+            )
+            .map_err(github_error)?;
+    }
     update_rollup(state, child, None, "observing_existing_child_pr", pr)?;
     Ok(StepOutcome::Wait)
 }

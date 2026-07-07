@@ -173,38 +173,46 @@ fn resume_config_targets(
     targets: &[SchedulerTarget],
     limits: &CapacityLimits,
 ) -> Vec<(String, DiscoveryConfig)> {
-    let mut seen = std::collections::BTreeSet::new();
-    let mut config_targets = Vec::new();
+    let mut config_targets: Vec<(String, DiscoveryConfig, bool)> = Vec::new();
     for target in targets {
-        push_resume_config_target(
+        upsert_resume_config_target(
             &mut config_targets,
-            &mut seen,
             target.config_id.clone(),
             target.discovery.clone(),
+            true,
         );
         if let Some(parent_config_id) = target.discovery.parent_config_id.as_ref() {
-            push_resume_config_target(
+            upsert_resume_config_target(
                 &mut config_targets,
-                &mut seen,
                 parent_config_id.clone(),
                 parent_capacity_discovery(&target.discovery, limits),
+                false,
             );
         }
     }
     config_targets
+        .into_iter()
+        .map(|(config_id, discovery, _)| (config_id, discovery))
+        .collect()
 }
 
-fn push_resume_config_target(
-    config_targets: &mut Vec<(String, DiscoveryConfig)>,
-    seen: &mut std::collections::BTreeSet<String>,
+fn upsert_resume_config_target(
+    config_targets: &mut Vec<(String, DiscoveryConfig, bool)>,
     config_id: String,
     discovery: DiscoveryConfig,
+    direct: bool,
 ) {
-    if seen.contains(&config_id) {
+    if let Some((_, existing_discovery, existing_direct)) = config_targets
+        .iter_mut()
+        .find(|(existing_config_id, _, _)| existing_config_id == &config_id)
+    {
+        if direct && !*existing_direct {
+            *existing_discovery = discovery;
+            *existing_direct = true;
+        }
         return;
     }
-    seen.insert(config_id.clone());
-    config_targets.push((config_id, discovery));
+    config_targets.push((config_id, discovery, direct));
 }
 
 fn prepare_resume_unit(
@@ -286,8 +294,12 @@ fn parent_capacity_discovery(
     limits: &CapacityLimits,
 ) -> DiscoveryConfig {
     let mut parent = discovery.clone();
-    parent.max_concurrent_runs = Some(usize_to_u32(limits.per_config));
-    parent.max_concurrent_runs_per_config = Some(usize_to_u32(limits.per_config));
+    let limit = discovery
+        .max_concurrent_runs_per_config
+        .or(discovery.max_concurrent_runs)
+        .map_or(limits.per_config, |value| value as usize);
+    parent.max_concurrent_runs = Some(usize_to_u32(limit));
+    parent.max_concurrent_runs_per_config = Some(usize_to_u32(limit));
     parent
 }
 

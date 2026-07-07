@@ -429,6 +429,7 @@ mod tests {
         };
         let r = discover(&cfg(), &q, &conn(), 0).unwrap();
         assert!(r.eligible.is_empty());
+        assert!(!r.skipped.is_empty(), "expected issue to be skipped");
         assert_eq!(
             r.skipped[0].1,
             SkipReason::MissingRequiredLabel("OK for Luther".to_string())
@@ -526,6 +527,7 @@ mod tests {
             vec![2]
         );
     }
+
     #[test]
     fn open_pr_skipped() {
         let q = MockQuery {

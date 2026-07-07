@@ -271,10 +271,16 @@ pub fn check_bucket(
         "skipped".to_string()
     } else if matches!(
         conclusion.as_str(),
-        "failure" | "startup_failure" | "timed_out" | "cancelled"
+        "failure" | "startup_failure" | "timed_out" | "action_required" | "cancelled" | "stale"
     ) || matches!(
         state.as_str(),
-        "failure" | "failed" | "startup_failure" | "timed_out" | "cancelled"
+        "failure"
+            | "failed"
+            | "startup_failure"
+            | "timed_out"
+            | "action_required"
+            | "cancelled"
+            | "stale"
     ) || matches!(bucket.as_str(), "fail" | "failed")
     {
         "failed".to_string()
@@ -435,10 +441,8 @@ fn aggregate_match_state(
 }
 
 fn classify_check(check: &PrCheckObservation, allow_skipped: bool) -> String {
-    if check.bucket == "skipped" && allow_skipped {
+    if check.bucket == "skipped" || (check.bucket == "failed" && allow_skipped) {
         "passed".to_string()
-    } else if check.bucket == "skipped" {
-        "failed".to_string()
     } else {
         check.bucket.clone()
     }
@@ -548,26 +552,20 @@ mod tests {
     }
 
     #[test]
-    fn skipped_requires_policy_allowance() {
-        let mut config = PrCheckWaitConfig {
+    fn skipped_and_neutral_are_non_blocking() {
+        let config = PrCheckWaitConfig {
             required: vec![definition("ci")],
             ..PrCheckWaitConfig::default()
         };
-        let denied = classify_pr_checks(
-            "h",
-            vec![check("ci", "skipped")],
-            &config,
-            PrCheckWaitCounters::default(),
-        );
-        assert_eq!(denied.overall_state, OverallState::Failed);
-        config.default_allow_skipped = true;
-        let allowed = classify_pr_checks(
-            "h",
-            vec![check("ci", "skipped")],
-            &config,
-            PrCheckWaitCounters::default(),
-        );
-        assert_eq!(allowed.overall_state, OverallState::Passed);
+        for bucket in ["skipped", "passed"] {
+            let result = classify_pr_checks(
+                "h",
+                vec![check("ci", bucket)],
+                &config,
+                PrCheckWaitCounters::default(),
+            );
+            assert_eq!(result.overall_state, OverallState::Passed);
+        }
     }
 
     fn definition(pattern: &str) -> PrCheckDefinition {

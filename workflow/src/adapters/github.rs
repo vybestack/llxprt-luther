@@ -54,6 +54,9 @@ pub enum GithubError {
         /// Captured stderr.
         stderr: String,
     },
+    /// A shared GitHub adapter cache could not be locked.
+    #[error("GitHub adapter cache lock failed while {context}: {error}")]
+    CacheLock { context: String, error: String },
 }
 
 impl GithubError {
@@ -103,6 +106,13 @@ impl GithubError {
                     diag.insert("exit_code".to_string(), code.to_string());
                 }
                 diag.insert("argv".to_string(), argv.join(" "));
+            }
+            GithubError::CacheLock { context, .. } => {
+                diag.insert("context".to_string(), context.clone());
+                diag.insert(
+                    "required_action".to_string(),
+                    "retry the GitHub operation".to_string(),
+                );
             }
         }
 
