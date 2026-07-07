@@ -21,7 +21,12 @@ fn review_thread_id_from_stable_marker_key(value: &Value) -> Option<String> {
     value
         .get("stable_marker_key")
         .and_then(Value::as_str)
-        .and_then(|key| key.strip_prefix(STABLE_MARKER_THREAD_PREFIX))
+        .and_then(parse_review_thread_id_from_stable_marker_key)
+}
+
+fn parse_review_thread_id_from_stable_marker_key(stable_marker_key: &str) -> Option<String> {
+    stable_marker_key
+        .strip_prefix(STABLE_MARKER_THREAD_PREFIX)
         // GitHub GraphQL Relay node IDs do not contain ':'. Any suffix after
         // the first ':' is marker metadata, not part of the thread node ID.
         .and_then(|thread_id| thread_id.split(':').next())

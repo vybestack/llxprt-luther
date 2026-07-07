@@ -305,29 +305,15 @@ fn marker_action_claims_review_thread_identity(action: &PendingMarkerAction) -> 
 }
 
 fn raw_thread_id_declares_review_thread_identity(value: &Value) -> bool {
-    string_at_paths(
-        value,
-        &[
-            "/thread_id",
-            "/evidence/thread_id",
-            "/original_feedback_identity/thread_id",
-        ],
-    )
-    .is_some_and(|thread_id| is_review_thread_node_id(thread_id.trim()))
+    direct_review_thread_id(value).is_some()
 }
 
 fn raw_stable_marker_declares_review_thread_identity(stable_marker_key: &str) -> bool {
-    stable_marker_key
-        .strip_prefix(STABLE_MARKER_THREAD_PREFIX)
-        .and_then(|suffix| suffix.split(':').next())
-        .is_some_and(is_review_thread_node_id)
+    parse_review_thread_id_from_stable_marker_key(stable_marker_key).is_some()
 }
 
 fn raw_graphql_item_declares_review_thread_identity(item_id: &str) -> bool {
-    item_id
-        .strip_prefix(GRAPHQL_NODE_ID_PREFIX)
-        .and_then(|suffix| suffix.split(':').next())
-        .is_some_and(is_review_thread_node_id)
+    parse_review_thread_id_from_graphql_item_id(item_id).is_some()
 }
 
 fn post_marker_reply_via_rest_review_comment(
@@ -424,19 +410,21 @@ fn post_marker_reply_via_graphql_thread(
     let parsed: Value = serde_json::from_str(&response).unwrap_or_else(|err| {
         json!({ "raw_response": response, "parse_error": err.to_string() })
     });
-    let comment = parsed.pointer("/data/addPullRequestReviewThreadReply/comment");
-    if comment.is_none() {
+    let Some(comment) = parsed
+        .pointer("/data/addPullRequestReviewThreadReply/comment")
+        .filter(|comment| comment.is_object())
+    else {
         return Err(github_feedback_error(format!(
             "GraphQL addPullRequestReviewThreadReply failed for thread {thread_id}; mutation may have partially succeeded, inspect response before retrying; {}",
             graphql_error_summary(&parsed)
         )));
-    }
+    };
     let graphql_errors_present = parsed
         .get("errors")
         .and_then(Value::as_array)
         .is_some_and(|errors| !errors.is_empty());
-    let comment_id = comment.and_then(|value| value.get("databaseId")).cloned();
-    let comment_url = comment.and_then(|value| value.get("url")).cloned();
+    let comment_id = comment.get("databaseId").cloned();
+    let comment_url = comment.get("url").cloned();
     let mut warnings = vec!["posted_review_thread_reply_via_graphql"];
     if graphql_errors_present {
         warnings.push("graphql_errors_present_with_posted_thread_reply");

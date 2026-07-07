@@ -15,7 +15,7 @@
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
-use rusqlite::Connection;
+use rusqlite::{Connection, Transaction, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
@@ -481,20 +481,10 @@ pub fn commit_continuation(
     request: &ContinuationRequest,
     step_id: &str,
 ) -> Result<RunMetadata, ContinuationError> {
-    conn.execute_batch("BEGIN IMMEDIATE")?;
-    let result = commit_continuation_in_transaction(conn, request, step_id);
-    match result {
-        Ok(metadata) => {
-            conn.execute_batch("COMMIT")?;
-            Ok(metadata)
-        }
-        Err(err) => {
-            if let Err(rollback_err) = conn.execute_batch("ROLLBACK") {
-                return Err(ContinuationError::from(rollback_err));
-            }
-            Err(err)
-        }
-    }
+    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+    let metadata = commit_continuation_in_transaction(&tx, request, step_id)?;
+    tx.commit()?;
+    Ok(metadata)
 }
 
 fn commit_continuation_in_transaction(

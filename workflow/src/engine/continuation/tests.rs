@@ -277,6 +277,12 @@ fn result_artifact_name_differs_for_retry() {
         }),
         "retry-result.json"
     );
+    assert_eq!(
+        result_artifact_name(&ContinuationKind::Rewind {
+            target: RewindTarget::ToStep("watch_pr_checks".to_string()),
+        }),
+        "resume-result.json"
+    );
 }
 
 /// Continuation kinds that should be rejected uniformly when a run is in a
@@ -353,6 +359,8 @@ fn validation_accepts_resumable_statuses() {
     for status in [
         RunStatus::Failed,
         RunStatus::WaitingForChecks,
+        RunStatus::WaitingExternal,
+        RunStatus::ReadyToResume,
         RunStatus::Paused,
         RunStatus::Blocked,
     ] {

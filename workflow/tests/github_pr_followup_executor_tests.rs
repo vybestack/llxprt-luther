@@ -8180,7 +8180,6 @@ fn write_p15_validated_fixed_pending(temp: &tempfile::TempDir) {
                 "source_type": "coderabbit_feedback",
                 "source_id": "cr-valid",
                 "thread_id": "PRRT_thread_valid",
-
                 "stable_marker_key": "PRRT_thread_valid",
                 "body_hash": "hash-valid",
                 "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
