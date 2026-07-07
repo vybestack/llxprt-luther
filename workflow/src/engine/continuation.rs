@@ -481,14 +481,32 @@ pub fn commit_continuation(
     request: &ContinuationRequest,
     step_id: &str,
 ) -> Result<RunMetadata, ContinuationError> {
-    let tx = conn.unchecked_transaction()?;
-    let metadata = get_run_with_conn(&tx, &request.run_id)?
+    conn.execute_batch("BEGIN IMMEDIATE")?;
+    let result = commit_continuation_in_transaction(conn, request, step_id);
+    match result {
+        Ok(metadata) => {
+            conn.execute_batch("COMMIT")?;
+            Ok(metadata)
+        }
+        Err(err) => {
+            if let Err(rollback_err) = conn.execute_batch("ROLLBACK") {
+                return Err(ContinuationError::from(rollback_err));
+            }
+            Err(err)
+        }
+    }
+}
+
+fn commit_continuation_in_transaction(
+    conn: &Connection,
+    request: &ContinuationRequest,
+    step_id: &str,
+) -> Result<RunMetadata, ContinuationError> {
+    let metadata = get_run_with_conn(conn, &request.run_id)?
         .ok_or_else(|| ContinuationError::RunNotFound(request.run_id.clone()))?;
     ensure_reopen_claim_is_available(&metadata, request)?;
-    set_resume_point(&tx, &request.run_id, step_id)?;
-    let metadata = reopen_run(&tx, request, step_id, metadata)?;
-    tx.commit()?;
-    Ok(metadata)
+    set_resume_point(conn, &request.run_id, step_id)?;
+    reopen_run(conn, request, step_id, metadata)
 }
 
 fn reopen_run(
@@ -548,7 +566,10 @@ fn running_claim_is_available(metadata: &RunMetadata) -> bool {
 }
 
 fn live_running_claim_pid(metadata: &RunMetadata) -> Option<u32> {
-    if metadata.status == RunStatus::Running && !metadata.is_process_stale() {
+    if metadata.status == RunStatus::Running
+        && metadata.process_pid.is_some()
+        && !metadata.is_process_stale()
+    {
         metadata.process_pid
     } else {
         None

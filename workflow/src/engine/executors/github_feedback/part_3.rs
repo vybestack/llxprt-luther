@@ -317,7 +317,10 @@ fn raw_thread_id_declares_review_thread_identity(value: &Value) -> bool {
 }
 
 fn raw_stable_marker_declares_review_thread_identity(stable_marker_key: &str) -> bool {
-    stable_marker_key.starts_with(STABLE_MARKER_THREAD_PREFIX)
+    stable_marker_key
+        .strip_prefix(STABLE_MARKER_THREAD_PREFIX)
+        .and_then(|suffix| suffix.split(':').next())
+        .is_some_and(is_review_thread_node_id)
 }
 
 fn raw_graphql_item_declares_review_thread_identity(item_id: &str) -> bool {
@@ -424,7 +427,8 @@ fn post_marker_reply_via_graphql_thread(
     let comment = parsed.pointer("/data/addPullRequestReviewThreadReply/comment");
     if comment.is_none() {
         return Err(github_feedback_error(format!(
-            "GraphQL addPullRequestReviewThreadReply failed for thread {thread_id}; mutation may have partially succeeded, inspect response before retrying: {parsed}"
+            "GraphQL addPullRequestReviewThreadReply failed for thread {thread_id}; mutation may have partially succeeded, inspect response before retrying; {}",
+            graphql_error_summary(&parsed)
         )));
     }
     let graphql_errors_present = parsed

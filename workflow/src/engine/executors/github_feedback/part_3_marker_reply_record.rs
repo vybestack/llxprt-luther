@@ -25,3 +25,18 @@ fn marker_reply_record(input: MarkerReplyRecordInput<'_>) -> Value {
     })
 }
 
+fn graphql_error_summary(parsed: &Value) -> String {
+    let summary = parsed
+        .get("errors")
+        .and_then(Value::as_array)
+        .map(|errors| {
+            errors
+                .iter()
+                .filter_map(|error| error.get("message").and_then(Value::as_str))
+                .collect::<Vec<_>>()
+                .join("; ")
+        })
+        .filter(|summary| !summary.is_empty())
+        .unwrap_or_else(|| "no GraphQL error message returned".to_string());
+    summary.chars().take(500).collect()
+}

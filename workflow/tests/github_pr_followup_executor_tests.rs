@@ -4947,11 +4947,24 @@ fn remediation_plan_with_must_fix_defers_user_judgment_and_remediates_actionable
             && item.get("decision").and_then(serde_json::Value::as_str)
                 != Some("needs_user_judgment")
     }));
-    assert!(!artifact
+    assert!(
+        must_fix.iter().any(|item| {
+            item.get("source_type").and_then(serde_json::Value::as_str) == Some("ci_failure")
+                && item.get("source_id").and_then(serde_json::Value::as_str) == Some("ci-1")
+        }),
+        "must_fix should contain the concrete CI failure item: {artifact}"
+    );
+    let needs_user_judgment = artifact
         .get("needs_user_judgment")
         .and_then(serde_json::Value::as_array)
-        .expect("needs_user_judgment")
-        .is_empty());
+        .expect("needs_user_judgment");
+    assert!(!needs_user_judgment.is_empty());
+    assert!(
+        needs_user_judgment.iter().any(|item| {
+            item.get("source_id").and_then(serde_json::Value::as_str) == Some("cr-judge")
+        }),
+        "needs_user_judgment should contain cr-judge: {artifact}"
+    );
 }
 
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P10
@@ -8004,6 +8017,7 @@ struct P15MarkerRunner {
     remote_comments: Arc<Mutex<Vec<serde_json::Value>>>,
     pull_review_comments: Arc<Mutex<Vec<serde_json::Value>>>,
     fail_resolution: bool,
+    graphql_reply_without_comment: bool,
 }
 
 /// @pseudocode lines 42-47
@@ -8025,6 +8039,13 @@ impl P15MarkerRunner {
     fn failing_resolution() -> Self {
         Self {
             fail_resolution: true,
+            ..Self::default()
+        }
+    }
+
+    fn graphql_reply_without_comment() -> Self {
+        Self {
+            graphql_reply_without_comment: true,
             ..Self::default()
         }
     }
@@ -8084,6 +8105,13 @@ impl GithubPrCommandRunner for P15MarkerRunner {
                 .iter()
                 .any(|arg| arg.contains("addPullRequestReviewThreadReply"))
             {
+                if self.graphql_reply_without_comment {
+                    return Ok(serde_json::json!({
+                        "data": { "addPullRequestReviewThreadReply": null },
+                        "errors": [{ "message": "reply was not created" }]
+                    })
+                    .to_string());
+                }
                 return Ok(serde_json::json!({ "data": { "addPullRequestReviewThreadReply": { "comment": { "id": "PRRC_reply_9101", "databaseId": 9101, "url": "https://github.com/example/workflow/pull/1910#discussion_r9101" } } } }).to_string());
             }
             if self.fail_resolution {
@@ -9237,6 +9265,47 @@ fn marker_posts_graphql_thread_reply_when_database_id_missing() {
     assert!(
         has_graphql_reply_audit,
         "GraphQL thread reply should be recorded as an in-thread reply with its comment id"
+    );
+}
+
+#[test]
+fn marker_fails_when_graphql_thread_reply_response_has_no_comment() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_p15_validated_fixed_pending_with_database_id(&temp, 7001);
+    let path = p11_current_artifact_path(&temp, "pending-feedback-marker-actions");
+    let mut pending = read_json(&path);
+    pending["pending_actions"][0]
+        .as_object_mut()
+        .expect("pending action object")
+        .remove("comment_database_id");
+    pending["pending_actions"][0]["original_feedback_identity"]
+        .as_object_mut()
+        .expect("original feedback identity object")
+        .remove("comment_database_id");
+    std::fs::write(
+        &path,
+        serde_json::to_vec_pretty(&pending).expect("pending without database id"),
+    )
+    .expect("write pending without comment_database_id");
+
+    let runner = P15MarkerRunner::graphql_reply_without_comment();
+    let mut context = p11_context(&temp);
+    let err = GithubFeedbackMarkerExecutorWithRunner::new(runner.clone(), FixedClock)
+        .execute(&mut context, &p11_params(&temp))
+        .expect_err("missing GraphQL reply comment should fail marker execution");
+
+    let message = err.to_string();
+    assert!(
+        message.contains("addPullRequestReviewThreadReply failed")
+            && message.contains("reply was not created"),
+        "GraphQL reply failure should surface sanitized error context: {message}"
+    );
+    let calls = runner.calls();
+    assert!(
+        calls.iter().any(|call| call
+            .iter()
+            .any(|arg| arg.contains("addPullRequestReviewThreadReply"))),
+        "malformed GraphQL reply test must exercise the GraphQL mutation path: {calls:?}"
     );
 }
 
