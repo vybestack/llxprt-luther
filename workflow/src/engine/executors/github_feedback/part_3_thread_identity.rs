@@ -3,17 +3,19 @@ const GRAPHQL_NODE_ID_PREFIX: &str = "graphql:";
 const REVIEW_THREAD_NODE_ID_PREFIX: &str = "PRRT_";
 
 fn direct_review_thread_id(value: &Value) -> Option<String> {
-    string_at_paths(
-        value,
-        &[
-            "/thread_id",
-            "/evidence/thread_id",
-            "/original_feedback_identity/thread_id",
-        ],
-    )
-    .and_then(|thread_id| {
-        let trimmed = thread_id.trim();
-        is_review_thread_node_id(trimmed).then(|| trimmed.to_string())
+    [
+        "/thread_id",
+        "/evidence/thread_id",
+        "/original_feedback_identity/thread_id",
+    ]
+    .into_iter()
+    .find_map(|path| {
+        value
+            .pointer(path)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|thread_id| is_review_thread_node_id(thread_id))
+            .map(ToString::to_string)
     })
 }
 

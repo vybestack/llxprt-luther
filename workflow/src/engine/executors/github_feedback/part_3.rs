@@ -220,15 +220,6 @@ fn pending_action_resolution_required(action_kind: &str, value: &Value) -> bool 
         .unwrap_or_else(|| unified_status_requires_resolution(action_kind, value))
 }
 
-fn string_at_paths(value: &Value, paths: &[&str]) -> Option<String> {
-    paths.iter().find_map(|path| {
-        value
-            .pointer(path)
-            .and_then(Value::as_str)
-            .map(ToString::to_string)
-    })
-}
-
 /// Derive whether Luther must resolve the review thread from the unified
 /// per-item status implied by the marker action and its remediation result.
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P15
@@ -340,6 +331,7 @@ fn post_marker_reply_via_rest_review_comment(
         in_thread_reply: true,
         in_reply_to_id: parsed.get("in_reply_to_id").cloned().unwrap_or(Value::Null),
         warnings: json!([]),
+        graphql_error_summary: None,
     }))
 }
 
@@ -366,6 +358,7 @@ fn post_marker_reply_via_issue_comment(
         in_thread_reply: false,
         in_reply_to_id: Value::Null,
         warnings: json!(["no_review_thread_identity_posted_top_level_comment"]),
+        graphql_error_summary: None,
     }))
 }
 
@@ -430,10 +423,12 @@ fn post_marker_reply_via_graphql_thread(
     let comment_id = comment.get("databaseId").cloned();
     let comment_url = comment.get("url").cloned();
     let mut warnings = vec!["posted_review_thread_reply_via_graphql"];
-    if graphql_errors_present {
+    let graphql_error_summary = if graphql_errors_present {
         warnings.push("partial_success_graphql_errors_present");
-        warnings.push(error_summary.as_str());
-    }
+        Some(error_summary.as_str())
+    } else {
+        None
+    };
     if comment_id.is_none() {
         warnings.push("missing_database_id_in_graphql_thread_reply_response");
     }
@@ -450,6 +445,7 @@ fn post_marker_reply_via_graphql_thread(
         in_thread_reply: true,
         in_reply_to_id: Value::Null,
         warnings: json!(warnings),
+        graphql_error_summary,
     }))
 }
 

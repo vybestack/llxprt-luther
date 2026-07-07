@@ -9389,9 +9389,59 @@ fn marker_records_graphql_thread_reply_when_response_has_comment_and_errors() {
     assert!(warnings
         .iter()
         .any(|warning| { warning.as_str() == Some("partial_success_graphql_errors_present") }));
-    assert!(warnings
-        .iter()
-        .any(|warning| warning.as_str() == Some("field selection warning")));
+    assert_eq!(
+        posted
+            .get("graphql_error_summary")
+            .and_then(serde_json::Value::as_str),
+        Some("field selection warning")
+    );
+}
+
+#[test]
+fn marker_uses_fallback_direct_thread_id_when_primary_candidate_is_invalid() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_p15_validated_fixed_pending_with_database_id(&temp, 7001);
+    let path = p11_current_artifact_path(&temp, "pending-feedback-marker-actions");
+    let mut pending = read_json(&path);
+    let action = pending["pending_actions"][0]
+        .as_object_mut()
+        .expect("pending action object");
+    action.insert("thread_id".to_string(), serde_json::json!("12345"));
+    action.insert(
+        "evidence".to_string(),
+        serde_json::json!({ "thread_id": "PRRT_evidence_thread" }),
+    );
+    action.remove("comment_database_id");
+    let identity = action
+        .get_mut("original_feedback_identity")
+        .and_then(serde_json::Value::as_object_mut)
+        .expect("original feedback identity object");
+    identity.remove("comment_database_id");
+    std::fs::write(
+        &path,
+        serde_json::to_vec_pretty(&pending).expect("pending with fallback thread id"),
+    )
+    .expect("write pending with fallback thread id");
+
+    let runner = P15MarkerRunner::default();
+    let mut context = p11_context(&temp);
+    let outcome = GithubFeedbackMarkerExecutorWithRunner::new(runner.clone(), FixedClock)
+        .execute(&mut context, &p11_params(&temp))
+        .expect("mark fixed feedback with fallback direct thread id");
+
+    assert_expected_outcome(
+        outcome,
+        StepOutcome::Success,
+        "fallback direct thread id should be used when primary candidate is not a review thread node",
+    );
+    let calls = runner.calls();
+    assert!(
+        calls.iter().any(|call| {
+            call.iter()
+                .any(|arg| arg == "threadId=PRRT_evidence_thread")
+        }),
+        "fallback direct thread id must be passed to GraphQL: {calls:?}"
+    );
 }
 
 #[test]
