@@ -8,5 +8,6 @@ include!("github_feedback/part_1.rs");
 include!("github_feedback/part_2.rs");
 include!("github_feedback/part_2b.rs");
 include!("github_feedback/part_3.rs");
+include!("github_feedback/part_3_marker_reply_record.rs");
 include!("github_feedback/part_4.rs");
 include!("github_feedback/part_5.rs");
