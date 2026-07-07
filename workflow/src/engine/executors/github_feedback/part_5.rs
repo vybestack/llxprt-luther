@@ -132,7 +132,14 @@ fn is_coderabbit(author: &str, identities: &BTreeSet<String>) -> bool {
     if author.is_empty() {
         return false;
     }
-    identities.contains(ALL_REVIEWERS_SENTINEL) || identities.contains(&author.to_ascii_lowercase())
+    identities.contains(ALL_REVIEWERS_SENTINEL) || is_explicit_reviewer_identity(author, identities)
+}
+
+fn is_explicit_reviewer_identity(author: &str, identities: &BTreeSet<String>) -> bool {
+    if author.is_empty() {
+        return false;
+    }
+    identities.contains(&author.to_ascii_lowercase())
 }
 
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P08

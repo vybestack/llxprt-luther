@@ -1297,12 +1297,13 @@ fn artifact_store_rejects_unbound_current_run_sequence_data_for_consumed_family(
 /// @requirement:REQ-PRFU-002
 /// @pseudocode lines 5-7
 #[test]
-fn artifact_sequence_recovery_allows_same_pr_run_history_after_head_change() {
+fn artifact_sequence_recovery_allows_same_pr_run_history_after_head_or_base_change() {
     let temp = tempfile::tempdir().expect("tempdir");
     let store = PrFollowupArtifactStore::new(temp.path().to_path_buf());
     let first_binding = sample_binding();
     let mut second_binding = first_binding.clone();
     second_binding.head_sha = "head-b".to_string();
+    second_binding.base_sha = Some("base-b".to_string());
     let clock = FixedClock;
     store
         .write_json_artifact(
@@ -1320,14 +1321,14 @@ fn artifact_sequence_recovery_allows_same_pr_run_history_after_head_change() {
 
     let sequence = store
         .next_sequence(&second_binding, "pr")
-        .expect("same PR run history from a previous head should seed sequence allocation");
+        .expect("same PR run history from a previous head/base should seed sequence allocation");
 
     assert_eq!(sequence.artifact_sequence, 2);
     assert_eq!(sequence.write_sequence, 2);
 
     let err = store
         .read_current_json(&second_binding, "pr")
-        .expect_err("current artifact reads remain bound to the exact head");
+        .expect_err("current artifact reads remain bound to the exact head and base");
     assert!(
         format!("{err}").contains("artifact binding mismatch"),
         "exact current artifact reads must remain strict; err={err:?}"
@@ -2034,6 +2035,84 @@ fn pr_checks_default_watch_budget_is_twelve_observations_without_real_sleep() {
     assert!(
         !runner.calls().iter().flatten().any(|arg| arg == "60"),
         "watcher must not request the obsolete t=60 poll interval"
+    );
+}
+
+/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P04
+/// @requirement:REQ-PRFU-004
+/// @pseudocode lines 16-33
+#[test]
+fn pr_checks_refreshes_pr_identity_before_classifying_current_head_checks() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let artifact_dir = temp
+        .path()
+        .join("artifacts")
+        .join("pr-followup")
+        .join("current")
+        .join("run-p06")
+        .join("example")
+        .join("workflow")
+        .join("1910");
+    std::fs::create_dir_all(&artifact_dir).expect("create pr artifact dir");
+    std::fs::write(
+        artifact_dir.join("pr.json"),
+        serde_json::to_string(&serde_json::json!({
+            "schema_version": 1,
+            "run_id": "run-p06",
+            "repository_owner": "example",
+            "repository_name": "workflow",
+            "pr_number": 1910,
+            "pr_url": "https://github.com/example/workflow/pull/1910",
+            "head_ref": "luther/issue-1234",
+            "head_sha": "cccccccccccccccccccccccccccccccccccccccc",
+            "base_ref": "main",
+            "base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "capture_state": "captured",
+            "captured_at": "2026-04-30T00:00:00Z",
+            "source": "gh_pr_view",
+            "producer_step_id": "capture_pr_identity",
+            "step_order_index": 1
+        }))
+        .expect("serialize stale pr artifact"),
+    )
+    .expect("write stale pr artifact");
+    let runner = ScriptedGithubRunner::new(
+        serde_json::json!([
+            { "name": "build", "state": "SUCCESS", "bucket": "pass", "headSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }
+        ]),
+        serde_json::json!({ "total_count": 0, "check_runs": [] }),
+    );
+    let clock = RecordingClock::default();
+    let mut context = p06_context(&temp);
+    let outcome = GithubPrChecksExecutorWithRunner::new(runner.clone(), clock)
+        .execute(&mut context, &p06_check_params(&temp, 12))
+        .expect("watch pr checks");
+    let artifact = read_json(&p06_pr_check_status_path(&temp));
+    let pr_artifact = read_json(&artifact_dir.join("pr.json"));
+
+    assert_expected_outcome(
+        outcome,
+        StepOutcome::Success,
+        "watch_pr_checks must refresh PR identity so stale cached heads cannot misclassify current checks",
+    );
+    assert!(
+        runner
+            .calls()
+            .iter()
+            .any(|call| call.iter().any(|arg| arg == "view")),
+        "watch_pr_checks must call gh pr view instead of trusting cached pr.json"
+    );
+    assert_eq!(
+        artifact.get("head_sha").and_then(serde_json::Value::as_str),
+        Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+        "pr-check-status must be bound to the refreshed PR head"
+    );
+    assert_eq!(
+        pr_artifact
+            .get("head_sha")
+            .and_then(serde_json::Value::as_str),
+        Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+        "canonical pr.json must be refreshed for downstream follow-up steps"
     );
 }
 
@@ -2814,9 +2893,20 @@ fn human_reviewer_graph_page() -> serde_json::Value {
                     "url": "https://github.com/example/workflow/pull/1910#discussion_r8200",
                     "path": "src/lib.rs",
                     "line": 12,
-                    "author": { "login": "octocat" },
+                    "author": { "login": "octocat", "__typename": "User" },
                     "createdAt": "2026-04-30T00:00:00Z",
                     "updatedAt": "2026-04-30T00:00:00Z",
+                    "commit": { "oid": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }
+                }, {
+                    "id": "PRRC_followup",
+                    "databaseId": 8201,
+                    "body": "Follow-up reply that must not become a second feedback item.",
+                    "url": "https://github.com/example/workflow/pull/1910#discussion_r8201",
+                    "path": "src/lib.rs",
+                    "line": 12,
+                    "author": { "login": "octocat", "__typename": "User" },
+                    "createdAt": "2026-04-30T00:01:00Z",
+                    "updatedAt": "2026-04-30T00:01:00Z",
                     "commit": { "oid": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }
                 }] }
             }],
@@ -2868,7 +2958,15 @@ fn collector_includes_non_coderabbit_reviewer_only_when_flag_set() {
     let runner_all = P08FeedbackRunner::with_pages(
         vec![human_reviewer_graph_page()],
         vec![serde_json::json!([])],
-        vec![serde_json::json!([])],
+        vec![serde_json::json!([{
+            "id": 9200,
+            "node_id": "IC_human",
+            "body": "Human issue comment should not be collected as review feedback.",
+            "html_url": "https://github.com/example/workflow/pull/1910#issuecomment-9200",
+            "user": { "login": "octocat" },
+            "created_at": "2026-04-30T00:02:00Z",
+            "updated_at": "2026-04-30T00:02:00Z"
+        }])],
         check_runs,
     );
     let mut context_all = p08_context(&temp_all);
@@ -2886,11 +2984,22 @@ fn collector_includes_non_coderabbit_reviewer_only_when_flag_set() {
         "human reviewer thread must be collected when include_all_reviewers is set"
     );
     let item = all_artifact
-        .pointer("/items/0")
-        .expect("collected reviewer item");
+        .get("items")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|items| {
+            items.iter().find(|item| {
+                item.get("source").and_then(serde_json::Value::as_str)
+                    == Some("graphql_review_thread")
+            })
+        })
+        .expect("collected reviewer thread item");
     assert_eq!(
         item.get("author_login").and_then(serde_json::Value::as_str),
         Some("octocat")
+    );
+    assert_eq!(
+        item.get("author_kind").and_then(serde_json::Value::as_str),
+        Some("User")
     );
     assert_eq!(
         item.get("comment_database_id")
@@ -3278,6 +3387,7 @@ fn p09_feedback_item(item_id: &str, key: &str, hash: &str) -> serde_json::Value 
         "comment_id": item_id,
         "review_id": null,
         "author_login": "coderabbitai[bot]",
+        "author_kind": "Bot",
         "author_association": "NONE",
         "bot_identity": "coderabbitai[bot]",
         "path": "src/lib.rs",
@@ -3825,6 +3935,83 @@ fn feedback_evaluation_reuses_unchanged_accepted_state_without_reinvoking_adapte
             .get("reused_results_count")
             .and_then(serde_json::Value::as_u64),
         Some(1)
+    );
+}
+
+#[test]
+fn feedback_evaluation_downranks_reused_low_confidence_nitpick_needs_judgment() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut item = p09_feedback_item("item-nitpick", "thread-nitpick", "hash-nitpick");
+    item["body"] = serde_json::json!(
+        "_🧹 Nitpick_ | _🔵 Trivial_\n\nClarify timeout semantics if suspend/resume waits could count against parent orchestration runtime.\n\n<!-- cr-indicator-types:nitpick -->"
+    );
+    write_p09_feedback(
+        &temp,
+        serde_json::json!([item]),
+        serde_json::json!([{
+            "item_id": "item-nitpick",
+            "stable_marker_key": "thread-nitpick",
+            "body_hash": "hash-nitpick",
+            "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "evaluation_status": "accepted",
+            "accepted_evaluation": {
+                "item_id": "item-nitpick",
+                "stable_marker_key": "thread-nitpick",
+                "body_hash": "hash-nitpick",
+                "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "repository_owner": "example",
+                "repository_name": "workflow",
+                "pr_number": 1910,
+                "decision": "needs_user_judgment",
+                "reason": "Timeout semantics require maintainer judgment.",
+                "recommended_action": "Ask a maintainer to decide timeout semantics.",
+                "response_text": "This needs maintainer judgment.",
+                "accepted_at": "2026-04-30T00:00:00Z",
+                "attempt_count": 1,
+                "source": "new",
+                "reuse_state": "not_reused"
+            },
+            "reuse_eligible": true,
+            "stale": false,
+            "superseded": false
+        }]),
+    );
+    let adapter = ScriptedFeedbackEvaluationAdapter::with_responses(vec![]);
+    let mut context = p09_context(&temp);
+    let outcome = FeedbackEvaluatorExecutor::new(adapter.clone(), FixedClock)
+        .execute(&mut context, &p09_params(&temp))
+        .expect("feedback evaluation reuse downrank");
+    let artifact = read_json(&p09_evaluations_path(&temp));
+
+    assert_expected_outcome(
+        outcome,
+        StepOutcome::Success,
+        "reused optional nitpick evaluations must not keep blocking as needs_user_judgment",
+    );
+    assert!(adapter.requests().is_empty());
+    assert_eq!(
+        artifact
+            .pointer("/accepted_results/0/decision")
+            .and_then(serde_json::Value::as_str),
+        Some("out_of_scope")
+    );
+    assert_eq!(
+        artifact
+            .pointer("/accepted_results/0/reason")
+            .and_then(serde_json::Value::as_str),
+        Some("This is a low-confidence optional nitpick/speculative suggestion, not a concrete product or scope decision requiring maintainer judgment.")
+    );
+    assert_eq!(
+        artifact
+            .pointer("/accepted_results/0/recommended_action")
+            .and_then(serde_json::Value::as_str),
+        Some("Do not block PR follow-up on this item; leave it for optional future design documentation if maintainers want to expand the scope.")
+    );
+    assert_eq!(
+        artifact
+            .pointer("/accepted_results/0/response_text")
+            .and_then(serde_json::Value::as_str),
+        Some("This item is not being treated as needs-user-judgment because it is framed as an optional/speculative nitpick rather than a concrete blocker. It can be revisited as optional design documentation outside this PR follow-up, but it should not block automated remediation.")
     );
 }
 
@@ -9275,6 +9462,83 @@ fn feedback_evaluator_default_argv_downranks_speculative_nits() {
     );
 }
 
+#[test]
+fn feedback_evaluator_downranks_low_confidence_nitpick_needs_judgment() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut item = p09_feedback_item("item-nitpick", "thread-nitpick", "hash-nitpick");
+    item["body"] = serde_json::json!(
+        "_🧹 Nitpick_ | _🔵 Trivial_\n\nConfirm timeout semantics don't penalize long child-merge waits. If the timeout is measured across suspend/resume cycles, it could terminate a parent orchestration waiting for human PR merges.\n\n<!-- cr-indicator-types:nitpick -->"
+    );
+    write_p09_feedback(&temp, serde_json::json!([item]), serde_json::json!([]));
+    let adapter = ScriptedFeedbackEvaluationAdapter::with_responses(vec![serde_json::json!({
+        "item_id": "item-nitpick",
+        "stable_marker_key": "thread-nitpick",
+        "body_hash": "hash-nitpick",
+        "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "decision": "needs_user_judgment",
+        "reason": "Timeout semantics require maintainer judgment.",
+        "recommended_action": "Ask the maintainer to decide timeout semantics.",
+        "response_text": "This needs maintainer judgment."
+    })
+    .to_string()]);
+    let mut context = p09_context(&temp);
+    let outcome = FeedbackEvaluatorExecutor::new(adapter, FixedClock)
+        .execute(&mut context, &p09_params(&temp))
+        .expect("feedback evaluator should downrank optional nitpick");
+    let artifact = read_json(&p09_evaluations_path(&temp));
+
+    assert_expected_outcome(
+        outcome,
+        StepOutcome::Success,
+        "low-confidence nitpick feedback must not block PR follow-up as needs_user_judgment",
+    );
+    assert_eq!(
+        artifact
+            .pointer("/accepted_results/0/decision")
+            .and_then(serde_json::Value::as_str),
+        Some("out_of_scope")
+    );
+}
+
+#[test]
+fn feedback_evaluator_downranks_conditional_ocr_design_judgment() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut item = p09_feedback_item("item-ocr", "thread-ocr", "hash-ocr");
+    item["author_login"] = serde_json::json!("github-actions");
+    item["author_kind"] = serde_json::json!("Bot");
+    item["body"] = serde_json::json!(
+        "<!-- luther-ocr-inline -->\n> If the current behavior is intentional, a comment clarifying this would help maintainers. If the intent is to continue processing remaining actionable children within the same run, consider adding a transition."
+    );
+    write_p09_feedback(&temp, serde_json::json!([item]), serde_json::json!([]));
+    let adapter = ScriptedFeedbackEvaluationAdapter::with_responses(vec![serde_json::json!({
+        "item_id": "item-ocr",
+        "stable_marker_key": "thread-ocr",
+        "body_hash": "hash-ocr",
+        "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "decision": "needs_user_judgment",
+        "reason": "The intended orchestration behavior needs maintainer judgment.",
+        "recommended_action": "Ask maintainers to confirm the intended behavior.",
+        "response_text": "This needs maintainer judgment."
+    })
+    .to_string()]);
+    let mut context = p09_context(&temp);
+    let outcome = FeedbackEvaluatorExecutor::new(adapter, FixedClock)
+        .execute(&mut context, &p09_params(&temp))
+        .expect("feedback evaluator should downrank conditional OCR design feedback");
+    let artifact = read_json(&p09_evaluations_path(&temp));
+
+    assert_expected_outcome(
+        outcome,
+        StepOutcome::Success,
+        "conditional OCR design feedback must not block PR follow-up as needs_user_judgment",
+    );
+    assert_eq!(
+        artifact
+            .pointer("/accepted_results/0/decision")
+            .and_then(serde_json::Value::as_str),
+        Some("out_of_scope")
+    );
+}
 #[test]
 fn feedback_evaluator_command_errors_consume_budget_without_panicking() {
     let temp = tempfile::tempdir().expect("tempdir");

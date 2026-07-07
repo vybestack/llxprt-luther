@@ -410,9 +410,9 @@ impl PrFollowupArtifactStore {
             && !actual.head_sha.is_empty()
             && expected.base_ref == actual.base_ref
             && !expected.base_ref.is_empty()
-            && expected.base_sha == actual.base_sha
+            && expected.base_sha.as_ref().is_none_or(|sha| !sha.is_empty())
+            && actual.base_sha.as_ref().is_none_or(|sha| !sha.is_empty())
     }
-
     fn validate_artifact_metadata(
         &self,
         artifact_family: &str,

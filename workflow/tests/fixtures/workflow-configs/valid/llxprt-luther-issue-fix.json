@@ -80,7 +80,14 @@
     },
     "pr_checks": {
       "required": [
-        "PR Quality"
+        "Tests (lib + integration)",
+        "Format (rustfmt)",
+        "Lint (clippy + structural)",
+        "Release readiness (release build)",
+        "Coverage (llvm-cov gate)",
+        "Docs (cargo doc)",
+        "Security (cargo audit)",
+        "OpenCodeReview"
       ],
       "ignored": [
         "CodeRabbit"
@@ -90,6 +97,7 @@
       "requirements": [
         "gh",
         "git",
+        "cargo",
         "cargo-llvm-cov",
         "cargo-audit",
         "workflow scope for workflow-file changes"
@@ -169,7 +177,8 @@
         "id": "coverage",
         "argv": [
           "cargo",
-          "llvm-cov"
+          "xtask",
+          "coverage"
         ],
         "project_subdirectory": "workflow",
         "timeout_seconds": 1200,
@@ -230,7 +239,8 @@
         "ocr_review"
       ],
       "post_pr": [
-        "test"
+        "test",
+        "coverage"
       ],
       "review": [
         "ocr_review"

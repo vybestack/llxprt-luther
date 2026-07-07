@@ -15,6 +15,11 @@ use std::time::{Duration, Instant};
 use serde_json::{json, Value};
 
 use crate::engine::executor::{interpolate_string, StepContext, StepExecutor};
+use crate::engine::executors::feedback_eval_policy::{
+    apply_low_confidence_accepted_policy, apply_low_confidence_needs_judgment_policy,
+    feedback_response_from_value, is_forbidden_response_field, parse_feedback_evaluator_json,
+    FeedbackEvaluationAdapter,
+};
 use crate::engine::executors::pr_followup_artifacts::{
     ArtifactWriter, ClockSleeper, PrFollowupArtifactStore, SystemPrFollowupFilesystem,
 };
@@ -62,6 +67,8 @@ pub struct FeedbackEvaluationRequest {
     pub repository_owner: String,
     pub repository_name: String,
     pub pr_number: u64,
+    pub author_login: String,
+    pub author_kind: Option<String>,
     pub body: String,
     pub path: Option<String>,
     pub url: Option<String>,
@@ -83,15 +90,6 @@ pub struct FeedbackEvaluationResponse {
     pub reason: String,
     pub recommended_action: Option<String>,
     pub response_text: String,
-}
-
-/// LLM invocation adapter seam for feedback evaluation behavior.
-/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P03
-/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P09
-/// @requirement:REQ-PRFU-011,REQ-PRFU-012,REQ-PRFU-017,REQ-PRFU-020
-/// @pseudocode lines 8-17
-pub trait FeedbackEvaluationAdapter: Send + Sync {
-    fn evaluate(&self, request: &FeedbackEvaluationRequest) -> Result<String, EngineError>;
 }
 
 /// Argv-safe command runner seam for the production feedback evaluator adapter.
@@ -302,6 +300,8 @@ struct FeedbackItem {
     stable_marker_key: String,
     body_hash: String,
     head_sha: String,
+    author_login: String,
+    author_kind: Option<String>,
     body: String,
     path: Option<String>,
     url: Option<String>,
@@ -596,7 +596,7 @@ fn evaluate_coderabbit_feedback(
 }
 
 #[derive(Debug)]
-struct RejectReason {
+pub(super) struct RejectReason {
     reason: String,
     parsed_decision: Option<String>,
     observed_head_sha: Option<String>,
@@ -646,12 +646,18 @@ fn reusable_evaluation(
         if entry.get("reuse_eligible").and_then(Value::as_bool) != Some(true) {
             return ReuseLookup::NoMatch;
         }
-        let Some(accepted) = entry.get("accepted_evaluation").cloned() else {
+        let Some(mut accepted) = entry.get("accepted_evaluation").cloned() else {
             return ReuseLookup::Fatal("missing_accepted_evaluation".to_string());
         };
         if validate_reusable_accepted(binding, item, &accepted).is_err() {
             return ReuseLookup::Fatal("malformed_or_unbindable_accepted_evaluation".to_string());
         }
+        apply_low_confidence_accepted_policy(
+            &item.body,
+            &item.author_login,
+            item.author_kind.as_deref(),
+            &mut accepted,
+        );
         return ReuseLookup::Reuse(accepted);
     }
     ReuseLookup::NoMatch
@@ -669,61 +675,10 @@ fn validate_response(
         parsed_decision: None,
         observed_head_sha: None,
     })?;
-    if value.is_array() {
-        return Err(reject("response_array_or_batch", &value));
-    }
-    let object = value
-        .as_object()
-        .ok_or_else(|| reject("response_not_object", &value))?;
-    for (field, field_value) in object {
-        let lower = field.to_ascii_lowercase();
-        let is_allowed_identity = matches!(
-            field.as_str(),
-            "item_id" | "stable_marker_key" | "body_hash" | "head_sha"
-        );
-        let is_extra_identity = !is_allowed_identity
-            && (lower.contains("item")
-                || lower.contains("stable_marker")
-                || lower.contains("body_hash")
-                || lower.contains("head_sha")
-                || lower.contains("marker_key"));
-        let is_batch_field = matches!(
-            field.as_str(),
-            "items"
-                | "item_ids"
-                | "feedback_items"
-                | "feedback_item_ids"
-                | "batch"
-                | "batches"
-                | "results"
-                | "evaluations"
-        );
-        if is_batch_field || is_extra_identity || field_value.is_array() {
-            return Err(reject("batch_or_extra_item_ids", &value));
-        }
-    }
+    reject_batch_response_fields(&value)?;
 
-    let response = FeedbackEvaluationResponse {
-        item_id: required_value_string(&value, "item_id")?,
-        stable_marker_key: required_value_string(&value, "stable_marker_key")?,
-        body_hash: required_value_string(&value, "body_hash")?,
-        head_sha: required_value_string(&value, "head_sha")?,
-        decision: required_value_string(&value, "decision")?,
-        reason: value
-            .get("reason")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string(),
-        recommended_action: value
-            .get("recommended_action")
-            .and_then(Value::as_str)
-            .map(ToString::to_string),
-        response_text: value
-            .get("response_text")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string(),
-    };
+    let mut response = feedback_response_from_value(&value)?;
+    apply_low_confidence_needs_judgment_policy(request, &mut response);
     if response.item_id != request.item_id {
         return Err(reject("wrong_item_id", &value));
     }
@@ -760,22 +715,19 @@ fn validate_response(
     Ok(response)
 }
 
-fn parse_feedback_evaluator_json(raw: &str) -> Result<Value, serde_json::Error> {
-    match serde_json::from_str(raw) {
-        Ok(value) => Ok(value),
-        Err(original) => {
-            for (index, _) in raw.match_indices('{') {
-                let mut stream =
-                    serde_json::Deserializer::from_str(&raw[index..]).into_iter::<Value>();
-                if let Some(Ok(value)) = stream.next() {
-                    if value.is_object() {
-                        return Ok(value);
-                    }
-                }
-            }
-            Err(original)
+fn reject_batch_response_fields(value: &Value) -> Result<(), RejectReason> {
+    if value.is_array() {
+        return Err(reject("response_array_or_batch", value));
+    }
+    let object = value
+        .as_object()
+        .ok_or_else(|| reject("response_not_object", value))?;
+    for (field, field_value) in object {
+        if is_forbidden_response_field(field, field_value) {
+            return Err(reject("batch_or_extra_item_ids", value));
         }
     }
+    Ok(())
 }
 
 fn deterministic_feedback_evaluation(item: &FeedbackItem, accepted_at: String) -> Option<Value> {
@@ -834,6 +786,15 @@ fn feedback_items(feedback: &Value) -> Result<Vec<FeedbackItem>, EngineError> {
                         feedback_eval_error("feedback item missing commit_sha/head_sha")
                     })?
                     .to_string(),
+                author_login: item
+                    .get("author_login")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+                author_kind: item
+                    .get("author_kind")
+                    .and_then(Value::as_str)
+                    .map(ToString::to_string),
                 body: require_string(item, "body")?,
                 path: item
                     .get("path")
@@ -859,7 +820,9 @@ fn build_request(binding: &PrFollowupBinding, item: &FeedbackItem) -> FeedbackEv
         head_sha: item.head_sha.clone(),
         repository_owner: binding.repository_owner.clone(),
         repository_name: binding.repository_name.clone(),
+        author_kind: item.author_kind.clone(),
         pr_number: binding.pr_number,
+        author_login: item.author_login.clone(),
         body: item.body.clone(),
         path: item.path.clone(),
         url: item.url.clone(),
@@ -1069,7 +1032,7 @@ fn reject(reason: &str, value: &Value) -> RejectReason {
     }
 }
 
-fn required_value_string(value: &Value, field: &str) -> Result<String, RejectReason> {
+pub(super) fn required_value_string(value: &Value, field: &str) -> Result<String, RejectReason> {
     value
         .get(field)
         .and_then(Value::as_str)

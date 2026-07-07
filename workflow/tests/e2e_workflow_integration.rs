@@ -1190,6 +1190,26 @@ fn assert_required_pr_check_prefix(policy: &serde_json::Value, expected_prefix: 
     );
 }
 
+fn assert_required_pr_check(policy: &serde_json::Value, expected_pattern: &str) {
+    let required = policy
+        .get("required")
+        .and_then(serde_json::Value::as_array)
+        .expect("check_policy.required");
+    assert!(
+        required.iter().any(|entry| {
+            entry.get("mode").is_none()
+                && entry.get("pattern").and_then(serde_json::Value::as_str)
+                    == Some(expected_pattern)
+                && entry
+                    .get("allow_skipped")
+                    .and_then(serde_json::Value::as_bool)
+                    == Some(false)
+        }),
+        "watch_pr_checks must require {} and disallow skipped required checks",
+        expected_pattern,
+    );
+}
+
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P16
 /// @requirement:REQ-PRFU-018,REQ-PRFU-020
 /// @pseudocode lines 1-53
@@ -3166,7 +3186,18 @@ fn dogfood_pr_check_wait_policy_targets_luther_pr_quality_checks() {
         "dogfood and issue-fix workflows must keep the same durable PR check wait defaults",
     );
     assert_required_pr_check_prefix(issue_policy, "CI");
-    assert_required_pr_check_prefix(dogfood_policy, "PR Quality");
+    for required_check in [
+        "Tests (lib + integration)",
+        "Format (rustfmt)",
+        "Lint (clippy + structural)",
+        "Release readiness (release build)",
+        "Coverage (llvm-cov gate)",
+        "Docs (cargo doc)",
+        "Security (cargo audit)",
+        "OpenCodeReview",
+    ] {
+        assert_required_pr_check(dogfood_policy, required_check);
+    }
 }
 
 fn watch_pr_check_params(workflow_type: &WorkflowType) -> &serde_json::Value {
