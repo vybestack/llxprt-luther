@@ -130,6 +130,28 @@ fn parse_first_sub_issue_page_returns_pagination_cursor() {
 }
 
 #[test]
+fn parse_sub_issue_response_skips_missing_edge_nodes() {
+    let json = r#"{
+        "data": {"repository": {"issue": {
+            "number": 1,
+            "subIssues": {
+                "edges": [
+                    {"node": null},
+                    {"node": {"number": 2, "title": "Child", "state": "OPEN"}},
+                    {}
+                ],
+                "pageInfo": {"hasNextPage": false, "endCursor": null}
+            }
+        }}}
+    }"#;
+
+    let children = parse_sub_issue_response(json).unwrap();
+
+    assert_eq!(children.len(), 1);
+    assert_eq!(children[0].issue.number, 2);
+}
+
+#[test]
 fn parse_parent_issue_response_accepts_parent_only_query_shape() {
     let json = r#"{
         "data": {"repository": {"issue": {

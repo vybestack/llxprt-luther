@@ -123,8 +123,10 @@ fn stale_child_run(
     poll_interval_seconds: u64,
 ) -> bool {
     let grace_seconds = poll_interval_seconds.saturating_mul(3).max(900);
-    let grace_i64 = i64::try_from(grace_seconds).unwrap_or(i64::MAX);
-    let stale_after = Duration::seconds(grace_i64);
+    let stale_after = match i64::try_from(grace_seconds) {
+        Ok(seconds) => Duration::seconds(seconds),
+        Err(_) => return false,
+    };
     Utc::now().signed_duration_since(lease.heartbeat_at) > stale_after
 }
 

@@ -63,8 +63,7 @@ fn is_issue_not_found_error(error: &GithubError) -> bool {
 
 fn issue_not_found_stderr(stderr: &str) -> bool {
     let trimmed = stderr.trim();
-    trimmed == "not found"
-        || trimmed.starts_with("GraphQL: Could not resolve to an Issue with the number of ")
+    trimmed.starts_with("GraphQL: Could not resolve to an Issue with the number of ")
         || trimmed.starts_with("could not resolve to issue or pull request ")
         || trimmed.starts_with("no issue found for ")
 }
@@ -696,7 +695,11 @@ impl<R: GithubCommandRunner> GithubIssueQuery for SystemGithubIssueQuery<R> {
         }
         Ok(issues
             .into_iter()
-            .filter(|issue| states.contains(&issue.state))
+            .filter(|issue| {
+                states
+                    .iter()
+                    .any(|state| state.eq_ignore_ascii_case(&issue.state))
+            })
             .collect())
     }
 

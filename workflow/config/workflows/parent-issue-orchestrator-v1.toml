@@ -128,6 +128,31 @@ to = "evaluate_parent_completion"
 condition = "fatal"
 
 [[transitions]]
+from = "load_parent_issue"
+to = "close_or_report_parent"
+condition = "fatal"
+
+[[transitions]]
+from = "discover_subissues"
+to = "close_or_report_parent"
+condition = "fatal"
+
+[[transitions]]
+from = "classify_subissues"
+to = "close_or_report_parent"
+condition = "fatal"
+
+[[transitions]]
+from = "determine_subissue_order"
+to = "close_or_report_parent"
+condition = "fatal"
+
+[[transitions]]
+from = "select_next_child"
+to = "close_or_report_parent"
+condition = "fatal"
+
+[[transitions]]
 from = "wait_for_child_merge"
 to = "refresh_parent_and_children"
 condition = "success"
@@ -160,6 +185,21 @@ max_iterations = 100
 from = "determine_refreshed_subissue_order"
 to = "select_next_child"
 max_iterations = 100
+
+[[transitions]]
+from = "refresh_parent_and_children"
+to = "close_or_report_parent"
+condition = "fatal"
+
+[[transitions]]
+from = "classify_refreshed_subissues"
+to = "close_or_report_parent"
+condition = "fatal"
+
+[[transitions]]
+from = "determine_refreshed_subissue_order"
+to = "close_or_report_parent"
+condition = "fatal"
 
 [[transitions]]
 from = "evaluate_parent_completion"

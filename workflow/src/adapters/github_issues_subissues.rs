@@ -80,7 +80,8 @@ struct ParsedSubIssuePage {
     next_cursor: Option<String>,
 }
 
-pub fn parse_sub_issue_response(json: &str) -> Result<Vec<GithubSubIssue>, GithubError> {
+#[cfg(test)]
+fn parse_sub_issue_response(json: &str) -> Result<Vec<GithubSubIssue>, GithubError> {
     parse_first_sub_issue_page(
         json,
         &["gh".to_string(), "api".to_string(), "graphql".to_string()],

@@ -8,6 +8,7 @@
 //! @requirement:REQ-DAEMON-DISCOVERY-006,REQ-DAEMON-DISCOVERY-007
 
 use std::borrow::Cow;
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
@@ -243,6 +244,7 @@ fn collect_launch_units(
     units: &mut Vec<DispatchUnit>,
     summary: &mut RunSummary,
 ) -> Result<(), rusqlite::Error> {
+    let parent_discoveries = parent_launch_discoveries(targets, limits)?;
     for (target, query) in targets.iter().zip(queries.iter()) {
         let repo = target.discovery.repo.as_deref().unwrap_or("");
         let active = count_active_leases_for_config(conn, &target.config_id)?;
@@ -256,7 +258,8 @@ fn collect_launch_units(
         summary.eligible += result.eligible.len();
         for routed in &result.eligible {
             let launch_config_id = routed.config_id.as_deref().unwrap_or(&target.config_id);
-            let launch_discovery = launch_discovery_for(target, launch_config_id, limits)?;
+            let launch_discovery =
+                launch_discovery_for(target, launch_config_id, limits, &parent_discoveries)?;
             if !has_capacity(conn, &launch_discovery, launch_config_id, repo, limits)? {
                 summary.skipped += 1;
                 continue;
@@ -288,11 +291,34 @@ fn launch_discovery_for<'a>(
     target: &'a SchedulerTarget,
     launch_config_id: &str,
     limits: &CapacityLimits,
+    parent_discoveries: &'a BTreeMap<String, DiscoveryConfig>,
 ) -> Result<Cow<'a, DiscoveryConfig>, rusqlite::Error> {
     if launch_config_id == target.config_id {
         return Ok(Cow::Borrowed(&target.discovery));
     }
+    if let Some(discovery) = parent_discoveries.get(launch_config_id) {
+        return Ok(Cow::Borrowed(discovery));
+    }
     parent_capacity_discovery(&target.discovery, limits).map(Cow::Owned)
+}
+
+fn parent_launch_discoveries(
+    targets: &[SchedulerTarget],
+    limits: &CapacityLimits,
+) -> Result<BTreeMap<String, DiscoveryConfig>, rusqlite::Error> {
+    let mut discoveries = BTreeMap::new();
+    let mut derived = BTreeMap::new();
+    for target in targets {
+        discoveries.insert(target.config_id.clone(), target.discovery.clone());
+        if let Some(parent_config_id) = target.discovery.parent_config_id.as_ref() {
+            let discovery = parent_capacity_discovery(&target.discovery, limits)?;
+            derived.entry(parent_config_id.clone()).or_insert(discovery);
+        }
+    }
+    for (config_id, discovery) in derived {
+        discoveries.entry(config_id).or_insert(discovery);
+    }
+    Ok(discoveries)
 }
 
 fn parent_capacity_discovery(

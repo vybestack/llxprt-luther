@@ -779,11 +779,12 @@ fn parent_summary_comment(complete: bool, evaluation: &Value) -> String {
 }
 
 fn parent_summary_evaluation_json(evaluation: &Value) -> String {
-    serde_json::to_string_pretty(evaluation).unwrap_or_else(|err| {
-        format!(
+    match serde_json::to_string_pretty(evaluation) {
+        Ok(json) => json,
+        Err(err) => format!(
             "Parent orchestration evaluation serialization failed; diagnostic context could not be encoded as JSON: {err}"
-        )
-    })
+        ),
+    }
 }
 
 fn resume_child_process(

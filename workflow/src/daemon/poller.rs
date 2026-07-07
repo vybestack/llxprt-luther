@@ -41,6 +41,28 @@ pub struct PollDecision {
 }
 
 /// Seam for polling one durable external wait record.
+#[derive(Default)]
+struct ChildWorkflowConnectionCache {
+    conn: Option<rusqlite::Connection>,
+}
+
+impl ChildWorkflowConnectionCache {
+    fn connection(
+        &mut self,
+        db_path: &std::path::Path,
+    ) -> Result<&rusqlite::Connection, rusqlite::Error> {
+        if self.conn.is_none() {
+            let conn = rusqlite::Connection::open(db_path)?;
+            conn.busy_timeout(std::time::Duration::from_secs(5))?;
+            self.conn = Some(conn);
+        }
+        match self.conn.as_ref() {
+            Some(conn) => Ok(conn),
+            None => unreachable!("connection cache initialized"),
+        }
+    }
+}
+
 pub trait ExternalWaitPoller {
     fn poll(&self, record: &WaitStateRecord) -> PollDecision;
 }
@@ -90,19 +112,34 @@ impl<R: GithubCommandRunner> ExternalWaitPoller for SystemExternalWaitPoller<R> 
         if let Some(decision) = timeout_decision(record) {
             return decision;
         }
-        match record.wait_kind {
-            WaitKind::PrChecks => poll_pr_checks(record, &self.runner),
-            WaitKind::CoderabbitReview => poll_coderabbit_review(record, &self.runner),
-            WaitKind::DependencyChildWorkflow => poll_child_workflow(record, &self.db_path),
-            WaitKind::PrMerge | WaitKind::DependencyChildMerge => {
-                poll_pr_merge(record, &self.runner)
-            }
-            WaitKind::HumanReview => poll_human_review(record, &self.runner),
-            WaitKind::RateLimitBackoff => PollDecision::still_waiting_with_state(
-                record,
-                json!({ "classification": "still_waiting", "wait_kind": record.wait_kind }),
-            ),
+        let mut child_workflow_connections = ChildWorkflowConnectionCache::default();
+        poll_with_child_workflow_cache(
+            record,
+            &self.runner,
+            &self.db_path,
+            &mut child_workflow_connections,
+        )
+    }
+}
+
+fn poll_with_child_workflow_cache(
+    record: &WaitStateRecord,
+    runner: &dyn GithubCommandRunner,
+    db_path: &std::path::Path,
+    child_workflow_connections: &mut ChildWorkflowConnectionCache,
+) -> PollDecision {
+    match record.wait_kind {
+        WaitKind::PrChecks => poll_pr_checks(record, runner),
+        WaitKind::CoderabbitReview => poll_coderabbit_review(record, runner),
+        WaitKind::DependencyChildWorkflow => {
+            poll_child_workflow(record, db_path, child_workflow_connections)
         }
+        WaitKind::PrMerge | WaitKind::DependencyChildMerge => poll_pr_merge(record, runner),
+        WaitKind::HumanReview => poll_human_review(record, runner),
+        WaitKind::RateLimitBackoff => PollDecision::still_waiting_with_state(
+            record,
+            json!({ "classification": "still_waiting", "wait_kind": record.wait_kind }),
+        ),
     }
 }
 
@@ -177,13 +214,17 @@ fn child_workflow_db_path() -> std::path::PathBuf {
     crate::runtime_paths::get_data_dir().join("checkpoints.db")
 }
 
-fn poll_child_workflow(record: &WaitStateRecord, db_path: &std::path::Path) -> PollDecision {
+fn poll_child_workflow(
+    record: &WaitStateRecord,
+    db_path: &std::path::Path,
+    child_workflow_connections: &mut ChildWorkflowConnectionCache,
+) -> PollDecision {
     // DependencyChildWorkflow records store the child run id in head_sha so the
     // existing wait-state identity schema can resume parent runs without a DB migration.
     let Some(child_run_id) = record.head_sha.as_deref() else {
         return terminal_failure(record, missing_identity_state(record));
     };
-    let conn = match rusqlite::Connection::open(db_path) {
+    let conn = match child_workflow_connections.connection(db_path) {
         Ok(conn) => conn,
         Err(err) => {
             return PollDecision::transient(
@@ -192,13 +233,7 @@ fn poll_child_workflow(record: &WaitStateRecord, db_path: &std::path::Path) -> P
             );
         }
     };
-    if let Err(err) = conn.busy_timeout(std::time::Duration::from_secs(5)) {
-        return PollDecision::transient(
-            record,
-            json!({"classification": "transient_failure", "error": err.to_string()}),
-        );
-    }
-    let metadata = match get_run_with_conn(&conn, child_run_id) {
+    let metadata = match get_run_with_conn(conn, child_run_id) {
         Ok(metadata) => metadata,
         Err(err) => {
             return PollDecision::transient(

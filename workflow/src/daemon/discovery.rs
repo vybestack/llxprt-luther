@@ -492,6 +492,14 @@ mod tests {
         c
     }
 
+    fn first_skip_reason(result: &DiscoveryResult) -> &SkipReason {
+        assert!(
+            !result.skipped.is_empty(),
+            "expected at least one skipped issue"
+        );
+        &result.skipped[0].1
+    }
+
     #[test]
     fn missing_required_label_skipped() {
         let q = MockQuery {
@@ -504,7 +512,7 @@ mod tests {
         assert!(r.eligible.is_empty());
         assert!(!r.skipped.is_empty(), "expected issue to be skipped");
         assert_eq!(
-            r.skipped[0].1,
+            *first_skip_reason(&r),
             SkipReason::MissingRequiredLabel("OK for Luther".to_string())
         );
     }
@@ -519,7 +527,7 @@ mod tests {
         };
         let r = discover(&cfg(), &q, &conn(), 0).unwrap();
         assert_eq!(
-            r.skipped[0].1,
+            *first_skip_reason(&r),
             SkipReason::HasExcludedLabel("Luther working".to_string())
         );
     }
@@ -535,7 +543,10 @@ mod tests {
             active_parent_for: vec![],
         };
         let r = discover(&cfg(), &q, &conn(), 0).unwrap();
-        assert_eq!(r.skipped[0].1, SkipReason::WrongState("closed".to_string()));
+        assert_eq!(
+            *first_skip_reason(&r),
+            SkipReason::WrongState("closed".to_string())
+        );
     }
 
     #[test]
@@ -550,7 +561,7 @@ mod tests {
         };
         let r = discover(&c, &q, &conn(), 0).unwrap();
         assert_eq!(
-            r.skipped[0].1,
+            *first_skip_reason(&r),
             SkipReason::AssigneeMismatch("acoliver".to_string())
         );
     }
@@ -566,7 +577,7 @@ mod tests {
             active_parent_for: vec![],
         };
         let r = discover(&cfg(), &q, &c, 0).unwrap();
-        assert_eq!(r.skipped[0].1, SkipReason::HasActiveLease);
+        assert_eq!(*first_skip_reason(&r), SkipReason::HasActiveLease);
     }
 
     #[test]
@@ -591,7 +602,7 @@ mod tests {
 
         let r = discover(&cfg, &q, &c, 0).unwrap();
 
-        assert_eq!(r.skipped[0].1, SkipReason::HasActiveLease);
+        assert_eq!(*first_skip_reason(&r), SkipReason::HasActiveLease);
         assert_eq!(
             r.eligible
                 .iter()
@@ -610,7 +621,7 @@ mod tests {
             active_parent_for: vec![],
         };
         let r = discover(&cfg(), &q, &conn(), 0).unwrap();
-        assert_eq!(r.skipped[0].1, SkipReason::HasOpenPr);
+        assert_eq!(*first_skip_reason(&r), SkipReason::HasOpenPr);
     }
 
     #[test]
@@ -628,7 +639,7 @@ mod tests {
         // max=2, active=0 => 2 eligible, 1 over limit.
         let r = discover(&cfg(), &q, &conn(), 0).unwrap();
         assert_eq!(r.eligible.len(), 2);
-        assert_eq!(r.skipped[0].1, SkipReason::ConcurrencyLimitReached);
+        assert_eq!(*first_skip_reason(&r), SkipReason::ConcurrencyLimitReached);
     }
 
     #[test]
@@ -652,6 +663,18 @@ mod tests {
         let parent = issue(50, &["not-ready"]);
 
         assert!(!parent_has_active_label(&c, &parent));
+    }
+    #[test]
+    fn static_filter_matches_labels_case_insensitively() {
+        let mut c = cfg();
+        c.include_labels = vec!["OK FOR LUTHER".to_string()];
+        c.exclude_labels = vec!["BLOCKED".to_string()];
+
+        assert_eq!(static_filter(&c, &issue(1, &["ok for luther"])), None);
+        assert_eq!(
+            static_filter(&c, &issue(2, &["ok for luther", "blocked"])),
+            Some(SkipReason::HasExcludedLabel("BLOCKED".to_string()))
+        );
     }
 
     #[test]
