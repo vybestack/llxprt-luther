@@ -132,12 +132,12 @@ impl RoutedIssue {
 /// @plan:PLAN-20260415-DAEMON-DISCOVERY.P04
 fn static_filter(cfg: &DiscoveryConfig, issue: &GithubIssue) -> Option<SkipReason> {
     for required in &cfg.include_labels {
-        if !issue.labels.contains(required) {
+        if !issue_has_label(issue, required) {
             return Some(SkipReason::MissingRequiredLabel(required.clone()));
         }
     }
     for excluded in &cfg.exclude_labels {
-        if issue.labels.contains(excluded) {
+        if issue_has_label(issue, excluded) {
             return Some(SkipReason::HasExcludedLabel(excluded.clone()));
         }
     }
@@ -150,6 +150,13 @@ fn static_filter(cfg: &DiscoveryConfig, issue: &GithubIssue) -> Option<SkipReaso
         }
     }
     None
+}
+
+fn issue_has_label(issue: &GithubIssue, expected: &str) -> bool {
+    issue
+        .labels
+        .iter()
+        .any(|label| label.eq_ignore_ascii_case(expected))
 }
 
 /// Whether an issue's assignee satisfies the filter. `""` means unassigned.
@@ -222,7 +229,15 @@ pub fn discover(
             result.skipped.push((issue, reason));
             continue;
         }
-        if let Some(reason) = local_dynamic_skip(conn, &issue, repo)? {
+        let local_skip = match local_dynamic_skip(conn, &issue, repo) {
+            Ok(reason) => reason,
+            Err(error) => {
+                error!(repo, issue_number = issue.number, error = %error, "local discovery skip check failed");
+                result.skipped.push((issue, SkipReason::InvalidLeaseState));
+                continue;
+            }
+        };
+        if let Some(reason) = local_skip {
             result.skipped.push((issue, reason));
             continue;
         }
@@ -312,12 +327,7 @@ fn parent_has_active_label(cfg: &DiscoveryConfig, parent: &GithubIssue) -> bool 
     cfg.active_parent_label
         .as_deref()
         .filter(|label| !label.is_empty())
-        .is_some_and(|active_label| {
-            parent
-                .labels
-                .iter()
-                .any(|label| label.eq_ignore_ascii_case(active_label))
-        })
+        .is_some_and(|active_label| issue_has_label(parent, active_label))
 }
 
 #[derive(Default)]

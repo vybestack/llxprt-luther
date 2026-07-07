@@ -33,7 +33,7 @@ use crate::workflow::target_profile::{apply_target_profile_overrides, TargetProf
 pub mod model;
 
 use model::{
-    classify_child, next_actionable_child, order_subissues, ChildIssueState, ChildTerminalState,
+    classify_child, next_actionable_child, order_subissues, ChildIssueState, ChildIssueStatus,
 };
 
 pub use model::missing_ordered_child_states;
@@ -237,15 +237,17 @@ impl OrchestrationState {
                 "child_config_id",
                 "llxprt-code",
             ),
-            merge_poll_interval_seconds: context
-                .get("parent_orchestration.merge_poll_interval_seconds")
-                .or_else(|| context.get("merge_poll_interval_seconds"))
-                .and_then(|value| value.parse::<u64>().ok())
-                .unwrap_or(300),
-            max_child_merge_wait_seconds: context
-                .get("parent_orchestration.max_child_merge_wait_seconds")
-                .or_else(|| context.get("max_child_merge_wait_seconds"))
-                .and_then(|value| value.parse::<u64>().ok()),
+            merge_poll_interval_seconds: optional_u64_context(
+                context,
+                "parent_orchestration.merge_poll_interval_seconds",
+                "merge_poll_interval_seconds",
+            )?
+            .unwrap_or(300),
+            max_child_merge_wait_seconds: optional_u64_context(
+                context,
+                "parent_orchestration.max_child_merge_wait_seconds",
+                "max_child_merge_wait_seconds",
+            )?,
             auto_merge_children: bool_context(
                 context,
                 "parent_orchestration.auto_merge_children",
@@ -259,21 +261,7 @@ impl OrchestrationState {
             ),
             work_dir: context.get("work_dir").map(PathBuf::from),
             artifact_dir: Some(artifact_dir),
-            config_root: context
-                .get("config_root")
-                .or_else(|| context.get("config_dir"))
-                .map(PathBuf::from)
-                .or_else(|| {
-                    context
-                        .get("work_dir")
-                        .map(|work_dir| PathBuf::from(work_dir).join("config"))
-                })
-                .unwrap_or_else(|| {
-                    warn!(
-                        "parent orchestration config_root/config_dir missing; falling back to relative config root"
-                    );
-                    PathBuf::from("config")
-                }),
+            config_root: parent_config_root(context)?,
         })
     }
 }

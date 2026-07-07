@@ -585,15 +585,14 @@ fn status_check_failed(check: &RawStatusCheck) -> bool {
 }
 
 fn status_check_passed(check: &RawStatusCheck) -> bool {
-    check_conclusion(check).as_deref() == Some("success")
-        || check_state(check).as_deref() == Some("success")
-}
-
-fn status_check_ignored(check: &RawStatusCheck) -> bool {
     matches!(
         check_conclusion(check).as_deref(),
-        Some("skipped" | "neutral")
-    )
+        Some("success" | "skipped" | "neutral")
+    ) || check_state(check).as_deref() == Some("success")
+}
+
+fn status_check_ignored(_check: &RawStatusCheck) -> bool {
+    false
 }
 
 fn check_conclusion(check: &RawStatusCheck) -> Option<String> {
@@ -901,13 +900,15 @@ impl<R: GithubCommandRunner> SystemGithubIssueQuery<R> {
 
     fn cached_auto_merge_method(&self, repo: &str) -> Result<&'static str, GithubError> {
         let entry = self.auto_merge_cache_entry(repo)?;
-        let mut method = entry.lock().map_err(auto_merge_cache_lock_error)?;
-        if let Some(method) = *method {
-            return Ok(method);
+        {
+            let method = entry.lock().map_err(auto_merge_cache_lock_error)?;
+            if let Some(method) = *method {
+                return Ok(method);
+            }
         }
         let computed = self.auto_merge_method(repo)?;
-        *method = Some(computed);
-        Ok(computed)
+        let mut method = entry.lock().map_err(auto_merge_cache_lock_error)?;
+        Ok(*method.get_or_insert(computed))
     }
 
     fn auto_merge_cache_entry(

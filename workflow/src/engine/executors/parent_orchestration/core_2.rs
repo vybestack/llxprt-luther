@@ -46,14 +46,19 @@ fn ensure_daemon_database_initialized(db_path: &Path) -> Result<(), EngineError>
         std::sync::Mutex<std::collections::BTreeSet<PathBuf>>,
     > = std::sync::OnceLock::new();
     let initialized = INITIALIZED_DATABASES.get_or_init(Default::default);
-    let mut initialized = initialized
+    if initialized
         .lock()
-        .map_err(|err| parent_error(format!("lock daemon database init guard: {err}")))?;
-    if !initialized.contains(db_path) {
-        crate::persistence::init_database(db_path)
-            .map_err(|err| parent_error(format!("initialize daemon database: {err}")))?;
-        initialized.insert(db_path.to_path_buf());
+        .map_err(|err| parent_error(format!("lock daemon database init guard: {err}")))?
+        .contains(db_path)
+    {
+        return Ok(());
     }
+    crate::persistence::init_database(db_path)
+        .map_err(|err| parent_error(format!("initialize daemon database: {err}")))?;
+    initialized
+        .lock()
+        .map_err(|err| parent_error(format!("lock daemon database init guard: {err}")))?
+        .insert(db_path.to_path_buf());
     Ok(())
 }
 
@@ -92,7 +97,7 @@ enum ChildLeaseAction {
 fn prepare_child_lease(
     state: &OrchestrationState,
     child: u64,
-    conn: &rusqlite::Connection,
+    conn: &mut rusqlite::Connection,
 ) -> Result<ChildLeaseAction, EngineError> {
     prepare_child_lease_with_conn(state, child, conn)
 }
@@ -100,7 +105,7 @@ fn prepare_child_lease(
 fn prepare_child_lease_with_conn(
     state: &OrchestrationState,
     child: u64,
-    conn: &rusqlite::Connection,
+    conn: &mut rusqlite::Connection,
 ) -> Result<ChildLeaseAction, EngineError> {
     if let Some(lease) = get_lease_for_issue(conn, &state.repo, child).map_err(sql_error)? {
         return Ok(match lease.status {
@@ -148,15 +153,17 @@ fn claim_child_lease(
 }
 
 fn prepare_relaunchable_child(
-    conn: &rusqlite::Connection,
+    conn: &mut rusqlite::Connection,
     lease: &crate::persistence::leases::IssueLease,
 ) -> Result<ChildLeaseAction, EngineError> {
-    clear_child_lease_for_relaunch(conn, lease)?;
-    let relaunchable = get_lease_for_issue(conn, &lease.issue_repo, lease.issue_number)
+    let tx = conn.transaction().map_err(sql_error)?;
+    clear_child_lease_for_relaunch(&tx, lease)?;
+    let relaunchable = get_lease_for_issue(&tx, &lease.issue_repo, lease.issue_number)
         .map_err(sql_error)?
         .ok_or_else(|| {
             parent_error("child lease disappeared while preparing relaunch".to_string())
         })?;
+    tx.commit().map_err(sql_error)?;
     Ok(ChildLeaseAction::Launch(relaunchable))
 }
 
@@ -749,16 +756,16 @@ fn read_rollup(artifact_root: &Path) -> Result<ParentOrchestrationRollup, Engine
 }
 
 fn child_is_complete(child: &ChildIssueState) -> bool {
-    matches!(child.terminal_state, ChildTerminalState::Merged)
+    matches!(child.terminal_state, ChildIssueStatus::Merged)
 }
 
 fn child_is_blocked(child: &ChildIssueState) -> bool {
     matches!(
         child.terminal_state,
-        ChildTerminalState::Blocked
-            | ChildTerminalState::MergedIssueOpen
-            | ChildTerminalState::Superseded
-            | ChildTerminalState::ClosedUnmerged
+        ChildIssueStatus::Blocked
+            | ChildIssueStatus::MergedIssueOpen
+            | ChildIssueStatus::Superseded
+            | ChildIssueStatus::ClosedUnmerged
     )
 }
 

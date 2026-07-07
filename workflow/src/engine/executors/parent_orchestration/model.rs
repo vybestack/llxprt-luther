@@ -11,7 +11,7 @@ pub struct ParentIssueOrchestrationState {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize)]
-pub enum ChildTerminalState {
+pub enum ChildIssueStatus {
     Open,
     ActiveRun,
     Closed,
@@ -27,7 +27,7 @@ pub enum ChildTerminalState {
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 pub struct ChildIssueState {
     pub issue_number: u64,
-    pub terminal_state: ChildTerminalState,
+    pub terminal_state: ChildIssueStatus,
     pub pr_number: Option<u64>,
 }
 
@@ -54,13 +54,13 @@ pub fn order_subissues(children: &[GithubSubIssue]) -> Vec<u64> {
 pub fn classify_child(issue: &GithubIssue, pr: Option<&GithubIssuePrState>) -> ChildIssueState {
     let issue_closed = issue.state.eq_ignore_ascii_case("closed");
     let terminal_state = match pr {
-        Some(pr) if pr.merged && issue_closed => ChildTerminalState::Merged,
-        Some(pr) if pr.merged => ChildTerminalState::MergedIssueOpen,
-        Some(pr) if pr.state.eq_ignore_ascii_case("superseded") => ChildTerminalState::Superseded,
-        Some(pr) if pr.state.eq_ignore_ascii_case("closed") => ChildTerminalState::ClosedUnmerged,
-        Some(_) => ChildTerminalState::ActiveRun,
-        None if issue_closed => ChildTerminalState::Closed,
-        None => ChildTerminalState::Open,
+        Some(pr) if pr.merged && issue_closed => ChildIssueStatus::Merged,
+        Some(pr) if pr.merged => ChildIssueStatus::MergedIssueOpen,
+        Some(pr) if pr.state.eq_ignore_ascii_case("superseded") => ChildIssueStatus::Superseded,
+        Some(pr) if pr.state.eq_ignore_ascii_case("closed") => ChildIssueStatus::ClosedUnmerged,
+        Some(_) => ChildIssueStatus::ActiveRun,
+        None if issue_closed => ChildIssueStatus::Closed,
+        None => ChildIssueStatus::Open,
     };
     ChildIssueState {
         issue_number: issue.number,
@@ -77,7 +77,7 @@ pub fn classify_child(issue: &GithubIssue, pr: Option<&GithubIssuePrState>) -> C
 /// ActiveRun is intentionally not blocked here; launch_child_workflow rechecks
 /// active leases before starting a run so recovery paths can still be selected.
 pub fn next_actionable_child(states: &[ChildIssueState], order: &[u64]) -> Option<u64> {
-    let states_by_number: HashMap<u64, &ChildTerminalState> = states
+    let states_by_number: HashMap<u64, &ChildIssueStatus> = states
         .iter()
         .map(|state| (state.issue_number, &state.terminal_state))
         .collect();
@@ -100,15 +100,15 @@ pub fn missing_ordered_child_states(states: &[ChildIssueState], order: &[u64]) -
 /// ActiveRun intentionally does not block selection: launch_child_workflow
 /// performs the active lease check before starting another run, so stale or
 /// failed child run recovery can still proceed through the normal launch path.
-fn child_state_blocks_selection(state: &ChildTerminalState) -> bool {
+fn child_state_blocks_selection(state: &ChildIssueStatus) -> bool {
     matches!(
         state,
-        ChildTerminalState::Merged
-            | ChildTerminalState::MergedIssueOpen
-            | ChildTerminalState::Closed
-            | ChildTerminalState::ClosedUnmerged
-            | ChildTerminalState::Superseded
-            | ChildTerminalState::Blocked,
+        ChildIssueStatus::Merged
+            | ChildIssueStatus::MergedIssueOpen
+            | ChildIssueStatus::Closed
+            | ChildIssueStatus::ClosedUnmerged
+            | ChildIssueStatus::Superseded
+            | ChildIssueStatus::Blocked,
     )
 }
 
@@ -168,12 +168,12 @@ mod tests {
         let states = vec![
             ChildIssueState {
                 issue_number: 1,
-                terminal_state: ChildTerminalState::Merged,
+                terminal_state: ChildIssueStatus::Merged,
                 pr_number: Some(10),
             },
             ChildIssueState {
                 issue_number: 2,
-                terminal_state: ChildTerminalState::Open,
+                terminal_state: ChildIssueStatus::Open,
                 pr_number: None,
             },
         ];
@@ -185,22 +185,22 @@ mod tests {
         let states = vec![
             ChildIssueState {
                 issue_number: 1,
-                terminal_state: ChildTerminalState::ClosedUnmerged,
+                terminal_state: ChildIssueStatus::ClosedUnmerged,
                 pr_number: Some(10),
             },
             ChildIssueState {
                 issue_number: 2,
-                terminal_state: ChildTerminalState::Superseded,
+                terminal_state: ChildIssueStatus::Superseded,
                 pr_number: Some(11),
             },
             ChildIssueState {
                 issue_number: 3,
-                terminal_state: ChildTerminalState::FailedRun,
+                terminal_state: ChildIssueStatus::FailedRun,
                 pr_number: None,
             },
             ChildIssueState {
                 issue_number: 4,
-                terminal_state: ChildTerminalState::Open,
+                terminal_state: ChildIssueStatus::Open,
                 pr_number: None,
             },
         ];
@@ -212,12 +212,12 @@ mod tests {
         let states = vec![
             ChildIssueState {
                 issue_number: 1,
-                terminal_state: ChildTerminalState::ActiveRun,
+                terminal_state: ChildIssueStatus::ActiveRun,
                 pr_number: Some(10),
             },
             ChildIssueState {
                 issue_number: 2,
-                terminal_state: ChildTerminalState::FailedRun,
+                terminal_state: ChildIssueStatus::FailedRun,
                 pr_number: None,
             },
         ];

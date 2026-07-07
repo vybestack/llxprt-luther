@@ -118,9 +118,12 @@ fn append_sub_issue_edges(
     children: &mut Vec<GithubSubIssue>,
 ) {
     for edge in edges {
-        if seen.insert(edge.node.number) {
+        let Some(node) = edge.node else {
+            continue;
+        };
+        if seen.insert(node.number) {
             children.push(GithubSubIssue {
-                issue: graphql_issue_to_issue(edge.node),
+                issue: graphql_issue_to_issue(node),
                 position: Some(children.len() as u64),
                 source: SubIssueSource::Native,
             });

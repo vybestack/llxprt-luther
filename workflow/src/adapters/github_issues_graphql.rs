@@ -63,7 +63,8 @@ struct GraphqlSubIssueConnection {
 
 #[derive(Debug, Deserialize)]
 struct GraphqlSubIssueEdge {
-    node: GraphqlIssue,
+    #[serde(default)]
+    node: Option<GraphqlIssue>,
 }
 
 #[derive(Debug, Deserialize)]

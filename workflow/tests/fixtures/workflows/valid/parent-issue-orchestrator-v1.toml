@@ -67,7 +67,7 @@ step_id = "determine_refreshed_subissue_order"
 step_type = "parent_orchestration"
 description = "Recompute deterministic child order after refresh."
 consumes = ["subissue-state-snapshot"]
-produces = ["subissue-order-plan-refreshed"]
+produces = ["subissue-order-plan"]
 
 [[steps]]
 step_id = "evaluate_parent_completion"
@@ -139,6 +139,11 @@ from = "wait_for_child_merge"
 to = "evaluate_parent_completion"
 condition = "fixable"
 
+[[transitions]]
+from = "wait_for_child_merge"
+to = "evaluate_parent_completion"
+condition = "fatal"
+
 # Per-edge guard for the parent orchestration refresh cycle.
 [[transitions]]
 from = "refresh_parent_and_children"
@@ -149,6 +154,7 @@ max_iterations = 100
 [[transitions]]
 from = "classify_refreshed_subissues"
 to = "determine_refreshed_subissue_order"
+max_iterations = 100
 
 [[transitions]]
 from = "determine_refreshed_subissue_order"

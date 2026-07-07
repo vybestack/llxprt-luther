@@ -139,7 +139,7 @@ fn child_run_registry_status_overrides_zero_exit_waiting_child() {
 fn closed_child_without_required_pr_is_not_complete_by_default() {
     let state = ChildIssueState {
         issue_number: 7,
-        terminal_state: ChildTerminalState::Closed,
+        terminal_state: ChildIssueStatus::Closed,
         pr_number: None,
     };
     assert!(!child_is_complete(&state));
@@ -153,7 +153,7 @@ fn failed_child_lease_relaunches_fresh_workflow() {
     let state = OrchestrationState::from_context(&context, &json!({})).unwrap();
     let db_path = temp.path().join("checkpoints.db");
     crate::persistence::init_database(&db_path).unwrap();
-    let conn = open_parent_orchestration_connection(&db_path).unwrap();
+    let mut conn = open_parent_orchestration_connection(&db_path).unwrap();
     let child = unique_child_issue_number();
     let lease = try_claim(&conn, &state.repo, child, &state.child_config_id)
         .unwrap()
@@ -166,7 +166,7 @@ fn failed_child_lease_relaunches_fresh_workflow() {
     )
     .unwrap();
 
-    let action = prepare_child_lease_with_conn(&state, child, &conn).unwrap();
+    let action = prepare_child_lease_with_conn(&state, child, &mut conn).unwrap();
 
     match action {
         ChildLeaseAction::Launch(lease) => {
@@ -208,7 +208,7 @@ fn child_lease_claim_contention_waits_without_error() {
 fn parent_completion_rejects_closed_child_without_explicit_non_actionable_reason() {
     let states = vec![ChildIssueState {
         issue_number: 7,
-        terminal_state: ChildTerminalState::Closed,
+        terminal_state: ChildIssueStatus::Closed,
         pr_number: None,
     }];
     let rollup = ParentOrchestrationRollup {
@@ -231,7 +231,7 @@ fn parent_completion_rejects_closed_child_without_explicit_non_actionable_reason
 fn parent_completion_accepts_closed_child_with_explicit_non_actionable_reason() {
     let states = vec![ChildIssueState {
         issue_number: 7,
-        terminal_state: ChildTerminalState::Closed,
+        terminal_state: ChildIssueStatus::Closed,
         pr_number: None,
     }];
     let rollup = ParentOrchestrationRollup {
@@ -263,7 +263,7 @@ fn parent_completion_accepts_closed_child_with_explicit_non_actionable_reason() 
 fn parent_completion_accepts_closed_child_with_non_actionable_lease_reason() {
     let states = vec![ChildIssueState {
         issue_number: 7,
-        terminal_state: ChildTerminalState::Closed,
+        terminal_state: ChildIssueStatus::Closed,
         pr_number: None,
     }];
     let rollup = ParentOrchestrationRollup {
@@ -293,7 +293,7 @@ fn parent_completion_accepts_closed_child_with_non_actionable_lease_reason() {
 fn parent_completion_rejects_unresolved_superseded_child() {
     let states = vec![ChildIssueState {
         issue_number: 7,
-        terminal_state: ChildTerminalState::Superseded,
+        terminal_state: ChildIssueStatus::Superseded,
         pr_number: Some(17),
     }];
     let rollup = ParentOrchestrationRollup {
@@ -345,7 +345,7 @@ fn auto_merge_is_gated_on_green_checks_and_review_state() {
 fn failed_child_run_is_recoverable_but_unsatisfied() {
     let states = vec![ChildIssueState {
         issue_number: 7,
-        terminal_state: ChildTerminalState::FailedRun,
+        terminal_state: ChildIssueStatus::FailedRun,
         pr_number: None,
     }];
     let rollup = ParentOrchestrationRollup {
@@ -370,7 +370,7 @@ fn failed_child_run_is_recoverable_but_unsatisfied() {
 fn parent_completion_rejects_merged_pr_when_child_issue_is_open() {
     let states = vec![ChildIssueState {
         issue_number: 7,
-        terminal_state: ChildTerminalState::MergedIssueOpen,
+        terminal_state: ChildIssueStatus::MergedIssueOpen,
         pr_number: Some(17),
     }];
     let rollup = ParentOrchestrationRollup {
@@ -632,7 +632,7 @@ fn parent_completion_executor_writes_complete_evaluation() {
         "subissue-state-snapshot.json",
         &vec![ChildIssueState {
             issue_number: child,
-            terminal_state: ChildTerminalState::Merged,
+            terminal_state: ChildIssueStatus::Merged,
             pr_number: Some(17),
         }],
     )
@@ -698,7 +698,7 @@ fn parent_completion_executor_reports_remaining_work() {
         "subissue-state-snapshot.json",
         &vec![ChildIssueState {
             issue_number: child,
-            terminal_state: ChildTerminalState::Closed,
+            terminal_state: ChildIssueStatus::Closed,
             pr_number: None,
         }],
     )

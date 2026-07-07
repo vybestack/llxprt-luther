@@ -293,7 +293,7 @@ fn evaluate_parent_completion(
         .collect();
     let closed_without_completion_evidence: Vec<u64> = states
         .iter()
-        .filter(|child| child.terminal_state == ChildTerminalState::Closed)
+        .filter(|child| child.terminal_state == ChildIssueStatus::Closed)
         .map(|child| child.issue_number)
         .collect();
     let acceptance = evaluate_acceptance_criteria(parent.body.as_deref(), &states, &rollup);
@@ -359,8 +359,8 @@ fn blocked_child_numbers(states: &[ChildIssueState]) -> Vec<u64> {
 fn required_prs_satisfied(states: &[ChildIssueState], rollup: &ParentOrchestrationRollup) -> bool {
     !states.is_empty()
         && states.iter().all(|child| match child.terminal_state {
-            ChildTerminalState::Merged => true,
-            ChildTerminalState::Closed => child_has_explicit_non_actionable_reason(child, rollup),
+            ChildIssueStatus::Merged => true,
+            ChildIssueStatus::Closed => child_has_explicit_non_actionable_reason(child, rollup),
             _ => false,
         })
         && !rollup
@@ -377,7 +377,7 @@ fn child_has_explicit_non_actionable_reason(
     child: &ChildIssueState,
     rollup: &ParentOrchestrationRollup,
 ) -> bool {
-    child.terminal_state == ChildTerminalState::Closed
+    child.terminal_state == ChildIssueStatus::Closed
         && rollup.children.iter().any(|entry| {
             entry.child_issue_number == child.issue_number
                 && matches!(
@@ -473,21 +473,21 @@ fn evaluate_acceptance_criteria(
     }
     for child in states {
         match child.terminal_state {
-            ChildTerminalState::Closed if child_has_explicit_non_actionable_reason(child, rollup) => {
+            ChildIssueStatus::Closed if child_has_explicit_non_actionable_reason(child, rollup) => {
                 evidence.push(format!(
                     "child issue #{} is closed with explicit non-actionable evidence",
                     child.issue_number
                 ));
             }
-            ChildTerminalState::Closed => remaining_work.push(format!(
+            ChildIssueStatus::Closed => remaining_work.push(format!(
                 "child issue #{} is closed without merged PR evidence or an explicit non-actionable reason",
                 child.issue_number
             )),
-            ChildTerminalState::Merged => evidence.push(format!(
+            ChildIssueStatus::Merged => evidence.push(format!(
                 "child issue #{} is closed with merged PR evidence",
                 child.issue_number
             )),
-            ChildTerminalState::MergedIssueOpen => remaining_work.push(format!(
+            ChildIssueStatus::MergedIssueOpen => remaining_work.push(format!(
                 "child issue #{} has merged PR evidence but is still open",
                 child.issue_number
             )),
@@ -648,6 +648,39 @@ fn context_value_with_warned_default(
                 "parent orchestration context missing; using compatibility default"
             );
             default.to_string()
+        })
+}
+
+fn optional_u64_context(
+    context: &StepContext,
+    primary: &str,
+    fallback: &str,
+) -> Result<Option<u64>, EngineError> {
+    let Some(value) = context.get(primary).or_else(|| context.get(fallback)) else {
+        return Ok(None);
+    };
+    value.parse::<u64>().map(Some).map_err(|err| {
+        parent_error(format!(
+            "invalid numeric parent orchestration context value for {primary}/{fallback}: {err}"
+        ))
+    })
+}
+
+fn parent_config_root(context: &StepContext) -> Result<PathBuf, EngineError> {
+    context
+        .get("config_root")
+        .or_else(|| context.get("config_dir"))
+        .map(PathBuf::from)
+        .or_else(|| {
+            context
+                .get("work_dir")
+                .map(|work_dir| PathBuf::from(work_dir).join("config"))
+        })
+        .ok_or_else(|| {
+            parent_error(
+                "parent orchestration requires config_root, config_dir, or work_dir to resolve child workflow config"
+                    .to_string(),
+            )
         })
 }
 

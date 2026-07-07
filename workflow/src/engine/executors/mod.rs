@@ -56,7 +56,7 @@ pub use github_pr::{
 pub use llxprt::{LlxprtExecutor, LlxprtExecutorWithDetector};
 pub use noop::NoOpExecutor;
 pub use parent_orchestration::model::{
-    classify_child, next_actionable_child, order_subissues, ChildIssueState, ChildTerminalState,
+    classify_child, next_actionable_child, order_subissues, ChildIssueState, ChildIssueStatus,
     ParentIssueOrchestrationState,
 };
 pub use parent_orchestration::{

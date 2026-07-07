@@ -447,8 +447,6 @@ fn classify_check(check: &PrCheckObservation, allow_skipped: bool) -> String {
         } else {
             "failed".to_string()
         }
-    } else if check.bucket == "failed" && allow_skipped {
-        "passed".to_string()
     } else {
         check.bucket.clone()
     }

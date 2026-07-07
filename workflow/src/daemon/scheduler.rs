@@ -7,6 +7,7 @@
 //! @plan:PLAN-20260415-DAEMON-DISCOVERY.P06
 //! @requirement:REQ-DAEMON-DISCOVERY-006,REQ-DAEMON-DISCOVERY-007
 
+use std::borrow::Cow;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
@@ -182,12 +183,14 @@ fn resume_config_targets(
             true,
         );
         if let Some(parent_config_id) = target.discovery.parent_config_id.as_ref() {
-            upsert_resume_config_target(
-                &mut config_targets,
-                parent_config_id.clone(),
-                parent_capacity_discovery(&target.discovery, limits),
-                false,
-            );
+            if let Ok(discovery) = parent_capacity_discovery(&target.discovery, limits) {
+                upsert_resume_config_target(
+                    &mut config_targets,
+                    parent_config_id.clone(),
+                    discovery,
+                    false,
+                );
+            }
         }
     }
     config_targets
@@ -250,7 +253,7 @@ fn collect_launch_units(
         summary.eligible += result.eligible.len();
         for routed in &result.eligible {
             let launch_config_id = routed.config_id.as_deref().unwrap_or(&target.config_id);
-            let launch_discovery = launch_discovery_for(target, launch_config_id, limits);
+            let launch_discovery = launch_discovery_for(target, launch_config_id, limits)?;
             if !has_capacity(conn, &launch_discovery, launch_config_id, repo, limits)? {
                 summary.skipped += 1;
                 continue;
@@ -278,33 +281,31 @@ fn collect_launch_units(
     Ok(())
 }
 
-fn launch_discovery_for(
-    target: &SchedulerTarget,
+fn launch_discovery_for<'a>(
+    target: &'a SchedulerTarget,
     launch_config_id: &str,
     limits: &CapacityLimits,
-) -> DiscoveryConfig {
+) -> Result<Cow<'a, DiscoveryConfig>, rusqlite::Error> {
     if launch_config_id == target.config_id {
-        return target.discovery.clone();
+        return Ok(Cow::Borrowed(&target.discovery));
     }
-    parent_capacity_discovery(&target.discovery, limits)
+    parent_capacity_discovery(&target.discovery, limits).map(Cow::Owned)
 }
 
 fn parent_capacity_discovery(
     discovery: &DiscoveryConfig,
     limits: &CapacityLimits,
-) -> DiscoveryConfig {
+) -> Result<DiscoveryConfig, rusqlite::Error> {
     let mut parent = discovery.clone();
     let limit = discovery
         .max_concurrent_runs_per_config
         .or(discovery.max_concurrent_runs)
         .map_or(limits.per_config, |value| value as usize);
-    parent.max_concurrent_runs = Some(usize_to_u32(limit));
-    parent.max_concurrent_runs_per_config = Some(usize_to_u32(limit));
-    parent
-}
-
-fn usize_to_u32(value: usize) -> u32 {
-    u32::try_from(value).unwrap_or(u32::MAX)
+    let limit =
+        u32::try_from(limit).map_err(|_| rusqlite::Error::IntegralValueOutOfRange(0, i64::MAX))?;
+    parent.max_concurrent_runs = Some(limit);
+    parent.max_concurrent_runs_per_config = Some(limit);
+    Ok(parent)
 }
 fn dispatch_units(
     conn: &Connection,

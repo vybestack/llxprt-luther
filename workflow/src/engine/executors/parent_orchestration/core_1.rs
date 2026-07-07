@@ -84,7 +84,7 @@ fn apply_child_run_state(
             LeaseStatus::Failed | LeaseStatus::Abandoned | LeaseStatus::Stale
                 if issue.state.eq_ignore_ascii_case("open") =>
             {
-                child.terminal_state = ChildTerminalState::FailedRun;
+                child.terminal_state = ChildIssueStatus::FailedRun;
             }
             LeaseStatus::Claimed
             | LeaseStatus::WaitingExternal
@@ -93,9 +93,9 @@ fn apply_child_run_state(
                 if stale_child_run(&lease, state.merge_poll_interval_seconds)
                     && issue.state.eq_ignore_ascii_case("open")
                 {
-                    child.terminal_state = ChildTerminalState::StaleRun;
+                    child.terminal_state = ChildIssueStatus::StaleRun;
                 } else if !child_workflow_completed(conn, &lease)? {
-                    child.terminal_state = ChildTerminalState::ActiveRun;
+                    child.terminal_state = ChildIssueStatus::ActiveRun;
                 }
             }
             _ => {}
@@ -113,7 +113,7 @@ fn apply_child_rollup_state(
         entry.child_issue_number == child.issue_number
             && unresolved_rollup_outcome_requires_pr(entry)
     }) {
-        child.terminal_state = ChildTerminalState::Blocked;
+        child.terminal_state = ChildIssueStatus::Blocked;
     }
     Ok(())
 }
@@ -218,7 +218,7 @@ fn launch_child_workflow(
     query: &dyn GithubIssueQuery,
     runner: &dyn ChildWorkflowRunner,
 ) -> Result<StepOutcome, EngineError> {
-    let conn = daemon_connection()?;
+    let mut conn = daemon_connection()?;
     let Some(child) = selected_child(&state.artifact_root)? else {
         write_launch_artifact(
             state,
@@ -234,7 +234,7 @@ fn launch_child_workflow(
             return observe_existing_child_pr(context, state, query, child, &pr);
         }
     }
-    match prepare_child_lease(state, child, &conn)? {
+    match prepare_child_lease(state, child, &mut conn)? {
         ChildLeaseAction::Wait { lease, reason } => {
             wait_for_existing_child(state, child, lease.as_ref(), &reason)
         }
@@ -408,7 +408,7 @@ fn start_child_workflow(
     .map_err(sql_error)?;
     let result = runner.launch_child(&request).map_err(|err| {
         if let Err(restore_err) =
-            restore_child_lease_after_runner_error(lease, lease.status, lease.run_id.as_deref())
+            restore_child_lease_after_runner_error(conn, lease, lease.status, lease.run_id.as_deref())
         {
             return parent_error(format!(
                 "{err}; failed to restore child lease {}: {restore_err}",
@@ -472,7 +472,9 @@ fn resume_child_workflow(
     )
     .map_err(sql_error)?;
     let result = runner.resume_child(&request).map_err(|err| {
-        if let Err(restore_err) = restore_child_lease_after_runner_error(lease, lease.status, Some(&run_id)) {
+        if let Err(restore_err) =
+            restore_child_lease_after_runner_error(conn, lease, lease.status, Some(&run_id))
+        {
             return parent_error(format!(
                 "{err}; failed to restore child lease {}: {restore_err}",
                 lease.lease_id
@@ -498,11 +500,12 @@ fn resume_child_workflow(
 }
 
 fn restore_child_lease_after_runner_error(
+    conn: &rusqlite::Connection,
     lease: &crate::persistence::leases::IssueLease,
     status: LeaseStatus,
     run_id: Option<&str>,
 ) -> Result<(), EngineError> {
-    update_lease_status(&daemon_connection()?, &lease.lease_id, status, run_id).map_err(sql_error)
+    update_lease_status(conn, &lease.lease_id, status, run_id).map_err(sql_error)
 }
 
 fn post_launch_metadata(

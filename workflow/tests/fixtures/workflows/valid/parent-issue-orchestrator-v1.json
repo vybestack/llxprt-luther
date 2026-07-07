@@ -105,7 +105,7 @@
         "subissue-state-snapshot"
       ],
       "produces": [
-        "subissue-order-plan-refreshed"
+        "subissue-order-plan"
       ]
     },
     {
@@ -185,6 +185,11 @@
       "condition": "fixable"
     },
     {
+      "from": "wait_for_child_merge",
+      "to": "evaluate_parent_completion",
+      "condition": "fatal"
+    },
+    {
       "from": "refresh_parent_and_children",
       "to": "classify_refreshed_subissues",
       "condition": "success",
@@ -192,7 +197,8 @@
     },
     {
       "from": "classify_refreshed_subissues",
-      "to": "determine_refreshed_subissue_order"
+      "to": "determine_refreshed_subissue_order",
+      "max_iterations": 100
     },
     {
       "from": "determine_refreshed_subissue_order",
