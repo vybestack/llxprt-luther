@@ -526,6 +526,35 @@ fn commit_rejects_live_running_resume_point_without_force() {
 }
 
 #[test]
+fn commit_accepts_live_running_resume_point_with_force() {
+    // @plan:PLAN-20260623-LUTHER-CONTINUATION
+    let conn = test_conn();
+    seed_run(
+        &conn,
+        "commit-force-live-running",
+        RunStatus::Running,
+        "watch_pr_checks",
+    );
+    let mut md = get_run_with_conn(&conn, "commit-force-live-running")
+        .expect("load run")
+        .expect("run exists");
+    md.process_pid = Some(std::process::id());
+    persist_run_with_conn(&conn, &md).expect("persist live pid");
+    seed_checkpoint(
+        &conn,
+        "commit-force-live-running",
+        "watch_pr_checks",
+        CHECKPOINT_STATUS_WAITING,
+    );
+    let req = request("commit-force-live-running", ContinuationKind::Resume, true);
+    let metadata = commit_continuation(&conn, &req, "watch_pr_checks")
+        .expect("force should override live running claim at commit time");
+
+    assert_eq!(metadata.status, RunStatus::Running);
+    assert_eq!(metadata.current_step.as_deref(), Some("watch_pr_checks"));
+}
+
+#[test]
 fn commit_accepts_unrecorded_pid_running_resume_point() {
     // @plan:PLAN-20260623-LUTHER-CONTINUATION
     let conn = test_conn();

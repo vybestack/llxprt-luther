@@ -236,9 +236,10 @@ fn check_workflow_resolvable(metadata: &RunMetadata) -> SafetyCheck {
 /// Refuse to reopen terminal non-failed runs (Completed/Merged/Abandoned/
 /// Cancelled). `Failed` is the single intentional terminal exception, encoded in
 /// `RunStatus::is_resumable`. A `Running` run is accepted when its recorded
-/// workflow PID is stale or unrecorded, or when `--force` is specified for
-/// operator recovery from PID recycling; all other terminal refusals remain
-/// non-bypassable.
+/// workflow PID is stale or unrecorded, or when `--force` is specified. Force
+/// overrides even a live Running claim, so operators must only use it after
+/// confirming the recorded process is unrelated; all other terminal refusals
+/// remain non-bypassable.
 /// @plan:PLAN-20260623-LUTHER-CONTINUATION
 fn check_resumable_status(metadata: &RunMetadata, force: bool) -> SafetyCheck {
     if metadata.status.is_resumable() {

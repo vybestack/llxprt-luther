@@ -8018,6 +8018,7 @@ struct P15MarkerRunner {
     pull_review_comments: Arc<Mutex<Vec<serde_json::Value>>>,
     fail_resolution: bool,
     graphql_reply_without_comment: bool,
+    rest_reply_non_json: bool,
 }
 
 /// @pseudocode lines 42-47
@@ -8050,6 +8051,13 @@ impl P15MarkerRunner {
         }
     }
 
+    fn rest_reply_non_json() -> Self {
+        Self {
+            rest_reply_non_json: true,
+            ..Self::default()
+        }
+    }
+
     fn calls(&self) -> Vec<Vec<String>> {
         self.calls.lock().expect("p15 calls").clone()
     }
@@ -8069,6 +8077,9 @@ impl GithubPrCommandRunner for P15MarkerRunner {
             .iter()
             .any(|arg| arg.contains("/pulls/1910/comments/") && arg.contains("/replies"))
         {
+            if self.rest_reply_non_json {
+                return Ok("not json".to_string());
+            }
             // In-thread review reply endpoint.
             Ok(serde_json::json!({
                 "id": 9101,
@@ -8990,6 +9001,35 @@ fn marker_posts_in_thread_reply_for_fixed_and_resolves_thread() {
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P15
 /// @requirement:REQ-PRFU-016
 /// @pseudocode lines 41-49
+
+#[test]
+fn marker_fails_when_rest_reply_response_is_not_json() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_p15_validated_fixed_pending_with_database_id(&temp, 7001);
+    let runner = P15MarkerRunner::rest_reply_non_json();
+    let mut context = p11_context(&temp);
+
+    let err = GithubFeedbackMarkerExecutorWithRunner::new(runner.clone(), FixedClock)
+        .execute(&mut context, &p11_params(&temp))
+        .expect_err("non-JSON REST reply response should fail marker execution");
+
+    let message = err.to_string();
+    assert!(
+        message.contains("failed to parse REST marker reply response"),
+        "REST parse failure should be explicit and not recorded as posted: {message}"
+    );
+    let calls = runner.calls();
+    assert!(
+        calls.iter().any(|call| {
+            call.iter().any(|arg| arg == "POST")
+                && call
+                    .iter()
+                    .any(|arg| arg.contains("/pulls/1910/comments/7001/replies"))
+        }),
+        "test must exercise REST in-thread reply path: {calls:?}"
+    );
+}
+
 #[test]
 fn marker_resolve_uses_real_mutation_and_thread_variable() {
     let temp = tempfile::tempdir().expect("tempdir");

@@ -383,9 +383,13 @@ fn post_marker_reply_rest(
         "--field".to_string(),
         format!("body=@{}", body_path.display()),
     ])?;
-    Ok(serde_json::from_str(&response).unwrap_or_else(|err| {
-        json!({ "raw_response": response, "parse_error": err.to_string() })
-    }))
+    serde_json::from_str(&response).map_err(|err| {
+        github_feedback_error(format!(
+            "failed to parse REST marker reply response: {err}; raw_response_hash={}; raw_response_bytes={}",
+            stable_hash(&response),
+            response.len()
+        ))
+    })
 }
 
 fn post_marker_reply_via_graphql_thread(
@@ -410,13 +414,13 @@ fn post_marker_reply_via_graphql_thread(
     let parsed: Value = serde_json::from_str(&response).unwrap_or_else(|err| {
         json!({ "raw_response": response, "parse_error": err.to_string() })
     });
+    let error_summary = graphql_error_summary(&parsed);
     let Some(comment) = parsed
         .pointer("/data/addPullRequestReviewThreadReply/comment")
         .filter(|comment| comment.is_object())
     else {
         return Err(github_feedback_error(format!(
-            "GraphQL addPullRequestReviewThreadReply failed for thread {thread_id}; mutation may have partially succeeded, inspect response before retrying; {}",
-            graphql_error_summary(&parsed)
+            "GraphQL addPullRequestReviewThreadReply failed for thread {thread_id}; mutation may have partially succeeded, inspect response before retrying; {error_summary}"
         )));
     };
     let graphql_errors_present = parsed
@@ -425,8 +429,9 @@ fn post_marker_reply_via_graphql_thread(
         .is_some_and(|errors| !errors.is_empty());
     if graphql_errors_present {
         return Err(github_feedback_error(format!(
-            "GraphQL addPullRequestReviewThreadReply returned errors despite a comment object for thread {thread_id}; reply may have been posted, inspect response before retrying; {}",
-            graphql_error_summary(&parsed)
+            "GraphQL addPullRequestReviewThreadReply returned errors despite a comment object for thread {thread_id}; reply may have been posted (database_id={:?}, node_id={:?}), inspect response before retrying; {error_summary}",
+            comment.get("databaseId"),
+            comment.get("id")
         )));
     }
     let comment_id = comment.get("databaseId").cloned();
