@@ -313,18 +313,18 @@ fn raw_thread_id_declares_review_thread_identity(value: &Value) -> bool {
             "/original_feedback_identity/thread_id",
         ],
     )
-    .is_some_and(|thread_id| !thread_id.trim().is_empty())
+    .is_some_and(|thread_id| is_review_thread_node_id(thread_id.trim()))
 }
 
 fn raw_stable_marker_declares_review_thread_identity(stable_marker_key: &str) -> bool {
-    stable_marker_key.starts_with("thread:")
+    stable_marker_key.starts_with(STABLE_MARKER_THREAD_PREFIX)
 }
 
 fn raw_graphql_item_declares_review_thread_identity(item_id: &str) -> bool {
     item_id
         .strip_prefix(GRAPHQL_NODE_ID_PREFIX)
         .and_then(|suffix| suffix.split(':').next())
-        .is_some_and(|thread_id| thread_id.starts_with(REVIEW_THREAD_NODE_ID_PREFIX))
+        .is_some_and(is_review_thread_node_id)
 }
 
 fn post_marker_reply_via_rest_review_comment(

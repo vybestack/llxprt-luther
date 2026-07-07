@@ -540,6 +540,38 @@ fn commit_accepts_unrecorded_pid_running_resume_point() {
     assert_eq!(metadata.process_pid, Some(std::process::id()));
 }
 
+#[cfg(unix)]
+#[test]
+fn commit_accepts_stale_running_resume_point() {
+    // @plan:PLAN-20260623-LUTHER-CONTINUATION
+    let conn = test_conn();
+    seed_run(
+        &conn,
+        "commit-stale-running",
+        RunStatus::Running,
+        "watch_pr_checks",
+    );
+    let mut md = get_run_with_conn(&conn, "commit-stale-running")
+        .expect("load run")
+        .expect("run exists");
+    let mut stale_process = short_lived_process().expect("spawn short-lived process");
+    let stale_pid = stale_process.id();
+    stale_process.wait().expect("wait for short-lived process");
+    md.process_pid = Some(stale_pid);
+    persist_run_with_conn(&conn, &md).expect("persist stale pid");
+    seed_checkpoint(
+        &conn,
+        "commit-stale-running",
+        "watch_pr_checks",
+        CHECKPOINT_STATUS_WAITING,
+    );
+    let req = request("commit-stale-running", ContinuationKind::Resume, false);
+    let metadata = commit_continuation(&conn, &req, "watch_pr_checks")
+        .expect("stale running claim should reopen");
+    assert_eq!(metadata.status, RunStatus::Running);
+    assert_eq!(metadata.process_pid, Some(std::process::id()));
+}
+
 #[test]
 fn validation_rejects_repo_only_identity() {
     // @plan:PLAN-20260623-LUTHER-CONTINUATION
