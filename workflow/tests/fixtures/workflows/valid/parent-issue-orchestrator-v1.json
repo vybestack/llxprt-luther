@@ -1,0 +1,219 @@
+{
+  "workflow_type_id": "parent-issue-orchestrator-v1",
+  "steps": [
+    {
+      "step_id": "load_parent_issue",
+      "step_type": "parent_orchestration",
+      "description": "Load the parent issue and apply the Luther working label.",
+      "produces": [
+        "parent-issue"
+      ]
+    },
+    {
+      "step_id": "discover_subissues",
+      "step_type": "parent_orchestration",
+      "description": "Discover native GitHub sub-issues and fallback body references.",
+      "consumes": [
+        "parent-issue"
+      ],
+      "produces": [
+        "parent-subissues"
+      ]
+    },
+    {
+      "step_id": "classify_subissues",
+      "step_type": "parent_orchestration",
+      "description": "Classify child issue and PR states.",
+      "consumes": [
+        "parent-subissues"
+      ],
+      "produces": [
+        "subissue-state-snapshot"
+      ]
+    },
+    {
+      "step_id": "determine_subissue_order",
+      "step_type": "parent_orchestration",
+      "description": "Determine deterministic child order.",
+      "consumes": [
+        "subissue-state-snapshot"
+      ],
+      "produces": [
+        "subissue-order-plan"
+      ]
+    },
+    {
+      "step_id": "select_next_child",
+      "step_type": "parent_orchestration",
+      "description": "Select the next actionable child issue.",
+      "consumes": [
+        "subissue-order-plan"
+      ],
+      "produces": [
+        "selected-child"
+      ]
+    },
+    {
+      "step_id": "launch_or_resume_child_workflow",
+      "step_type": "parent_orchestration",
+      "description": "Launch or resume the child issue-fix workflow.",
+      "consumes": [
+        "selected-child"
+      ],
+      "produces": [
+        "child-run-launch"
+      ]
+    },
+    {
+      "step_id": "wait_for_child_merge",
+      "step_type": "parent_orchestration",
+      "description": "Wait for human merge by default before the next child.",
+      "consumes": [
+        "child-run-launch"
+      ],
+      "produces": [
+        "child-merge-wait"
+      ]
+    },
+    {
+      "step_id": "refresh_parent_and_children",
+      "step_type": "parent_orchestration",
+      "description": "Refresh parent and child state after a child reaches terminal state.",
+      "consumes": [
+        "child-merge-wait"
+      ],
+      "produces": [
+        "parent-refresh-snapshot"
+      ]
+    },
+    {
+      "step_id": "classify_refreshed_subissues",
+      "step_type": "parent_orchestration",
+      "description": "Reclassify refreshed child issue and PR states.",
+      "consumes": [
+        "parent-refresh-snapshot"
+      ],
+      "produces": [
+        "subissue-state-snapshot"
+      ]
+    },
+    {
+      "step_id": "determine_refreshed_subissue_order",
+      "step_type": "parent_orchestration",
+      "description": "Recompute deterministic child order after refresh.",
+      "consumes": [
+        "subissue-state-snapshot"
+      ],
+      "produces": [
+        "subissue-order-plan"
+      ]
+    },
+    {
+      "step_id": "evaluate_parent_completion",
+      "step_type": "parent_orchestration",
+      "description": "Evaluate parent completion only after child issues are complete.",
+      "consumes": [
+        "parent-refresh-snapshot"
+      ],
+      "produces": [
+        "parent-completion-evaluation"
+      ]
+    },
+    {
+      "step_id": "close_or_report_parent",
+      "step_type": "parent_orchestration",
+      "description": "Close the parent only if acceptance criteria are satisfied.",
+      "consumes": [
+        "parent-completion-evaluation"
+      ],
+      "produces": [
+        "parent-close-result"
+      ],
+      "terminal": true
+    }
+  ],
+  "transitions": [
+    {
+      "from": "load_parent_issue",
+      "to": "discover_subissues"
+    },
+    {
+      "from": "discover_subissues",
+      "to": "classify_subissues"
+    },
+    {
+      "from": "classify_subissues",
+      "to": "determine_subissue_order"
+    },
+    {
+      "from": "determine_subissue_order",
+      "to": "select_next_child"
+    },
+    {
+      "from": "select_next_child",
+      "to": "launch_or_resume_child_workflow",
+      "condition": "success"
+    },
+    {
+      "from": "select_next_child",
+      "to": "evaluate_parent_completion",
+      "condition": "fixable"
+    },
+    {
+      "from": "launch_or_resume_child_workflow",
+      "to": "wait_for_child_merge",
+      "condition": "success"
+    },
+    {
+      "from": "launch_or_resume_child_workflow",
+      "to": "evaluate_parent_completion",
+      "condition": "fixable"
+    },
+    {
+      "from": "launch_or_resume_child_workflow",
+      "to": "evaluate_parent_completion",
+      "condition": "fatal"
+    },
+    {
+      "from": "wait_for_child_merge",
+      "to": "refresh_parent_and_children",
+      "condition": "success"
+    },
+    {
+      "from": "wait_for_child_merge",
+      "to": "evaluate_parent_completion",
+      "condition": "fixable"
+    },
+    {
+      "from": "wait_for_child_merge",
+      "to": "evaluate_parent_completion",
+      "condition": "fatal"
+    },
+    {
+      "from": "refresh_parent_and_children",
+      "to": "classify_refreshed_subissues",
+      "condition": "success",
+      "max_iterations": 100
+    },
+    {
+      "from": "classify_refreshed_subissues",
+      "to": "determine_refreshed_subissue_order",
+      "max_iterations": 100
+    },
+    {
+      "from": "determine_refreshed_subissue_order",
+      "to": "select_next_child",
+      "max_iterations": 100
+    },
+    {
+      "from": "evaluate_parent_completion",
+      "to": "close_or_report_parent",
+      "condition": "success"
+    },
+    {
+      "from": "evaluate_parent_completion",
+      "to": "close_or_report_parent",
+      "condition": "fixable"
+    }
+  ]
+}

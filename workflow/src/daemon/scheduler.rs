@@ -7,6 +7,8 @@
 //! @plan:PLAN-20260415-DAEMON-DISCOVERY.P06
 //! @requirement:REQ-DAEMON-DISCOVERY-006,REQ-DAEMON-DISCOVERY-007
 
+use std::borrow::Cow;
+use std::collections::{btree_map::Entry, BTreeMap};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
@@ -135,22 +137,19 @@ fn collect_resume_units(
     limits: &CapacityLimits,
 ) -> Result<Vec<DispatchUnit>, rusqlite::Error> {
     let mut units = Vec::new();
-    for target in targets {
-        let ready_leases = match list_ready_to_resume_leases(conn, &target.config_id) {
+    for (resume_config_id, discovery) in resume_config_targets(targets, limits) {
+        let ready_leases = match list_ready_to_resume_leases(conn, &resume_config_id) {
             Ok(leases) => leases,
             Err(e) => {
-                eprintln!(
-                    "resume discovery error for config={}: {e}",
-                    target.config_id
-                );
+                eprintln!("resume discovery error for config={resume_config_id}: {e}");
                 continue;
             }
         };
         for lease in ready_leases {
             if !has_capacity(
                 conn,
-                &target.discovery,
-                &target.config_id,
+                &discovery,
+                &resume_config_id,
                 &lease.issue_repo,
                 limits,
             )? {
@@ -160,16 +159,68 @@ fn collect_resume_units(
                 Ok(Some(unit)) => units.push(unit),
                 Ok(None) => eprintln!(
                     "resume claim skipped for config={} issue={}#{}: invalid lease state",
-                    target.config_id, lease.issue_repo, lease.issue_number
+                    resume_config_id, lease.issue_repo, lease.issue_number
                 ),
                 Err(e) => eprintln!(
                     "resume claim skipped for config={} issue={}#{}: {e}",
-                    target.config_id, lease.issue_repo, lease.issue_number
+                    resume_config_id, lease.issue_repo, lease.issue_number
                 ),
             }
         }
     }
     Ok(units)
+}
+
+fn resume_config_targets(
+    targets: &[SchedulerTarget],
+    limits: &CapacityLimits,
+) -> Vec<(String, DiscoveryConfig)> {
+    let mut config_targets: BTreeMap<String, (DiscoveryConfig, bool)> = BTreeMap::new();
+    for target in targets {
+        upsert_resume_config_target(
+            &mut config_targets,
+            target.config_id.clone(),
+            target.discovery.clone(),
+            true,
+        );
+        if let Some(parent_config_id) = target.discovery.parent_config_id.as_ref() {
+            match parent_capacity_discovery(&target.discovery, limits) {
+                Ok(discovery) => upsert_resume_config_target(
+                    &mut config_targets,
+                    parent_config_id.clone(),
+                    discovery,
+                    false,
+                ),
+                Err(err) => eprintln!(
+                    "parent resume discovery capacity error for config={parent_config_id}: {err}"
+                ),
+            }
+        }
+    }
+    config_targets
+        .into_iter()
+        .map(|(config_id, (discovery, _))| (config_id, discovery))
+        .collect()
+}
+
+fn upsert_resume_config_target(
+    config_targets: &mut BTreeMap<String, (DiscoveryConfig, bool)>,
+    config_id: String,
+    discovery: DiscoveryConfig,
+    direct: bool,
+) {
+    match config_targets.entry(config_id) {
+        Entry::Occupied(mut entry) => {
+            let (existing_discovery, existing_direct) = entry.get_mut();
+            if direct && !*existing_direct {
+                *existing_discovery = discovery;
+                *existing_direct = true;
+            }
+        }
+        Entry::Vacant(entry) => {
+            entry.insert((discovery, direct));
+        }
+    }
 }
 
 fn prepare_resume_unit(
@@ -194,6 +245,7 @@ fn collect_launch_units(
     units: &mut Vec<DispatchUnit>,
     summary: &mut RunSummary,
 ) -> Result<(), rusqlite::Error> {
+    let parent_discoveries = parent_launch_discoveries(targets, limits);
     for (target, query) in targets.iter().zip(queries.iter()) {
         let repo = target.discovery.repo.as_deref().unwrap_or("");
         let active = count_active_leases_for_config(conn, &target.config_id)?;
@@ -205,22 +257,28 @@ fn collect_launch_units(
             }
         };
         summary.eligible += result.eligible.len();
-        for issue in &result.eligible {
-            if !has_capacity(conn, &target.discovery, &target.config_id, repo, limits)? {
+        for routed in &result.eligible {
+            let launch_config_id = routed.config_id.as_deref().unwrap_or(&target.config_id);
+            let launch_discovery =
+                launch_discovery_for(target, launch_config_id, limits, &parent_discoveries)?;
+            if !has_capacity(conn, &launch_discovery, launch_config_id, repo, limits)? {
                 summary.skipped += 1;
                 continue;
             }
-            match claim_for_launch(issue, &target.discovery, conn, &target.config_id) {
-                Ok(Ok(claimed)) => units.push(DispatchUnit {
-                    lease_id: claimed.lease_id,
-                    request: claimed.request,
-                    resume: false,
-                }),
+            match claim_for_launch(&routed.issue, &launch_discovery, conn, launch_config_id) {
+                Ok(Ok(mut claimed)) => {
+                    claimed.request.workflow_type_id = routed.workflow_type_id.clone();
+                    units.push(DispatchUnit {
+                        lease_id: claimed.lease_id,
+                        request: claimed.request,
+                        resume: false,
+                    })
+                }
                 Ok(Err(_)) => summary.skipped += 1,
                 Err(e) => {
                     eprintln!(
                         "claim error for config={} issue={}#{}: {e}",
-                        target.config_id, repo, issue.number
+                        launch_config_id, repo, routed.issue.number
                     );
                     summary.failed += 1;
                 }
@@ -228,6 +286,64 @@ fn collect_launch_units(
         }
     }
     Ok(())
+}
+
+fn launch_discovery_for<'a>(
+    target: &'a SchedulerTarget,
+    launch_config_id: &str,
+    limits: &CapacityLimits,
+    parent_discoveries: &'a BTreeMap<String, DiscoveryConfig>,
+) -> Result<Cow<'a, DiscoveryConfig>, rusqlite::Error> {
+    if launch_config_id == target.config_id {
+        return Ok(Cow::Borrowed(&target.discovery));
+    }
+    if let Some(discovery) = parent_discoveries.get(launch_config_id) {
+        return Ok(Cow::Borrowed(discovery));
+    }
+    parent_capacity_discovery(&target.discovery, limits).map(Cow::Owned)
+}
+
+fn parent_launch_discoveries(
+    targets: &[SchedulerTarget],
+    limits: &CapacityLimits,
+) -> BTreeMap<String, DiscoveryConfig> {
+    let mut discoveries = BTreeMap::new();
+    let mut derived = BTreeMap::new();
+    for target in targets {
+        discoveries.insert(target.config_id.clone(), target.discovery.clone());
+        if let Some(parent_config_id) = target.discovery.parent_config_id.as_ref() {
+            match parent_capacity_discovery(&target.discovery, limits) {
+                Ok(discovery) => {
+                    derived.entry(parent_config_id.clone()).or_insert(discovery);
+                }
+                Err(err) => eprintln!(
+                    "parent launch discovery capacity error for config={}: parent_config={parent_config_id}: {err}",
+                    target.config_id
+                ),
+            }
+        }
+    }
+    for (config_id, discovery) in derived {
+        discoveries.entry(config_id).or_insert(discovery);
+    }
+    discoveries
+}
+
+fn parent_capacity_discovery(
+    discovery: &DiscoveryConfig,
+    limits: &CapacityLimits,
+) -> Result<DiscoveryConfig, rusqlite::Error> {
+    let mut parent = discovery.clone();
+    let limit = discovery
+        .max_concurrent_runs_per_config
+        .or(discovery.max_concurrent_runs)
+        .map_or(limits.per_config, |value| value as usize);
+    let limit = u32::try_from(limit).map_err(|_| {
+        rusqlite::Error::IntegralValueOutOfRange(0, i64::try_from(limit).unwrap_or(i64::MAX))
+    })?;
+    parent.max_concurrent_runs = Some(limit);
+    parent.max_concurrent_runs_per_config = Some(limit);
+    Ok(parent)
 }
 fn dispatch_units(
     conn: &Connection,
@@ -431,6 +547,7 @@ mod tests {
             repo: Some("o/r".to_string()),
             include_labels: vec!["ok".to_string()],
             exclude_labels: vec![],
+            active_parent_label: None,
             issue_states: vec!["open".to_string()],
             assignee_filter: None,
             milestone_order: Some("none".to_string()),
@@ -439,6 +556,10 @@ mod tests {
             max_concurrent_active_runs: None,
             max_concurrent_runs_per_repository: None,
             max_concurrent_runs_per_config: None,
+            route_parent_issues: false,
+            parent_workflow_type_id: Some("parent-issue-orchestrator-v1".to_string()),
+            parent_config_id: None,
+            skip_children_of_active_parents: false,
         }
     }
 
@@ -450,6 +571,7 @@ mod tests {
             labels: vec!["ok".to_string()],
             assignee: None,
             milestone: None,
+            body: None,
         }
     }
 

@@ -226,6 +226,10 @@ fn assert_configs_equivalent(
         "discovery should match for {fixture_id}"
     );
     assert_eq!(
+        toml_config.parent_orchestration, json_config.parent_orchestration,
+        "parent_orchestration should match for {fixture_id}"
+    );
+    assert_eq!(
         toml_config.command_manifest, json_config.command_manifest,
         "command_manifest should match for {fixture_id}"
     );
@@ -248,6 +252,8 @@ fn test_toml_json_produce_equivalent_config() {
         "llxprt-luther",
         "llxprt-luther-issue-fix",
         "llxprt-jefe",
+        "parent-orchestrator-luther",
+        "parent-orchestrator-code",
         "codepuppy",
     ] {
         let (toml_config, json_config) = load_config_pair(fixture_id);

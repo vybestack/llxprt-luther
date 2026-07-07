@@ -133,6 +133,7 @@ fn make_config_with_vars(
         },
         variables,
         discovery: None,
+        parent_orchestration: Default::default(),
         command_manifest: None,
         target_profile: None,
     }

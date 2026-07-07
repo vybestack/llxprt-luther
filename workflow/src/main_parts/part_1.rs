@@ -40,8 +40,11 @@ use luther_workflow::workflow::config_loader::{
     resolve_workflow_config, resolve_workflow_type, validate_artifact_dependencies,
     validate_workflow_tokens,
 };
-use luther_workflow::workflow::schema::{StepDef, WorkflowConfig, WorkflowType};
+use luther_workflow::workflow::schema::{
+    StepDef, WorkflowConfig, WorkflowType, DEFAULT_MAX_CHILD_MERGE_WAIT_SECONDS,
+};
 use serde_json::{Map, Value};
+
 use luther_workflow::workflow::target_profile::{
     apply_target_profile_overrides, target_profile_validation_required, validate_target_profile,
     TargetProfileOverrides,
@@ -508,7 +511,11 @@ fn launch_daemon_workflow(
     let config_root = std::path::PathBuf::from("config");
     let mut config = resolve_workflow_config(config_id, &config_root)
         .map_err(|e| format!("resolve config '{config_id}': {e}"))?;
-    let workflow_type = resolve_workflow_type(&config.workflow_type_id, &config_root)
+    let workflow_type_id = request
+        .workflow_type_id
+        .as_deref()
+        .unwrap_or(&config.workflow_type_id);
+    let workflow_type = resolve_workflow_type(workflow_type_id, &config_root)
         .map_err(|e| format!("resolve workflow type: {e}"))?;
     let overrides = TargetProfileOverrides {
         repo: Some(request.repo.clone()),
@@ -613,6 +620,25 @@ fn persist_external_wait_state(
         wait_kind,
         &step_params,
     )?;
+    if wait_kind == WaitKind::DependencyChildWorkflow {
+        if let Some(child_run_id) = record.head_sha.clone() {
+            record.wait_condition["child_run_id"] = serde_json::Value::String(child_run_id);
+        }
+        if let Some(artifact_root) = wait_artifact_root(config, metadata.as_ref())? {
+            if let Some(wait) = read_child_workflow_wait_artifact(&artifact_root)? {
+                record.wait_condition["child_issue_number"] = wait
+                    .get("child_issue_number")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null);
+                record.wait_condition["child_lease_id"] = wait
+                    .get("child_lease_id")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null);
+                record.wait_condition["parent_run_id"] =
+                    serde_json::Value::String(request.run_id.clone());
+            }
+        }
+    }
     record.last_observed_state = serde_json::json!({
         "classification": "suspended",
         "step_id": step_id,
@@ -624,7 +650,8 @@ fn persist_external_wait_state(
         .and_then(|d| d.poll_interval_secs)
         .unwrap_or(300);
     record.poll_interval_seconds = poll_interval;
-    record.next_poll_at = chrono::Utc::now() + chrono::Duration::seconds(poll_interval as i64);
+    record.max_wait_seconds = max_wait_seconds_for_wait(config, wait_kind);
+    record.next_poll_at = luther_workflow::polling::next_poll_time(poll_interval);
     record.resume_step = checkpoint.step_id.clone();
     record.checkpoint_id = luther_workflow::engine::continuation::checkpoint_identity(&checkpoint);
     upsert_wait_state(&conn, &record).map_err(|e| e.to_string())?;
@@ -636,6 +663,19 @@ fn persist_external_wait_state(
     }
     Ok(())
 }
+
+fn max_wait_seconds_for_wait(config: &WorkflowConfig, wait_kind: WaitKind) -> Option<u64> {
+    match wait_kind {
+        WaitKind::DependencyChildMerge | WaitKind::DependencyChildWorkflow => Some(
+            config
+                .parent_orchestration
+                .max_child_merge_wait_seconds
+                .unwrap_or(DEFAULT_MAX_CHILD_MERGE_WAIT_SECONDS),
+        ),
+        _ => None,
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct WaitPollIdentity {
     pr_number: Option<u64>,
@@ -685,10 +725,16 @@ fn wait_poll_identity(
     let artifact_head_sha = artifact_identity
         .as_ref()
         .and_then(|value| string_field(value, "head_sha"));
-    let identity = WaitPollIdentity {
+    let mut identity = WaitPollIdentity {
         pr_number: artifact_pr_number.or_else(|| metadata_pr_number(metadata)),
         head_sha: artifact_head_sha.or_else(|| metadata.and_then(|md| md.head_sha.clone())),
     };
+    if matches!(
+        wait_kind,
+        WaitKind::DependencyChildMerge | WaitKind::DependencyChildWorkflow
+    ) {
+        fill_parent_dependency_wait_identity(wait_kind, &mut identity, artifact_root.as_deref())?;
+    }
     validate_wait_poll_identity(wait_kind, &identity)?;
     Ok(identity)
 }
@@ -711,6 +757,11 @@ fn validate_wait_poll_identity(
                 return Err(format!("missing PR number for {wait_kind} wait state"));
             }
         }
+        WaitKind::DependencyChildWorkflow => {
+            if identity.head_sha.is_none() {
+                return Err(format!("missing child run ID for {wait_kind} wait state"));
+            }
+        }
         WaitKind::RateLimitBackoff => {}
     }
     Ok(())
@@ -720,6 +771,33 @@ fn metadata_pr_number(metadata: Option<&RunMetadata>) -> Option<u64> {
     metadata
         .and_then(|md| md.pr_number)
         .and_then(|number| u64::try_from(number).ok())
+}
+
+fn fill_parent_dependency_wait_identity(
+    wait_kind: WaitKind,
+    identity: &mut WaitPollIdentity,
+    artifact_root: Option<&std::path::Path>,
+) -> Result<(), String> {
+    match wait_kind {
+        WaitKind::DependencyChildMerge if identity.pr_number.is_none() => {
+            identity.pr_number = artifact_root
+                .map(read_child_merge_wait_artifact)
+                .transpose()?
+                .flatten();
+        }
+        WaitKind::DependencyChildWorkflow => {
+            if let Some(value) = artifact_root
+                .map(read_child_workflow_wait_artifact)
+                .transpose()?
+                .flatten()
+            {
+                identity.pr_number = value.get("pr_number").and_then(serde_json::Value::as_u64);
+                identity.head_sha = string_field(&value, "child_run_id");
+            }
+        }
+        _ => {}
+    }
+    Ok(())
 }
 
 fn wait_artifact_root(
@@ -796,197 +874,4 @@ fn is_config_token_name(token: &str) -> bool {
     true
 }
 
-const CONFIG_TOKEN_UNDERSCORE: u8 = 95;
-const CONFIG_TOKEN_DOT: u8 = 46;
-
-fn is_config_token_byte(byte: u8) -> bool {
-    byte.is_ascii_alphanumeric() || byte == CONFIG_TOKEN_UNDERSCORE || byte == CONFIG_TOKEN_DOT
-}
-
-fn read_pr_identity_artifact(
-    artifact_root: &std::path::Path,
-    run_id: &str,
-) -> Result<Option<serde_json::Value>, String> {
-    let current_root = artifact_root
-        .join("pr-followup")
-        .join("current")
-        .join(run_id);
-    if !current_root.exists() {
-        return Ok(None);
-    }
-    let mut matches = Vec::new();
-    collect_pr_identity_artifacts(&current_root, run_id, &mut matches)?;
-    matches.sort_by(|left, right| left.0.cmp(&right.0));
-    match matches.len() {
-        0 => Ok(None),
-        1 => Ok(Some(matches.remove(0).1)),
-        _ => Err(format!(
-            "multiple PR identity artifacts found for run {run_id}; cannot choose poll identity"
-        )),
-    }
-}
-
-fn collect_pr_identity_artifacts(
-    dir: &std::path::Path,
-    run_id: &str,
-    matches: &mut Vec<(std::path::PathBuf, serde_json::Value)>,
-) -> Result<(), String> {
-    for entry in std::fs::read_dir(dir).map_err(|e| e.to_string())? {
-        let path = entry.map_err(|e| e.to_string())?.path();
-        if path.is_dir() {
-            collect_pr_identity_artifacts(&path, run_id, matches)?;
-        } else if path.file_name().and_then(|name| name.to_str()) == Some("pr.json") {
-            let value = read_json_path(&path)?;
-            if value.get("run_id").and_then(serde_json::Value::as_str) == Some(run_id)
-                && value
-                    .get("pr_number")
-                    .and_then(serde_json::Value::as_u64)
-                    .is_some()
-                && value
-                    .get("head_sha")
-                    .and_then(serde_json::Value::as_str)
-                    .is_some_and(|head| !head.is_empty())
-            {
-                matches.push((path, value));
-            }
-        }
-    }
-    Ok(())
-}
-
-fn read_json_path(path: &std::path::Path) -> Result<serde_json::Value, String> {
-    let content = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
-    serde_json::from_str(&content).map_err(|e| e.to_string())
-}
-
-fn string_field(value: &serde_json::Value, field: &str) -> Option<String> {
-    value
-        .get(field)
-        .and_then(serde_json::Value::as_str)
-        .filter(|text| !text.is_empty())
-        .map(ToString::to_string)
-}
-
-fn lookup_lease_id(
-    conn: &rusqlite::Connection,
-    request: &luther_workflow::daemon::launcher::LaunchRequest,
-) -> Result<Option<String>, String> {
-    luther_workflow::persistence::leases::get_lease_for_issue(
-        conn,
-        &request.repo,
-        request.issue_number,
-    )
-    .map(|lease| lease.map(|lease| lease.lease_id))
-    .map_err(|e| e.to_string())
-}
-fn resolved_wait_step_parameters(config: &WorkflowConfig, step_id: &str) -> Result<Value, String> {
-    let config_root = std::path::PathBuf::from("config");
-    let workflow_type = resolve_workflow_type(&config.workflow_type_id, &config_root)
-        .map_err(|e| format!("resolve workflow type for wait state: {e}"))?;
-    let step = workflow_type
-        .steps
-        .iter()
-        .find(|step| step.step_id == step_id)
-        .ok_or_else(|| format!("missing wait step {step_id}"))?;
-    resolve_step_parameters(config, step)
-}
-
-fn resolve_step_parameters(config: &WorkflowConfig, step: &StepDef) -> Result<Value, String> {
-    match step.parameters.clone().unwrap_or(Value::Null) {
-        Value::Object(map) => Ok(Value::Object(resolve_parameter_map(config, map)?)),
-        Value::Null => Ok(Value::Null),
-        other => Ok(resolve_parameter_value(config, other)?),
-    }
-}
-
-fn resolve_parameter_map(
-    config: &WorkflowConfig,
-    map: Map<String, Value>,
-) -> Result<Map<String, Value>, String> {
-    let mut resolved = Map::new();
-    for (key, value) in map {
-        resolved.insert(key, resolve_parameter_value(config, value)?);
-    }
-    Ok(resolved)
-}
-
-fn resolve_parameter_value(config: &WorkflowConfig, value: Value) -> Result<Value, String> {
-    match value {
-        Value::String(raw) => Ok(Value::String(interpolate_config_variables(&raw, config)?)),
-        Value::Array(items) => items
-            .into_iter()
-            .map(|item| resolve_parameter_value(config, item))
-            .collect::<Result<Vec<_>, _>>()
-            .map(Value::Array),
-        Value::Object(map) => resolve_parameter_map(config, map).map(Value::Object),
-        other => Ok(other),
-    }
-}
-
-fn wait_condition_payload(
-    step_id: &str,
-    reason: &str,
-    request: &luther_workflow::daemon::launcher::LaunchRequest,
-    wait_kind: WaitKind,
-    step_params: &Value,
-) -> Result<Value, String> {
-    let mut payload = serde_json::json!({
-        "step_id": step_id,
-        "reason": reason,
-        "repository": request.repo,
-        "issue_number": request.issue_number,
-    });
-    match wait_kind {
-        WaitKind::PrChecks => add_required_pr_check_wait_parameters(&mut payload, step_params)?,
-        _ => add_optional_wait_parameters(&mut payload, step_params),
-    }
-    Ok(payload)
-}
-
-fn add_required_pr_check_wait_parameters(
-    payload: &mut Value,
-    step_params: &Value,
-) -> Result<(), String> {
-    set_required_wait_parameter(payload, step_params, "artifact_root")?;
-    set_optional_wait_parameter(payload, step_params, "check_policy");
-    set_optional_wait_parameter(payload, step_params, "pr_check_policy");
-    set_required_wait_parameter(payload, step_params, "head_ref")?;
-    set_required_wait_parameter(payload, step_params, "base_ref")?;
-    set_required_wait_parameter(payload, step_params, "base_sha")?;
-    Ok(())
-}
-
-fn add_optional_wait_parameters(payload: &mut Value, step_params: &Value) {
-    for key in [
-        "artifact_root",
-        "check_policy",
-        "pr_check_policy",
-        "head_ref",
-        "base_ref",
-        "base_sha",
-    ] {
-        set_optional_wait_parameter(payload, step_params, key);
-    }
-}
-
-fn set_required_wait_parameter(
-    payload: &mut Value,
-    step_params: &Value,
-    key: &str,
-) -> Result<(), String> {
-    let value = step_params
-        .get(key)
-        .filter(|value| !value.is_null())
-        .cloned()
-        .ok_or_else(|| format!("missing resolved PR check wait parameter {key}"))?;
-    if value.as_str().is_some_and(has_unresolved_config_token) {
-        return Err(format!("unresolved PR check wait parameter {key}: {value}"));
-    }
-    payload[key] = value;
-    Ok(())
-}
-
-fn set_optional_wait_parameter(payload: &mut Value, step_params: &Value, key: &str) {
-    payload[key] = step_params.get(key).cloned().unwrap_or(Value::Null);
-}
-
+include!("part_1_wait_helpers.rs");

@@ -34,7 +34,6 @@ pub struct CheckResult {
     pub errors: Vec<ErrorRecord>,
     pub raw_stdout: String,
     pub raw_stderr: String,
-    #[serde(default)]
     pub command: Option<CommandEvidence>,
 }
 

@@ -44,6 +44,7 @@ pub enum WorkflowLaunchResult {
 #[derive(Debug, Clone)]
 pub struct LaunchRequest {
     pub config_id: String,
+    pub workflow_type_id: Option<String>,
     pub run_id: String,
     pub repo: String,
     pub issue_number: u64,
@@ -104,6 +105,7 @@ pub fn claim_for_launch(
         lease_id: lease.lease_id,
         request: LaunchRequest {
             config_id: config_id.to_string(),
+            workflow_type_id: None,
             run_id,
             repo,
             issue_number: issue.number,
@@ -190,11 +192,21 @@ pub fn prepare_resume_lease(
         lease_id: lease.lease_id.clone(),
         request: LaunchRequest {
             config_id: lease.config_id.clone(),
+            workflow_type_id: workflow_type_id_for_resume(conn, &run_id)?,
             run_id,
             repo: lease.issue_repo.clone(),
             issue_number: lease.issue_number,
         },
     }))
+}
+
+fn workflow_type_id_for_resume(
+    conn: &Connection,
+    run_id: &str,
+) -> Result<Option<String>, rusqlite::Error> {
+    Ok(crate::persistence::get_run_with_conn(conn, run_id)?
+        .map(|metadata| metadata.workflow_type_id)
+        .filter(|workflow_type_id| !workflow_type_id.is_empty()))
 }
 
 /// Resume a ready lease using its existing run id/checkpoint.
@@ -227,6 +239,7 @@ mod tests {
             repo: Some("o/r".to_string()),
             include_labels: vec![],
             exclude_labels: vec![],
+            active_parent_label: None,
             issue_states: vec!["open".to_string()],
             assignee_filter: None,
             milestone_order: Some("semver".to_string()),
@@ -235,6 +248,10 @@ mod tests {
             max_concurrent_active_runs: None,
             max_concurrent_runs_per_repository: None,
             max_concurrent_runs_per_config: None,
+            route_parent_issues: false,
+            parent_workflow_type_id: Some("parent-issue-orchestrator-v1".to_string()),
+            parent_config_id: None,
+            skip_children_of_active_parents: false,
         }
     }
 
@@ -246,6 +263,7 @@ mod tests {
             labels: vec![],
             assignee: None,
             milestone: None,
+            body: None,
         }
     }
 

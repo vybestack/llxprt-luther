@@ -1,6 +1,8 @@
 use super::*;
 use crate::persistence::leases::{get_lease_for_issue, init_leases_table, try_claim};
+use crate::persistence::sqlite::{init_runs_schema, persist_run_with_conn};
 use crate::persistence::wait_state::{get_wait_state, init_wait_states_table, upsert_wait_state};
+use chrono::Duration;
 use serde_json::json;
 
 fn conn() -> Connection {
@@ -175,13 +177,13 @@ fn still_waiting_missing_wait_state_does_not_write_poll_artifact() {
 }
 
 #[test]
-fn action_required_pr_check_keeps_waiting() {
+fn action_required_pr_check_is_terminal() {
     let record = wait_record(&conn());
     let decision = classify_terminal_or_pending(
         &record,
         vec![json!({ "name": "ci", "conclusion": "action_required" })],
     );
-    assert_eq!(decision.classification, PollClassification::StillWaiting);
+    assert_eq!(decision.classification, PollClassification::ReadyToResume);
 }
 
 #[test]
@@ -313,6 +315,49 @@ fn timed_out_wait_returns_timeout_decision_before_polling() {
             .get("classification")
             .and_then(Value::as_str),
         Some("timed_out")
+    );
+}
+#[test]
+fn dependency_child_workflow_observes_child_run_id() {
+    let temp = tempfile::tempdir().unwrap();
+    let db_path = temp.path().join("checkpoints.db");
+    let c = Connection::open(&db_path).unwrap();
+    init_runs_schema(&c).unwrap();
+    let mut child =
+        crate::persistence::RunMetadata::new("child-run-63", "llxprt-issue-fix-v1", "cfg");
+    child.status = RunStatus::WaitingExternal;
+    child.set_current_step("watch_pr_checks");
+    persist_run_with_conn(&c, &child).unwrap();
+    let mut record = WaitStateRecord::new("parent-run-62", "parent-cfg");
+    record.wait_kind = WaitKind::DependencyChildWorkflow;
+    record.head_sha = Some("child-run-63".to_string());
+
+    let poller = SystemExternalWaitPoller::with_runner_and_db_path(
+        ScriptedPrCheckRunner::new(Vec::new()),
+        db_path,
+    );
+    let waiting = poller.poll(&record);
+    assert_eq!(waiting.classification, PollClassification::StillWaiting);
+    assert_eq!(
+        waiting
+            .observed_state
+            .get("child_run_id")
+            .and_then(Value::as_str),
+        Some("child-run-63")
+    );
+
+    let mut child = get_run_with_conn(&c, "child-run-63").unwrap().unwrap();
+    child.status = RunStatus::ReadyToResume;
+    persist_run_with_conn(&c, &child).unwrap();
+
+    let ready = poller.poll(&record);
+    assert_eq!(ready.classification, PollClassification::ReadyToResume);
+    assert_eq!(
+        ready
+            .observed_state
+            .get("child_status")
+            .and_then(Value::as_str),
+        Some("ready_to_resume")
     );
 }
 

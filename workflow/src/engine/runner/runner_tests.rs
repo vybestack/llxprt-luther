@@ -107,6 +107,7 @@ fn test_workflow_config(workflow_type_id: &str) -> crate::workflow::schema::Work
         },
         variables: std::collections::HashMap::new(),
         discovery: None,
+        parent_orchestration: Default::default(),
         command_manifest: None,
         target_profile: None,
     }
@@ -234,6 +235,7 @@ fn engine_runner_can_be_created() {
         },
         variables: std::collections::HashMap::new(),
         discovery: None,
+        parent_orchestration: Default::default(),
         command_manifest: None,
         target_profile: None,
     };
@@ -299,6 +301,7 @@ fn seam_test_instance() -> WorkflowInstance {
         },
         variables: std::collections::HashMap::new(),
         discovery: None,
+        parent_orchestration: Default::default(),
         command_manifest: None,
         target_profile: None,
     };

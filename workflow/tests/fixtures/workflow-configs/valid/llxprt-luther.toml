@@ -22,6 +22,19 @@ max_file_changes = 200
 max_tokens = 500000
 max_cost = 50.0
 
+[discovery]
+enabled = false
+include_labels = ["OK for Luther"]
+exclude_labels = ["Luther working"]
+issue_states = ["open"]
+active_parent_label = "Luther working"
+max_concurrent_runs = 1
+poll_interval_secs = 300
+route_parent_issues = true
+parent_workflow_type_id = "parent-issue-orchestrator-v1"
+parent_config_id = "parent-orchestrator-luther"
+skip_children_of_active_parents = true
+
 [variables]
 primary_issue_number = "3"
 issue_number = "3"

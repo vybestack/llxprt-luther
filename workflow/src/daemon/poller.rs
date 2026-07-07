@@ -1,4 +1,6 @@
-use chrono::{DateTime, Duration, Utc};
+use std::cell::RefCell;
+
+use chrono::{DateTime, Utc};
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -20,6 +22,7 @@ use crate::persistence::wait_state::{
 use crate::persistence::{
     write_poll_result_artifact, write_resume_decision_artifact, write_wait_state_artifact,
 };
+use crate::workflow::schema::DEFAULT_MAX_CHILD_MERGE_WAIT_SECONDS;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -40,6 +43,28 @@ pub struct PollDecision {
 }
 
 /// Seam for polling one durable external wait record.
+#[derive(Default)]
+struct ChildWorkflowConnectionCache {
+    conn: Option<rusqlite::Connection>,
+}
+
+impl ChildWorkflowConnectionCache {
+    fn connection(
+        &mut self,
+        db_path: &std::path::Path,
+    ) -> Result<&rusqlite::Connection, rusqlite::Error> {
+        if self.conn.is_none() {
+            let conn = rusqlite::Connection::open(db_path)?;
+            conn.busy_timeout(std::time::Duration::from_secs(5))?;
+            self.conn = Some(conn);
+        }
+        match self.conn.as_ref() {
+            Some(conn) => Ok(conn),
+            None => unreachable!("connection cache initialized"),
+        }
+    }
+}
+
 pub trait ExternalWaitPoller {
     fn poll(&self, record: &WaitStateRecord) -> PollDecision;
 }
@@ -47,6 +72,8 @@ pub trait ExternalWaitPoller {
 /// Production poller backed by statically constructed `gh` argv calls.
 pub struct SystemExternalWaitPoller<R = SystemGithubCommandRunner> {
     runner: R,
+    db_path: std::path::PathBuf,
+    child_workflow_connections: RefCell<ChildWorkflowConnectionCache>,
 }
 
 impl SystemExternalWaitPoller<SystemGithubCommandRunner> {
@@ -54,6 +81,8 @@ impl SystemExternalWaitPoller<SystemGithubCommandRunner> {
     pub fn new() -> Self {
         Self {
             runner: SystemGithubCommandRunner,
+            db_path: child_workflow_db_path(),
+            child_workflow_connections: RefCell::new(ChildWorkflowConnectionCache::default()),
         }
     }
 }
@@ -67,7 +96,20 @@ impl Default for SystemExternalWaitPoller<SystemGithubCommandRunner> {
 impl<R> SystemExternalWaitPoller<R> {
     #[must_use]
     pub fn with_runner(runner: R) -> Self {
-        Self { runner }
+        Self {
+            runner,
+            db_path: child_workflow_db_path(),
+            child_workflow_connections: RefCell::new(ChildWorkflowConnectionCache::default()),
+        }
+    }
+
+    #[must_use]
+    pub fn with_runner_and_db_path(runner: R, db_path: impl Into<std::path::PathBuf>) -> Self {
+        Self {
+            runner,
+            db_path: db_path.into(),
+            child_workflow_connections: RefCell::new(ChildWorkflowConnectionCache::default()),
+        }
     }
 }
 
@@ -76,18 +118,34 @@ impl<R: GithubCommandRunner> ExternalWaitPoller for SystemExternalWaitPoller<R> 
         if let Some(decision) = timeout_decision(record) {
             return decision;
         }
-        match record.wait_kind {
-            WaitKind::PrChecks => poll_pr_checks(record, &self.runner),
-            WaitKind::CoderabbitReview => poll_coderabbit_review(record, &self.runner),
-            WaitKind::PrMerge | WaitKind::DependencyChildMerge => {
-                poll_pr_merge(record, &self.runner)
-            }
-            WaitKind::HumanReview => poll_human_review(record, &self.runner),
-            WaitKind::RateLimitBackoff => PollDecision::still_waiting_with_state(
-                record,
-                json!({ "classification": "still_waiting", "wait_kind": record.wait_kind }),
-            ),
+        let mut child_workflow_connections = self.child_workflow_connections.borrow_mut();
+        poll_with_child_workflow_cache(
+            record,
+            &self.runner,
+            &self.db_path,
+            &mut child_workflow_connections,
+        )
+    }
+}
+
+fn poll_with_child_workflow_cache(
+    record: &WaitStateRecord,
+    runner: &dyn GithubCommandRunner,
+    db_path: &std::path::Path,
+    child_workflow_connections: &mut ChildWorkflowConnectionCache,
+) -> PollDecision {
+    match record.wait_kind {
+        WaitKind::PrChecks => poll_pr_checks(record, runner),
+        WaitKind::CoderabbitReview => poll_coderabbit_review(record, runner),
+        WaitKind::DependencyChildWorkflow => {
+            poll_child_workflow(record, db_path, child_workflow_connections)
         }
+        WaitKind::PrMerge | WaitKind::DependencyChildMerge => poll_pr_merge(record, runner),
+        WaitKind::HumanReview => poll_human_review(record, runner),
+        WaitKind::RateLimitBackoff => PollDecision::still_waiting_with_state(
+            record,
+            json!({ "classification": "still_waiting", "wait_kind": record.wait_kind }),
+        ),
     }
 }
 
@@ -129,7 +187,7 @@ impl PollDecision {
 }
 
 fn timeout_decision(record: &WaitStateRecord) -> Option<PollDecision> {
-    let max_wait_seconds = record.max_wait_seconds?;
+    let max_wait_seconds = effective_max_wait_seconds(record)?;
     let max_wait_seconds = i64::try_from(max_wait_seconds).unwrap_or(i64::MAX);
     if Utc::now()
         .signed_duration_since(record.created_at)
@@ -146,8 +204,79 @@ fn timeout_decision(record: &WaitStateRecord) -> Option<PollDecision> {
             "classification": "timed_out",
             "wait_kind": record.wait_kind,
             "max_wait_seconds": record.max_wait_seconds,
+            "effective_max_wait_seconds": max_wait_seconds,
         }),
     })
+}
+
+fn effective_max_wait_seconds(record: &WaitStateRecord) -> Option<u64> {
+    record.max_wait_seconds.or(match record.wait_kind {
+        WaitKind::DependencyChildWorkflow | WaitKind::DependencyChildMerge => {
+            Some(DEFAULT_MAX_CHILD_MERGE_WAIT_SECONDS)
+        }
+        _ => None,
+    })
+}
+
+fn child_workflow_db_path() -> std::path::PathBuf {
+    crate::runtime_paths::get_data_dir().join("checkpoints.db")
+}
+
+fn poll_child_workflow(
+    record: &WaitStateRecord,
+    db_path: &std::path::Path,
+    child_workflow_connections: &mut ChildWorkflowConnectionCache,
+) -> PollDecision {
+    // DependencyChildWorkflow records store the child run id in head_sha so the
+    // existing wait-state identity schema can resume parent runs without a DB migration.
+    let Some(child_run_id) = record.head_sha.as_deref() else {
+        return terminal_failure(record, missing_identity_state(record));
+    };
+    let conn = match child_workflow_connections.connection(db_path) {
+        Ok(conn) => conn,
+        Err(err) => {
+            return PollDecision::transient(
+                record,
+                json!({"classification": "transient_failure", "error": err.to_string()}),
+            );
+        }
+    };
+    let metadata = match get_run_with_conn(conn, child_run_id) {
+        Ok(metadata) => metadata,
+        Err(err) => {
+            return PollDecision::transient(
+                record,
+                json!({"classification": "transient_failure", "error": err.to_string()}),
+            );
+        }
+    };
+    let Some(metadata) = metadata else {
+        return PollDecision::transient(
+            record,
+            json!({
+                "classification": "transient_failure",
+                "wait_kind": record.wait_kind,
+                "child_run_id": child_run_id,
+                "reason": "child_run_metadata_missing"
+            }),
+        );
+    };
+    let observed_state = json!({
+        "classification": "observed",
+        "wait_kind": record.wait_kind,
+        "child_run_id": child_run_id,
+        "child_status": metadata.status.to_string(),
+        "child_current_step": metadata.current_step
+    });
+    if child_workflow_status_ready(metadata.status) {
+        PollDecision::ready(record, observed_state)
+    } else {
+        PollDecision::still_waiting_with_state(record, observed_state)
+    }
+}
+
+fn child_workflow_status_ready(status: RunStatus) -> bool {
+    status.is_terminal() || matches!(status, RunStatus::ReadyToResume)
 }
 
 fn poll_pr_checks(record: &WaitStateRecord, runner: &dyn GithubCommandRunner) -> PollDecision {
@@ -801,11 +930,7 @@ fn mark_run_status(
 }
 
 fn next_poll_time(record: &WaitStateRecord) -> DateTime<Utc> {
-    const MAX_POLL_INTERVAL_SECONDS: i64 = 86_400;
-    let seconds = i64::try_from(record.poll_interval_seconds)
-        .unwrap_or(MAX_POLL_INTERVAL_SECONDS)
-        .clamp(1, MAX_POLL_INTERVAL_SECONDS);
-    Utc::now() + Duration::seconds(seconds)
+    crate::polling::next_poll_time(record.poll_interval_seconds)
 }
 
 #[cfg(test)]

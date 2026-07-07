@@ -253,7 +253,7 @@ pub fn update_lease_status(
     run_id: Option<&str>,
 ) -> SqliteResult<()> {
     let now = Utc::now().to_rfc3339();
-    match run_id {
+    let changed = match run_id {
         Some(rid) => conn.execute(
             "UPDATE issue_leases SET status = ?1, run_id = ?2, updated_at = ?3
              WHERE lease_id = ?4",
@@ -264,6 +264,7 @@ pub fn update_lease_status(
             params![status.to_string(), now, lease_id],
         )?,
     };
+    let _ = changed;
     Ok(())
 }
 

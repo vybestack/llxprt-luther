@@ -19,7 +19,7 @@ pub struct PrCheckDefinition {
     #[serde(default = "default_match_mode")]
     pub mode: PrCheckMatchMode,
     pub pattern: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub allow_skipped: Option<bool>,
 }
 
@@ -271,19 +271,25 @@ pub fn check_bucket(
         "skipped".to_string()
     } else if matches!(
         conclusion.as_str(),
-        "failure" | "startup_failure" | "timed_out" | "cancelled"
+        "failure" | "startup_failure" | "timed_out" | "action_required" | "cancelled" | "stale"
     ) || matches!(
         state.as_str(),
-        "failure" | "failed" | "startup_failure" | "timed_out" | "cancelled"
+        "failure"
+            | "failed"
+            | "startup_failure"
+            | "timed_out"
+            | "action_required"
+            | "cancelled"
+            | "stale"
     ) || matches!(bucket.as_str(), "fail" | "failed")
     {
         "failed".to_string()
     } else if matches!(
         status.as_str(),
-        "queued" | "requested" | "waiting" | "pending" | "in_progress" | "action_required"
+        "queued" | "requested" | "waiting" | "pending" | "in_progress"
     ) || matches!(
         state.as_str(),
-        "queued" | "requested" | "waiting" | "pending" | "in_progress" | "action_required"
+        "queued" | "requested" | "waiting" | "pending" | "in_progress"
     ) || matches!(bucket.as_str(), "pending")
     {
         "pending".to_string()
@@ -435,10 +441,12 @@ fn aggregate_match_state(
 }
 
 fn classify_check(check: &PrCheckObservation, allow_skipped: bool) -> String {
-    if check.bucket == "skipped" && allow_skipped {
-        "passed".to_string()
-    } else if check.bucket == "skipped" {
-        "failed".to_string()
+    if check.bucket == "skipped" {
+        if allow_skipped {
+            "passed".to_string()
+        } else {
+            "failed".to_string()
+        }
     } else {
         check.bucket.clone()
     }
@@ -548,26 +556,33 @@ mod tests {
     }
 
     #[test]
-    fn skipped_requires_policy_allowance() {
-        let mut config = PrCheckWaitConfig {
+    fn skipped_requires_explicit_allow_skipped() {
+        let blocking_config = PrCheckWaitConfig {
             required: vec![definition("ci")],
             ..PrCheckWaitConfig::default()
         };
-        let denied = classify_pr_checks(
+        let blocking_result = classify_pr_checks(
             "h",
             vec![check("ci", "skipped")],
-            &config,
+            &blocking_config,
             PrCheckWaitCounters::default(),
         );
-        assert_eq!(denied.overall_state, OverallState::Failed);
-        config.default_allow_skipped = true;
-        let allowed = classify_pr_checks(
+        assert_eq!(blocking_result.overall_state, OverallState::Failed);
+
+        let allowed_config = PrCheckWaitConfig {
+            required: vec![PrCheckDefinition {
+                allow_skipped: Some(true),
+                ..definition("ci")
+            }],
+            ..PrCheckWaitConfig::default()
+        };
+        let allowed_result = classify_pr_checks(
             "h",
             vec![check("ci", "skipped")],
-            &config,
+            &allowed_config,
             PrCheckWaitCounters::default(),
         );
-        assert_eq!(allowed.overall_state, OverallState::Passed);
+        assert_eq!(allowed_result.overall_state, OverallState::Passed);
     }
 
     fn definition(pattern: &str) -> PrCheckDefinition {

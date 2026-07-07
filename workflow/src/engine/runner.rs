@@ -164,7 +164,7 @@ impl EngineRunner {
     ) -> Result<Self, EngineError> {
         let max_retries = instance.config.runtime.max_retries;
         let max_loops = instance.config.guard_limits.max_iterations.unwrap_or(10);
-        let context = build_step_context(&instance)?;
+        let context = build_step_context(&instance, None)?;
 
         // Create an in-memory SQLite connection for persistence
         let conn = Connection::open_in_memory().map_err(|e| {
@@ -222,7 +222,7 @@ impl EngineRunner {
         let max_loops = instance.config.guard_limits.max_iterations.unwrap_or(10);
         let conn = open_initialized_connection(db_path.as_ref())?;
         let (retry_count, edge_loop_counts) = load_checkpoint_state(&conn, &instance.run_id);
-        let context = build_step_context(&instance)?;
+        let context = build_step_context(&instance, Some(&run_context))?;
 
         let mut runner = Self {
             instance,
@@ -584,6 +584,14 @@ impl EngineRunner {
         if *outcome == StepOutcome::Wait {
             return self.pause_for_external_wait(current_step_id);
         }
+        if *outcome == StepOutcome::Retryable {
+            let run_outcome = RunOutcome::Failure {
+                step_id: current_step_id.to_string(),
+                reason: "Retryable error with no recovery transition".to_string(),
+            };
+            let _ = self.record_run_completion(&run_outcome, current_step_id);
+            return Ok(run_outcome);
+        }
 
         let run_outcome = run_outcome_without_transition(current_step_id, outcome);
         let _ = self.record_run_completion(&run_outcome, current_step_id);
@@ -890,84 +898,7 @@ impl EngineRunner {
     }
 }
 
-fn preview_for_log(value: &str, max_bytes: usize) -> &str {
-    if value.len() <= max_bytes {
-        return value;
-    }
-
-    let mut boundary = max_bytes;
-    while !value.is_char_boundary(boundary) {
-        boundary -= 1;
-    }
-    &value[..boundary]
-}
-
-fn open_initialized_connection(db_path: &Path) -> Result<Connection, EngineError> {
-    let conn = Connection::open(db_path)
-        .map_err(|e| EngineError::PersistenceError(format!("Failed to open database: {}", e)))?;
-
-    crate::persistence::checkpoint::init_checkpoint_table(&conn).map_err(|e| {
-        EngineError::PersistenceError(format!("Failed to initialize checkpoint schema: {e}"))
-    })?;
-    crate::persistence::run_metadata::init_runs_table(&conn).map_err(|e| {
-        EngineError::PersistenceError(format!("Failed to initialize runs schema: {e}"))
-    })?;
-
-    Ok(conn)
-}
-
-fn load_checkpoint_state(conn: &Connection, run_id: &str) -> (u32, HashMap<String, u32>) {
-    if let Ok(Some(checkpoint)) = load_checkpoint_with_conn(conn, run_id) {
-        (
-            checkpoint.state_snapshot.retry_count,
-            checkpoint.state_snapshot.edge_loop_counts.clone(),
-        )
-    } else {
-        (0, HashMap::new())
-    }
-}
-
-fn build_step_context(instance: &WorkflowInstance) -> Result<StepContext, EngineError> {
-    let work_dir = std::env::temp_dir().join(&instance.run_id);
-    let mut context = StepContext::new(work_dir, instance.run_id.clone());
-
-    for (key, value) in &instance.config.variables {
-        context.set(key, value);
-    }
-
-    if let Some(work_dir_str) = instance.config.variables.get("work_dir") {
-        let path = std::path::PathBuf::from(work_dir_str);
-        std::fs::create_dir_all(&path).map_err(|e| {
-            EngineError::InvalidState(format!(
-                "Failed to create work_dir '{}': {}",
-                work_dir_str, e
-            ))
-        })?;
-        context.set_work_dir(path);
-    }
-
-    seed_target_paths(&mut context, instance);
-
-    Ok(context)
-}
-
-fn run_outcome_without_transition(step_id: &str, outcome: &StepOutcome) -> RunOutcome {
-    match outcome {
-        StepOutcome::Success => RunOutcome::Success,
-        StepOutcome::Fatal => RunOutcome::Failure {
-            step_id: step_id.to_string(),
-            reason: "Fatal error occurred".to_string(),
-        },
-        StepOutcome::Fixable => RunOutcome::Failure {
-            step_id: step_id.to_string(),
-            reason: "Fixable error with no recovery transition".to_string(),
-        },
-        _ => RunOutcome::Failure {
-            step_id: step_id.to_string(),
-            reason: "Unexpected outcome".to_string(),
-        },
-    }
-}
+include!("runner_tail.rs");
 
 #[cfg(test)]
 mod runner_tests;

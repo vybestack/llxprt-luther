@@ -56,6 +56,12 @@ pub fn init_database(db_path: &Path) -> Result<(), checkpoint::PersistenceError>
     let conn = Connection::open(db_path).map_err(|e| {
         checkpoint::PersistenceError::Database(format!("Failed to open database: {}", e))
     })?;
+    conn.busy_timeout(std::time::Duration::from_secs(5))
+        .map_err(|e| {
+            checkpoint::PersistenceError::Database(format!(
+                "Failed to set database busy timeout: {e}"
+            ))
+        })?;
 
     // Initialize checkpoint table
     checkpoint::init_checkpoint_table(&conn).map_err(|e| {

@@ -13,13 +13,10 @@ pub struct CommandManifest {
 pub struct CommandEntry {
     pub id: String,
     pub argv: Vec<String>,
-    #[serde(default)]
     pub working_directory: Option<String>,
-    #[serde(default)]
     pub project_subdirectory: Option<String>,
     #[serde(default)]
     pub env: BTreeMap<String, String>,
-    #[serde(default)]
     pub timeout_seconds: Option<u64>,
     #[serde(default = "default_acceptable_exit_codes")]
     pub acceptable_exit_codes: Vec<i32>,

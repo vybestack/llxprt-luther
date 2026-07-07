@@ -688,11 +688,6 @@ fn validate_discovery_config(config: &WorkflowConfig) -> Result<()> {
 /// Resolve effective discovery rules for a config, filling unset fields from
 /// the config's `[variables]` table and built-in defaults.
 ///
-/// This preserves parity with the legacy `select_issue` workflow step:
-/// `variables.target_repo` -> repo, `variables.ok_label` -> include label,
-/// `variables.luther_label` -> exclude label, `variables.assignee` ->
-/// assignee filter. Defaults: states `["open"]`, milestone order `"semver"`,
-/// `max_concurrent_runs = 1`, `poll_interval_secs = 300`.
 /// @plan:PLAN-20260415-DAEMON-DISCOVERY.P01
 /// @requirement:REQ-DAEMON-DISCOVERY-001
 #[must_use]
@@ -734,6 +729,9 @@ pub fn resolve_discovery_config(config: &WorkflowConfig) -> DiscoveryConfig {
         repo,
         include_labels,
         exclude_labels,
+        // Default active parent detection to the configured Luther working
+        // label, matching the DiscoveryConfig default contract.
+        active_parent_label: raw.active_parent_label.or_else(|| var("luther_label")),
         issue_states,
         assignee_filter,
         milestone_order,
@@ -742,6 +740,13 @@ pub fn resolve_discovery_config(config: &WorkflowConfig) -> DiscoveryConfig {
         max_concurrent_active_runs: raw.max_concurrent_active_runs,
         max_concurrent_runs_per_repository: raw.max_concurrent_runs_per_repository,
         max_concurrent_runs_per_config: raw.max_concurrent_runs_per_config,
+        route_parent_issues: raw.route_parent_issues,
+        parent_workflow_type_id: Some(
+            raw.parent_workflow_type_id
+                .unwrap_or_else(|| "parent-issue-orchestrator-v1".to_string()),
+        ),
+        parent_config_id: raw.parent_config_id,
+        skip_children_of_active_parents: raw.skip_children_of_active_parents,
     }
 }
 
@@ -964,10 +969,6 @@ pub fn validate_workflow_tokens(
 }
 
 /// Validate that every consumed artifact has a producing step.
-///
-/// Existence-only check: the union of all steps' `produces` must cover every
-/// step's `consumes`. Absent/empty `produces`/`consumes` are no-ops, keeping
-/// existing workflows backward-compatible.
 /// @plan:PLAN-20260408-LLXPRT-FIRST.P11
 #[must_use]
 pub fn validate_artifact_dependencies(wf: &WorkflowType) -> Vec<MissingArtifactProducer> {

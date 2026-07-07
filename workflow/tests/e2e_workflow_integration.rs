@@ -953,7 +953,9 @@ fn test_run_completion_records_metadata() {
 // Phase 16: Post-PR workflow graph TDD
 // ============================================================================
 
-use luther_workflow::workflow::config_loader::{parse_workflow_type_toml, validate_workflow_type};
+use luther_workflow::workflow::config_loader::{
+    parse_workflow_config_toml, parse_workflow_type_toml, validate_workflow_type,
+};
 use luther_workflow::workflow::schema::{StepDef, WorkflowConfig, WorkflowType};
 use luther_workflow::workflow::validation::validate_workflow_graph;
 
@@ -1117,6 +1119,11 @@ fn run_tests_step(workflow_type: &WorkflowType) -> &StepDef {
 fn load_workflow_toml(path: &str) -> WorkflowType {
     let content = std::fs::read_to_string(path).unwrap_or_else(|err| panic!("read {path}: {err}"));
     parse_workflow_type_toml(&content).unwrap_or_else(|err| panic!("parse {path}: {err}"))
+}
+
+fn load_workflow_config_toml(path: &str) -> WorkflowConfig {
+    let content = std::fs::read_to_string(path).unwrap_or_else(|err| panic!("read {path}: {err}"));
+    parse_workflow_config_toml(&content).unwrap_or_else(|err| panic!("parse {path}: {err}"))
 }
 
 fn assert_pr_check_policy(watch_params: &serde_json::Value) {
@@ -3147,6 +3154,71 @@ fn create_pr_reuses_existing_issue_branch_pr_when_present() {
         params.get("exit_code_map").is_none(),
         "create_pr should not map an existing PR lookup/create branch to fatal before PR follow-through can capture identity"
     );
+}
+
+#[test]
+fn parent_issue_orchestrator_workflow_loads_with_target_configs() {
+    let production = load_workflow_toml("config/workflows/parent-issue-orchestrator-v1.toml");
+    let fixture =
+        load_workflow_toml("tests/fixtures/workflows/valid/parent-issue-orchestrator-v1.toml");
+    assert_eq!(production.workflow_type_id, "parent-issue-orchestrator-v1");
+    assert_eq!(production.steps.len(), 12);
+    assert_eq!(fixture.steps.len(), production.steps.len());
+    assert!(production
+        .steps
+        .iter()
+        .all(|step| step.step_type == "parent_orchestration"));
+    assert!(production.transitions.iter().any(|transition| {
+        transition.from == "evaluate_parent_completion"
+            && transition.to == "close_or_report_parent"
+            && transition.condition.as_deref() == Some("fixable")
+    }));
+    validate_workflow_graph(&production)
+        .expect("parent orchestrator production workflow graph validates");
+    validate_workflow_type(&production).expect("parent orchestrator production workflow validates");
+
+    for config_id in ["parent-orchestrator-luther", "parent-orchestrator-code"] {
+        let fixture_config = workflow_config(config_id);
+        let production_config =
+            load_workflow_config_toml(&format!("config/workflow-configs/{config_id}.toml"));
+        assert_eq!(fixture_config.config_id, config_id);
+        assert_eq!(production_config.config_id, config_id);
+        assert_eq!(
+            production_config.workflow_type_id,
+            "parent-issue-orchestrator-v1"
+        );
+        assert_eq!(
+            production_config.workflow_type_id,
+            fixture_config.workflow_type_id
+        );
+        assert_eq!(
+            production_config.parent_orchestration,
+            fixture_config.parent_orchestration
+        );
+        assert!(!production_config.parent_orchestration.auto_merge_children);
+        assert!(production_config.parent_orchestration.wait_for_human_merge);
+        assert_eq!(
+            production_config
+                .parent_orchestration
+                .merge_poll_interval_seconds,
+            300
+        );
+        assert_eq!(
+            production_config
+                .parent_orchestration
+                .max_child_merge_wait_seconds,
+            None
+        );
+        let expected_child_config = if config_id == "parent-orchestrator-luther" {
+            "llxprt-luther"
+        } else {
+            "llxprt-code"
+        };
+        assert_eq!(
+            production_config.parent_orchestration.child_config_id,
+            expected_child_config
+        );
+    }
 }
 
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P17

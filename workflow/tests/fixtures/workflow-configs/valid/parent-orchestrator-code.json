@@ -1,0 +1,36 @@
+{
+  "config_id": "parent-orchestrator-code",
+  "workflow_type_id": "parent-issue-orchestrator-v1",
+  "runtime": {
+    "timeout_seconds": 7200,
+    "max_retries": 3
+  },
+  "repository": {
+    "workspace_strategy": "temp_clone",
+    "branch_template": "parent-issue-{issue_number}",
+    "base_branch": "main"
+  },
+  "guards": {
+    "max_iterations": 100,
+    "max_file_changes": 200,
+    "max_tokens": 500000,
+    "max_cost": 50.0
+  },
+  "parent_orchestration": {
+    "auto_merge_children": false,
+    "wait_for_human_merge": true,
+    "merge_poll_interval_seconds": 300,
+    "child_workflow_type_id": "llxprt-issue-fix-v1",
+    "child_config_id": "llxprt-code"
+  },
+  "variables": {
+    "target_repo": "vybestack/llxprt-code",
+    "ok_label": "OK for Luther",
+    "luther_label": "Luther working",
+    "primary_issue_number": "0",
+    "issue_number": "0",
+    "work_dir": "/tmp/luther-workspaces/llxprt-code",
+    "artifact_dir": "/tmp/luther-artifacts/llxprt-code",
+    "target_ecosystem_name": "TypeScript"
+  }
+}
