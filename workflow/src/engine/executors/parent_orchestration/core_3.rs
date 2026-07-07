@@ -30,7 +30,7 @@ fn prepare_child_resume(
     let conn = open_parent_orchestration_connection(db_path)?;
     let metadata = get_run_with_conn(&conn, &request.run_id)
         .map_err(|err| err.to_string())?
-        .ok_or_else(|| format!("missing child run metadata for {}", request.run_id))?;
+        .ok_or_else(|| format!("missing child run metadata for head_sha child workflow run id {}", request.run_id))?;
     let step = metadata
         .current_step
         .as_deref()
@@ -249,7 +249,7 @@ fn child_wait_poll_interval(config: &WorkflowConfig) -> u64 {
 
 fn child_wait_max_wait_seconds(config: &WorkflowConfig, wait_kind: WaitKind) -> Option<u64> {
     match wait_kind {
-        WaitKind::DependencyChildWorkflow => Some(
+        WaitKind::DependencyChildWorkflow | WaitKind::DependencyChildMerge => Some(
             config
                 .parent_orchestration
                 .max_child_merge_wait_seconds
@@ -450,9 +450,8 @@ fn evaluate_acceptance_criteria(
     ));
     let criteria = parent_body.map_or(0, count_acceptance_criteria);
     if criteria == 0 {
-        remaining_work.push(
-            "parent acceptance criteria require deterministic verification; no explicit checked acceptance checklist was found"
-                .to_string(),
+        evidence.push(
+            "no parent acceptance checklist found; relying on child completion evidence".to_string(),
         );
     } else {
         let unchecked = parent_body.map_or(0, count_unchecked_acceptance_criteria);
@@ -730,8 +729,12 @@ fn write_json<T: serde::Serialize>(
     fs::write(&temp_path, bytes)
         .map_err(|err| parent_error(format!("write {}: {err}", temp_path.display())))?;
     fs::rename(&temp_path, &path).map_err(|err| {
+        let cleanup_error = fs::remove_file(&temp_path).err();
+        let cleanup_context = cleanup_error
+            .map(|cleanup| format!("; additionally failed to remove temp file: {cleanup}"))
+            .unwrap_or_default();
         parent_error(format!(
-            "rename {} to {}: {err}",
+            "rename {} to {}: {err}{cleanup_context}",
             temp_path.display(),
             path.display()
         ))

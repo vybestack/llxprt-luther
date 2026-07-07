@@ -1,3 +1,5 @@
+use std::cell::RefCell;
+
 use chrono::{DateTime, Utc};
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
@@ -71,6 +73,7 @@ pub trait ExternalWaitPoller {
 pub struct SystemExternalWaitPoller<R = SystemGithubCommandRunner> {
     runner: R,
     db_path: std::path::PathBuf,
+    child_workflow_connections: RefCell<ChildWorkflowConnectionCache>,
 }
 
 impl SystemExternalWaitPoller<SystemGithubCommandRunner> {
@@ -79,6 +82,7 @@ impl SystemExternalWaitPoller<SystemGithubCommandRunner> {
         Self {
             runner: SystemGithubCommandRunner,
             db_path: child_workflow_db_path(),
+            child_workflow_connections: RefCell::new(ChildWorkflowConnectionCache::default()),
         }
     }
 }
@@ -95,6 +99,7 @@ impl<R> SystemExternalWaitPoller<R> {
         Self {
             runner,
             db_path: child_workflow_db_path(),
+            child_workflow_connections: RefCell::new(ChildWorkflowConnectionCache::default()),
         }
     }
 
@@ -103,6 +108,7 @@ impl<R> SystemExternalWaitPoller<R> {
         Self {
             runner,
             db_path: db_path.into(),
+            child_workflow_connections: RefCell::new(ChildWorkflowConnectionCache::default()),
         }
     }
 }
@@ -112,7 +118,7 @@ impl<R: GithubCommandRunner> ExternalWaitPoller for SystemExternalWaitPoller<R> 
         if let Some(decision) = timeout_decision(record) {
             return decision;
         }
-        let mut child_workflow_connections = ChildWorkflowConnectionCache::default();
+        let mut child_workflow_connections = self.child_workflow_connections.borrow_mut();
         poll_with_child_workflow_cache(
             record,
             &self.runner,
@@ -205,7 +211,9 @@ fn timeout_decision(record: &WaitStateRecord) -> Option<PollDecision> {
 
 fn effective_max_wait_seconds(record: &WaitStateRecord) -> Option<u64> {
     record.max_wait_seconds.or(match record.wait_kind {
-        WaitKind::DependencyChildWorkflow => Some(DEFAULT_MAX_CHILD_MERGE_WAIT_SECONDS),
+        WaitKind::DependencyChildWorkflow | WaitKind::DependencyChildMerge => {
+            Some(DEFAULT_MAX_CHILD_MERGE_WAIT_SECONDS)
+        }
         _ => None,
     })
 }
@@ -260,30 +268,15 @@ fn poll_child_workflow(
         "child_status": metadata.status.to_string(),
         "child_current_step": metadata.current_step
     });
-    match metadata.status {
-        RunStatus::Queued
-        | RunStatus::Initialized
-        | RunStatus::Starting
-        | RunStatus::Running
-        | RunStatus::WaitingForChecks
-        | RunStatus::WaitingExternal
-        | RunStatus::Remediating
-        | RunStatus::Blocked
-        | RunStatus::Paused => PollDecision::still_waiting_with_state(record, observed_state),
-        RunStatus::ReadyToResume
-        | RunStatus::Completed
-        | RunStatus::Failed
-        | RunStatus::Abandoned
-        | RunStatus::Merged
-        | RunStatus::Cancelled => {
-            assert!(child_workflow_status_ready(metadata.status));
-            PollDecision::ready(record, observed_state)
-        }
+    if child_workflow_status_ready(metadata.status) {
+        PollDecision::ready(record, observed_state)
+    } else {
+        PollDecision::still_waiting_with_state(record, observed_state)
     }
 }
 
 fn child_workflow_status_ready(status: RunStatus) -> bool {
-    status.is_terminal() || status == RunStatus::ReadyToResume
+    status.is_terminal() || matches!(status, RunStatus::ReadyToResume)
 }
 
 fn poll_pr_checks(record: &WaitStateRecord, runner: &dyn GithubCommandRunner) -> PollDecision {

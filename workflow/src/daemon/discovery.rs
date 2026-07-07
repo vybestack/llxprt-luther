@@ -234,14 +234,7 @@ pub fn discover(
             result.skipped.push((issue, reason));
             continue;
         }
-        let local_skip = match local_dynamic_skip(conn, &issue, repo) {
-            Ok(reason) => reason,
-            Err(error) => {
-                error!(repo, issue_number = issue.number, error = %error, "local discovery skip check failed");
-                result.skipped.push((issue, SkipReason::InvalidLeaseState));
-                continue;
-            }
-        };
+        let local_skip = local_dynamic_skip(conn, &issue, repo)?;
         if let Some(reason) = local_skip {
             result.skipped.push((issue, reason));
             continue;
@@ -320,12 +313,16 @@ fn has_active_parent(
     let Some(parent) = cache.parent_issue(q, repo, issue.number)? else {
         return Ok(false);
     };
-    if parent_has_active_label(cfg, &parent.issue) {
+    if parent_has_active_label(cfg, parent) {
         return Ok(true);
     }
-    get_lease_for_issue(conn, repo, parent.issue.number)
-        .map(|lease| lease.is_some_and(|lease| lease.status.blocks_duplicate_work()))
-        .map_err(DiscoveryError::from)
+    match get_lease_for_issue(conn, repo, parent.number) {
+        Ok(lease) => Ok(lease.is_some_and(|lease| lease.status.blocks_duplicate_work())),
+        Err(error) => {
+            error!(repo, issue_number = issue.number, parent_issue_number = parent.number, error = %error, "parent lease lookup failed during active-parent discovery");
+            Ok(false)
+        }
+    }
 }
 
 fn parent_has_active_label(cfg: &DiscoveryConfig, parent: &GithubIssue) -> bool {
@@ -337,7 +334,7 @@ fn parent_has_active_label(cfg: &DiscoveryConfig, parent: &GithubIssue) -> bool 
 
 #[derive(Default)]
 struct DiscoveryLookupCache {
-    parents: BTreeMap<(String, u64), Option<crate::adapters::github_issues::GithubParentIssue>>,
+    parents: BTreeMap<(String, u64), Option<GithubIssue>>,
     sub_issues: BTreeMap<(String, u64), Vec<crate::adapters::github_issues::GithubSubIssue>>,
 }
 
@@ -347,13 +344,13 @@ impl DiscoveryLookupCache {
         q: &dyn GithubIssueQuery,
         repo: &str,
         number: u64,
-    ) -> Result<Option<crate::adapters::github_issues::GithubParentIssue>, GithubError> {
+    ) -> Result<Option<&GithubIssue>, GithubError> {
         let key = (repo.to_string(), number);
         if !self.parents.contains_key(&key) {
-            let parent = q.get_parent_issue(repo, number)?;
+            let parent = q.get_parent_issue(repo, number)?.map(|parent| parent.issue);
             self.parents.insert(key.clone(), parent);
         }
-        Ok(self.parents.get(&key).cloned().flatten())
+        Ok(self.parents.get(&key).and_then(Option::as_ref))
     }
 
     fn sub_issues(

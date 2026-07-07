@@ -52,12 +52,16 @@ fn auto_merge_cache_lock_error<T>(err: std::sync::PoisonError<T>) -> GithubError
     }
 }
 
-fn is_issue_not_found_error(error: &GithubError) -> bool {
+fn issue_not_found_error(error: GithubError, repo: &str, number: u64) -> GithubError {
     match error {
         GithubError::CommandFailed {
-            stderr, exit_code, ..
-        } => *exit_code == Some(1) && issue_not_found_stderr(stderr),
-        _ => false,
+            ref stderr,
+            exit_code: Some(1),
+            ..
+        } if issue_not_found_stderr(stderr) => GithubError::NotFound {
+            resource: format!("issue {repo}#{number}"),
+        },
+        other => other,
     }
 }
 
@@ -209,6 +213,33 @@ enum AutoMergeMethodCacheState {
     Empty,
     Resolving,
     Ready(&'static str),
+}
+
+struct AutoMergeMethodResolutionGuard<'a> {
+    entry: &'a AutoMergeMethodCacheEntry,
+    armed: bool,
+}
+
+impl<'a> AutoMergeMethodResolutionGuard<'a> {
+    fn new(entry: &'a AutoMergeMethodCacheEntry) -> Self {
+        Self { entry, armed: true }
+    }
+
+    fn disarm(mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for AutoMergeMethodResolutionGuard<'_> {
+    fn drop(&mut self) {
+        if !self.armed || !std::thread::panicking() {
+            return;
+        }
+        if let Ok(mut state) = self.entry.state.lock() {
+            *state = AutoMergeMethodCacheState::Empty;
+            self.entry.ready.notify_all();
+        }
+    }
 }
 
 impl<R: GithubCommandRunner> SystemGithubIssueQuery<R> {
@@ -611,8 +642,10 @@ impl<R: GithubCommandRunner> GithubIssueQuery for SystemGithubIssueQuery<R> {
         ];
         let out = match self.runner.run(&argv) {
             Ok(out) => out,
-            Err(err) if is_issue_not_found_error(&err) => return Ok(None),
-            Err(err) => return Err(err),
+            Err(err) => match issue_not_found_error(err, repo, number) {
+                GithubError::NotFound { .. } => return Ok(None),
+                err => return Err(err),
+            },
         };
         let raw: RawIssueView =
             serde_json::from_str(&out).map_err(|e| GithubError::CommandFailed {
@@ -696,6 +729,23 @@ impl<R: GithubCommandRunner> GithubIssueQuery for SystemGithubIssueQuery<R> {
         let issue_refs = parse_issue_pr_references(&issue_refs_out, &issue_refs_argv)?;
         if let Some(pr) = select_relevant_pr(issue_refs) {
             return Ok(Some(raw_pr_state_to_issue_pr_state(pr)));
+        }
+        let argv = vec![
+            "gh".to_string(),
+            "pr".to_string(),
+            "list".to_string(),
+            "--repo".to_string(),
+            repo.to_string(),
+            "--state".to_string(),
+            "open".to_string(),
+            "--search".to_string(),
+            format!("issue:{number}"),
+            "--json".to_string(),
+            "number,state,updatedAt,mergeCommit,reviewDecision,statusCheckRollup".to_string(),
+        ];
+        let out = self.runner.run(&argv)?;
+        if let Some(pr) = parse_pr_state(&out, &argv)? {
+            return Ok(Some(pr));
         }
 
         Ok(None)
@@ -790,6 +840,7 @@ impl<R: GithubCommandRunner> SystemGithubIssueQuery<R> {
             }
         }
         drop(state);
+        let reset_guard = AutoMergeMethodResolutionGuard::new(&entry);
         let computed = match self.auto_merge_method(repo) {
             Ok(method) => method,
             Err(err) => {
@@ -799,6 +850,7 @@ impl<R: GithubCommandRunner> SystemGithubIssueQuery<R> {
                 return Err(err);
             }
         };
+        reset_guard.disarm();
         let mut state = entry.state.lock().map_err(auto_merge_cache_lock_error)?;
         *state = AutoMergeMethodCacheState::Ready(computed);
         entry.ready.notify_all();

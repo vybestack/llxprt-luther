@@ -18,7 +18,7 @@ use thiserror::Error;
 pub use crate::engine::executors::github_pr::{GithubPrCommandRunner, SystemGithubPrCommandRunner};
 
 /// Structured error for GitHub CLI preflight failures.
-#[derive(Debug, Error)]
+#[derive(Debug, Error, Clone)]
 pub enum GithubError {
     /// `gh` was not found on PATH.
     #[error(
@@ -53,6 +53,12 @@ pub enum GithubError {
         exit_code: Option<i32>,
         /// Captured stderr.
         stderr: String,
+    },
+    /// GitHub reported that a requested resource does not exist.
+    #[error("GitHub resource not found: {resource}")]
+    NotFound {
+        /// The missing resource description.
+        resource: String,
     },
     /// A shared GitHub adapter cache could not be locked.
     #[error("GitHub adapter cache lock failed while {context}: {error}")]
@@ -106,6 +112,9 @@ impl GithubError {
                     diag.insert("exit_code".to_string(), code.to_string());
                 }
                 diag.insert("argv".to_string(), argv.join(" "));
+            }
+            GithubError::NotFound { resource } => {
+                diag.insert("resource".to_string(), resource.clone());
             }
             GithubError::CacheLock { context, .. } => {
                 diag.insert("context".to_string(), context.clone());
@@ -373,6 +382,9 @@ mod tests {
                 Err(GithubError::AuthenticationRequired) => {
                     Err(GithubError::AuthenticationRequired)
                 }
+                Err(GithubError::NotFound { resource }) => Err(GithubError::NotFound {
+                    resource: resource.clone(),
+                }),
                 Err(other) => panic!("unexpected fixture error: {other:?}"),
             }
         }

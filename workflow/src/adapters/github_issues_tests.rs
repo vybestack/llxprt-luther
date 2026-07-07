@@ -398,14 +398,15 @@ fn pr_state_for_issue_selects_most_relevant_closing_pr() {
 #[test]
 fn pr_state_for_issue_reports_none_when_issue_has_no_closing_pr() {
     let issue_refs = r#"{"closedByPullRequestsReferences": []}"#;
-    let runner = MockRunner::new(vec![Ok(issue_refs.to_string())]);
+    let runner = MockRunner::new(vec![Ok(issue_refs.to_string()), Ok("[]".to_string())]);
     let q = SystemGithubIssueQuery::new(runner);
 
     assert!(q.pr_state_for_issue("o/r", 7).unwrap().is_none());
 
     let calls = q.runner.calls.borrow();
-    assert_eq!(calls.len(), 1);
+    assert_eq!(calls.len(), 2);
     assert!(calls[0].contains(&"closedByPullRequestsReferences".to_string()));
+    assert!(calls[1].contains(&"--search".to_string()));
 }
 
 #[test]
@@ -466,23 +467,28 @@ fn status_check_rollup_treats_terminal_failure_conclusions_as_failed() {
 }
 
 #[test]
-fn pr_state_for_issue_does_not_select_unrelated_search_mentions() {
+fn pr_state_for_issue_uses_open_pr_search_when_closing_refs_are_empty() {
     let issue_refs = r#"{"closedByPullRequestsReferences": []}"#;
-    let runner = MockRunner::new(vec![Ok(issue_refs.to_string())]);
+    let search_hit =
+        r#"[{"number":20,"state":"OPEN","merged":false,"updatedAt":"2026-01-01T00:00:00Z"}]"#;
+    let runner = MockRunner::new(vec![Ok(issue_refs.to_string()), Ok(search_hit.to_string())]);
     let q = SystemGithubIssueQuery::new(runner);
 
-    assert!(q.pr_state_for_issue("o/r", 7).unwrap().is_none());
+    let pr = q.pr_state_for_issue("o/r", 7).unwrap().unwrap();
 
+    assert_eq!(pr.number, 20);
+    assert_eq!(pr.state, "open");
     let calls = q.runner.calls.borrow();
-    assert_eq!(calls.len(), 1);
-    assert!(!calls[0].contains(&"--search".to_string()));
+    assert_eq!(calls.len(), 2);
+    assert!(calls[1].contains(&"--search".to_string()));
 }
 
 #[test]
 fn pr_state_for_issue_reports_absent_pr_when_no_reference_or_search_hit() {
-    let runner = MockRunner::new(vec![Ok(
-        r#"{"closedByPullRequestsReferences": []}"#.to_string()
-    )]);
+    let runner = MockRunner::new(vec![
+        Ok(r#"{"closedByPullRequestsReferences": []}"#.to_string()),
+        Ok("[]".to_string()),
+    ]);
     let q = SystemGithubIssueQuery::new(runner);
 
     assert!(q.pr_state_for_issue("o/r", 7).unwrap().is_none());

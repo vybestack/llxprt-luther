@@ -610,7 +610,7 @@ fn persist_external_wait_state(
     record.repository = request.repo.clone();
     record.issue_number = request.issue_number;
     record.pr_number = identity.pr_number;
-    record.head_sha = identity.head_sha.clone();
+    record.head_sha = identity.head_sha;
     record.wait_kind = wait_kind;
     let step_params = resolved_wait_step_parameters(config, step_id)?;
     record.wait_condition = wait_condition_payload(
@@ -621,7 +621,7 @@ fn persist_external_wait_state(
         &step_params,
     )?;
     if wait_kind == WaitKind::DependencyChildWorkflow {
-        if let Some(child_run_id) = identity.head_sha {
+        if let Some(child_run_id) = record.head_sha.clone() {
             record.wait_condition["child_run_id"] = serde_json::Value::String(child_run_id);
         }
         if let Some(artifact_root) = wait_artifact_root(config, metadata.as_ref())? {
@@ -675,7 +675,6 @@ fn max_wait_seconds_for_wait(config: &WorkflowConfig, wait_kind: WaitKind) -> Op
         _ => None,
     }
 }
-
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct WaitPollIdentity {

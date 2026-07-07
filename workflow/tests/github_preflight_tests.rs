@@ -67,6 +67,9 @@ impl GithubCommandRunner for FixtureGithubCommandRunner {
                 exit_code: *exit_code,
                 stderr: stderr.clone(),
             }),
+            Some(Err(GithubError::NotFound { resource })) => Err(GithubError::NotFound {
+                resource: resource.clone(),
+            }),
             Some(Err(GithubError::CacheLock { context, error })) => Err(GithubError::CacheLock {
                 context: context.clone(),
                 error: error.clone(),

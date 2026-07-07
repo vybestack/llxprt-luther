@@ -8,7 +8,7 @@
 //! @requirement:REQ-DAEMON-DISCOVERY-006,REQ-DAEMON-DISCOVERY-007
 
 use std::borrow::Cow;
-use std::collections::BTreeMap;
+use std::collections::{btree_map::Entry, BTreeMap};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
@@ -175,7 +175,7 @@ fn resume_config_targets(
     targets: &[SchedulerTarget],
     limits: &CapacityLimits,
 ) -> Vec<(String, DiscoveryConfig)> {
-    let mut config_targets: Vec<(String, DiscoveryConfig, bool)> = Vec::new();
+    let mut config_targets: BTreeMap<String, (DiscoveryConfig, bool)> = BTreeMap::new();
     for target in targets {
         upsert_resume_config_target(
             &mut config_targets,
@@ -199,27 +199,28 @@ fn resume_config_targets(
     }
     config_targets
         .into_iter()
-        .map(|(config_id, discovery, _)| (config_id, discovery))
+        .map(|(config_id, (discovery, _))| (config_id, discovery))
         .collect()
 }
 
 fn upsert_resume_config_target(
-    config_targets: &mut Vec<(String, DiscoveryConfig, bool)>,
+    config_targets: &mut BTreeMap<String, (DiscoveryConfig, bool)>,
     config_id: String,
     discovery: DiscoveryConfig,
     direct: bool,
 ) {
-    if let Some((_, existing_discovery, existing_direct)) = config_targets
-        .iter_mut()
-        .find(|(existing_config_id, _, _)| existing_config_id == &config_id)
-    {
-        if direct && !*existing_direct {
-            *existing_discovery = discovery;
-            *existing_direct = true;
+    match config_targets.entry(config_id) {
+        Entry::Occupied(mut entry) => {
+            let (existing_discovery, existing_direct) = entry.get_mut();
+            if direct && !*existing_direct {
+                *existing_discovery = discovery;
+                *existing_direct = true;
+            }
         }
-        return;
+        Entry::Vacant(entry) => {
+            entry.insert((discovery, direct));
+        }
     }
-    config_targets.push((config_id, discovery, direct));
 }
 
 fn prepare_resume_unit(
@@ -244,7 +245,7 @@ fn collect_launch_units(
     units: &mut Vec<DispatchUnit>,
     summary: &mut RunSummary,
 ) -> Result<(), rusqlite::Error> {
-    let parent_discoveries = parent_launch_discoveries(targets, limits)?;
+    let parent_discoveries = parent_launch_discoveries(targets, limits);
     for (target, query) in targets.iter().zip(queries.iter()) {
         let repo = target.discovery.repo.as_deref().unwrap_or("");
         let active = count_active_leases_for_config(conn, &target.config_id)?;
@@ -305,20 +306,27 @@ fn launch_discovery_for<'a>(
 fn parent_launch_discoveries(
     targets: &[SchedulerTarget],
     limits: &CapacityLimits,
-) -> Result<BTreeMap<String, DiscoveryConfig>, rusqlite::Error> {
+) -> BTreeMap<String, DiscoveryConfig> {
     let mut discoveries = BTreeMap::new();
     let mut derived = BTreeMap::new();
     for target in targets {
         discoveries.insert(target.config_id.clone(), target.discovery.clone());
         if let Some(parent_config_id) = target.discovery.parent_config_id.as_ref() {
-            let discovery = parent_capacity_discovery(&target.discovery, limits)?;
-            derived.entry(parent_config_id.clone()).or_insert(discovery);
+            match parent_capacity_discovery(&target.discovery, limits) {
+                Ok(discovery) => {
+                    derived.entry(parent_config_id.clone()).or_insert(discovery);
+                }
+                Err(err) => eprintln!(
+                    "parent launch discovery capacity error for config={}: parent_config={parent_config_id}: {err}",
+                    target.config_id
+                ),
+            }
         }
     }
     for (config_id, discovery) in derived {
         discoveries.entry(config_id).or_insert(discovery);
     }
-    Ok(discoveries)
+    discoveries
 }
 
 fn parent_capacity_discovery(
@@ -330,8 +338,9 @@ fn parent_capacity_discovery(
         .max_concurrent_runs_per_config
         .or(discovery.max_concurrent_runs)
         .map_or(limits.per_config, |value| value as usize);
-    let limit = u32::try_from(limit)
-        .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(0, limit as i64))?;
+    let limit = u32::try_from(limit).map_err(|_| {
+        rusqlite::Error::IntegralValueOutOfRange(0, i64::try_from(limit).unwrap_or(i64::MAX))
+    })?;
     parent.max_concurrent_runs = Some(limit);
     parent.max_concurrent_runs_per_config = Some(limit);
     Ok(parent)

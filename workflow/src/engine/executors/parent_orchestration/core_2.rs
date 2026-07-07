@@ -693,6 +693,8 @@ fn update_rollup(
     outcome: &str,
     pr: Option<&GithubIssuePrState>,
 ) -> Result<(), EngineError> {
+    let mut conn = daemon_connection()?;
+    let tx = conn.transaction().map_err(sql_error)?;
     let mut rollup = read_rollup(&state.artifact_root)?;
     rollup.parent_issue_number = state.parent_issue_number;
     rollup
@@ -717,11 +719,8 @@ fn update_rollup(
     rollup
         .children
         .sort_by_key(|entry| entry.child_issue_number);
-    write_json(
-        &state.artifact_root,
-        "parent-orchestration-rollup.json",
-        &rollup,
-    )
+    write_json(&state.artifact_root, "parent-orchestration-rollup.json", &rollup)?;
+    tx.commit().map_err(sql_error)
 }
 
 fn non_actionable_reason_for_outcome(outcome: &str) -> Option<String> {

@@ -115,10 +115,8 @@ fn status_check_failed(check: &RawStatusCheck) -> bool {
 }
 
 fn status_check_passed(check: &RawStatusCheck) -> bool {
-    matches!(
-        check_conclusion(check).as_deref(),
-        Some("success" | "skipped" | "neutral")
-    ) || check_state(check).as_deref() == Some("success")
+    check_conclusion(check).as_deref() == Some("success")
+        || check_state(check).as_deref() == Some("success")
 }
 
 fn status_check_ignored(check: &RawStatusCheck) -> bool {
