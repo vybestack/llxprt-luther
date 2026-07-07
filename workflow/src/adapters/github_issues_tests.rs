@@ -396,6 +396,26 @@ fn pr_state_for_issue_selects_most_relevant_closing_pr() {
 }
 
 #[test]
+fn pr_state_for_issue_falls_back_for_closed_unmerged_references() {
+    let issue_refs = r#"{
+        "closedByPullRequestsReferences": [
+            {"number": 17, "state": "CLOSED", "merged": false, "updatedAt": "2026-01-02T00:00:00Z"}
+        ]
+    }"#;
+    let search_hit =
+        r#"[{"number":20,"state":"OPEN","merged":false,"updatedAt":"2026-01-03T00:00:00Z"}]"#;
+    let runner = MockRunner::new(vec![Ok(issue_refs.to_string()), Ok(search_hit.to_string())]);
+    let q = SystemGithubIssueQuery::new(runner);
+
+    let pr = q.pr_state_for_issue("o/r", 7).unwrap().unwrap();
+
+    assert_eq!(pr.number, 20);
+    let calls = q.runner.calls.borrow();
+    assert_eq!(calls.len(), 2);
+    assert!(calls[1].contains(&"--search".to_string()));
+}
+
+#[test]
 fn pr_state_for_issue_reports_none_when_issue_has_no_closing_pr() {
     let issue_refs = r#"{"closedByPullRequestsReferences": []}"#;
     let runner = MockRunner::new(vec![Ok(issue_refs.to_string()), Ok("[]".to_string())]);

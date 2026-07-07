@@ -264,9 +264,7 @@ pub fn update_lease_status(
             params![status.to_string(), now, lease_id],
         )?,
     };
-    if changed == 0 {
-        return Err(rusqlite::Error::QueryReturnedNoRows);
-    }
+    let _ = changed;
     Ok(())
 }
 

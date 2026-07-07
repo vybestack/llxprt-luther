@@ -584,6 +584,14 @@ impl EngineRunner {
         if *outcome == StepOutcome::Wait {
             return self.pause_for_external_wait(current_step_id);
         }
+        if *outcome == StepOutcome::Retryable {
+            let run_outcome = RunOutcome::Failure {
+                step_id: current_step_id.to_string(),
+                reason: "Retryable error with no recovery transition".to_string(),
+            };
+            let _ = self.record_run_completion(&run_outcome, current_step_id);
+            return Ok(run_outcome);
+        }
 
         let run_outcome = run_outcome_without_transition(current_step_id, outcome);
         let _ = self.record_run_completion(&run_outcome, current_step_id);

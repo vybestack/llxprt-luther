@@ -20,17 +20,13 @@ type GraphqlParentResponse = GraphqlResponse<GraphqlParentLinkIssue>;
 #[derive(Debug, Deserialize)]
 struct GraphqlError {
     message: String,
-    #[serde(default)]
     path: Option<serde_json::Value>,
-    #[serde(default)]
     locations: Option<serde_json::Value>,
-    #[serde(default)]
     extensions: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
 struct GraphqlParentLinkIssue {
-    #[serde(default)]
     parent: Option<GraphqlIssue>,
 }
 
@@ -41,13 +37,11 @@ struct GraphqlIssue {
     title: String,
     #[serde(default)]
     state: String,
-    #[serde(default)]
     body: Option<String>,
     #[serde(default)]
     labels: GraphqlNodeList<GraphqlLabel>,
     #[serde(default)]
     assignees: GraphqlNodeList<GraphqlAssignee>,
-    #[serde(default)]
     milestone: Option<GraphqlMilestone>,
     #[serde(default, rename = "subIssues")]
     sub_issues: GraphqlSubIssueConnection,
@@ -63,7 +57,6 @@ struct GraphqlSubIssueConnection {
 
 #[derive(Debug, Deserialize)]
 struct GraphqlSubIssueEdge {
-    #[serde(default)]
     node: Option<GraphqlIssue>,
 }
 

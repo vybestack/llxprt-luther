@@ -2,7 +2,7 @@
 struct GraphqlPageInfo {
     #[serde(default, rename = "hasNextPage")]
     has_next_page: bool,
-    #[serde(default, rename = "endCursor")]
+    #[serde(rename = "endCursor")]
     end_cursor: Option<String>,
 }
 

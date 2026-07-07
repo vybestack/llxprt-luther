@@ -11,11 +11,11 @@ struct RawPrState {
     state: String,
     #[serde(default)]
     merged: bool,
-    #[serde(default, rename = "updatedAt")]
+    #[serde(rename = "updatedAt")]
     updated_at: Option<String>,
-    #[serde(default, rename = "mergeCommit")]
+    #[serde(rename = "mergeCommit")]
     merge_commit: Option<RawCommit>,
-    #[serde(default, rename = "reviewDecision")]
+    #[serde(rename = "reviewDecision")]
     review_decision: Option<String>,
     #[serde(default, rename = "statusCheckRollup")]
     status_check_rollup: Vec<RawStatusCheck>,
@@ -23,15 +23,12 @@ struct RawPrState {
 
 #[derive(Debug, Deserialize)]
 struct RawCommit {
-    #[serde(default)]
     oid: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 struct RawStatusCheck {
-    #[serde(default)]
     conclusion: Option<String>,
-    #[serde(default)]
     state: Option<String>,
 }
 
@@ -76,6 +73,10 @@ fn pr_relevance_key(pr: &RawPrState) -> u8 {
     }
 }
 
+fn pr_reference_usable(pr: &RawPrState) -> bool {
+    pr_relevance_key(pr) > 0
+}
+
 fn raw_pr_state_to_issue_pr_state(pr: RawPrState) -> GithubIssuePrState {
     let state = normalize_state(&pr.state);
     GithubIssuePrState {
@@ -96,7 +97,10 @@ fn summarize_status_check_rollup(checks: &[RawStatusCheck]) -> Option<String> {
     if blocking.is_empty() {
         return None;
     }
-    if blocking.iter().any(|check| status_check_failed(check)) {
+    if blocking
+        .iter()
+        .any(|check| status_check_failed(check) || status_check_unknown_terminal(check))
+    {
         return Some("failed".to_string());
     }
     if blocking.iter().all(|check| status_check_passed(check)) {
@@ -117,6 +121,15 @@ fn status_check_failed(check: &RawStatusCheck) -> bool {
 fn status_check_passed(check: &RawStatusCheck) -> bool {
     check_conclusion(check).as_deref() == Some("success")
         || check_state(check).as_deref() == Some("success")
+}
+
+fn status_check_unknown_terminal(check: &RawStatusCheck) -> bool {
+    check
+        .conclusion
+        .as_deref()
+        .is_some_and(|conclusion| !conclusion.trim().is_empty())
+        && !status_check_passed(check)
+        && !status_check_ignored(check)
 }
 
 fn status_check_ignored(check: &RawStatusCheck) -> bool {

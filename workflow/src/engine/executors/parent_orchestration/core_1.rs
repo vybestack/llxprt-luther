@@ -98,7 +98,8 @@ fn apply_child_run_state(
                     child.terminal_state = ChildIssueStatus::ActiveRun;
                 }
             }
-            _ => {}
+            LeaseStatus::Failed | LeaseStatus::Abandoned | LeaseStatus::Stale => {}
+            LeaseStatus::Pending | LeaseStatus::Completed => {}
         }
     }
     apply_child_rollup_state(state, child)
@@ -163,15 +164,11 @@ fn determine_subissue_order(
         &json!({"order": order, "strategy": "native_position_then_issue_number"}),
     )?;
     if state.current_step == "determine_refreshed_subissue_order" {
-        let source = state.artifact_root.join(artifact_name);
-        let destination = state.artifact_root.join("subissue-order-plan.json");
-        fs::copy(&source, &destination).map_err(|err| {
-            parent_error(format!(
-                "copy refreshed subissue order artifact from {} to {}: {err}",
-                source.display(),
-                destination.display()
-            ))
-        })?;
+        write_json(
+            &state.artifact_root,
+            "subissue-order-plan.json",
+            &json!({"order": order, "strategy": "native_position_then_issue_number"}),
+        )?;
     }
     context.set("subissue_order", &json!(order).to_string());
     Ok(StepOutcome::Success)

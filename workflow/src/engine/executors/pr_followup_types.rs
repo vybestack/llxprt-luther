@@ -270,7 +270,6 @@ pub struct PrCheckStatus {
     pub overall_state: OverallState,
     /// Watcher fatal source recorded when check polling failed fatally.
     /// @requirement:REQ-PRFU-007
-    #[serde(default)]
     pub fatal_source: Option<Value>,
 }
 
@@ -308,11 +307,9 @@ pub struct CiFailures {
     pub collection_state: CollectionState,
     /// Fatal source carried forward into the collection artifact.
     /// @requirement:REQ-PRFU-007
-    #[serde(default)]
     pub fatal_source: Option<Value>,
     /// Fatal source observed by the upstream check watcher.
     /// @requirement:REQ-PRFU-007
-    #[serde(default)]
     pub watcher_fatal_source: Option<Value>,
 }
 

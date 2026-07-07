@@ -222,9 +222,9 @@ fn child_wait_poll_identity(
         WaitKind::PrChecks if identity.pr_number.is_none() || identity.head_sha.is_none() => {
             Err("missing child PR number or head SHA for PR checks wait state".to_string())
         }
-        WaitKind::DependencyChildWorkflow if identity.head_sha.is_none() => {
-            Err("missing child run id for dependency child workflow wait state".to_string())
-        }
+        WaitKind::DependencyChildWorkflow if identity.head_sha.is_none() => Err(
+            "missing head_sha child run id for dependency child workflow wait state".to_string(),
+        ),
         WaitKind::CoderabbitReview
         | WaitKind::HumanReview
         | WaitKind::PrMerge
@@ -512,10 +512,7 @@ fn evaluate_acceptance_criteria(
 
 fn count_unchecked_acceptance_criteria(body: &str) -> usize {
     body.lines()
-        .filter(|line| {
-            let trimmed = line.trim_start();
-            trimmed.starts_with("- [ ]") || trimmed.starts_with("* [ ]")
-        })
+        .filter(|line| checklist_marker(line.trim_start(), &["[ ]"]))
         .count()
 }
 
@@ -532,16 +529,16 @@ fn refresh_parent_completion_evidence(
 
 fn count_acceptance_criteria(body: &str) -> usize {
     body.lines()
-        .filter(|line| {
-            let trimmed = line.trim_start();
-            trimmed.starts_with("- [x]")
-                || trimmed.starts_with("- [X]")
-                || trimmed.starts_with("- [ ]")
-                || trimmed.starts_with("* [x]")
-                || trimmed.starts_with("* [X]")
-                || trimmed.starts_with("* [ ]")
-        })
+        .filter(|line| checklist_marker(line.trim_start(), &["[x]", "[X]", "[ ]"]))
         .count()
+}
+
+fn checklist_marker(trimmed: &str, markers: &[&str]) -> bool {
+    ["-", "*", "+"].into_iter().any(|bullet| {
+        markers
+            .iter()
+            .any(|marker| trimmed.starts_with(&format!("{bullet} {marker}")))
+    })
 }
 
 fn active_child_leases(
@@ -641,9 +638,9 @@ fn context_value_with_warned_default(
         .cloned()
         .unwrap_or_else(|| {
             warn!(
-                primary,
-                fallback,
-                default,
+                primary = primary,
+                fallback = fallback,
+                default = default,
                 "parent orchestration context missing; using compatibility default"
             );
             default.to_string()

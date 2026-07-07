@@ -333,11 +333,11 @@ fn auto_merge_is_gated_on_green_checks_and_review_state() {
             Some("passed"),
             Some("changes_requested")
         )),
-        Some("review_not_approved")
+        Some("changes_requested")
     );
     assert_eq!(
         auto_merge_block_reason(&pr_with_checks(17, Some("passed"), Some("review_required"))),
-        Some("review_not_approved")
+        Some("review_required")
     );
 }
 
@@ -611,6 +611,14 @@ fn child_wait_identity_rejects_missing_check_head_sha() {
     let metadata = child_run_metadata(Some(17), None);
 
     assert!(child_wait_poll_identity(Some(&metadata), WaitKind::PrChecks).is_err());
+}
+
+#[test]
+fn acceptance_criteria_counts_plus_checklist_markers() {
+    let body = "+ [ ] open item\n+ [x] done item\n+ [X] also done";
+
+    assert_eq!(count_acceptance_criteria(body), 3);
+    assert_eq!(count_unchecked_acceptance_criteria(body), 1);
 }
 
 fn child_run_metadata(pr_number: Option<i64>, head_sha: Option<&str>) -> RunMetadata {

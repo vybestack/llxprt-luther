@@ -41,25 +41,55 @@ fn daemon_connection() -> Result<rusqlite::Connection, EngineError> {
     Ok(conn)
 }
 
+#[derive(Default)]
+struct DaemonDatabaseInitState {
+    initialized: std::collections::BTreeSet<PathBuf>,
+    in_flight: std::collections::BTreeMap<PathBuf, std::sync::Arc<std::sync::Mutex<()>>>,
+}
+
 fn ensure_daemon_database_initialized(db_path: &Path) -> Result<(), EngineError> {
-    static INITIALIZED_DATABASES: std::sync::OnceLock<
-        std::sync::Mutex<std::collections::BTreeSet<PathBuf>>,
-    > = std::sync::OnceLock::new();
-    let initialized = INITIALIZED_DATABASES.get_or_init(Default::default);
-    if initialized
+    static INITIALIZED_DATABASES: std::sync::OnceLock<std::sync::Mutex<DaemonDatabaseInitState>> =
+        std::sync::OnceLock::new();
+    let init_state = INITIALIZED_DATABASES.get_or_init(Default::default);
+    let path_lock = {
+        let mut state = lock_daemon_database_init_state(init_state);
+        if state.initialized.contains(db_path) {
+            return Ok(());
+        }
+        state
+            .in_flight
+            .entry(db_path.to_path_buf())
+            .or_insert_with(|| std::sync::Arc::new(std::sync::Mutex::new(())))
+            .clone()
+    };
+    let _path_guard = path_lock
         .lock()
-        .map_err(|err| parent_error(format!("lock daemon database init guard: {err}")))?
-        .contains(db_path)
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     {
-        return Ok(());
+        let state = lock_daemon_database_init_state(init_state);
+        if state.initialized.contains(db_path) {
+            return Ok(());
+        }
     }
-    crate::persistence::init_database(db_path)
-        .map_err(|err| parent_error(format!("initialize daemon database: {err}")))?;
-    initialized
+    let result = crate::persistence::init_database(db_path)
+        .map_err(|err| parent_error(format!("initialize daemon database: {err}")));
+    let mut state = lock_daemon_database_init_state(init_state);
+    state.in_flight.remove(db_path);
+    match result {
+        Ok(()) => {
+            state.initialized.insert(db_path.to_path_buf());
+            Ok(())
+        }
+        Err(err) => Err(err),
+    }
+}
+
+fn lock_daemon_database_init_state(
+    init_state: &std::sync::Mutex<DaemonDatabaseInitState>,
+) -> std::sync::MutexGuard<'_, DaemonDatabaseInitState> {
+    init_state
         .lock()
-        .map_err(|err| parent_error(format!("lock daemon database init guard: {err}")))?
-        .insert(db_path.to_path_buf());
-    Ok(())
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 fn configure_parent_orchestration_connection(
@@ -427,7 +457,8 @@ fn auto_merge_block_reason(pr: &GithubIssuePrState) -> Option<&'static str> {
         return Some("checks_not_passed");
     }
     match pr.review_decision.as_deref() {
-        Some("changes_requested" | "review_required") => Some("review_not_approved"),
+        Some("changes_requested") => Some("changes_requested"),
+        Some("review_required") => Some("review_required"),
         _ => None,
     }
 }
@@ -693,8 +724,6 @@ fn update_rollup(
     outcome: &str,
     pr: Option<&GithubIssuePrState>,
 ) -> Result<(), EngineError> {
-    let mut conn = daemon_connection()?;
-    let tx = conn.transaction().map_err(sql_error)?;
     let mut rollup = read_rollup(&state.artifact_root)?;
     rollup.parent_issue_number = state.parent_issue_number;
     rollup
@@ -719,8 +748,7 @@ fn update_rollup(
     rollup
         .children
         .sort_by_key(|entry| entry.child_issue_number);
-    write_json(&state.artifact_root, "parent-orchestration-rollup.json", &rollup)?;
-    tx.commit().map_err(sql_error)
+    write_json(&state.artifact_root, "parent-orchestration-rollup.json", &rollup)
 }
 
 fn non_actionable_reason_for_outcome(outcome: &str) -> Option<String> {

@@ -19,7 +19,7 @@ pub struct PrCheckDefinition {
     #[serde(default = "default_match_mode")]
     pub mode: PrCheckMatchMode,
     pub pattern: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub allow_skipped: Option<bool>,
 }
 
@@ -286,10 +286,10 @@ pub fn check_bucket(
         "failed".to_string()
     } else if matches!(
         status.as_str(),
-        "queued" | "requested" | "waiting" | "pending" | "in_progress" | "action_required"
+        "queued" | "requested" | "waiting" | "pending" | "in_progress"
     ) || matches!(
         state.as_str(),
-        "queued" | "requested" | "waiting" | "pending" | "in_progress" | "action_required"
+        "queued" | "requested" | "waiting" | "pending" | "in_progress"
     ) || matches!(bucket.as_str(), "pending")
     {
         "pending".to_string()

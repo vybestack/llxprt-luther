@@ -213,6 +213,7 @@ enum AutoMergeMethodCacheState {
     Empty,
     Resolving,
     Ready(&'static str),
+    Failed(GithubError),
 }
 
 struct AutoMergeMethodResolutionGuard<'a> {
@@ -235,10 +236,12 @@ impl Drop for AutoMergeMethodResolutionGuard<'_> {
         if !self.armed || !std::thread::panicking() {
             return;
         }
-        if let Ok(mut state) = self.entry.state.lock() {
-            *state = AutoMergeMethodCacheState::Empty;
-            self.entry.ready.notify_all();
-        }
+        let mut state = match self.entry.state.lock() {
+            Ok(state) => state,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        *state = AutoMergeMethodCacheState::Empty;
+        self.entry.ready.notify_all();
     }
 }
 
@@ -264,7 +267,6 @@ struct RawIssue {
     labels: Vec<RawLabel>,
     #[serde(default)]
     assignees: Vec<RawAssignee>,
-    #[serde(default)]
     milestone: Option<RawMilestone>,
 }
 
@@ -290,15 +292,12 @@ struct RawIssueView {
     labels: Vec<RawLabel>,
     #[serde(default)]
     assignees: Vec<RawAssignee>,
-    #[serde(default)]
     milestone: Option<RawMilestone>,
-    #[serde(default)]
     body: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 struct RawIssueBody {
-    #[serde(default)]
     body: Option<String>,
 }
 
@@ -727,7 +726,7 @@ impl<R: GithubCommandRunner> GithubIssueQuery for SystemGithubIssueQuery<R> {
         ];
         let issue_refs_out = self.runner.run(&issue_refs_argv)?;
         let issue_refs = parse_issue_pr_references(&issue_refs_out, &issue_refs_argv)?;
-        if let Some(pr) = select_relevant_pr(issue_refs) {
+        if let Some(pr) = select_relevant_pr(issue_refs).filter(pr_reference_usable) {
             return Ok(Some(raw_pr_state_to_issue_pr_state(pr)));
         }
         let argv = vec![
@@ -825,8 +824,9 @@ impl<R: GithubCommandRunner> SystemGithubIssueQuery<R> {
         let entry = self.auto_merge_cache_entry(repo)?;
         let mut state = entry.state.lock().map_err(auto_merge_cache_lock_error)?;
         loop {
-            match *state {
+            match &*state {
                 AutoMergeMethodCacheState::Ready(method) => return Ok(method),
+                AutoMergeMethodCacheState::Failed(err) => return Err(err.clone()),
                 AutoMergeMethodCacheState::Empty => {
                     *state = AutoMergeMethodCacheState::Resolving;
                     break;
@@ -845,7 +845,7 @@ impl<R: GithubCommandRunner> SystemGithubIssueQuery<R> {
             Ok(method) => method,
             Err(err) => {
                 let mut state = entry.state.lock().map_err(auto_merge_cache_lock_error)?;
-                *state = AutoMergeMethodCacheState::Empty;
+                *state = AutoMergeMethodCacheState::Failed(err.clone());
                 entry.ready.notify_all();
                 return Err(err);
             }

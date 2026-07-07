@@ -7,7 +7,7 @@
 //! @plan:PLAN-20260415-DAEMON-DISCOVERY.P04
 //! @requirement:REQ-DAEMON-DISCOVERY-004
 
-use std::collections::BTreeMap;
+use std::collections::{btree_map::Entry, BTreeMap};
 
 use rusqlite::Connection;
 use tracing::error;
@@ -234,7 +234,15 @@ pub fn discover(
             result.skipped.push((issue, reason));
             continue;
         }
-        let local_skip = local_dynamic_skip(conn, &issue, repo)?;
+        let local_skip = match local_dynamic_skip(conn, &issue, repo) {
+            Ok(skip) => skip,
+            Err(DiscoveryError::Database(error)) => {
+                error!(repo, issue_number = issue.number, error = %error, "issue lease lookup failed during discovery");
+                result.skipped.push((issue, SkipReason::InvalidLeaseState));
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
         if let Some(reason) = local_skip {
             result.skipped.push((issue, reason));
             continue;
@@ -346,9 +354,9 @@ impl DiscoveryLookupCache {
         number: u64,
     ) -> Result<Option<&GithubIssue>, GithubError> {
         let key = (repo.to_string(), number);
-        if !self.parents.contains_key(&key) {
+        if let Entry::Vacant(entry) = self.parents.entry(key.clone()) {
             let parent = q.get_parent_issue(repo, number)?.map(|parent| parent.issue);
-            self.parents.insert(key.clone(), parent);
+            entry.insert(parent);
         }
         Ok(self.parents.get(&key).and_then(Option::as_ref))
     }
@@ -360,9 +368,9 @@ impl DiscoveryLookupCache {
         number: u64,
     ) -> Result<&[crate::adapters::github_issues::GithubSubIssue], GithubError> {
         let key = (repo.to_string(), number);
-        if !self.sub_issues.contains_key(&key) {
+        if let Entry::Vacant(entry) = self.sub_issues.entry(key.clone()) {
             let children = q.list_sub_issues(repo, number)?;
-            self.sub_issues.insert(key.clone(), children);
+            entry.insert(children);
         }
         Ok(self.sub_issues.get(&key).map(Vec::as_slice).unwrap_or(&[]))
     }

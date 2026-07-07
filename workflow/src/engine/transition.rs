@@ -92,7 +92,6 @@ pub struct TransitionDef {
     /// Maps to StepOutcome as: "success", "retryable", "fatal", "fixable", "abandon".
     pub condition: Option<String>,
     /// Optional per-edge loop limit.
-    #[serde(default)]
     pub max_iterations: Option<u32>,
 }
 
