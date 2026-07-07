@@ -488,7 +488,7 @@ impl ChildWorkflowRunner for WaitingChildRunner {
         Ok(ChildWorkflowRunResult::WaitingExternal)
     }
 
-    fn run_status(&self, _run_id: &str) -> Result<Option<RunStatus>, EngineError> {
+    fn run_status(&self, _run_id: &str) -> Result<Option<RunStatus>, ChildWorkflowRunnerError> {
         Ok(Some(RunStatus::WaitingExternal))
     }
 }

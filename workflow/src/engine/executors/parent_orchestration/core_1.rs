@@ -540,7 +540,7 @@ fn post_launch_metadata(
 ) -> Result<(Option<RunStatus>, Option<GithubIssuePrState>), EngineError> {
     let run_status = runner.run_status(&request.run_id).map_err(|err| {
         post_launch_metadata_error(
-            err,
+            parent_error(err.to_string()),
             "read child run status",
             &lease.lease_id,
             &request.run_id,

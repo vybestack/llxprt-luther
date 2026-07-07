@@ -56,6 +56,7 @@ impl StepExecutor for ParentOrchestrationExecutor {
 pub enum ChildWorkflowRunnerError {
     LaunchFailed(String),
     ResumeFailed(String),
+    StatusFailed(String),
     Unsupported(String),
 }
 
@@ -67,6 +68,9 @@ impl std::fmt::Display for ChildWorkflowRunnerError {
             }
             ChildWorkflowRunnerError::ResumeFailed(message) => {
                 write!(f, "child workflow resume failed: {message}")
+            }
+            ChildWorkflowRunnerError::StatusFailed(message) => {
+                write!(f, "child workflow status read failed: {message}")
             }
             ChildWorkflowRunnerError::Unsupported(message) => {
                 write!(f, "unsupported child workflow operation: {message}")
@@ -92,8 +96,8 @@ pub trait ChildWorkflowRunner: Send + Sync {
         ))
     }
 
-    fn run_status(&self, _run_id: &str) -> Result<Option<RunStatus>, EngineError> {
-        Err(parent_error(
+    fn run_status(&self, _run_id: &str) -> Result<Option<RunStatus>, ChildWorkflowRunnerError> {
+        Err(ChildWorkflowRunnerError::Unsupported(
             "child workflow runner does not support run_status".to_string(),
         ))
     }
@@ -116,8 +120,9 @@ impl ChildWorkflowRunner for SystemChildWorkflowRunner {
         resume_child_process(request).map_err(ChildWorkflowRunnerError::ResumeFailed)
     }
 
-    fn run_status(&self, run_id: &str) -> Result<Option<RunStatus>, EngineError> {
+    fn run_status(&self, run_id: &str) -> Result<Option<RunStatus>, ChildWorkflowRunnerError> {
         child_run_status_from_registry(run_id)
+            .map_err(|err| ChildWorkflowRunnerError::StatusFailed(err.to_string()))
     }
 }
 
