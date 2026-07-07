@@ -543,6 +543,9 @@ fn ensure_reopen_claim_is_available(
     metadata: &RunMetadata,
     request: &ContinuationRequest,
 ) -> Result<(), ContinuationError> {
+    // This runs inside the IMMEDIATE transaction after re-reading metadata, so
+    // a second concurrent continuation attempt observes the first claim's PID
+    // before deciding whether the Running record is still available.
     if !reopen_status_is_allowed(metadata) {
         return Err(ContinuationError::InvalidTarget(format!(
             "run {} status {} is not resumable; terminal states other than failed cannot be continued",
