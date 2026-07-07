@@ -184,59 +184,9 @@ fn pending_action_response_text(value: &Value) -> Option<String> {
 }
 
 fn pending_action_thread_id(value: &Value) -> Option<String> {
-    string_at_paths(
-        value,
-        &[
-            "/thread_id",
-            "/evidence/thread_id",
-            "/original_feedback_identity/thread_id",
-        ],
-    )
-    .or_else(|| review_thread_id_from_stable_marker_key(value))
-    .or_else(|| review_thread_id_from_graphql_item_id(value))
-}
-
-fn review_thread_id_from_stable_marker_key(value: &Value) -> Option<String> {
-    value
-        .get("stable_marker_key")
-        .and_then(Value::as_str)
-        .and_then(|key| key.strip_prefix("thread:"))
-        // GitHub GraphQL Relay node IDs do not contain ':'. Any suffix after
-        // the first ':' is marker metadata, not part of the thread node ID.
-        .and_then(|thread_id| thread_id.split(':').next())
-        .filter(|thread_id| is_review_thread_node_id(thread_id))
-        .map(ToString::to_string)
-}
-
-fn review_thread_id_from_graphql_item_id(value: &Value) -> Option<String> {
-    [
-        "/item_id",
-        "/source_id",
-        "/original_feedback_identity/item_id",
-    ]
-    .iter()
-    .find_map(|path| {
-        value
-            .pointer(path)
-            .and_then(Value::as_str)
-            .and_then(parse_review_thread_id_from_graphql_item_id)
-    })
-}
-
-const GRAPHQL_NODE_ID_PREFIX: &str = "graphql:";
-const REVIEW_THREAD_NODE_ID_PREFIX: &str = "PRRT_";
-
-fn parse_review_thread_id_from_graphql_item_id(item_id: &str) -> Option<String> {
-    item_id
-        .strip_prefix(GRAPHQL_NODE_ID_PREFIX)
-        .and_then(|suffix| suffix.split(':').next())
-        .filter(|thread_id| is_review_thread_node_id(thread_id))
-        .map(ToString::to_string)
-}
-
-fn is_review_thread_node_id(thread_id: &str) -> bool {
-    thread_id.starts_with(REVIEW_THREAD_NODE_ID_PREFIX)
-        && thread_id.len() > REVIEW_THREAD_NODE_ID_PREFIX.len()
+    direct_review_thread_id(value)
+        .or_else(|| review_thread_id_from_stable_marker_key(value))
+        .or_else(|| review_thread_id_from_graphql_item_id(value))
 }
 
 fn pending_action_comment_database_id(value: &Value) -> Option<i64> {
@@ -339,8 +289,42 @@ fn post_marker_reply(
 }
 
 fn marker_action_claims_review_thread_identity(action: &PendingMarkerAction) -> bool {
-    review_thread_id_from_stable_marker_key(&action.value).is_some()
-        || review_thread_id_from_graphql_item_id(&action.value).is_some()
+    raw_thread_id_declares_review_thread_identity(&action.value)
+        || raw_stable_marker_declares_review_thread_identity(&action.stable_marker_key)
+        || raw_graphql_item_declares_review_thread_identity(&action.item_id)
+        || action
+            .value
+            .pointer("/source_id")
+            .and_then(Value::as_str)
+            .is_some_and(raw_graphql_item_declares_review_thread_identity)
+        || action
+            .value
+            .pointer("/original_feedback_identity/item_id")
+            .and_then(Value::as_str)
+            .is_some_and(raw_graphql_item_declares_review_thread_identity)
+}
+
+fn raw_thread_id_declares_review_thread_identity(value: &Value) -> bool {
+    string_at_paths(
+        value,
+        &[
+            "/thread_id",
+            "/evidence/thread_id",
+            "/original_feedback_identity/thread_id",
+        ],
+    )
+    .is_some_and(|thread_id| !thread_id.trim().is_empty())
+}
+
+fn raw_stable_marker_declares_review_thread_identity(stable_marker_key: &str) -> bool {
+    stable_marker_key.starts_with("thread:")
+}
+
+fn raw_graphql_item_declares_review_thread_identity(item_id: &str) -> bool {
+    item_id
+        .strip_prefix(GRAPHQL_NODE_ID_PREFIX)
+        .and_then(|suffix| suffix.split(':').next())
+        .is_some_and(|thread_id| thread_id.starts_with(REVIEW_THREAD_NODE_ID_PREFIX))
 }
 
 fn post_marker_reply_via_rest_review_comment(

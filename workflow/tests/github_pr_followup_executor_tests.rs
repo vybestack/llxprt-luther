@@ -3403,7 +3403,7 @@ fn p09_feedback_item(item_id: &str, key: &str, hash: &str) -> serde_json::Value 
     serde_json::json!({
         "item_id": item_id,
         "stable_marker_key": key,
-        "thread_id": "thread-p09",
+        "thread_id": "PRRT_thread_p09",
         "comment_id": item_id,
         "review_id": null,
         "author_login": "coderabbitai[bot]",
@@ -4579,9 +4579,14 @@ fn remediation_plan_routes_only_concrete_failures_and_valid_feedback_to_must_fix
         serde_json::json!([{ "failure_id": "ci-1", "check_name": "build", "conclusion": "failure" }]),
         serde_json::json!([]),
         serde_json::json!([
-            p10_accepted("cr-valid", "thread-valid", "hash-valid", "valid"),
-            p10_accepted("cr-invalid", "thread-invalid", "hash-invalid", "invalid"),
-            p10_accepted("cr-out", "thread-out", "hash-out", "out_of_scope")
+            p10_accepted("cr-valid", "PRRT_thread_valid", "hash-valid", "valid"),
+            p10_accepted(
+                "cr-invalid",
+                "PRRT_thread_invalid",
+                "hash-invalid",
+                "invalid"
+            ),
+            p10_accepted("cr-out", "PRRT_thread_out", "hash-out", "out_of_scope")
         ]),
         serde_json::json!([]),
         serde_json::json!([]),
@@ -4647,8 +4652,13 @@ fn remediation_plan_invalid_out_of_scope_only_writes_pending_marker_actions_and_
         serde_json::json!([]),
         serde_json::json!([]),
         serde_json::json!([
-            p10_accepted("cr-invalid", "thread-invalid", "hash-invalid", "invalid"),
-            p10_accepted("cr-out", "thread-out", "hash-out", "out_of_scope")
+            p10_accepted(
+                "cr-invalid",
+                "PRRT_thread_invalid",
+                "hash-invalid",
+                "invalid"
+            ),
+            p10_accepted("cr-out", "PRRT_thread_out", "hash-out", "out_of_scope")
         ]),
         serde_json::json!([]),
         serde_json::json!([]),
@@ -4840,8 +4850,13 @@ fn pending_marker_actions_invalid_out_of_scope_have_no_remediation_output_head_a
         serde_json::json!([]),
         serde_json::json!([]),
         serde_json::json!([
-            p10_accepted("cr-invalid", "thread-invalid", "hash-invalid", "invalid"),
-            p10_accepted("cr-out", "thread-out", "hash-out", "out_of_scope")
+            p10_accepted(
+                "cr-invalid",
+                "PRRT_thread_invalid",
+                "hash-invalid",
+                "invalid"
+            ),
+            p10_accepted("cr-out", "PRRT_thread_out", "hash-out", "out_of_scope")
         ]),
         serde_json::json!([]),
         serde_json::json!([]),
@@ -4895,7 +4910,7 @@ fn remediation_plan_with_must_fix_defers_user_judgment_and_remediates_actionable
         serde_json::json!([{ "source": "watch_pr_checks", "reason": "pending_timeout", "check_name": "slow" }]),
         serde_json::json!([p10_accepted(
             "cr-judge",
-            "thread-judge",
+            "PRRT_thread_judge",
             "hash-judge",
             "needs_user_judgment"
         )]),
@@ -4951,7 +4966,7 @@ fn remediation_plan_needs_user_judgment_only_returns_fatal() {
         serde_json::json!([]),
         serde_json::json!([p10_accepted(
             "cr-judge",
-            "thread-judge",
+            "PRRT_thread_judge",
             "hash-judge",
             "needs_user_judgment"
         )]),
@@ -5096,14 +5111,14 @@ fn p11_plan_items() -> Vec<serde_json::Value> {
         serde_json::json!({
             "source_type": "coderabbit_feedback",
             "source_id": "cr-valid",
-            "stable_marker_key": "thread-valid",
+            "stable_marker_key": "PRRT_thread_valid",
             "reason": "valid feedback",
             "recommended_action": "fix valid feedback",
             "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             "source_artifact_sequence": 4,
             "decision": "valid",
             "body_hash": "hash-valid",
-            "evidence": { "item_id": "cr-valid", "stable_marker_key": "thread-valid" }
+            "evidence": { "item_id": "cr-valid", "stable_marker_key": "PRRT_thread_valid" }
         }),
     ]
 }
@@ -5266,7 +5281,7 @@ fn remediation_validator_rejects_stale_input_head_without_burning_model_attempts
         &temp,
         serde_json::json!([
             { "source_type": "ci_failure", "source_id": "ci-build", "status": "not_fixed", "input_head_sha": "old-head", "action": "attempted", "evidence": { "kind": "test", "current_head_sha": "old-head", "commands": [] }, "response_text": "stale result", "evidence_paths": [] },
-            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "thread-valid", "body_hash": "hash-valid", "status": "not_fixed", "input_head_sha": "old-head", "action": "attempted", "evidence": { "kind": "test", "current_head_sha": "old-head", "commands": [] }, "response_text": "stale result", "evidence_paths": [] }
+            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "PRRT_thread_valid", "body_hash": "hash-valid", "status": "not_fixed", "input_head_sha": "old-head", "action": "attempted", "evidence": { "kind": "test", "current_head_sha": "old-head", "commands": [] }, "response_text": "stale result", "evidence_paths": [] }
         ]),
     );
     rewrite_p11_result(&temp, |result| {
@@ -5413,7 +5428,7 @@ fn remediation_validator_accepts_retry_scope_only_normal_counters() {
         &temp,
         serde_json::json!([
             { "source_type": "ci_failure", "source_id": "ci-build", "status": "fixed", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "fixed", "evidence": { "kind": "change", "current_head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "paths": ["src/lib.rs"] }, "response_text": "Luther addressed this CI failure and will post the remediation evidence on the original thread.", "evidence_paths": ["src/lib.rs"] },
-            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "thread-valid", "body_hash": "hash-valid", "status": "fixed", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "fixed", "evidence": { "kind": "change", "current_head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "paths": ["src/lib.rs"] }, "response_text": "Luther addressed this CodeRabbit item and will post the remediation evidence on the original thread.", "evidence_paths": ["src/lib.rs"] }
+            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "PRRT_thread_valid", "body_hash": "hash-valid", "status": "fixed", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "fixed", "evidence": { "kind": "change", "current_head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "paths": ["src/lib.rs"] }, "response_text": "Luther addressed this CodeRabbit item and will post the remediation evidence on the original thread.", "evidence_paths": ["src/lib.rs"] }
         ]),
     );
     rewrite_p11_result(&temp, |result| {
@@ -5464,7 +5479,7 @@ fn remediation_validator_waits_for_correctly_scoped_artifact_after_stale_result(
         &temp,
         serde_json::json!([
             { "source_type": "ci_failure", "source_id": "ci-build", "status": "fixed", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "fixed", "evidence": { "kind": "change", "current_head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "paths": ["src/lib.rs"] }, "response_text": "Luther addressed this CI failure and will post the remediation evidence on the original thread.", "evidence_paths": ["src/lib.rs"] },
-            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "thread-valid", "body_hash": "hash-valid", "status": "fixed", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "fixed", "evidence": { "kind": "change", "current_head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "paths": ["src/lib.rs"] }, "response_text": "Luther addressed this CodeRabbit item and will post the remediation evidence on the original thread.", "evidence_paths": ["src/lib.rs"] }
+            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "PRRT_thread_valid", "body_hash": "hash-valid", "status": "fixed", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "fixed", "evidence": { "kind": "change", "current_head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "paths": ["src/lib.rs"] }, "response_text": "Luther addressed this CodeRabbit item and will post the remediation evidence on the original thread.", "evidence_paths": ["src/lib.rs"] }
         ]),
     );
     let correct_result = read_json(&p11_result_path(&temp));
@@ -5511,7 +5526,7 @@ fn remediation_validator_restores_engine_known_plan_sequence_for_agent_result() 
         &temp,
         serde_json::json!([
             { "source_type": "ci_failure", "source_id": "ci-build", "status": "fixed", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "fixed", "evidence": { "kind": "change", "current_head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "paths": ["src/lib.rs"] }, "response_text": "Luther addressed this CI failure and will post the remediation evidence on the original thread.", "evidence_paths": ["src/lib.rs"] },
-            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "thread-valid", "body_hash": "hash-valid", "status": "fixed", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "fixed", "evidence": { "kind": "change", "current_head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "paths": ["src/lib.rs"] }, "response_text": "Luther addressed this CodeRabbit item and will post the remediation evidence on the original thread.", "evidence_paths": ["src/lib.rs"] }
+            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "PRRT_thread_valid", "body_hash": "hash-valid", "status": "fixed", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "fixed", "evidence": { "kind": "change", "current_head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "paths": ["src/lib.rs"] }, "response_text": "Luther addressed this CodeRabbit item and will post the remediation evidence on the original thread.", "evidence_paths": ["src/lib.rs"] }
         ]),
     );
     let mut result = read_json(&p11_result_path(&temp));
@@ -5576,7 +5591,7 @@ fn remediation_result_rejects_not_fixed_skipped_failed_before_push_success() {
         &temp,
         serde_json::json!([
             { "source_type": "ci_failure", "source_id": "ci-build", "status": "not_fixed", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "attempted", "evidence": { "kind": "test", "current_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "commands": [{ "id": "cargo-test", "status": "failed" }] }, "response_text": "Luther addressed this review item and posted the remediation evidence on the original thread.", "evidence_paths": [] },
-            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "thread-valid", "body_hash": "hash-valid", "status": "skipped", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "skipped", "evidence": { "kind": "policy", "current_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "paths": ["src/lib.rs"] }, "response_text": "Luther addressed this review item and posted the remediation evidence on the original thread.", "evidence_paths": [] }
+            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "PRRT_thread_valid", "body_hash": "hash-valid", "status": "skipped", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "skipped", "evidence": { "kind": "policy", "current_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "paths": ["src/lib.rs"] }, "response_text": "Luther addressed this review item and posted the remediation evidence on the original thread.", "evidence_paths": [] }
         ]),
     );
     let mut context = p11_context(&temp);
@@ -5669,7 +5684,7 @@ fn remediation_result_accepts_already_satisfied_and_not_reproduced_only_with_det
         &temp,
         serde_json::json!([
             { "source_type": "ci_failure", "source_id": "ci-build", "status": "already_satisfied", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "verified", "evidence": { "kind": "current_repository_test", "current_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "commands": [{ "id": "cargo-test", "status": "passed", "argv": ["cargo", "test"] }] }, "response_text": "Luther addressed this review item and posted the remediation evidence on the original thread.", "evidence_paths": [] },
-            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "thread-valid", "body_hash": "hash-valid", "status": "not_reproduced", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "verified", "evidence": { "kind": "api_lookup", "current_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "api_lookups": [{ "endpoint": "/repos/example/workflow/pulls/1910/comments", "normalized_status": "not_found" }] }, "response_text": "Luther addressed this review item and posted the remediation evidence on the original thread.", "evidence_paths": [] }
+            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "PRRT_thread_valid", "body_hash": "hash-valid", "status": "not_reproduced", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "verified", "evidence": { "kind": "api_lookup", "current_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "api_lookups": [{ "endpoint": "/repos/example/workflow/pulls/1910/comments", "normalized_status": "not_found" }] }, "response_text": "Luther addressed this review item and posted the remediation evidence on the original thread.", "evidence_paths": [] }
         ]),
     );
     let mut context = p11_context(&temp);
@@ -5694,7 +5709,7 @@ fn remediation_result_accepts_already_satisfied_and_not_reproduced_only_with_det
         &command_only_evidence,
         serde_json::json!([
             { "source_type": "ci_failure", "source_id": "ci-build", "status": "already_satisfied", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "verified", "evidence": { "current_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "commands": [{ "id": "cargo-test", "status": "passed", "argv": ["cargo", "test"] }] }, "response_text": "Luther addressed this review item and posted the remediation evidence on the original thread.", "evidence_paths": [] },
-            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "thread-valid", "body_hash": "hash-valid", "status": "not_reproduced", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "verified", "evidence": { "kind": "api_lookup", "current_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "api_lookups": [{ "endpoint": "/repos/example/workflow/pulls/1910/comments", "normalized_status": "not_found" }] }, "response_text": "Luther addressed this review item and posted the remediation evidence on the original thread.", "evidence_paths": [] }
+            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "PRRT_thread_valid", "body_hash": "hash-valid", "status": "not_reproduced", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "verified", "evidence": { "kind": "api_lookup", "current_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "api_lookups": [{ "endpoint": "/repos/example/workflow/pulls/1910/comments", "normalized_status": "not_found" }] }, "response_text": "Luther addressed this review item and posted the remediation evidence on the original thread.", "evidence_paths": [] }
         ]),
     );
     let mut command_only_context = p11_context(&command_only_evidence);
@@ -5722,7 +5737,7 @@ fn remediation_result_accepts_already_satisfied_and_not_reproduced_only_with_det
         &missing_evidence,
         serde_json::json!([
             { "source_type": "ci_failure", "source_id": "ci-build", "status": "already_satisfied", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "verified", "evidence": { "kind": "current_repository_test", "current_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "commands": [] }, "response_text": "Luther addressed this review item and posted the remediation evidence on the original thread.", "evidence_paths": [] },
-            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "thread-valid", "body_hash": "hash-valid", "status": "not_reproduced", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "verified", "evidence": { "kind": "api_lookup", "current_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "api_lookups": [] }, "response_text": "Luther addressed this review item and posted the remediation evidence on the original thread.", "evidence_paths": [] }
+            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "PRRT_thread_valid", "body_hash": "hash-valid", "status": "not_reproduced", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "verified", "evidence": { "kind": "api_lookup", "current_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "api_lookups": [] }, "response_text": "Luther addressed this review item and posted the remediation evidence on the original thread.", "evidence_paths": [] }
         ]),
     );
     let mut missing_context = p11_context(&missing_evidence);
@@ -5747,7 +5762,7 @@ fn remediation_result_accepts_already_satisfied_and_not_reproduced_only_with_det
         &mismatched_head,
         serde_json::json!([
             { "source_type": "ci_failure", "source_id": "ci-build", "status": "already_satisfied", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "verified", "evidence": { "kind": "current_repository_test", "current_head_sha": "cccccccccccccccccccccccccccccccccccccccc", "commands": [{ "id": "cargo-test", "status": "passed", "argv": ["cargo", "test"] }] }, "response_text": "Luther addressed this review item and posted the remediation evidence on the original thread.", "evidence_paths": [] },
-            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "thread-valid", "body_hash": "hash-valid", "status": "not_reproduced", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "verified", "evidence": { "kind": "api_lookup", "current_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "api_lookups": [{ "endpoint": "/repos/example/workflow/pulls/1910/comments", "normalized_status": "not_found" }] }, "response_text": "Luther addressed this review item and posted the remediation evidence on the original thread.", "evidence_paths": [] }
+            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "PRRT_thread_valid", "body_hash": "hash-valid", "status": "not_reproduced", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "verified", "evidence": { "kind": "api_lookup", "current_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "api_lookups": [{ "endpoint": "/repos/example/workflow/pulls/1910/comments", "normalized_status": "not_found" }] }, "response_text": "Luther addressed this review item and posted the remediation evidence on the original thread.", "evidence_paths": [] }
         ]),
     );
     let mut mismatch_context = p11_context(&mismatched_head);
@@ -5780,7 +5795,7 @@ fn remediation_validator_same_head_no_change_attempt_cap_reaches_post_pr_failure
         &temp,
         serde_json::json!([
             { "source_type": "ci_failure", "source_id": "ci-build", "status": "failed", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "attempted", "evidence": { "kind": "test", "current_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "commands": [{ "id": "cargo-test", "status": "failed" }] }, "response_text": "Luther addressed this review item and posted the remediation evidence on the original thread.", "evidence_paths": [] },
-            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "thread-valid", "body_hash": "hash-valid", "status": "not_fixed", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "attempted", "evidence": { "kind": "test", "current_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "commands": [{ "id": "cargo-test", "status": "failed" }] }, "response_text": "Luther addressed this review item and posted the remediation evidence on the original thread.", "evidence_paths": [] }
+            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "PRRT_thread_valid", "body_hash": "hash-valid", "status": "not_fixed", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "attempted", "evidence": { "kind": "test", "current_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "commands": [{ "id": "cargo-test", "status": "failed" }] }, "response_text": "Luther addressed this review item and posted the remediation evidence on the original thread.", "evidence_paths": [] }
         ]),
     );
     let mut result = read_json(&p11_result_path(&temp));
@@ -5822,7 +5837,7 @@ fn remediation_validator_wraps_raw_llxprt_result_without_store_metadata() {
         &temp,
         serde_json::json!([
             { "source_type": "ci_failure", "source_id": "ci-build", "status": "not_fixed", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "attempted", "evidence": { "kind": "test", "current_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "commands": [{ "id": "cargo-test", "status": "failed" }] }, "response_text": "Luther addressed this review item and posted the remediation evidence on the original thread.", "evidence_paths": [] },
-            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "thread-valid", "body_hash": "hash-valid", "status": "not_fixed", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "attempted", "evidence": { "kind": "test", "current_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "commands": [{ "id": "cargo-test", "status": "failed" }] }, "response_text": "Luther addressed this review item and posted the remediation evidence on the original thread.", "evidence_paths": [] }
+            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "PRRT_thread_valid", "body_hash": "hash-valid", "status": "not_fixed", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "attempted", "evidence": { "kind": "test", "current_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "commands": [{ "id": "cargo-test", "status": "failed" }] }, "response_text": "Luther addressed this review item and posted the remediation evidence on the original thread.", "evidence_paths": [] }
         ]),
     );
     let plan = read_json(&p11_current_artifact_path(&temp, "pr-remediation-plan"));
@@ -5838,7 +5853,7 @@ fn remediation_validator_wraps_raw_llxprt_result_without_store_metadata() {
             "overall_status": "failed",
             "results": [
                 { "source_type": "ci_failure", "source_id": "ci-build", "status": "not_fixed", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "attempted", "evidence": { "kind": "test", "current_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "commands": [{ "id": "cargo-test", "status": "failed" }] }, "response_text": "Luther addressed this review item and posted the remediation evidence on the original thread.", "evidence_paths": [] },
-                { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "thread-valid", "body_hash": "hash-valid", "status": "not_fixed", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "attempted", "evidence": { "kind": "test", "current_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "commands": [{ "id": "cargo-test", "status": "failed" }] }, "response_text": "Luther addressed this review item and posted the remediation evidence on the original thread.", "evidence_paths": [] }
+                { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "PRRT_thread_valid", "body_hash": "hash-valid", "status": "not_fixed", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "attempted", "evidence": { "kind": "test", "current_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "commands": [{ "id": "cargo-test", "status": "failed" }] }, "response_text": "Luther addressed this review item and posted the remediation evidence on the original thread.", "evidence_paths": [] }
             ],
             "plan_artifact_sequence": plan.get("artifact_sequence"),
             "retry_scope": { "scope_kind": "remediation_result_validation", "run_id": "run-p11", "repository_owner": "example", "repository_name": "workflow", "pr_number": 1910, "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "output_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "plan_artifact_sequence": plan.get("artifact_sequence"), "remediation_attempt_index": 1, "max_remediation_attempts": 2, "validation_retry_index": 0, "max_validation_retries": 2 },
@@ -5883,7 +5898,7 @@ fn remediation_validator_status_enum() {
         &temp,
         serde_json::json!([
             { "source_type": "ci_failure", "source_id": "ci-build", "status": "fixed", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "fixed", "evidence": { "kind": "change", "current_head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "paths": ["src/lib.rs"] }, "response_text": "Luther addressed this review item and posted the remediation evidence on the original thread.", "evidence_paths": ["src/lib.rs"] },
-            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "thread-valid", "body_hash": "hash-valid", "status": "changed", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "changed", "evidence": { "kind": "change", "current_head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "paths": ["src/lib.rs"] }, "response_text": "Luther addressed this review item and posted the remediation evidence on the original thread.", "evidence_paths": ["src/lib.rs"] }
+            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "PRRT_thread_valid", "body_hash": "hash-valid", "status": "changed", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "changed", "evidence": { "kind": "change", "current_head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "paths": ["src/lib.rs"] }, "response_text": "Luther addressed this review item and posted the remediation evidence on the original thread.", "evidence_paths": ["src/lib.rs"] }
         ]),
     );
     let mut context = p11_context(&temp);
@@ -5901,7 +5916,7 @@ fn remediation_validator_status_enum() {
         &unknown,
         serde_json::json!([
             { "source_type": "ci_failure", "source_id": "ci-build", "status": "needs_user_judgment", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "invalid", "evidence": { "kind": "text" }, "response_text": "Luther addressed this review item and posted the remediation evidence on the original thread.", "evidence_paths": [] },
-            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "thread-valid", "body_hash": "hash-valid", "status": "fixed", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "fixed", "evidence": { "kind": "change", "current_head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "paths": ["src/lib.rs"] }, "response_text": "Luther addressed this review item and posted the remediation evidence on the original thread.", "evidence_paths": ["src/lib.rs"] }
+            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "PRRT_thread_valid", "body_hash": "hash-valid", "status": "fixed", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "fixed", "evidence": { "kind": "change", "current_head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "paths": ["src/lib.rs"] }, "response_text": "Luther addressed this review item and posted the remediation evidence on the original thread.", "evidence_paths": ["src/lib.rs"] }
         ]),
     );
     let mut unknown_context = p11_context(&unknown);
@@ -5925,7 +5940,7 @@ fn remediation_validator_rejects_unknown_status_outside_canonical_enum() {
         &temp,
         serde_json::json!([
             { "source_type": "ci_failure", "source_id": "ci-build", "status": "needs_user_judgment", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "invalid", "evidence": { "kind": "text" }, "response_text": "Luther addressed this review item and posted the remediation evidence on the original thread.", "evidence_paths": [] },
-            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "thread-valid", "body_hash": "hash-valid", "status": "fixed", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "fixed", "evidence": { "kind": "change", "current_head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "paths": ["src/lib.rs"] }, "response_text": "Luther addressed this review item and posted the remediation evidence on the original thread.", "evidence_paths": ["src/lib.rs"] }
+            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "PRRT_thread_valid", "body_hash": "hash-valid", "status": "fixed", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "fixed", "evidence": { "kind": "change", "current_head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "paths": ["src/lib.rs"] }, "response_text": "Luther addressed this review item and posted the remediation evidence on the original thread.", "evidence_paths": ["src/lib.rs"] }
         ]),
     );
     let mut context = p11_context(&temp);
@@ -5950,7 +5965,7 @@ fn remediation_validator_rejects_unknown_status_outside_canonical_enum() {
         &changed,
         serde_json::json!([
             { "source_type": "ci_failure", "source_id": "ci-build", "status": "fixed", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "fixed", "evidence": { "kind": "change", "current_head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "paths": ["src/lib.rs"] }, "response_text": "Luther addressed this review item and posted the remediation evidence on the original thread.", "evidence_paths": ["src/lib.rs"] },
-            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "thread-valid", "body_hash": "hash-valid", "status": "changed", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "changed", "evidence": { "kind": "change", "current_head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "paths": ["src/lib.rs"] }, "response_text": "Luther addressed this review item and posted the remediation evidence on the original thread.", "evidence_paths": ["src/lib.rs"] }
+            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "PRRT_thread_valid", "body_hash": "hash-valid", "status": "changed", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "changed", "evidence": { "kind": "change", "current_head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "paths": ["src/lib.rs"] }, "response_text": "Luther addressed this review item and posted the remediation evidence on the original thread.", "evidence_paths": ["src/lib.rs"] }
         ]),
     );
     let mut changed_context = p11_context(&changed);
@@ -5984,7 +5999,7 @@ fn remediation_validator_ties_fixed_evidence_to_post_remediation_head() {
         &stale,
         serde_json::json!([
             { "source_type": "ci_failure", "source_id": "ci-build", "status": "fixed", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "fixed", "evidence": { "kind": "change", "current_head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "paths": ["src/lib.rs"] }, "response_text": "Luther addressed this review item and posted the remediation evidence on the original thread.", "evidence_paths": ["src/lib.rs"] },
-            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "thread-valid", "body_hash": "hash-valid", "status": "fixed", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "fixed", "evidence": { "kind": "change", "current_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "paths": ["src/lib.rs"] }, "response_text": "Luther addressed this review item and posted the remediation evidence on the original thread.", "evidence_paths": ["src/lib.rs"] }
+            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "PRRT_thread_valid", "body_hash": "hash-valid", "status": "fixed", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "fixed", "evidence": { "kind": "change", "current_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "paths": ["src/lib.rs"] }, "response_text": "Luther addressed this review item and posted the remediation evidence on the original thread.", "evidence_paths": ["src/lib.rs"] }
         ]),
     );
     let mut stale_context = p11_context(&stale);
@@ -6011,7 +6026,7 @@ fn remediation_validator_ties_fixed_evidence_to_post_remediation_head() {
         &fresh,
         serde_json::json!([
             { "source_type": "ci_failure", "source_id": "ci-build", "status": "fixed", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "fixed", "evidence": { "kind": "change", "current_head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "paths": ["src/lib.rs"] }, "response_text": "Luther addressed this review item and posted the remediation evidence on the original thread.", "evidence_paths": ["src/lib.rs"] },
-            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "thread-valid", "body_hash": "hash-valid", "status": "fixed", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "fixed", "evidence": { "kind": "change", "current_head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "paths": ["src/lib.rs"] }, "response_text": "Luther addressed this review item and posted the remediation evidence on the original thread.", "evidence_paths": ["src/lib.rs"] }
+            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "PRRT_thread_valid", "body_hash": "hash-valid", "status": "fixed", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "fixed", "evidence": { "kind": "change", "current_head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "paths": ["src/lib.rs"] }, "response_text": "Luther addressed this review item and posted the remediation evidence on the original thread.", "evidence_paths": ["src/lib.rs"] }
         ]),
     );
     let mut fresh_context = p11_context(&fresh);
@@ -6062,7 +6077,7 @@ fn remediation_validator_requires_complete_exact_plan_coverage_before_success() 
         serde_json::json!([
             { "source_type": "ci_failure", "source_id": "ci-build", "status": "fixed", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "fixed", "evidence": { "kind": "change", "current_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "paths": ["src/lib.rs"] }, "response_text": "Luther addressed this review item and posted the remediation evidence on the original thread.", "evidence_paths": ["src/lib.rs"] },
             { "source_type": "ci_failure", "source_id": "ci-build", "status": "fixed", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "fixed", "evidence": { "kind": "change", "current_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "paths": ["src/lib.rs"] }, "response_text": "Luther addressed this review item and posted the remediation evidence on the original thread.", "evidence_paths": ["src/lib.rs"] },
-            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "thread-valid", "body_hash": "hash-valid", "status": "fixed", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "fixed", "evidence": { "kind": "change", "current_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "paths": ["src/lib.rs"] }, "response_text": "Luther addressed this review item and posted the remediation evidence on the original thread.", "evidence_paths": ["src/lib.rs"] }
+            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "PRRT_thread_valid", "body_hash": "hash-valid", "status": "fixed", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "fixed", "evidence": { "kind": "change", "current_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "paths": ["src/lib.rs"] }, "response_text": "Luther addressed this review item and posted the remediation evidence on the original thread.", "evidence_paths": ["src/lib.rs"] }
         ]),
     );
     let mut duplicate_context = p11_context(&duplicate);
@@ -6095,7 +6110,7 @@ fn remediation_validator_writes_pending_marker_action_for_fixed_valid_feedback_b
         &temp,
         serde_json::json!([
             { "source_type": "ci_failure", "source_id": "ci-build", "status": "fixed", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "fixed", "evidence": { "kind": "change", "current_head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "paths": ["src/lib.rs"] }, "response_text": "Luther addressed this review item and posted the remediation evidence on the original thread.", "evidence_paths": ["src/lib.rs"] },
-            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "thread-valid", "body_hash": "hash-valid", "status": "fixed", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "fixed", "evidence": { "kind": "change", "current_head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "paths": ["src/lib.rs"] }, "response_text": "Luther addressed this review item and posted the remediation evidence on the original thread.", "evidence_paths": ["src/lib.rs"] }
+            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "PRRT_thread_valid", "body_hash": "hash-valid", "status": "fixed", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "fixed", "evidence": { "kind": "change", "current_head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "paths": ["src/lib.rs"] }, "response_text": "Luther addressed this review item and posted the remediation evidence on the original thread.", "evidence_paths": ["src/lib.rs"] }
         ]),
     );
     let mut context = p11_context(&temp);
@@ -6127,7 +6142,7 @@ fn remediation_validator_writes_pending_marker_action_for_fixed_valid_feedback_b
         action
             .get("stable_marker_key")
             .and_then(serde_json::Value::as_str),
-        Some("thread-valid")
+        Some("PRRT_thread_valid")
     );
     assert_eq!(
         action.get("body_hash").and_then(serde_json::Value::as_str),
@@ -6154,7 +6169,7 @@ fn remediation_validator_writes_pending_marker_action_for_fixed_valid_feedback_b
     assert!(action
         .get("idempotency_key")
         .and_then(serde_json::Value::as_str)
-        .is_some_and(|key| key.contains("thread-valid")));
+        .is_some_and(|key| key.contains("PRRT_thread_valid")));
     assert_eq!(
         action
             .pointer("/original_feedback_identity/item_id")
@@ -6263,7 +6278,7 @@ fn write_p12_plan(temp: &tempfile::TempDir) {
         serde_json::json!([]),
         serde_json::json!([p10_accepted(
             "cr-valid",
-            "thread-valid",
+            "PRRT_thread_valid",
             "hash-valid",
             "valid"
         )]),
@@ -7144,7 +7159,7 @@ fn run_post_pr_tests_fixable_failures_use_artifact_backed_retry_cap() {
             {
                 "source_type": "coderabbit_feedback",
                 "source_id": "cr-valid",
-                "stable_marker_key": "thread-valid",
+                "stable_marker_key": "PRRT_thread_valid",
                 "body_hash": "hash-valid",
                 "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
                 "status": "changed",
@@ -7453,7 +7468,7 @@ fn push_remediation_retry_scope_includes_source_sequences_and_full_binding() {
         &temp,
         serde_json::json!([
             { "source_type": "ci_failure", "source_id": "ci-build", "status": "changed", "evidence": { "kind": "current_repository_test", "current_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } },
-            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "thread-valid", "body_hash": "hash-valid", "status": "changed", "evidence": { "kind": "current_repository_test", "current_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } }
+            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "PRRT_thread_valid", "body_hash": "hash-valid", "status": "changed", "evidence": { "kind": "current_repository_test", "current_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } }
         ]),
     );
     write_p14_post_pr_test_result(&temp, "passed");
@@ -7593,7 +7608,7 @@ fn push_remediation_retry_scope_matching_sequences_exhausts_retry_cap() {
         &temp,
         serde_json::json!([
             { "source_type": "ci_failure", "source_id": "ci-build", "status": "changed", "evidence": { "kind": "current_repository_test", "current_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } },
-            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "thread-valid", "body_hash": "hash-valid", "status": "changed", "evidence": { "kind": "current_repository_test", "current_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } }
+            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "PRRT_thread_valid", "body_hash": "hash-valid", "status": "changed", "evidence": { "kind": "current_repository_test", "current_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } }
         ]),
     );
     write_p14_post_pr_test_result(&temp, "passed");
@@ -7621,7 +7636,7 @@ fn push_remediation_retry_scope_ignores_stale_plan_artifact_sequence() {
         &temp,
         serde_json::json!([
             { "source_type": "ci_failure", "source_id": "ci-build", "status": "changed", "evidence": { "kind": "current_repository_test", "current_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } },
-            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "thread-valid", "body_hash": "hash-valid", "status": "changed", "evidence": { "kind": "current_repository_test", "current_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } }
+            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "PRRT_thread_valid", "body_hash": "hash-valid", "status": "changed", "evidence": { "kind": "current_repository_test", "current_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } }
         ]),
     );
     write_p14_post_pr_test_result(&temp, "passed");
@@ -7649,7 +7664,7 @@ fn push_remediation_retry_scope_ignores_stale_remediation_result_artifact_sequen
         &temp,
         serde_json::json!([
             { "source_type": "ci_failure", "source_id": "ci-build", "status": "changed", "evidence": { "kind": "current_repository_test", "current_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } },
-            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "thread-valid", "body_hash": "hash-valid", "status": "changed", "evidence": { "kind": "current_repository_test", "current_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } }
+            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "PRRT_thread_valid", "body_hash": "hash-valid", "status": "changed", "evidence": { "kind": "current_repository_test", "current_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } }
         ]),
     );
     write_p14_post_pr_test_result(&temp, "passed");
@@ -7677,7 +7692,7 @@ fn push_remediation_observation_failures_use_matching_retry_scope_for_cap() {
         &temp,
         serde_json::json!([
             { "source_type": "ci_failure", "source_id": "ci-build", "status": "changed", "evidence": { "kind": "current_repository_test", "current_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } },
-            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "thread-valid", "body_hash": "hash-valid", "status": "changed", "evidence": { "kind": "current_repository_test", "current_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } }
+            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "PRRT_thread_valid", "body_hash": "hash-valid", "status": "changed", "evidence": { "kind": "current_repository_test", "current_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } }
         ]),
     );
     write_p14_post_pr_test_result(&temp, "passed");
@@ -7741,7 +7756,7 @@ fn push_remediation_changes_no_change_routes_fixable_for_marker_handling() {
         &temp,
         serde_json::json!([
             { "source_type": "ci_failure", "source_id": "ci-build", "status": "already_satisfied", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "verified", "evidence": { "current_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "commands": [{ "id": "cargo-test", "status": "passed", "argv": ["cargo", "test"] }] }, "response_text": "Luther addressed this review item and posted the remediation evidence on the original thread.", "evidence_paths": [] },
-            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "thread-valid", "body_hash": "hash-valid", "status": "already_satisfied", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "verified", "evidence": { "current_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "commands": [{ "id": "cargo-test", "status": "passed", "argv": ["cargo", "test"] }] }, "response_text": "Luther addressed this review item and posted the remediation evidence on the original thread.", "evidence_paths": [] }
+            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "PRRT_thread_valid", "body_hash": "hash-valid", "status": "already_satisfied", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "verified", "evidence": { "current_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "commands": [{ "id": "cargo-test", "status": "passed", "argv": ["cargo", "test"] }] }, "response_text": "Luther addressed this review item and posted the remediation evidence on the original thread.", "evidence_paths": [] }
         ]),
     );
     write_p14_post_pr_test_result(&temp, "passed");
@@ -7781,7 +7796,7 @@ fn push_remediation_changes_rejects_false_validator_success_evidence() {
         &temp,
         serde_json::json!([
             { "source_type": "ci_failure", "source_id": "ci-build", "status": "changed", "evidence": false },
-            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "thread-valid", "body_hash": "hash-valid", "status": "changed", "evidence": { "kind": "change", "current_head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" } }
+            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "PRRT_thread_valid", "body_hash": "hash-valid", "status": "changed", "evidence": { "kind": "change", "current_head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" } }
         ]),
     );
     write_p14_post_pr_test_result(&temp, "passed");
@@ -7817,7 +7832,7 @@ fn push_remediation_changes_rejects_zero_numeric_validator_success_evidence() {
         &temp,
         serde_json::json!([
             { "source_type": "ci_failure", "source_id": "ci-build", "status": "changed", "evidence": 0 },
-            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "thread-valid", "body_hash": "hash-valid", "status": "changed", "evidence": { "kind": "change", "current_head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" } }
+            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "PRRT_thread_valid", "body_hash": "hash-valid", "status": "changed", "evidence": { "kind": "change", "current_head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" } }
         ]),
     );
     write_p14_post_pr_test_result(&temp, "passed");
@@ -7853,7 +7868,7 @@ fn push_remediation_changes_pushes_clean_local_head_when_already_committed() {
         &temp,
         serde_json::json!([
             { "source_type": "ci_failure", "source_id": "ci-build", "status": "changed", "evidence": { "kind": "current_repository_test", "current_head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" } },
-            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "thread-valid", "body_hash": "hash-valid", "status": "changed", "evidence": { "kind": "current_repository_test", "current_head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" } }
+            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "PRRT_thread_valid", "body_hash": "hash-valid", "status": "changed", "evidence": { "kind": "current_repository_test", "current_head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" } }
         ]),
     );
     write_p14_post_pr_test_result(&temp, "passed");
@@ -8079,7 +8094,7 @@ impl GithubPrCommandRunner for P15MarkerRunner {
                     },
                 );
             }
-            Ok(serde_json::json!({ "data": { "resolveReviewThread": { "thread": { "id": "thread-valid", "isResolved": true } } } }).to_string())
+            Ok(serde_json::json!({ "data": { "resolveReviewThread": { "thread": { "id": "PRRT_thread_valid", "isResolved": true } } } }).to_string())
         } else {
             Ok("[]".to_string())
         }
@@ -8102,8 +8117,13 @@ fn write_p15_invalid_out_of_scope_pending(temp: &tempfile::TempDir) {
         serde_json::json!([]),
         serde_json::json!([]),
         serde_json::json!([
-            p10_accepted("cr-invalid", "thread-invalid", "hash-invalid", "invalid"),
-            p10_accepted("cr-out", "thread-out", "hash-out", "out_of_scope")
+            p10_accepted(
+                "cr-invalid",
+                "PRRT_thread_invalid",
+                "hash-invalid",
+                "invalid"
+            ),
+            p10_accepted("cr-out", "PRRT_thread_out", "hash-out", "out_of_scope")
         ]),
         serde_json::json!([]),
         serde_json::json!([]),
@@ -8131,9 +8151,9 @@ fn write_p15_validated_fixed_pending(temp: &tempfile::TempDir) {
             {
                 "source_type": "coderabbit_feedback",
                 "source_id": "cr-valid",
-                "thread_id": "thread-valid",
+                "thread_id": "PRRT_thread_valid",
 
-                "stable_marker_key": "thread-valid",
+                "stable_marker_key": "PRRT_thread_valid",
                 "body_hash": "hash-valid",
                 "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
                 "status": "changed",
@@ -8154,24 +8174,24 @@ fn write_p15_validated_fixed_pending(temp: &tempfile::TempDir) {
                 9,
                 &serde_json::json!({
                     "pending_actions": [{
-                        "action_id": "comment_fixed:thread-valid:hash-valid:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                        "action_id": "comment_fixed:PRRT_thread_valid:hash-valid:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
                         "action_kind": "comment_fixed",
                         "item_id": "cr-valid",
-                        "stable_marker_key": "thread-valid",
+                        "stable_marker_key": "PRRT_thread_valid",
                         "source_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
                         "remediation_input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
                         "remediation_output_head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
                         "remediation_output_head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
                         "body_hash": "hash-valid",
-                        "idempotency_key": "run-p11:example:workflow:1910:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb:thread-valid:comment_fixed",
+                        "idempotency_key": "run-p11:example:workflow:1910:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb:PRRT_thread_valid:comment_fixed",
                         "resolution_required": true,
-                        "thread_id": "thread-valid",
+                        "thread_id": "PRRT_thread_valid",
                         "comment_database_id": 7001,
                         "response_text": "Luther addressed this review item and posted the remediation evidence on the original thread.",
                         "status": "pending",
                         "reason": "fixed valid feedback",
                         "remediation_result_evidence": { "kind": "current_repository_test", "current_head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" },
-                        "original_feedback_identity": { "item_id": "cr-valid", "stable_marker_key": "thread-valid", "body_hash": "hash-valid", "source_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "thread_id": "thread-valid", "comment_database_id": 7001 }
+                        "original_feedback_identity": { "item_id": "cr-valid", "stable_marker_key": "PRRT_thread_valid", "body_hash": "hash-valid", "source_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "thread_id": "PRRT_thread_valid", "comment_database_id": 7001 }
                     }],
                     "carry_forward_from_artifact_sequence": null,
                     "marker_policy": {},
@@ -8308,7 +8328,7 @@ fn marker_executor_derives_current_invalid_actions_without_pending_artifact() {
         serde_json::json!([]),
         serde_json::json!([p10_accepted(
             "cr-invalid",
-            "thread-invalid",
+            "PRRT_thread_invalid",
             "hash-invalid",
             "invalid"
         )]),
@@ -8370,7 +8390,12 @@ fn marker_refresh_suppresses_summary_but_keeps_actionable_invalid_action() {
         serde_json::json!([]),
         serde_json::json!([
             summary,
-            p10_accepted("cr-invalid", "thread-invalid", "hash-invalid", "invalid")
+            p10_accepted(
+                "cr-invalid",
+                "PRRT_thread_invalid",
+                "hash-invalid",
+                "invalid"
+            )
         ]),
         serde_json::json!([]),
         serde_json::json!([]),
@@ -8573,7 +8598,7 @@ fn marker_remote_only_resume_skips_duplicate_fixed_resolution_attempt() {
     write_p15_validated_fixed_pending(&temp);
     let remote_marker = serde_json::json!({
         "id": 77,
-        "body": "Luther follow-up\n\n<!-- luther-pr-followup marker_key=thread-valid source_head=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa remediation_output_head=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb body=hash-valid action=comment_fixed run_id=run-p11 -->"
+        "body": "Luther follow-up\n\n<!-- luther-pr-followup marker_key=PRRT_thread_valid source_head=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa remediation_output_head=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb body=hash-valid action=comment_fixed run_id=run-p11 -->"
     });
     let runner = P15MarkerRunner::with_remote_comments(vec![remote_marker]);
     let mut context = p11_context(&temp);
@@ -8605,7 +8630,7 @@ fn marker_remote_review_comment_marker_skips_duplicate_in_thread_reply() {
         "id": 88,
         "in_reply_to_id": 7001,
         "user": { "login": "coderabbitai" },
-        "body": "Luther follow-up\n\n<!-- luther-pr-followup marker_key=thread-valid source_head=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa remediation_output_head=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb body=hash-valid action=comment_fixed run_id=run-p11 -->"
+        "body": "Luther follow-up\n\n<!-- luther-pr-followup marker_key=PRRT_thread_valid source_head=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa remediation_output_head=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb body=hash-valid action=comment_fixed run_id=run-p11 -->"
     });
     let runner = P15MarkerRunner::with_pull_review_comments(vec![remote_review_comment]);
     let mut context = p11_context(&temp);
@@ -8867,10 +8892,10 @@ fn p15_thread_audit_entry(report: &serde_json::Value) -> serde_json::Value {
             entry
                 .get("review_thread_id")
                 .and_then(serde_json::Value::as_str)
-                == Some("thread-valid")
+                == Some("PRRT_thread_valid")
         })
         .cloned()
-        .expect("audit entry for thread-valid")
+        .expect("audit entry for PRRT_thread_valid")
 }
 
 /// Fixed/changed items must post the agent reply on the original review thread
@@ -8961,7 +8986,7 @@ fn marker_resolve_uses_real_mutation_and_thread_variable() {
     assert!(
         graphql_call
             .iter()
-            .any(|arg| arg == "threadId=thread-valid"),
+            .any(|arg| arg == "threadId=PRRT_thread_valid"),
         "resolve must bind the threadId variable: {graphql_call:?}"
     );
     assert!(
@@ -9167,7 +9192,7 @@ fn marker_posts_graphql_thread_reply_when_database_id_missing() {
         calls.iter().any(|call| {
             call.iter()
                 .any(|arg| arg.contains("addPullRequestReviewThreadReply"))
-                && call.iter().any(|arg| arg == "threadId=thread-valid")
+                && call.iter().any(|arg| arg == "threadId=PRRT_thread_valid")
         }),
         "GraphQL thread reply must target the original review thread: {calls:?}"
     );
