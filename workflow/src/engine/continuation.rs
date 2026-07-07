@@ -482,8 +482,11 @@ pub fn commit_continuation(
     step_id: &str,
 ) -> Result<RunMetadata, ContinuationError> {
     let tx = conn.unchecked_transaction()?;
+    let metadata = get_run_with_conn(&tx, &request.run_id)?
+        .ok_or_else(|| ContinuationError::RunNotFound(request.run_id.clone()))?;
+    ensure_reopen_claim_is_available(&metadata, request)?;
     set_resume_point(&tx, &request.run_id, step_id)?;
-    let metadata = reopen_run(&tx, request, step_id)?;
+    let metadata = reopen_run(&tx, request, step_id, metadata)?;
     tx.commit()?;
     Ok(metadata)
 }
@@ -492,10 +495,8 @@ fn reopen_run(
     conn: &Connection,
     request: &ContinuationRequest,
     step_id: &str,
+    mut metadata: RunMetadata,
 ) -> Result<RunMetadata, ContinuationError> {
-    let mut metadata = get_run_with_conn(conn, &request.run_id)?
-        .ok_or_else(|| ContinuationError::RunNotFound(request.run_id.clone()))?;
-    ensure_reopen_claim_is_available(&metadata, request)?;
     let prior_status = metadata.status.to_string();
     metadata.reopen();
     metadata.set_current_step(step_id);

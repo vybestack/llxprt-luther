@@ -422,14 +422,21 @@ fn post_marker_reply_via_graphql_thread(
         json!({ "raw_response": response, "parse_error": err.to_string() })
     });
     let comment = parsed.pointer("/data/addPullRequestReviewThreadReply/comment");
-    if parsed.get("errors").is_some() || comment.is_none() {
+    if comment.is_none() {
         return Err(github_feedback_error(format!(
-            "GraphQL addPullRequestReviewThreadReply may have partially succeeded for thread {thread_id}: {parsed}"
+            "GraphQL addPullRequestReviewThreadReply failed for thread {thread_id}; mutation may have partially succeeded, inspect response before retrying: {parsed}"
         )));
     }
+    let graphql_errors_present = parsed
+        .get("errors")
+        .and_then(Value::as_array)
+        .is_some_and(|errors| !errors.is_empty());
     let comment_id = comment.and_then(|value| value.get("databaseId")).cloned();
     let comment_url = comment.and_then(|value| value.get("url")).cloned();
     let mut warnings = vec!["posted_review_thread_reply_via_graphql"];
+    if graphql_errors_present {
+        warnings.push("graphql_errors_present_with_posted_thread_reply");
+    }
     if comment_id.is_none() {
         warnings.push("missing_database_id_in_graphql_thread_reply_response");
     }

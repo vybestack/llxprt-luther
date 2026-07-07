@@ -1,3 +1,7 @@
+const STABLE_MARKER_THREAD_PREFIX: &str = "thread:";
+const GRAPHQL_NODE_ID_PREFIX: &str = "graphql:";
+const REVIEW_THREAD_NODE_ID_PREFIX: &str = "PRRT_";
+
 fn direct_review_thread_id(value: &Value) -> Option<String> {
     string_at_paths(
         value,
@@ -7,7 +11,10 @@ fn direct_review_thread_id(value: &Value) -> Option<String> {
             "/original_feedback_identity/thread_id",
         ],
     )
-    .filter(|thread_id| is_review_thread_node_id(thread_id))
+    .and_then(|thread_id| {
+        let trimmed = thread_id.trim();
+        is_review_thread_node_id(trimmed).then(|| trimmed.to_string())
+    })
 }
 
 fn review_thread_id_from_stable_marker_key(value: &Value) -> Option<String> {
@@ -28,7 +35,7 @@ fn review_thread_id_from_graphql_item_id(value: &Value) -> Option<String> {
         "/source_id",
         "/original_feedback_identity/item_id",
     ]
-    .iter()
+    .into_iter()
     .find_map(|path| {
         value
             .pointer(path)
@@ -36,10 +43,6 @@ fn review_thread_id_from_graphql_item_id(value: &Value) -> Option<String> {
             .and_then(parse_review_thread_id_from_graphql_item_id)
     })
 }
-
-const STABLE_MARKER_THREAD_PREFIX: &str = "thread:";
-const GRAPHQL_NODE_ID_PREFIX: &str = "graphql:";
-const REVIEW_THREAD_NODE_ID_PREFIX: &str = "PRRT_";
 
 fn parse_review_thread_id_from_graphql_item_id(item_id: &str) -> Option<String> {
     item_id
