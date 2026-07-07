@@ -8539,6 +8539,7 @@ fn marker_remote_review_comment_marker_skips_duplicate_in_thread_reply() {
     let remote_review_comment = serde_json::json!({
         "id": 88,
         "in_reply_to_id": 7001,
+        "user": { "login": "coderabbitai" },
         "body": "Luther follow-up\n\n<!-- luther-pr-followup marker_key=thread-valid source_head=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa remediation_output_head=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb body=hash-valid action=comment_fixed run_id=run-p11 -->"
     });
     let runner = P15MarkerRunner::with_pull_review_comments(vec![remote_review_comment]);

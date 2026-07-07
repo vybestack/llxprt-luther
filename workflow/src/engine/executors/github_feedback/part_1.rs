@@ -584,7 +584,7 @@ fn observe_coderabbit_feedback(
     }
     normalize_graphql_threads(&graph, binding, identities, &mut observation);
     for rest_comment in query_rest_review_comments(runner, binding)? {
-        scan_rest_review_comment_marker(&rest_comment, &mut observation);
+        scan_rest_review_comment_marker(&rest_comment, identities, &mut observation);
     }
     for issue_comment in query_issue_comments(runner, binding)? {
         normalize_issue_comment(&issue_comment, binding, identities, &mut observation);
@@ -770,7 +770,22 @@ fn graphql_feedback_item(
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P08
 /// @requirement:REQ-PRFU-008,REQ-PRFU-009,REQ-PRFU-017
 /// @pseudocode lines 5,8,12-14
-fn scan_rest_review_comment_marker(comment: &Value, observation: &mut FeedbackObservation) {
+fn scan_rest_review_comment_marker(
+    comment: &Value,
+    identities: &BTreeSet<String>,
+    observation: &mut FeedbackObservation,
+) {
+    let author = comment
+        .pointer("/user/login")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if !is_coderabbit(author, identities) {
+        observation
+            .noise
+            .push(json!({ "source": "rest_review_comment", "author_login": author }));
+        return;
+    }
+    observation.matched_identities.insert(author.to_string());
     let body = string_field(comment, "body");
     record_remote_marker_parse(
         &body,
