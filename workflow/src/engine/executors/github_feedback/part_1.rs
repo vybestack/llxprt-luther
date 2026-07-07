@@ -584,7 +584,7 @@ fn observe_coderabbit_feedback(
     }
     normalize_graphql_threads(&graph, binding, identities, &mut observation);
     for rest_comment in query_rest_review_comments(runner, binding)? {
-        normalize_rest_review_comment(&rest_comment, binding, identities, &mut observation);
+        scan_rest_review_comment_marker(&rest_comment, &mut observation);
     }
     for issue_comment in query_issue_comments(runner, binding)? {
         normalize_issue_comment(&issue_comment, binding, identities, &mut observation);
@@ -770,23 +770,7 @@ fn graphql_feedback_item(
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P08
 /// @requirement:REQ-PRFU-008,REQ-PRFU-009,REQ-PRFU-017
 /// @pseudocode lines 5,8,12-14
-fn normalize_rest_review_comment(
-    comment: &Value,
-    binding: &PrFollowupBinding,
-    identities: &BTreeSet<String>,
-    observation: &mut FeedbackObservation,
-) {
-    let author = comment
-        .pointer("/user/login")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    if !is_coderabbit(author, identities) {
-        observation
-            .noise
-            .push(json!({ "source": "rest_review_comment", "author_login": author }));
-        return;
-    }
-    observation.matched_identities.insert(author.to_string());
+fn scan_rest_review_comment_marker(comment: &Value, observation: &mut FeedbackObservation) {
     let body = string_field(comment, "body");
     record_remote_marker_parse(
         &body,
@@ -794,54 +778,8 @@ fn normalize_rest_review_comment(
         comment.get("id").cloned().unwrap_or(Value::Null),
         observation,
     );
-    let commit_sha = opt_string(comment, "commit_id");
-    let stale = commit_sha
-        .as_deref()
-        .map(|sha| sha != binding.head_sha.as_str())
-        .unwrap_or(true);
-    let comment_id = opt_string(comment, "node_id").or_else(|| {
-        comment
-            .get("id")
-            .and_then(Value::as_u64)
-            .map(|id| id.to_string())
-    });
-    let unique_id = comment_id.clone().unwrap_or_else(|| stable_hash(&body));
-    let item = FeedbackItem {
-        item_id: format!("rest-review:{unique_id}"),
-        stable_marker_key: format!("review-comment:{unique_id}"),
-        thread_id: None,
-        comment_id,
-        comment_database_id: comment.get("id").and_then(Value::as_i64),
-        review_id: comment
-            .get("pull_request_review_id")
-            .and_then(Value::as_u64)
-            .map(|id| id.to_string()),
-        author_login: author.to_string(),
-        author_kind: comment
-            .pointer("/user/type")
-            .and_then(Value::as_str)
-            .map(ToString::to_string),
-        path: opt_string(comment, "path"),
-        line: comment
-            .get("line")
-            .and_then(Value::as_u64)
-            .or_else(|| comment.get("original_line").and_then(Value::as_u64)),
-        side: opt_string(comment, "side"),
-        body_hash: stable_hash(&body),
-        body,
-        url: opt_string(comment, "html_url"),
-        created_at: opt_string(comment, "created_at"),
-        updated_at: opt_string(comment, "updated_at"),
-        resolved: false,
-        outdated: false,
-        resolution_state_available: false,
-        source: "rest_review_comment".to_string(),
-        raw_node_id: opt_string(comment, "node_id"),
-        commit_sha,
-        stale,
-    };
-    push_current_or_stale(item, observation);
 }
+
 
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P08
 /// @requirement:REQ-PRFU-008,REQ-PRFU-009,REQ-PRFU-017

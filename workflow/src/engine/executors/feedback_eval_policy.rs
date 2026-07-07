@@ -147,6 +147,10 @@ fn optional_intent_feedback(lower: &str) -> bool {
         || lower.contains("if it is only used internally")
         || lower.contains("if the intent")
         || lower.contains("if the current behavior")
+        || lower.contains("if they are used directly")
+        || lower.contains("if they are used directly as-is")
+        || lower.contains("unless overridden")
+        || lower.contains("always overridden")
         || lower.contains("intended for external consumption")
         || (lower.contains("current behavior") && lower.contains("intentional"))
 }
@@ -268,6 +272,22 @@ mod tests {
     #[test]
     fn inline_marker_downranks_for_trusted_bot_author() {
         let body = "<!-- luther-ocr-inline --> if the current behavior is intentional, should consider documenting it";
+        let mut accepted = json!({
+            "decision": "needs_user_judgment",
+            "reason": "model requested judgment"
+        });
+
+        apply_low_confidence_accepted_policy(body, "github-actions", Some("Bot"), &mut accepted);
+
+        assert_eq!(
+            accepted.get("decision").and_then(Value::as_str),
+            Some("out_of_scope")
+        );
+    }
+
+    #[test]
+    fn inline_marker_downranks_conditional_placeholder_override_feedback() {
+        let body = "<!-- luther-ocr-inline --> if they are used directly as-is, confirm these placeholders are always overridden by the launcher";
         let mut accepted = json!({
             "decision": "needs_user_judgment",
             "reason": "model requested judgment"

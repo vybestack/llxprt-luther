@@ -2957,7 +2957,18 @@ fn collector_includes_non_coderabbit_reviewer_only_when_flag_set() {
     let temp_all = tempfile::tempdir().expect("tempdir");
     let runner_all = P08FeedbackRunner::with_pages(
         vec![human_reviewer_graph_page()],
-        vec![serde_json::json!([])],
+        vec![serde_json::json!([{
+            "id": 9300,
+            "node_id": "PRRC_rest_duplicate",
+            "body": "REST review comment mirrors GraphQL thread data and must not become a duplicate feedback item.",
+            "html_url": "https://github.com/example/workflow/pull/1910#discussion_r9300",
+            "path": "src/lib.rs",
+            "line": 12,
+            "commit_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "user": { "login": "octocat", "type": "User" },
+            "created_at": "2026-04-30T00:02:00Z",
+            "updated_at": "2026-04-30T00:02:00Z"
+        }])],
         vec![serde_json::json!([{
             "id": 9200,
             "node_id": "IC_human",
