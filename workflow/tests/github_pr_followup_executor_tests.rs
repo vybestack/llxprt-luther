@@ -8011,13 +8011,21 @@ fn push_remediation_changes_uses_configured_remote_for_push_and_remote_head_veri
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P15
 /// @requirement:REQ-PRFU-015,REQ-PRFU-016,REQ-PRFU-017,REQ-PRFU-026
 /// @pseudocode lines 41-49
+#[derive(Clone, Copy, Debug, Default)]
+enum P15GraphqlReplyMode {
+    #[default]
+    Normal,
+    WithoutComment,
+    ErrorsWithComment,
+}
+
 #[derive(Clone, Debug, Default)]
 struct P15MarkerRunner {
     calls: Arc<Mutex<Vec<Vec<String>>>>,
     remote_comments: Arc<Mutex<Vec<serde_json::Value>>>,
     pull_review_comments: Arc<Mutex<Vec<serde_json::Value>>>,
     fail_resolution: bool,
-    graphql_reply_without_comment: bool,
+    graphql_reply_mode: P15GraphqlReplyMode,
     rest_reply_non_json: bool,
 }
 
@@ -8046,7 +8054,14 @@ impl P15MarkerRunner {
 
     fn graphql_reply_without_comment() -> Self {
         Self {
-            graphql_reply_without_comment: true,
+            graphql_reply_mode: P15GraphqlReplyMode::WithoutComment,
+            ..Self::default()
+        }
+    }
+
+    fn graphql_reply_errors_with_comment() -> Self {
+        Self {
+            graphql_reply_mode: P15GraphqlReplyMode::ErrorsWithComment,
             ..Self::default()
         }
     }
@@ -8116,14 +8131,19 @@ impl GithubPrCommandRunner for P15MarkerRunner {
                 .iter()
                 .any(|arg| arg.contains("addPullRequestReviewThreadReply"))
             {
-                if self.graphql_reply_without_comment {
-                    return Ok(serde_json::json!({
+                return match self.graphql_reply_mode {
+                    P15GraphqlReplyMode::WithoutComment => Ok(serde_json::json!({
                         "data": { "addPullRequestReviewThreadReply": null },
                         "errors": [{ "message": "reply was not created" }]
                     })
-                    .to_string());
-                }
-                return Ok(serde_json::json!({ "data": { "addPullRequestReviewThreadReply": { "comment": { "id": "PRRC_reply_9101", "databaseId": 9101, "url": "https://github.com/example/workflow/pull/1910#discussion_r9101" } } } }).to_string());
+                    .to_string()),
+                    P15GraphqlReplyMode::ErrorsWithComment => Ok(serde_json::json!({
+                        "data": { "addPullRequestReviewThreadReply": { "comment": { "id": "PRRC_reply_9101", "databaseId": 9101, "url": "https://github.com/example/workflow/pull/1910#discussion_r9101" } } },
+                        "errors": [{ "message": "field selection warning" }]
+                    })
+                    .to_string()),
+                    P15GraphqlReplyMode::Normal => Ok(serde_json::json!({ "data": { "addPullRequestReviewThreadReply": { "comment": { "id": "PRRC_reply_9101", "databaseId": 9101, "url": "https://github.com/example/workflow/pull/1910#discussion_r9101" } } } }).to_string()),
+                };
             }
             if self.fail_resolution {
                 return Err(
@@ -9305,6 +9325,73 @@ fn marker_posts_graphql_thread_reply_when_database_id_missing() {
         has_graphql_reply_audit,
         "GraphQL thread reply should be recorded as an in-thread reply with its comment id"
     );
+}
+
+#[test]
+fn marker_records_graphql_thread_reply_when_response_has_comment_and_errors() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_p15_validated_fixed_pending_with_database_id(&temp, 7001);
+    let path = p11_current_artifact_path(&temp, "pending-feedback-marker-actions");
+    let mut pending = read_json(&path);
+    pending["pending_actions"][0]
+        .as_object_mut()
+        .expect("pending action object")
+        .remove("comment_database_id");
+    pending["pending_actions"][0]["original_feedback_identity"]
+        .as_object_mut()
+        .expect("original feedback identity object")
+        .remove("comment_database_id");
+    std::fs::write(
+        &path,
+        serde_json::to_vec_pretty(&pending).expect("pending without database id"),
+    )
+    .expect("write pending without comment_database_id");
+
+    let runner = P15MarkerRunner::graphql_reply_errors_with_comment();
+    let mut context = p11_context(&temp);
+    let outcome = GithubFeedbackMarkerExecutorWithRunner::new(runner.clone(), FixedClock)
+        .execute(&mut context, &p11_params(&temp))
+        .expect("GraphQL reply with comment plus errors should record partial success");
+
+    assert_expected_outcome(
+        outcome,
+        StepOutcome::Success,
+        "posted GraphQL comment object should be recorded to avoid duplicate replies on retry",
+    );
+    let report = read_json(&p11_current_artifact_path(
+        &temp,
+        "pr-feedback-marker-report",
+    ));
+    let audit = p15_thread_audit_entry(&report);
+    assert_eq!(
+        audit
+            .get("reply_comment_id")
+            .and_then(serde_json::Value::as_i64),
+        Some(9101)
+    );
+    let posted_comments = report
+        .get("posted_comments")
+        .and_then(serde_json::Value::as_array)
+        .expect("posted_comments");
+    let posted = posted_comments
+        .iter()
+        .find(|comment| {
+            comment
+                .get("comment_id")
+                .and_then(serde_json::Value::as_i64)
+                == Some(9101)
+        })
+        .expect("posted comment record for GraphQL partial success");
+    let warnings = posted
+        .get("warnings")
+        .and_then(serde_json::Value::as_array)
+        .expect("warnings");
+    assert!(warnings
+        .iter()
+        .any(|warning| { warning.as_str() == Some("partial_success_graphql_errors_present") }));
+    assert!(warnings
+        .iter()
+        .any(|warning| warning.as_str() == Some("field selection warning")));
 }
 
 #[test]

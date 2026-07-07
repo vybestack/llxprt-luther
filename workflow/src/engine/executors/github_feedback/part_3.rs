@@ -427,16 +427,13 @@ fn post_marker_reply_via_graphql_thread(
         .get("errors")
         .and_then(Value::as_array)
         .is_some_and(|errors| !errors.is_empty());
-    if graphql_errors_present {
-        return Err(github_feedback_error(format!(
-            "GraphQL addPullRequestReviewThreadReply returned errors despite a comment object for thread {thread_id}; reply may have been posted (database_id={:?}, node_id={:?}), inspect response before retrying; {error_summary}",
-            comment.get("databaseId"),
-            comment.get("id")
-        )));
-    }
     let comment_id = comment.get("databaseId").cloned();
     let comment_url = comment.get("url").cloned();
     let mut warnings = vec!["posted_review_thread_reply_via_graphql"];
+    if graphql_errors_present {
+        warnings.push("partial_success_graphql_errors_present");
+        warnings.push(error_summary.as_str());
+    }
     if comment_id.is_none() {
         warnings.push("missing_database_id_in_graphql_thread_reply_response");
     }
