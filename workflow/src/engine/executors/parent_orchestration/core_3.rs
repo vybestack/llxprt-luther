@@ -49,8 +49,10 @@ fn prepare_child_resume(
     .map_err(|err| format!("commit child resume: {err}"))
 }
 
-fn child_run_context(config: &WorkflowConfig, request: &ChildWorkflowLaunchRequest) -> RunContext {
-    RunContext {
+fn child_run_context(config: &WorkflowConfig, request: &ChildWorkflowLaunchRequest) -> Result<RunContext, String> {
+    let issue_number = i64::try_from(request.issue_number)
+        .map_err(|_| format!("child issue number {} exceeds supported range", request.issue_number))?;
+    Ok(RunContext {
         log_path: None,
         artifact_root: request
             .artifact_dir
@@ -63,10 +65,10 @@ fn child_run_context(config: &WorkflowConfig, request: &ChildWorkflowLaunchReque
             .map(|path| path.to_string_lossy().to_string())
             .or_else(|| config.variables.get("work_dir").cloned()),
         repository: Some(request.repo.clone()),
-        issue_number: i64::try_from(request.issue_number).ok(),
+        issue_number: Some(issue_number),
         pr_number: None,
         head_sha: None,
-    }
+    })
 }
 
 fn child_result_from_run_outcome(

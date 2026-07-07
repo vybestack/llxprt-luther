@@ -36,7 +36,8 @@
     "route_parent_issues": true,
     "parent_workflow_type_id": "parent-issue-orchestrator-v1",
     "parent_config_id": "parent-orchestrator-luther",
-    "skip_children_of_active_parents": true
+    "skip_children_of_active_parents": true,
+    "active_parent_label": "Luther working"
   },
   "variables": {
     "primary_issue_number": "3",

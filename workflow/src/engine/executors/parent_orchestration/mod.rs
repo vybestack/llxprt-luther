@@ -209,6 +209,7 @@ impl OrchestrationState {
                 .unwrap_or(300),
             max_child_merge_wait_seconds: context
                 .get("parent_orchestration.max_child_merge_wait_seconds")
+                .or_else(|| context.get("max_child_merge_wait_seconds"))
                 .and_then(|value| value.parse::<u64>().ok()),
             auto_merge_children: bool_context(
                 context,

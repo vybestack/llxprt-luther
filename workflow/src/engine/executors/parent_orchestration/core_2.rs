@@ -104,7 +104,7 @@ fn prepare_child_lease_with_conn(
     if let Some(lease) = get_lease_for_issue(conn, &state.repo, child).map_err(sql_error)? {
         return Ok(match lease.status {
             LeaseStatus::ReadyToResume => {
-                if child_workflow_completed(&lease)? {
+                if child_workflow_completed(conn, &lease)? {
                     ChildLeaseAction::Wait {
                         lease: Some(lease),
                         reason: "child_workflow_completed_waiting_for_pr_merge".to_string(),
@@ -237,6 +237,7 @@ fn record_ready_for_human_merge(
 ) -> Result<StepOutcome, EngineError> {
     let run_id = child_run_id_for_wait(state, child)?;
     let auto_merge = attempt_auto_merge_if_enabled(state, query, pr);
+    let already_recorded = rollup_has_outcome(state, child, "ready_for_human_merge")?;
     write_json(
         &state.artifact_root,
         "child-merge-wait.json",
@@ -253,15 +254,17 @@ fn record_ready_for_human_merge(
             "max_child_merge_wait_seconds": state.max_child_merge_wait_seconds
         }),
     )?;
-    query
-        .comment_issue(
-            &state.repo,
-            state.parent_issue_number,
-            &format!(
-                "Child issue #{child} has a PR ready for human merge. Parent orchestration will continue after the PR is merged."
-            ),
-        )
-        .map_err(github_error)?;
+    if !already_recorded {
+        query
+            .comment_issue(
+                &state.repo,
+                state.parent_issue_number,
+                &format!(
+                    "Child issue #{child} has a PR ready for human merge. Parent orchestration will continue after the PR is merged."
+                ),
+            )
+            .map_err(github_error)?;
+    }
     update_rollup(state, child, run_id.as_deref(), "ready_for_human_merge", pr)?;
     Ok(if state.wait_for_human_merge {
         StepOutcome::Wait
@@ -295,8 +298,8 @@ fn child_workflow_ready_for_merge(run_id: &Option<String>) -> Result<bool, Engin
     let Some(run_id) = run_id.as_deref() else {
         return Ok(false);
     };
-    let Some(metadata) = get_run_with_conn(&daemon_connection()?, run_id).map_err(sql_error)?
-    else {
+    let conn = daemon_connection()?;
+    let Some(metadata) = get_run_with_conn(&conn, run_id).map_err(sql_error)? else {
         return Ok(false);
     };
     Ok(matches!(
@@ -582,7 +585,7 @@ fn finish_child_launch(
         write_child_workflow_wait_artifact(
             state,
             completion.child,
-            completion.lease,
+            Some(completion.lease),
             Some(&completion.request.run_id),
             "child_workflow_waiting_external",
             completion.run_status.as_ref(),
@@ -705,6 +708,17 @@ fn non_actionable_reason_for_outcome(outcome: &str) -> Option<String> {
     }
 }
 
+fn rollup_has_outcome(
+    state: &OrchestrationState,
+    child: u64,
+    outcome: &str,
+) -> Result<bool, EngineError> {
+    let rollup = read_rollup(&state.artifact_root)?;
+    Ok(rollup.children.iter().any(|entry| {
+        entry.child_issue_number == child && entry.outcome.as_deref() == Some(outcome)
+    }))
+}
+
 fn read_rollup(artifact_root: &Path) -> Result<ParentOrchestrationRollup, EngineError> {
     let path = artifact_root.join("parent-orchestration-rollup.json");
 
@@ -776,7 +790,7 @@ fn run_child_workflow(
     if matches!(mode, ChildRunMode::Resume) {
         prepare_child_resume(&db_path, request)?;
     }
-    let run_context = child_run_context(&config, request);
+    let run_context = child_run_context(&config, request)?;
     let instance =
         WorkflowInstance::create_with_run_id(workflow_type, config.clone(), &request.run_id);
     let mut runner = EngineRunner::with_db_path_and_context(

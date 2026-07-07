@@ -10,7 +10,7 @@ pub struct ParentIssueOrchestrationState {
     pub child_issue_numbers: Vec<u64>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize)]
 pub enum ChildTerminalState {
     Open,
     ActiveRun,
@@ -98,6 +98,9 @@ pub fn missing_ordered_child_states(states: &[ChildIssueState], order: &[u64]) -
         .collect()
 }
 
+/// ActiveRun intentionally does not block selection: launch_child_workflow
+/// performs the active lease check before starting another run, so stale or
+/// failed child run recovery can still proceed through the normal launch path.
 fn child_state_blocks_selection(state: &ChildTerminalState) -> bool {
     matches!(
         state,

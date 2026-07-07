@@ -28,7 +28,7 @@ pub enum SkipReason {
     ChildOfActiveParent,
     ConcurrencyLimitReached,
     InvalidLeaseState,
-    RoutingFailed,
+    RoutingFailed(String),
 }
 
 impl std::fmt::Display for SkipReason {
@@ -47,7 +47,7 @@ impl std::fmt::Display for SkipReason {
                 write!(f, "per-config concurrency limit reached")
             }
             SkipReason::InvalidLeaseState => write!(f, "invalid lease state"),
-            SkipReason::RoutingFailed => write!(f, "parent issue routing failed"),
+            SkipReason::RoutingFailed(detail) => write!(f, "parent issue routing failed: {detail}"),
         }
     }
 }
@@ -67,7 +67,7 @@ impl SkipReason {
             SkipReason::HasOpenPr => "has_open_pr",
             SkipReason::ConcurrencyLimitReached => "concurrency_limit_reached",
             SkipReason::InvalidLeaseState => "invalid_lease_state",
-            SkipReason::RoutingFailed => "routing_failed",
+            SkipReason::RoutingFailed(_) => "routing_failed",
         }
     }
 }
@@ -82,7 +82,10 @@ pub enum DiscoveryError {
 
 impl From<DiscoveryError> for EngineError {
     fn from(error: DiscoveryError) -> Self {
-        EngineError::InvalidState(error.to_string())
+        match error {
+            DiscoveryError::Database(err) => EngineError::PersistenceError(err.to_string()),
+            DiscoveryError::Github(err) => EngineError::InvalidState(err.to_string()),
+        }
     }
 }
 
@@ -227,7 +230,10 @@ pub fn discover(
                 Ok(routed) => result.eligible.push(routed),
                 Err(err) => {
                     eprintln!("route issue error for {repo}: {err}");
-                    result.skipped.push((*err.issue, SkipReason::RoutingFailed));
+                    result.skipped.push((
+                        *err.issue,
+                        SkipReason::RoutingFailed(err.source.to_string()),
+                    ));
                 }
             }
         } else {
@@ -306,9 +312,7 @@ fn route_issue(
     repo: &str,
 ) -> Result<RoutedIssue, RouteIssueError> {
     match q.list_sub_issues(repo, issue.number) {
-        Ok(children) if cfg.route_parent_issues && !children.is_empty() => {
-            Ok(RoutedIssue::parent(issue, cfg))
-        }
+        Ok(children) if !children.is_empty() => Ok(RoutedIssue::parent(issue, cfg)),
         Ok(_) => Ok(RoutedIssue::ordinary(issue)),
         Err(source) => Err(RouteIssueError {
             issue_number: issue.number,

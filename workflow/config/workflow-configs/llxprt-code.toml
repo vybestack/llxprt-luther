@@ -25,6 +25,7 @@ enabled = false
 include_labels = ["OK for Luther"]
 exclude_labels = ["Luther working"]
 issue_states = ["open"]
+active_parent_label = "Luther working"
 max_concurrent_runs = 1
 poll_interval_secs = 300
 route_parent_issues = true

@@ -92,7 +92,7 @@ fn apply_child_run_state(
                     && issue.state.eq_ignore_ascii_case("open")
                 {
                     child.terminal_state = ChildTerminalState::StaleRun;
-                } else if !child_workflow_completed(&lease)? {
+                } else if !child_workflow_completed(&conn, &lease)? {
                     child.terminal_state = ChildTerminalState::ActiveRun;
                 }
             }
@@ -127,13 +127,13 @@ fn stale_child_run(
 }
 
 fn child_workflow_completed(
+    conn: &rusqlite::Connection,
     lease: &crate::persistence::leases::IssueLease,
 ) -> Result<bool, EngineError> {
     let Some(run_id) = lease.run_id.as_deref() else {
         return Ok(false);
     };
-    let Some(metadata) = get_run_with_conn(&daemon_connection()?, run_id).map_err(sql_error)?
-    else {
+    let Some(metadata) = get_run_with_conn(conn, run_id).map_err(sql_error)? else {
         return Ok(false);
     };
     Ok(matches!(
@@ -148,11 +148,23 @@ fn determine_subissue_order(
 ) -> Result<StepOutcome, EngineError> {
     let children = read_children(&state.artifact_root)?;
     let order = order_subissues(&children);
+    let artifact_name = if state.current_step == "determine_refreshed_subissue_order" {
+        "subissue-order-plan-refreshed.json"
+    } else {
+        "subissue-order-plan.json"
+    };
     write_json(
         &state.artifact_root,
-        "subissue-order-plan.json",
+        artifact_name,
         &json!({"order": order, "strategy": "native_position_then_issue_number"}),
     )?;
+    if state.current_step == "determine_refreshed_subissue_order" {
+        fs::copy(
+            state.artifact_root.join(artifact_name),
+            state.artifact_root.join("subissue-order-plan.json"),
+        )
+        .map_err(|err| parent_error(format!("copy refreshed subissue order artifact: {err}")))?;
+    }
     context.set("subissue_order", &json!(order).to_string());
     Ok(StepOutcome::Success)
 }
@@ -324,24 +336,28 @@ fn wait_for_existing_child(
             "run_status": run_status.as_ref().map(ToString::to_string)
         }),
     )?;
-    if let Some(lease) = lease {
-        write_child_workflow_wait_artifact(
-            state,
-            child,
-            lease,
-            lease.run_id.as_deref(),
-            reason,
-            run_status.as_ref(),
-        )?;
-        update_rollup(state, child, lease.run_id.as_deref(), reason, None)?;
-    }
+    write_child_workflow_wait_artifact(
+        state,
+        child,
+        lease,
+        lease.and_then(|lease| lease.run_id.as_deref()),
+        reason,
+        run_status.as_ref(),
+    )?;
+    update_rollup(
+        state,
+        child,
+        lease.and_then(|lease| lease.run_id.as_deref()),
+        reason,
+        None,
+    )?;
     Ok(StepOutcome::Wait)
 }
 
 fn write_child_workflow_wait_artifact(
     state: &OrchestrationState,
     child: u64,
-    lease: &crate::persistence::leases::IssueLease,
+    lease: Option<&crate::persistence::leases::IssueLease>,
     child_run_id: Option<&str>,
     reason: &str,
     run_status: Option<&RunStatus>,
@@ -354,8 +370,8 @@ fn write_child_workflow_wait_artifact(
             "state": "child_workflow_in_progress",
             "child_issue_number": child,
             "child_run_id": child_run_id,
-            "child_lease_id": lease.lease_id,
-            "lease_status": lease.status.to_string(),
+            "child_lease_id": lease.map(|lease| lease.lease_id.as_str()),
+            "lease_status": lease.map(|lease| lease.status.to_string()),
             "run_status": run_status.map(ToString::to_string),
             "reason": reason,
             "poll_interval_seconds": state.merge_poll_interval_seconds,

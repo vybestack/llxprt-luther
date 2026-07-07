@@ -158,6 +158,10 @@ fn discover_skips_issue_with_active_lease() {
 
     let result = discover(&discovery_cfg(), &query, &conn, 0).expect("discover");
     assert!(result.eligible.is_empty(), "leased issue is not eligible");
+    assert!(
+        !result.skipped.is_empty(),
+        "active lease should produce a skipped issue"
+    );
     assert!(matches!(result.skipped[0].1, SkipReason::HasActiveLease));
 }
 

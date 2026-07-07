@@ -8,7 +8,8 @@
 //! @plan:PLAN-20260415-DAEMON-DISCOVERY.P03
 //! @requirement:REQ-DAEMON-DISCOVERY-003
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
 use tracing::warn;
@@ -42,6 +43,13 @@ fn no_supported_merge_method_error(argv: &[String]) -> GithubError {
         argv: argv.to_vec(),
         exit_code: None,
         stderr: "repository does not report any enabled auto-merge method".to_string(),
+    }
+}
+fn auto_merge_cache_lock_error<T>(err: std::sync::PoisonError<T>) -> GithubError {
+    GithubError::CommandFailed {
+        argv: vec!["gh".to_string(), "repo".to_string(), "view".to_string()],
+        exit_code: None,
+        stderr: format!("failed to lock auto-merge method cache: {err}"),
     }
 }
 
@@ -171,12 +179,16 @@ pub trait GithubIssueQuery {
 /// @plan:PLAN-20260415-DAEMON-DISCOVERY.P03
 pub struct SystemGithubIssueQuery<R: GithubCommandRunner> {
     runner: R,
+    auto_merge_methods: Mutex<BTreeMap<String, &'static str>>,
 }
 
 impl<R: GithubCommandRunner> SystemGithubIssueQuery<R> {
     /// Wrap a command runner.
     pub fn new(runner: R) -> Self {
-        Self { runner }
+        Self {
+            runner,
+            auto_merge_methods: Mutex::new(BTreeMap::new()),
+        }
     }
 }
 
@@ -280,6 +292,8 @@ struct GraphqlIssue {
     #[serde(default)]
     state: String,
     #[serde(default)]
+    body: Option<String>,
+    #[serde(default)]
     labels: GraphqlNodeList<GraphqlLabel>,
     #[serde(default)]
     assignees: GraphqlNodeList<GraphqlAssignee>,
@@ -376,7 +390,7 @@ fn graphql_issue_to_issue(issue: GraphqlIssue) -> GithubIssue {
             .collect(),
         assignee: issue.assignees.nodes.into_iter().next().map(|a| a.login),
         milestone: issue.milestone.map(|m| m.title),
-        body: None,
+        body: issue.body,
     }
 }
 
@@ -535,13 +549,17 @@ fn raw_pr_state_to_issue_pr_state(pr: RawPrState) -> GithubIssuePrState {
 }
 
 fn summarize_status_check_rollup(checks: &[RawStatusCheck]) -> Option<String> {
-    if checks.is_empty() {
+    let blocking: Vec<&RawStatusCheck> = checks
+        .iter()
+        .filter(|check| !status_check_ignored(check))
+        .collect();
+    if blocking.is_empty() {
         return None;
     }
-    if checks.iter().any(status_check_failed) {
+    if blocking.iter().any(|check| status_check_failed(check)) {
         return Some("failed".to_string());
     }
-    if checks.iter().all(status_check_passed) {
+    if blocking.iter().all(|check| status_check_passed(check)) {
         return Some("passed".to_string());
     }
     Some("pending".to_string())
@@ -550,7 +568,9 @@ fn summarize_status_check_rollup(checks: &[RawStatusCheck]) -> Option<String> {
 fn status_check_failed(check: &RawStatusCheck) -> bool {
     matches!(
         check.conclusion.as_deref(),
-        Some("FAILURE" | "TIMED_OUT" | "ACTION_REQUIRED")
+        Some(
+            "FAILURE" | "TIMED_OUT" | "ACTION_REQUIRED" | "CANCELLED" | "STALE" | "STARTUP_FAILURE"
+        )
     ) || matches!(check.state.as_deref(), Some("FAILURE" | "ERROR"))
 }
 
@@ -558,16 +578,14 @@ fn status_check_passed(check: &RawStatusCheck) -> bool {
     check.conclusion.as_deref() == Some("SUCCESS") || check.state.as_deref() == Some("SUCCESS")
 }
 
+fn status_check_ignored(check: &RawStatusCheck) -> bool {
+    matches!(check.conclusion.as_deref(), Some("SKIPPED" | "NEUTRAL"))
+}
+
 #[derive(Debug, Deserialize)]
 struct RawMilestone {
     #[serde(default)]
     title: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct RawPr {
-    #[allow(dead_code)]
-    number: u64,
 }
 
 /// Parse the JSON returned by `gh issue list --json ...` into `GithubIssue`s.
@@ -642,27 +660,8 @@ impl<R: GithubCommandRunner> GithubIssueQuery for SystemGithubIssueQuery<R> {
     }
 
     fn has_open_pr_for_issue(&self, repo: &str, number: u64) -> Result<bool, GithubError> {
-        let argv = vec![
-            "gh".to_string(),
-            "pr".to_string(),
-            "list".to_string(),
-            "--repo".to_string(),
-            repo.to_string(),
-            "--state".to_string(),
-            "open".to_string(),
-            "--search".to_string(),
-            format!("issue:{number}"),
-            "--json".to_string(),
-            "number".to_string(),
-        ];
-        let out = self.runner.run(&argv)?;
-        let prs: Vec<RawPr> =
-            serde_json::from_str(&out).map_err(|e| GithubError::CommandFailed {
-                argv: argv.clone(),
-                exit_code: None,
-                stderr: format!("failed to parse gh pr list JSON: {e}"),
-            })?;
-        Ok(!prs.is_empty())
+        self.pr_state_for_issue(repo, number)
+            .map(|pr| pr.is_some_and(|pr| pr.state.eq_ignore_ascii_case("open")))
     }
 
     fn list_milestones(&self, repo: &str) -> Result<Vec<String>, GithubError> {
@@ -822,7 +821,7 @@ impl<R: GithubCommandRunner> GithubIssueQuery for SystemGithubIssueQuery<R> {
     }
 
     fn enable_pr_auto_merge(&self, repo: &str, pr_number: u64) -> Result<(), GithubError> {
-        let merge_method = self.auto_merge_method(repo)?;
+        let merge_method = self.cached_auto_merge_method(repo)?;
         let argv = vec![
             "gh".to_string(),
             "pr".to_string(),
@@ -845,7 +844,7 @@ impl<R: GithubCommandRunner> SystemGithubIssueQuery<R> {
     ) -> Result<Vec<GithubSubIssue>, GithubError> {
         let argv = graphql_issue_argv(repo, number, SUB_ISSUES_QUERY)?;
         let out = self.runner.run(&argv)?;
-        let mut page = parse_first_sub_issue_page(&out)?;
+        let mut page = parse_first_sub_issue_page(&out, &argv)?;
         let mut seen = page
             .children
             .iter()
@@ -863,6 +862,24 @@ impl<R: GithubCommandRunner> SystemGithubIssueQuery<R> {
             page_count += 1;
         }
         Ok(page.children)
+    }
+
+    fn cached_auto_merge_method(&self, repo: &str) -> Result<&'static str, GithubError> {
+        if let Some(method) = self
+            .auto_merge_methods
+            .lock()
+            .map_err(auto_merge_cache_lock_error)?
+            .get(repo)
+            .copied()
+        {
+            return Ok(method);
+        }
+        let method = self.auto_merge_method(repo)?;
+        self.auto_merge_methods
+            .lock()
+            .map_err(auto_merge_cache_lock_error)?
+            .insert(repo.to_string(), method);
+        Ok(method)
     }
 
     fn auto_merge_method(&self, repo: &str) -> Result<&'static str, GithubError> {
@@ -926,12 +943,19 @@ impl<R: GithubCommandRunner> SystemGithubIssueQuery<R> {
                 .into_iter()
                 .enumerate()
         {
-            if let Some(issue) = self.get_issue(repo, child_number)? {
-                children.push(GithubSubIssue {
+            match self.get_issue(repo, child_number) {
+                Ok(Some(issue)) => children.push(GithubSubIssue {
                     issue,
                     position: Some(idx as u64),
                     source: SubIssueSource::FallbackChecklist,
-                });
+                }),
+                Ok(None) => warn!(repo, child_number, "fallback child issue was not found"),
+                Err(err) => warn!(
+                    repo,
+                    child_number,
+                    error = %err,
+                    "skipping fallback child issue after lookup failed"
+                ),
             }
         }
         Ok(children)

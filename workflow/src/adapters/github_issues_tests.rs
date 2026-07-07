@@ -72,22 +72,31 @@ fn list_issues_builds_correct_argv() {
 
 #[test]
 fn has_open_pr_true_and_false() {
-    let runner_true = MockRunner::new(vec![Ok(r#"[{"number":99}]"#.to_string())]);
+    let runner_true = MockRunner::new(vec![
+        Ok(r#"{"closedByPullRequestsReferences": []}"#.to_string()),
+        Ok(r#"[{"number":99,"state":"OPEN","merged":false}]"#.to_string()),
+    ]);
     let q_true = SystemGithubIssueQuery::new(runner_true);
     assert!(q_true.has_open_pr_for_issue("o/r", 12).unwrap());
 
-    let runner_false = MockRunner::new(vec![Ok("[]".to_string())]);
+    let runner_false = MockRunner::new(vec![
+        Ok(r#"{"closedByPullRequestsReferences": []}"#.to_string()),
+        Ok("[]".to_string()),
+    ]);
     let q_false = SystemGithubIssueQuery::new(runner_false);
     assert!(!q_false.has_open_pr_for_issue("o/r", 12).unwrap());
 }
 
 #[test]
 fn has_open_pr_builds_search_argv() {
-    let runner = MockRunner::new(vec![Ok("[]".to_string())]);
+    let runner = MockRunner::new(vec![
+        Ok(r#"{"closedByPullRequestsReferences": []}"#.to_string()),
+        Ok("[]".to_string()),
+    ]);
     let q = SystemGithubIssueQuery::new(runner);
     let _ = q.has_open_pr_for_issue("o/r", 7).unwrap();
     let calls = q.runner.calls.borrow();
-    let argv = &calls[0];
+    let argv = &calls[1];
     assert!(argv.contains(&"--search".to_string()));
     assert!(argv.contains(&"issue:7".to_string()));
 }
@@ -120,7 +129,8 @@ fn parse_first_sub_issue_page_returns_pagination_cursor() {
         }}}
     }"#;
 
-    let page = parse_first_sub_issue_page(json).unwrap();
+    let argv = vec!["gh".to_string(), "api".to_string(), "graphql".to_string()];
+    let page = parse_first_sub_issue_page(json, &argv).unwrap();
 
     assert!(page.children.is_empty());
     assert_eq!(page.next_cursor.as_deref(), Some("cursor-1"));

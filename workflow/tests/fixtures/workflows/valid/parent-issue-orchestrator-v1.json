@@ -105,7 +105,7 @@
         "subissue-state-snapshot"
       ],
       "produces": [
-        "subissue-order-plan"
+        "subissue-order-plan-refreshed"
       ]
     },
     {

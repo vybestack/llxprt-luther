@@ -135,7 +135,7 @@ fn collect_resume_units(
     limits: &CapacityLimits,
 ) -> Result<Vec<DispatchUnit>, rusqlite::Error> {
     let mut units = Vec::new();
-    for (resume_config_id, target) in resume_config_targets(targets) {
+    for (resume_config_id, discovery) in resume_config_targets(targets, limits) {
         let ready_leases = match list_ready_to_resume_leases(conn, &resume_config_id) {
             Ok(leases) => leases,
             Err(e) => {
@@ -146,7 +146,7 @@ fn collect_resume_units(
         for lease in ready_leases {
             if !has_capacity(
                 conn,
-                &target.discovery,
+                &discovery,
                 &resume_config_id,
                 &lease.issue_repo,
                 limits,
@@ -169,7 +169,10 @@ fn collect_resume_units(
     Ok(units)
 }
 
-fn resume_config_targets(targets: &[SchedulerTarget]) -> Vec<(String, &SchedulerTarget)> {
+fn resume_config_targets(
+    targets: &[SchedulerTarget],
+    limits: &CapacityLimits,
+) -> Vec<(String, DiscoveryConfig)> {
     let mut seen = std::collections::BTreeSet::new();
     let mut config_targets = Vec::new();
     for target in targets {
@@ -177,31 +180,31 @@ fn resume_config_targets(targets: &[SchedulerTarget]) -> Vec<(String, &Scheduler
             &mut config_targets,
             &mut seen,
             target.config_id.clone(),
-            target,
+            target.discovery.clone(),
         );
         if let Some(parent_config_id) = target.discovery.parent_config_id.as_ref() {
             push_resume_config_target(
                 &mut config_targets,
                 &mut seen,
                 parent_config_id.clone(),
-                target,
+                parent_capacity_discovery(&target.discovery, limits),
             );
         }
     }
     config_targets
 }
 
-fn push_resume_config_target<'a>(
-    config_targets: &mut Vec<(String, &'a SchedulerTarget)>,
+fn push_resume_config_target(
+    config_targets: &mut Vec<(String, DiscoveryConfig)>,
     seen: &mut std::collections::BTreeSet<String>,
     config_id: String,
-    target: &'a SchedulerTarget,
+    discovery: DiscoveryConfig,
 ) {
     if seen.contains(&config_id) {
         return;
     }
     seen.insert(config_id.clone());
-    config_targets.push((config_id, target));
+    config_targets.push((config_id, discovery));
 }
 
 fn prepare_resume_unit(
@@ -239,11 +242,12 @@ fn collect_launch_units(
         summary.eligible += result.eligible.len();
         for routed in &result.eligible {
             let launch_config_id = routed.config_id.as_deref().unwrap_or(&target.config_id);
-            if !has_capacity(conn, &target.discovery, launch_config_id, repo, limits)? {
+            let launch_discovery = launch_discovery_for(target, launch_config_id, limits);
+            if !has_capacity(conn, &launch_discovery, launch_config_id, repo, limits)? {
                 summary.skipped += 1;
                 continue;
             }
-            match claim_for_launch(&routed.issue, &target.discovery, conn, launch_config_id) {
+            match claim_for_launch(&routed.issue, &launch_discovery, conn, launch_config_id) {
                 Ok(Ok(mut claimed)) => {
                     claimed.request.workflow_type_id = routed.workflow_type_id.clone();
                     units.push(DispatchUnit {
@@ -264,6 +268,31 @@ fn collect_launch_units(
         }
     }
     Ok(())
+}
+
+fn launch_discovery_for(
+    target: &SchedulerTarget,
+    launch_config_id: &str,
+    limits: &CapacityLimits,
+) -> DiscoveryConfig {
+    if launch_config_id == target.config_id {
+        return target.discovery.clone();
+    }
+    parent_capacity_discovery(&target.discovery, limits)
+}
+
+fn parent_capacity_discovery(
+    discovery: &DiscoveryConfig,
+    limits: &CapacityLimits,
+) -> DiscoveryConfig {
+    let mut parent = discovery.clone();
+    parent.max_concurrent_runs = Some(usize_to_u32(limits.per_config));
+    parent.max_concurrent_runs_per_config = Some(usize_to_u32(limits.per_config));
+    parent
+}
+
+fn usize_to_u32(value: usize) -> u32 {
+    u32::try_from(value).unwrap_or(u32::MAX)
 }
 fn dispatch_units(
     conn: &Connection,

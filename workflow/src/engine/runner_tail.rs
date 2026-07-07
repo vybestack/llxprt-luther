@@ -138,6 +138,10 @@ fn run_outcome_without_transition(step_id: &str, outcome: &StepOutcome) -> RunOu
             step_id: step_id.to_string(),
             reason: "Fixable error with no recovery transition".to_string(),
         },
+        StepOutcome::Retryable => RunOutcome::Failure {
+            step_id: step_id.to_string(),
+            reason: "Retryable error with no recovery transition".to_string(),
+        },
         _ => RunOutcome::Failure {
             step_id: step_id.to_string(),
             reason: "Unexpected outcome".to_string(),

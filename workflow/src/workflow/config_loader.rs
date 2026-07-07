@@ -734,6 +734,8 @@ pub fn resolve_discovery_config(config: &WorkflowConfig) -> DiscoveryConfig {
         repo,
         include_labels,
         exclude_labels,
+        // Default active parent detection to the configured Luther working
+        // label, matching the DiscoveryConfig default contract.
         active_parent_label: raw.active_parent_label.or_else(|| var("luther_label")),
         issue_states,
         assignee_filter,

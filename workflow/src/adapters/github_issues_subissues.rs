@@ -53,6 +53,14 @@ fn native_sub_issue_page_limit_error(repo: &str, number: u64, cursor: &str) -> G
     }
 }
 
+fn missing_sub_issue_parent_error(argv: &[String]) -> GithubError {
+    GithubError::CommandFailed {
+        argv: argv.to_vec(),
+        exit_code: None,
+        stderr: "sub-issue GraphQL response did not include the requested parent issue".to_string(),
+    }
+}
+
 fn graphql_sub_issue_page_argv(
     repo: &str,
     number: u64,
@@ -64,11 +72,11 @@ fn graphql_sub_issue_page_argv(
     Ok(argv)
 }
 
-const SUB_ISSUES_QUERY: &str = "query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){issue(number:$number){number title state labels(first:50){nodes{name}} assignees(first:10){nodes{login}} milestone{title} subIssues(first:100){edges{node{number title state labels(first:50){nodes{name}} assignees(first:10){nodes{login}} milestone{title}}} pageInfo{hasNextPage endCursor}}}}}";
+const SUB_ISSUES_QUERY: &str = "query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){issue(number:$number){number title state body labels(first:50){nodes{name}} assignees(first:10){nodes{login}} milestone{title} subIssues(first:100){edges{node{number title state body labels(first:50){nodes{name}} assignees(first:10){nodes{login}} milestone{title}}} pageInfo{hasNextPage endCursor}}}}}";
 
-const SUB_ISSUES_PAGE_QUERY: &str = "query($owner:String!,$name:String!,$number:Int!,$after:String!){repository(owner:$owner,name:$name){issue(number:$number){subIssues(first:100,after:$after){edges{cursor node{number title state labels(first:50){nodes{name}} assignees(first:10){nodes{login}} milestone{title}}} pageInfo{hasNextPage endCursor}}}}}";
+const SUB_ISSUES_PAGE_QUERY: &str = "query($owner:String!,$name:String!,$number:Int!,$after:String!){repository(owner:$owner,name:$name){issue(number:$number){subIssues(first:100,after:$after){edges{cursor node{number title state body labels(first:50){nodes{name}} assignees(first:10){nodes{login}} milestone{title}}} pageInfo{hasNextPage endCursor}}}}}";
 
-const PARENT_ISSUE_QUERY: &str = "query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){issue(number:$number){parent{number title state labels(first:50){nodes{name}} assignees(first:10){nodes{login}} milestone{title}}}}}";
+const PARENT_ISSUE_QUERY: &str = "query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){issue(number:$number){parent{number title state body labels(first:50){nodes{name}} assignees(first:10){nodes{login}} milestone{title}}}}}";
 
 struct ParsedSubIssuePage {
     children: Vec<GithubSubIssue>,
@@ -76,7 +84,11 @@ struct ParsedSubIssuePage {
 }
 
 pub fn parse_sub_issue_response(json: &str) -> Result<Vec<GithubSubIssue>, GithubError> {
-    parse_first_sub_issue_page(json).map(|page| page.children)
+    parse_first_sub_issue_page(
+        json,
+        &["gh".to_string(), "api".to_string(), "graphql".to_string()],
+    )
+    .map(|page| page.children)
 }
 
 fn parse_sub_issue_page_response(
@@ -92,7 +104,7 @@ fn parse_sub_issue_page_response(
             stderr: format!("failed to parse sub-issue GraphQL page JSON: {e}"),
         })?;
     let Some(issue) = response.data.repository.issue else {
-        return Ok(None);
+        return Err(missing_sub_issue_parent_error(argv));
     };
     append_sub_issue_edges(issue.sub_issues.edges, seen, children);
     if issue.sub_issues.page_info.has_next_page {
@@ -126,18 +138,15 @@ fn append_sub_issue_edges(
     }
 }
 
-fn parse_first_sub_issue_page(json: &str) -> Result<ParsedSubIssuePage, GithubError> {
+fn parse_first_sub_issue_page(json: &str, argv: &[String]) -> Result<ParsedSubIssuePage, GithubError> {
     let response: GraphqlResponse =
         serde_json::from_str(json).map_err(|e| GithubError::CommandFailed {
-            argv: vec!["gh".into(), "api".into(), "graphql".into()],
+            argv: argv.to_vec(),
             exit_code: None,
             stderr: format!("failed to parse sub-issue GraphQL JSON: {e}"),
         })?;
     let Some(issue) = response.data.repository.issue else {
-        return Ok(ParsedSubIssuePage {
-            children: Vec::new(),
-            next_cursor: None,
-        });
+        return Err(missing_sub_issue_parent_error(argv));
     };
     let mut seen = BTreeSet::new();
     let mut children = Vec::new();

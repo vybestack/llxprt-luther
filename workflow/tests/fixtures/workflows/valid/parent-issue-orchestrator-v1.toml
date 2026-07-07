@@ -67,7 +67,7 @@ step_id = "determine_refreshed_subissue_order"
 step_type = "parent_orchestration"
 description = "Recompute deterministic child order after refresh."
 consumes = ["subissue-state-snapshot"]
-produces = ["subissue-order-plan"]
+produces = ["subissue-order-plan-refreshed"]
 
 [[steps]]
 step_id = "evaluate_parent_completion"
