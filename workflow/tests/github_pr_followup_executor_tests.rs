@@ -8019,6 +8019,15 @@ enum P15GraphqlReplyMode {
     ErrorsWithComment,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+enum P15RestReplyMode {
+    #[default]
+    Normal,
+    NonJson,
+    NonObjectJson,
+    ApiError,
+}
+
 #[derive(Clone, Debug, Default)]
 struct P15MarkerRunner {
     calls: Arc<Mutex<Vec<Vec<String>>>>,
@@ -8026,7 +8035,7 @@ struct P15MarkerRunner {
     pull_review_comments: Arc<Mutex<Vec<serde_json::Value>>>,
     fail_resolution: bool,
     graphql_reply_mode: P15GraphqlReplyMode,
-    rest_reply_non_json: bool,
+    rest_reply_mode: P15RestReplyMode,
 }
 
 /// @pseudocode lines 42-47
@@ -8068,7 +8077,21 @@ impl P15MarkerRunner {
 
     fn rest_reply_non_json() -> Self {
         Self {
-            rest_reply_non_json: true,
+            rest_reply_mode: P15RestReplyMode::NonJson,
+            ..Self::default()
+        }
+    }
+
+    fn rest_reply_non_object_json() -> Self {
+        Self {
+            rest_reply_mode: P15RestReplyMode::NonObjectJson,
+            ..Self::default()
+        }
+    }
+
+    fn rest_reply_api_error() -> Self {
+        Self {
+            rest_reply_mode: P15RestReplyMode::ApiError,
             ..Self::default()
         }
     }
@@ -8092,8 +8115,17 @@ impl GithubPrCommandRunner for P15MarkerRunner {
             .iter()
             .any(|arg| arg.contains("/pulls/1910/comments/") && arg.contains("/replies"))
         {
-            if self.rest_reply_non_json {
-                return Ok("not json".to_string());
+            match self.rest_reply_mode {
+                P15RestReplyMode::NonJson => return Ok("not json".to_string()),
+                P15RestReplyMode::NonObjectJson => return Ok("[1,2]".to_string()),
+                P15RestReplyMode::ApiError => {
+                    return Ok(serde_json::json!({
+                        "message": "Validation Failed",
+                        "documentation_url": "https://docs.github.com/rest"
+                    })
+                    .to_string());
+                }
+                P15RestReplyMode::Normal => {}
             }
             // In-thread review reply endpoint.
             Ok(serde_json::json!({
@@ -9016,6 +9048,75 @@ fn marker_posts_in_thread_reply_for_fixed_and_resolves_thread() {
     );
 }
 
+fn single_posted_comment_with_warning<'a>(
+    report: &'a serde_json::Value,
+    warning: &str,
+) -> &'a serde_json::Value {
+    let posted_comments = report
+        .get("posted_comments")
+        .and_then(serde_json::Value::as_array)
+        .expect("posted_comments");
+    assert_eq!(
+        posted_comments.len(),
+        1,
+        "exactly one posted comment expected to avoid duplicate replies: {posted_comments:?}"
+    );
+    posted_comments
+        .iter()
+        .find(|comment| marker_warnings_include(comment, warning))
+        .unwrap_or_else(|| panic!("no posted comment contained expected warning: {warning}"))
+}
+
+fn marker_warnings_include(comment: &serde_json::Value, expected: &str) -> bool {
+    comment
+        .get("warnings")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|warnings| {
+            warnings
+                .iter()
+                .any(|warning| warning.as_str() == Some(expected))
+        })
+}
+
+fn assert_unknown_marker_reply_record(posted: &serde_json::Value) {
+    assert_eq!(
+        posted.get("source").and_then(serde_json::Value::as_str),
+        Some("posted_result_unknown")
+    );
+    assert_eq!(
+        posted
+            .get("github_delivery_status")
+            .and_then(serde_json::Value::as_str),
+        Some("unknown")
+    );
+    assert_eq!(
+        posted
+            .get("retry_suppressed")
+            .and_then(serde_json::Value::as_bool),
+        Some(true)
+    );
+}
+
+fn rest_reply_call_count(calls: &[Vec<String>]) -> usize {
+    calls
+        .iter()
+        .filter(|call| {
+            call.iter()
+                .any(|arg| arg.contains("/pulls/1910/comments/") && arg.contains("/replies"))
+        })
+        .count()
+}
+
+fn graphql_reply_call_count(calls: &[Vec<String>]) -> usize {
+    calls
+        .iter()
+        .filter(|call| {
+            call.iter()
+                .any(|arg| arg.contains("addPullRequestReviewThreadReply"))
+        })
+        .count()
+}
+
 /// The resolve call must send the real GraphQL mutation text and bind the
 /// `threadId` variable, not a placeholder named query.
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P15
@@ -9023,21 +9124,44 @@ fn marker_posts_in_thread_reply_for_fixed_and_resolves_thread() {
 /// @pseudocode lines 41-49
 
 #[test]
-fn marker_fails_when_rest_reply_response_is_not_json() {
+fn marker_records_rest_reply_when_response_is_not_json() {
     let temp = tempfile::tempdir().expect("tempdir");
     write_p15_validated_fixed_pending_with_database_id(&temp, 7001);
     let runner = P15MarkerRunner::rest_reply_non_json();
     let mut context = p11_context(&temp);
 
-    let err = GithubFeedbackMarkerExecutorWithRunner::new(runner.clone(), FixedClock)
+    let outcome = GithubFeedbackMarkerExecutorWithRunner::new(runner.clone(), FixedClock)
         .execute(&mut context, &p11_params(&temp))
-        .expect_err("non-JSON REST reply response should fail marker execution");
+        .expect("non-JSON REST reply response should record an ambiguous post attempt");
 
-    let message = err.to_string();
-    assert!(
-        message.contains("failed to parse REST marker reply response"),
-        "REST parse failure should be explicit and not recorded as posted: {message}"
+    assert_expected_outcome(
+        outcome,
+        StepOutcome::Success,
+        "ambiguous REST post response should be recorded to avoid duplicate replies on retry",
     );
+    let report = read_json(&p11_current_artifact_path(
+        &temp,
+        "pr-feedback-marker-report",
+    ));
+    let posted = single_posted_comment_with_warning(&report, "rest_reply_response_not_json");
+    assert_unknown_marker_reply_record(posted);
+    let summary = posted
+        .get("github_response_summary")
+        .and_then(serde_json::Value::as_str)
+        .expect("github_response_summary should be present for non-JSON REST response");
+    assert!(
+        !summary.is_empty() && !summary.contains("not json"),
+        "REST parse summary should contain sanitized error context, not raw response: {summary}"
+    );
+    assert!(
+        summary.contains("response parse error") && summary.contains("raw_response_hash"),
+        "REST parse summary should include sanitized parse diagnostics: {summary}"
+    );
+    let preview = posted
+        .get("github_response_preview")
+        .and_then(serde_json::Value::as_str)
+        .expect("github_response_preview should be present for non-JSON REST response");
+    assert_eq!(preview, "not json");
     let calls = runner.calls();
     assert!(
         calls.iter().any(|call| {
@@ -9047,6 +9171,112 @@ fn marker_fails_when_rest_reply_response_is_not_json() {
                     .any(|arg| arg.contains("/pulls/1910/comments/7001/replies"))
         }),
         "test must exercise REST in-thread reply path: {calls:?}"
+    );
+    let initial_rest_reply_call_count = rest_reply_call_count(&calls);
+
+    let second_outcome = GithubFeedbackMarkerExecutorWithRunner::new(runner.clone(), FixedClock)
+        .execute(&mut p11_context(&temp), &p11_params(&temp))
+        .expect("ambiguous non-JSON REST reply rerun should use local marker completion");
+    assert_expected_outcome(
+        second_outcome,
+        StepOutcome::Success,
+        "ambiguous non-JSON REST record should suppress duplicate replies on rerun",
+    );
+    let second_calls = runner.calls();
+    let second_rest_reply_call_count = rest_reply_call_count(&second_calls);
+    assert_eq!(
+        second_rest_reply_call_count, initial_rest_reply_call_count,
+        "local idempotency record should suppress duplicate REST replies"
+    );
+}
+
+#[test]
+fn marker_records_rest_reply_when_response_is_non_object_json() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_p15_validated_fixed_pending_with_database_id(&temp, 7001);
+    let runner = P15MarkerRunner::rest_reply_non_object_json();
+    let mut context = p11_context(&temp);
+
+    let outcome = GithubFeedbackMarkerExecutorWithRunner::new(runner.clone(), FixedClock)
+        .execute(&mut context, &p11_params(&temp))
+        .expect("non-object JSON REST response should record an ambiguous post attempt");
+
+    assert_expected_outcome(
+        outcome,
+        StepOutcome::Success,
+        "non-object JSON REST response should be recorded to avoid duplicate replies on retry",
+    );
+    let report = read_json(&p11_current_artifact_path(
+        &temp,
+        "pr-feedback-marker-report",
+    ));
+    let posted = single_posted_comment_with_warning(&report, "rest_reply_response_not_json");
+    assert_unknown_marker_reply_record(posted);
+    let summary = posted
+        .get("github_response_summary")
+        .and_then(serde_json::Value::as_str)
+        .expect("github_response_summary should be present for non-object REST JSON");
+    assert!(
+        summary.contains("expected JSON object, got array")
+            && summary.contains("raw_response_hash"),
+        "REST non-object JSON summary should include sanitized diagnostics: {summary}"
+    );
+    assert_eq!(
+        posted
+            .get("github_response_preview")
+            .and_then(serde_json::Value::as_str),
+        Some("[1,2]")
+    );
+}
+
+#[test]
+fn marker_records_rest_reply_when_response_is_api_error() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_p15_validated_fixed_pending_with_database_id(&temp, 7001);
+    let runner = P15MarkerRunner::rest_reply_api_error();
+    let mut context = p11_context(&temp);
+
+    let outcome = GithubFeedbackMarkerExecutorWithRunner::new(runner.clone(), FixedClock)
+        .execute(&mut context, &p11_params(&temp))
+        .expect("REST API error response should record an ambiguous post attempt");
+
+    assert_expected_outcome(
+        outcome,
+        StepOutcome::Success,
+        "ambiguous REST API error response should be recorded to avoid duplicate replies on retry",
+    );
+    let report = read_json(&p11_current_artifact_path(
+        &temp,
+        "pr-feedback-marker-report",
+    ));
+    let posted = single_posted_comment_with_warning(&report, "rest_reply_response_error_message");
+    assert_unknown_marker_reply_record(posted);
+    assert_eq!(
+        posted
+            .get("github_response_summary")
+            .and_then(serde_json::Value::as_str),
+        Some("Validation Failed")
+    );
+    assert!(
+        posted.get("github_response_preview").is_none(),
+        "API error responses should not include a raw response preview: {posted:?}"
+    );
+    let calls = runner.calls();
+    let initial_rest_reply_call_count = rest_reply_call_count(&calls);
+
+    let second_outcome = GithubFeedbackMarkerExecutorWithRunner::new(runner.clone(), FixedClock)
+        .execute(&mut p11_context(&temp), &p11_params(&temp))
+        .expect("ambiguous REST API error rerun should use local marker completion");
+    assert_expected_outcome(
+        second_outcome,
+        StepOutcome::Success,
+        "ambiguous REST API error record should suppress duplicate replies on rerun",
+    );
+    let second_calls = runner.calls();
+    let second_rest_reply_call_count = rest_reply_call_count(&second_calls);
+    assert_eq!(
+        second_rest_reply_call_count, initial_rest_reply_call_count,
+        "local idempotency record should suppress duplicate REST replies"
     );
 }
 
@@ -9373,6 +9603,11 @@ fn marker_records_graphql_thread_reply_when_response_has_comment_and_errors() {
         .get("posted_comments")
         .and_then(serde_json::Value::as_array)
         .expect("posted_comments");
+    assert_eq!(
+        posted_comments.len(),
+        1,
+        "exactly one posted comment expected to avoid duplicate replies: {posted_comments:?}"
+    );
     let posted = posted_comments
         .iter()
         .find(|comment| {
@@ -9391,7 +9626,7 @@ fn marker_records_graphql_thread_reply_when_response_has_comment_and_errors() {
         .any(|warning| { warning.as_str() == Some("partial_success_graphql_errors_present") }));
     assert_eq!(
         posted
-            .get("graphql_error_summary")
+            .get("github_response_summary")
             .and_then(serde_json::Value::as_str),
         Some("field selection warning")
     );
@@ -9445,7 +9680,7 @@ fn marker_uses_fallback_direct_thread_id_when_primary_candidate_is_invalid() {
 }
 
 #[test]
-fn marker_fails_when_graphql_thread_reply_response_has_no_comment() {
+fn marker_records_graphql_thread_reply_when_response_has_no_comment() {
     let temp = tempfile::tempdir().expect("tempdir");
     write_p15_validated_fixed_pending_with_database_id(&temp, 7001);
     let path = p11_current_artifact_path(&temp, "pending-feedback-marker-actions");
@@ -9466,22 +9701,48 @@ fn marker_fails_when_graphql_thread_reply_response_has_no_comment() {
 
     let runner = P15MarkerRunner::graphql_reply_without_comment();
     let mut context = p11_context(&temp);
-    let err = GithubFeedbackMarkerExecutorWithRunner::new(runner.clone(), FixedClock)
+    let outcome = GithubFeedbackMarkerExecutorWithRunner::new(runner.clone(), FixedClock)
         .execute(&mut context, &p11_params(&temp))
-        .expect_err("missing GraphQL reply comment should fail marker execution");
+        .expect("missing GraphQL reply comment should record an ambiguous post attempt");
 
-    let message = err.to_string();
-    assert!(
-        message.contains("addPullRequestReviewThreadReply failed")
-            && message.contains("reply was not created"),
-        "GraphQL reply failure should surface sanitized error context: {message}"
+    assert_expected_outcome(
+        outcome,
+        StepOutcome::Success,
+        "ambiguous GraphQL post response should be recorded to avoid duplicate replies on retry",
+    );
+    let report = read_json(&p11_current_artifact_path(
+        &temp,
+        "pr-feedback-marker-report",
+    ));
+    let posted =
+        single_posted_comment_with_warning(&report, "non_idempotent_graphql_reply_result_unknown");
+    assert_unknown_marker_reply_record(posted);
+    assert_eq!(
+        posted
+            .get("github_response_summary")
+            .and_then(serde_json::Value::as_str),
+        Some("reply was not created")
     );
     let calls = runner.calls();
-    assert!(
-        calls.iter().any(|call| call
-            .iter()
-            .any(|arg| arg.contains("addPullRequestReviewThreadReply"))),
-        "malformed GraphQL reply test must exercise the GraphQL mutation path: {calls:?}"
+    let initial_graphql_reply_call_count = graphql_reply_call_count(&calls);
+    assert_eq!(
+        initial_graphql_reply_call_count, 1,
+        "malformed GraphQL reply test must exercise the GraphQL mutation path exactly once: {calls:?}"
+    );
+
+    let second_outcome = GithubFeedbackMarkerExecutorWithRunner::new(runner.clone(), FixedClock)
+        .execute(&mut p11_context(&temp), &p11_params(&temp))
+        .expect("ambiguous GraphQL reply rerun should use local marker completion");
+    assert_expected_outcome(
+        second_outcome,
+        StepOutcome::Success,
+        "ambiguous GraphQL post record should suppress duplicate replies on rerun",
+    );
+    let second_calls = runner.calls();
+    let second_graphql_reply_call_count = graphql_reply_call_count(&second_calls);
+    assert_eq!(
+        second_graphql_reply_call_count, initial_graphql_reply_call_count,
+        "local idempotency key should suppress duplicate GraphQL replies: {second_calls:?}"
     );
 }
 

@@ -502,15 +502,15 @@ pub fn commit_continuation(
 }
 
 fn commit_continuation_in_transaction(
-    conn: &Connection,
+    tx: &Transaction<'_>,
     request: &ContinuationRequest,
     step_id: &str,
 ) -> Result<RunMetadata, ContinuationError> {
-    let metadata = get_run_with_conn(conn, &request.run_id)?
+    let metadata = get_run_with_conn(tx, &request.run_id)?
         .ok_or_else(|| ContinuationError::RunNotFound(request.run_id.clone()))?;
     ensure_reopen_claim_is_available(&metadata, request)?;
-    set_resume_point(conn, &request.run_id, step_id)?;
-    reopen_run(conn, request, step_id, metadata)
+    set_resume_point(tx, &request.run_id, step_id)?;
+    reopen_run(tx, request, step_id, metadata)
 }
 
 fn reopen_run(

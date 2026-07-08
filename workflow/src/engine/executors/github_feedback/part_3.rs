@@ -321,6 +321,8 @@ fn post_marker_reply_via_rest_review_comment(
         binding.repository_owner, binding.repository_name, binding.pr_number, comment_database_id
     );
     let parsed = post_marker_reply_rest(runner, endpoint, body_path)?;
+    let github_response_summary = rest_response_summary(&parsed);
+    let github_response_preview = rest_response_preview(&parsed);
     Ok(marker_reply_record(MarkerReplyRecordInput {
         action,
         comment_key,
@@ -330,8 +332,9 @@ fn post_marker_reply_via_rest_review_comment(
         comment_url: parsed.get("html_url").cloned().unwrap_or(Value::Null),
         in_thread_reply: true,
         in_reply_to_id: parsed.get("in_reply_to_id").cloned().unwrap_or(Value::Null),
-        warnings: json!([]),
-        graphql_error_summary: None,
+        warnings: rest_reply_warnings(&parsed, None),
+        github_response_summary: github_response_summary.as_deref(),
+        github_response_preview,
     }))
 }
 
@@ -348,6 +351,8 @@ fn post_marker_reply_via_issue_comment(
         binding.repository_owner, binding.repository_name, binding.pr_number
     );
     let parsed = post_marker_reply_rest(runner, endpoint, body_path)?;
+    let github_response_summary = rest_response_summary(&parsed);
+    let github_response_preview = rest_response_preview(&parsed);
     Ok(marker_reply_record(MarkerReplyRecordInput {
         action,
         comment_key,
@@ -357,32 +362,10 @@ fn post_marker_reply_via_issue_comment(
         comment_url: parsed.get("html_url").cloned().unwrap_or(Value::Null),
         in_thread_reply: false,
         in_reply_to_id: Value::Null,
-        warnings: json!(["no_review_thread_identity_posted_top_level_comment"]),
-        graphql_error_summary: None,
+        warnings: rest_reply_warnings(&parsed, Some(WARN_NO_REVIEW_THREAD_IDENTITY_TOP_LEVEL)),
+        github_response_summary: github_response_summary.as_deref(),
+        github_response_preview,
     }))
-}
-
-fn post_marker_reply_rest(
-    runner: &dyn GithubPrCommandRunner,
-    endpoint: String,
-    body_path: &Path,
-) -> Result<Value, EngineError> {
-    let response = runner.run_github_command(&[
-        "gh".to_string(),
-        "api".to_string(),
-        endpoint,
-        "--method".to_string(),
-        "POST".to_string(),
-        "--field".to_string(),
-        format!("body=@{}", body_path.display()),
-    ])?;
-    serde_json::from_str(&response).map_err(|err| {
-        github_feedback_error(format!(
-            "failed to parse REST marker reply response: {err}; raw_response_hash={}; raw_response_bytes={}",
-            stable_hash(&response),
-            response.len()
-        ))
-    })
 }
 
 fn post_marker_reply_via_graphql_thread(
@@ -407,14 +390,18 @@ fn post_marker_reply_via_graphql_thread(
     let parsed: Value = serde_json::from_str(&response).unwrap_or_else(|err| {
         json!({ "raw_response": response, "parse_error": err.to_string() })
     });
-    let error_summary = graphql_error_summary(&parsed);
     let Some(comment) = parsed
         .pointer("/data/addPullRequestReviewThreadReply/comment")
         .filter(|comment| comment.is_object())
     else {
-        return Err(github_feedback_error(format!(
-            "GraphQL addPullRequestReviewThreadReply failed for thread {thread_id}; mutation may have partially succeeded, inspect response before retrying; {error_summary}"
-        )));
+        return marker_reply_record_for_missing_graphql_comment(
+            action,
+            comment_key,
+            body,
+            body_path,
+            thread_id,
+            &parsed,
+        );
     };
     let graphql_errors_present = parsed
         .get("errors")
@@ -422,18 +409,18 @@ fn post_marker_reply_via_graphql_thread(
         .is_some_and(|errors| !errors.is_empty());
     let comment_id = comment.get("databaseId").cloned();
     let comment_url = comment.get("url").cloned();
-    let mut warnings = vec!["posted_review_thread_reply_via_graphql"];
-    let graphql_error_summary = if graphql_errors_present {
-        warnings.push("partial_success_graphql_errors_present");
-        Some(error_summary.as_str())
+    let mut warnings = vec![WARN_POSTED_REVIEW_THREAD_REPLY_GRAPHQL];
+    let github_response_summary = if graphql_errors_present {
+        warnings.push(WARN_PARTIAL_SUCCESS_GRAPHQL_ERRORS_PRESENT);
+        Some(graphql_error_summary(&parsed))
     } else {
         None
     };
     if comment_id.is_none() {
-        warnings.push("missing_database_id_in_graphql_thread_reply_response");
+        warnings.push(WARN_MISSING_DATABASE_ID_GRAPHQL_THREAD_REPLY);
     }
     if comment_url.is_none() {
-        warnings.push("missing_url_in_graphql_thread_reply_response");
+        warnings.push(WARN_MISSING_URL_GRAPHQL_THREAD_REPLY);
     }
     Ok(marker_reply_record(MarkerReplyRecordInput {
         action,
@@ -445,7 +432,8 @@ fn post_marker_reply_via_graphql_thread(
         in_thread_reply: true,
         in_reply_to_id: Value::Null,
         warnings: json!(warnings),
-        graphql_error_summary,
+        github_response_summary: github_response_summary.as_deref(),
+        github_response_preview: None,
     }))
 }
 
