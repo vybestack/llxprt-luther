@@ -168,9 +168,12 @@ pub fn claim_for_launch(
 
     let run_id = new_run_id();
     update_lease_status(conn, &lease.lease_id, LeaseStatus::Running, Some(&run_id))?;
-    let paths = bases
-        .per_run_paths(issue.number, &run_id)
-        .map_err(rusqlite::Error::InvalidParameterName)?;
+    let paths = bases.per_run_paths(issue.number, &run_id).map_err(|err| {
+        rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            err,
+        )))
+    })?;
     Ok(Ok(ClaimedLaunch {
         lease_id: lease.lease_id,
         request: LaunchRequest {

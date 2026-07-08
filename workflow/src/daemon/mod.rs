@@ -18,7 +18,7 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-#[cfg(unix)]
+#[cfg(not(target_os = "linux"))]
 use std::process::Command;
 
 // Daemon discovery/queueing/leasing/launch submodules (issue #49).
@@ -259,19 +259,55 @@ pub enum StopOutcome {
 /// existing `kill -0` checks in `monitor/process.rs`.
 /// @plan:PLAN-20260404-INITIAL-RUNTIME.P09
 #[cfg(unix)]
-pub fn terminate_pid(pid: u32) {
+pub fn terminate_pid(pid: u32) -> bool {
     let _ = Command::new("kill")
         .args(["-TERM", &pid.to_string()])
         .output();
-    for _ in 0..20 {
-        if !is_daemon_alive(pid) {
-            return;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(100));
+    if wait_for_daemon_exit(pid, 20) {
+        return true;
     }
     let _ = Command::new("kill")
         .args(["-KILL", &pid.to_string()])
         .output();
+    wait_for_daemon_exit(pid, 20)
+}
+
+#[cfg(not(unix))]
+pub fn terminate_pid(_pid: u32) -> bool {
+    false
+}
+
+#[cfg(target_os = "linux")]
+#[must_use]
+pub fn is_daemon_alive(pid: u32) -> bool {
+    Path::new(&format!("/proc/{pid}")).exists()
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+#[must_use]
+pub fn is_daemon_alive(pid: u32) -> bool {
+    Command::new("kill")
+        .args(["-0", &pid.to_string()])
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
+}
+
+#[cfg(not(unix))]
+#[must_use]
+pub fn is_daemon_alive(_pid: u32) -> bool {
+    false
+}
+
+#[cfg(unix)]
+fn wait_for_daemon_exit(pid: u32, attempts: usize) -> bool {
+    for _ in 0..attempts {
+        if !is_daemon_alive(pid) {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    !is_daemon_alive(pid)
 }
 
 /// Stop the daemon recorded for `config_id` in `store`.
@@ -281,7 +317,6 @@ pub fn terminate_pid(pid: u32) {
 /// still observe the last known state, and so workspaces/artifacts/logs are
 /// never affected. Stopping an absent or already-dead daemon is idempotent.
 /// @plan:PLAN-20260404-INITIAL-RUNTIME.P09
-#[cfg(unix)]
 #[must_use]
 pub fn stop_daemon(store: &DaemonStore, config_id: &str) -> StopOutcome {
     let Some(state) = store.read(config_id) else {
@@ -292,28 +327,6 @@ pub fn stop_daemon(store: &DaemonStore, config_id: &str) -> StopOutcome {
     }
     terminate_pid(state.pid);
     StopOutcome::Stopped
-}
-
-/// Check whether a process with `pid` is currently alive.
-///
-/// On Linux this checks `/proc/<pid>`; on other Unix targets (notably macOS,
-/// which has no `/proc`) it sends signal 0 via `kill -0`, matching the
-/// lock-file liveness check in `monitor/process.rs`.
-/// @plan:PLAN-20260404-INITIAL-RUNTIME.P09
-#[must_use]
-pub fn is_daemon_alive(pid: u32) -> bool {
-    #[cfg(target_os = "linux")]
-    {
-        Path::new(&format!("/proc/{pid}")).exists()
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        Command::new("kill")
-            .args(["-0", &pid.to_string()])
-            .output()
-            .map(|output| output.status.success())
-            .unwrap_or(false)
-    }
 }
 
 #[cfg(test)]

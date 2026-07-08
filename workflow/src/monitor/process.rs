@@ -2,6 +2,7 @@
 //!
 /// @plan:PLAN-20260404-INITIAL-RUNTIME.P10
 use std::fs;
+use std::io::Write;
 use std::path::Path;
 #[cfg(not(target_os = "linux"))]
 use std::process::Command;
@@ -162,11 +163,22 @@ pub fn acquire_singleton_lock(scope: &str) -> Result<SingletonGuard, MonitorErro
             });
         }
 
-        // Process is dead, we can steal the lock
+        // Process is dead, remove the stale lock before the atomic create below.
+        fs::remove_file(lock_file).map_err(|e| MonitorError::LockError {
+            message: format!("Failed to remove stale lock file: {}", e),
+        })?;
     }
 
-    // Write our PID to lock file
-    fs::write(lock_file, std::process::id().to_string()).map_err(|e| MonitorError::LockError {
+    // Atomically create the lock so another process cannot win between the
+    // stale-lock check above and the write.
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(lock_file)
+        .map_err(|e| MonitorError::LockError {
+            message: format!("Failed to create lock file: {}", e),
+        })?;
+    write!(file, "{}", std::process::id()).map_err(|e| MonitorError::LockError {
         message: format!("Failed to write lock file: {}", e),
     })?;
 

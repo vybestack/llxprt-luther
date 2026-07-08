@@ -287,6 +287,12 @@ fn reconstruct_runner(
     let run_context = run_context_from_metadata(md, run_id);
     let mut instance = WorkflowInstance::create_with_run_id(workflow_type, config, run_id);
     if let Some(step) = md.current_step.as_deref().filter(|step| !step.is_empty()) {
+        if !instance.workflow_type.steps.iter().any(|def| def.step_id == step) {
+            return Err(format!(
+                "run '{run_id}' current_step '{step}' is not present in workflow type '{}'",
+                md.workflow_type_id
+            ));
+        }
         instance.transition_to(step);
     }
     let registry = ExecutorRegistry::with_defaults();

@@ -66,3 +66,26 @@ fn reconstructs_runner_from_non_default_config_dir() {
     assert_eq!(runner.config_id(), "custom-resume-config");
 }
 
+#[test]
+fn reconstruct_runner_rejects_missing_current_step() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let config_root = temp.path().join("custom-config");
+    let db_path = temp.path().join("checkpoints.db");
+    write_config_root(&config_root, "custom-resume-v1", "custom_marker_step");
+    let store = SqliteStore::open(&db_path).expect("open store");
+    let md = seed_run(
+        &store,
+        "missing-step-run",
+        "custom-resume-v1",
+        "removed_marker_step",
+    );
+    let err = match reconstruct_runner(&md, &md.run_id, &db_path, &Some(config_root)) {
+        Ok(_) => panic!("missing persisted step is rejected"),
+        Err(err) => err,
+    };
+    assert!(
+        err.contains("current_step 'removed_marker_step' is not present"),
+        "unexpected error: {err}"
+    );
+}
+

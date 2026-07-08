@@ -342,8 +342,9 @@ fn path_bases_for<'a>(
     match target.parent_path_bases.get(launch_config_id) {
         Some(bases) => Cow::Borrowed(bases),
         None => {
-            eprintln!(
-                "Warning: no daemon path bases found for routed parent config={launch_config_id}; using empty path bases"
+            tracing::warn!(
+                launch_config_id,
+                "no daemon path bases found for routed parent config; using empty path bases"
             );
             Cow::Owned(DaemonPathBases::default())
         }

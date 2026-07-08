@@ -393,6 +393,19 @@ fn two_issues_same_config_get_distinct_run_paths() {
             "work dir ends with run id"
         );
     }
+    for (request, artifact) in launched.iter().zip(artifact_dirs.iter()) {
+        assert!(
+            artifact
+                .to_str()
+                .unwrap()
+                .contains(&format!("issue-{}", request.issue_number)),
+            "artifact dir contains issue segment"
+        );
+        assert!(
+            artifact.to_str().unwrap().ends_with(&request.run_id),
+            "artifact dir ends with run id"
+        );
+    }
 }
 
 #[test]

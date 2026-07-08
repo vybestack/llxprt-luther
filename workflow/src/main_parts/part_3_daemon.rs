@@ -15,7 +15,12 @@ fn acquire_daemon_lock(
         Ok(guard) => Some(guard),
         Err(MonitorError::LockHeld { pid }) => {
             if force {
-                luther_workflow::daemon::terminate_pid(pid);
+                if !luther_workflow::daemon::terminate_pid(pid) {
+                    eprintln!(
+                        "Error: failed to confirm daemon pid {pid} exited before replacing lock for '{config_id}'"
+                    );
+                    return None;
+                }
                 let _ = std::fs::remove_file(&lock_path);
                 match acquire_singleton_lock(&lock_path) {
                     Ok(guard) => Some(guard),
@@ -78,18 +83,17 @@ async fn handle_daemon_run(
     install_interrupt_handlers(shutdown.clone());
 
     let (cfg, discovery) = resolve_config_and_discovery_for(&config_id, config_dir);
-    let mut daemon_failure = None;
-    if discovery.enabled {
-        daemon_failure = if let Some(path) = scheduler_config {
+    let daemon_failure = if discovery.enabled {
+        if let Some(path) = scheduler_config {
             run_daemon_supervisor_loop(store, &mut state, &shutdown, path, config_dir, once).await
         } else {
             let config_root = config_dir.as_deref().unwrap_or(std::path::Path::new("config"));
             let target = discovery_scheduler_target(&config_id, &discovery, &cfg, config_root);
             run_daemon_discovery_loop(store, &mut state, &shutdown, target, once).await
-        };
+        }
     } else {
-        run_daemon_heartbeat_loop(store, &mut state, &shutdown).await;
-    }
+        run_daemon_heartbeat_loop(store, &mut state, &shutdown).await
+    };
 
     if let Some(error) = daemon_failure {
         eprintln!("Error: daemon exiting after failure: {error}");
@@ -97,9 +101,13 @@ async fn handle_daemon_run(
     }
 
     state.set_status(DaemonStatus::Stopping);
-    let _ = store.write(&state);
+    if let Err(e) = store.write(&state) {
+        tracing::warn!(config_id, error = %e, "failed to persist daemon stopping state");
+    }
     state.set_status(DaemonStatus::Stopped);
-    let _ = store.write(&state);
+    if let Err(e) = store.write(&state) {
+        tracing::warn!(config_id, error = %e, "failed to persist daemon stopped state");
+    }
     println!("Daemon stopped (config={config_id}).");
 }
 
@@ -220,6 +228,37 @@ fn daemon_path_bases_from_config(
             .map(std::path::PathBuf::from),
     }
 }
+
+const MAX_HEARTBEAT_WRITE_FAILURES: u32 = 3;
+
+fn write_daemon_heartbeat(
+    store: &DaemonStore,
+    state: &DaemonState,
+    consecutive_failures: &mut u32,
+) -> Option<String> {
+    match store.write(state) {
+        Ok(()) => {
+            *consecutive_failures = 0;
+            None
+        }
+        Err(e) => {
+            *consecutive_failures = consecutive_failures.saturating_add(1);
+            tracing::warn!(
+                config_id = %state.config_id,
+                consecutive_failures = *consecutive_failures,
+                error = %e,
+                "failed to persist daemon heartbeat"
+            );
+            (*consecutive_failures >= MAX_HEARTBEAT_WRITE_FAILURES).then(|| {
+                format!(
+                    "heartbeat persistence failed {} consecutive times for config '{}': {e}",
+                    *consecutive_failures, state.config_id
+                )
+            })
+        }
+    }
+}
+
 fn recover_stale_daemon_leases(
     conn: &rusqlite::Connection,
     stale_timeout: u64,
@@ -235,6 +274,41 @@ fn recover_stale_daemon_leases(
         );
     }
     Ok(())
+}
+
+fn run_supervisor_scheduler_pass(
+    targets: Vec<luther_workflow::daemon::scheduler::SchedulerTarget>,
+) -> Result<luther_workflow::daemon::scheduler::RunSummary, rusqlite::Error> {
+    let conn = open_daemon_db();
+    let queries = targets
+        .iter()
+        .map(|_| SystemGithubIssueQuery::new(SystemGithubCommandRunner))
+        .collect::<Vec<_>>();
+    let query_refs = queries
+        .iter()
+        .map(|query| query as &dyn luther_workflow::adapters::github_issues::GithubIssueQuery)
+        .collect::<Vec<_>>();
+    let launcher = DaemonWorkflowLauncher::new("supervisor".to_string());
+    luther_workflow::daemon::scheduler::run_multi_target_once(
+        &targets,
+        &query_refs,
+        &conn,
+        &launcher,
+    )
+}
+
+fn run_discovery_scheduler_pass(
+    target: luther_workflow::daemon::scheduler::SchedulerTarget,
+) -> Result<luther_workflow::daemon::scheduler::RunSummary, rusqlite::Error> {
+    let conn = open_daemon_db();
+    let query = SystemGithubIssueQuery::new(SystemGithubCommandRunner);
+    let launcher = DaemonWorkflowLauncher::new(target.config_id.clone());
+    luther_workflow::daemon::scheduler::run_multi_target_once(
+        std::slice::from_ref(&target),
+        &[&query as &dyn luther_workflow::adapters::github_issues::GithubIssueQuery],
+        &conn,
+        &launcher,
+    )
 }
 
 async fn run_daemon_supervisor_loop(
@@ -255,33 +329,24 @@ async fn run_daemon_supervisor_loop(
         }
     };
     let targets = scheduler_targets(&scheduler, config_dir);
-    let conn = open_daemon_db();
-    let queries = targets
-        .iter()
-        .map(|_| SystemGithubIssueQuery::new(SystemGithubCommandRunner))
-        .collect::<Vec<_>>();
-    let query_refs = queries
-        .iter()
-        .map(|query| query as &dyn luther_workflow::adapters::github_issues::GithubIssueQuery)
-        .collect::<Vec<_>>();
     let stale_timeout = scheduler
         .poll_interval_seconds
         .unwrap_or(300)
         .saturating_mul(4);
-    if let Err(e) = recover_stale_daemon_leases(&conn, stale_timeout) {
+    let recovery_conn = open_daemon_db();
+    if let Err(e) = recover_stale_daemon_leases(&recovery_conn, stale_timeout) {
         eprintln!("Error: stale lease recovery failed: {e}");
+
         return Some(format!("stale lease recovery failed: {e}"));
     }
-    let launcher = DaemonWorkflowLauncher::new("supervisor".to_string());
     let poll = scheduler.poll_interval_seconds.unwrap_or(300);
+    let mut heartbeat_failures = 0;
     while !shutdown.load(Ordering::SeqCst) {
-        match luther_workflow::daemon::scheduler::run_multi_target_once(
-            &targets,
-            &query_refs,
-            &conn,
-            &launcher,
-        ) {
-            Ok(summary)
+        let scheduler_targets = targets.clone();
+        match tokio::task::spawn_blocking(move || run_supervisor_scheduler_pass(scheduler_targets))
+            .await
+        {
+            Ok(Ok(summary))
                 if summary.launched > 0
                     || summary.resumed > 0
                     || summary.suspended > 0
@@ -296,11 +361,14 @@ async fn run_daemon_supervisor_loop(
                     summary.skipped
                 );
             }
-            Ok(_) => {}
-            Err(e) => eprintln!("scheduler error: {e}"),
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => eprintln!("scheduler error: {e}"),
+            Err(e) => eprintln!("scheduler task failed: {e}"),
         }
         state.touch_heartbeat();
-        let _ = store.write(state);
+        if let Some(error) = write_daemon_heartbeat(store, state, &mut heartbeat_failures) {
+            return Some(error);
+        }
         if once {
             break;
         }
@@ -323,32 +391,29 @@ async fn run_daemon_discovery_loop(
 ) -> Option<String> {
     use std::sync::atomic::Ordering;
 
-    let conn = open_daemon_db();
-    let query = SystemGithubIssueQuery::new(SystemGithubCommandRunner);
-    let launcher = DaemonWorkflowLauncher::new(target.config_id.clone());
     let stale_timeout = target
         .discovery
         .poll_interval_secs
         .unwrap_or(300)
         .saturating_mul(4);
 
-    if let Err(e) = recover_stale_daemon_leases(&conn, stale_timeout) {
+    let recovery_conn = open_daemon_db();
+    if let Err(e) = recover_stale_daemon_leases(&recovery_conn, stale_timeout) {
         eprintln!("Error: stale lease recovery failed: {e}");
         return Some(format!("stale lease recovery failed: {e}"));
     }
 
     let poll = target.discovery.poll_interval_secs.unwrap_or(300);
+    let mut heartbeat_failures = 0;
     loop {
         if shutdown.load(Ordering::SeqCst) {
             break;
         }
-        match luther_workflow::daemon::scheduler::run_multi_target_once(
-            std::slice::from_ref(&target),
-            &[&query as &dyn luther_workflow::adapters::github_issues::GithubIssueQuery],
-            &conn,
-            &launcher,
-        ) {
-            Ok(summary)
+        let scheduler_target = target.clone();
+        match tokio::task::spawn_blocking(move || run_discovery_scheduler_pass(scheduler_target))
+            .await
+        {
+            Ok(Ok(summary))
                 if summary.launched > 0
                     || summary.resumed > 0
                     || summary.suspended > 0
@@ -363,11 +428,14 @@ async fn run_daemon_discovery_loop(
                     summary.skipped
                 );
             }
-            Ok(_) => {}
-            Err(e) => eprintln!("scheduler error: {e}"),
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => eprintln!("scheduler error: {e}"),
+            Err(e) => eprintln!("scheduler task failed: {e}"),
         }
         state.touch_heartbeat();
-        let _ = store.write(state);
+        if let Some(error) = write_daemon_heartbeat(store, state, &mut heartbeat_failures) {
+            return Some(error);
+        }
         if once {
             break;
         }
@@ -401,17 +469,21 @@ async fn run_daemon_heartbeat_loop(
     store: &DaemonStore,
     state: &mut DaemonState,
     shutdown: &std::sync::Arc<std::sync::atomic::AtomicBool>,
-) {
+) -> Option<String> {
     use std::sync::atomic::Ordering;
 
     let mut ticks: u32 = 0;
+    let mut heartbeat_failures = 0;
     while !shutdown.load(Ordering::SeqCst) {
         tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
         ticks += 1;
         if ticks >= 150 {
             ticks = 0;
             state.touch_heartbeat();
-            let _ = store.write(state);
+            if let Some(error) = write_daemon_heartbeat(store, state, &mut heartbeat_failures) {
+                return Some(error);
+            }
         }
     }
+    None
 }
