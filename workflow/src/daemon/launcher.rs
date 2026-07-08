@@ -83,7 +83,7 @@ fn new_run_id() -> String {
 /// Structured daemon base roots used to construct isolated per-run paths.
 ///
 /// Configured `work_dir`/`artifact_dir` values from the resolved
-/// [`WorkflowConfig`] variables are treated as base roots; each daemon-launched
+/// workflow config variables are treated as base roots; each daemon-launched
 /// run gets `base / issue-N / run-id` so concurrent runs for the same config
 /// cannot collide. Bases are optional: a one-shot CLI run has no daemon bases,
 /// so existing engine fallbacks continue to apply.
@@ -501,9 +501,18 @@ mod tests {
     fn lease_running_during_launch() {
         let c = conn();
         let l = MockLauncher::new(WorkflowLaunchResult::CompletedSuccess);
-        let outcome = claim_for_launch(&issue(5), &cfg(2), &c, "cfg", &DaemonPathBases::default())
-            .unwrap()
-            .unwrap();
+        let outcome = claim_for_launch(
+            &issue(5),
+            &cfg(2),
+            &c,
+            "cfg",
+            &DaemonPathBases {
+                work_dir_base: None,
+                artifact_dir_base: None,
+            },
+        )
+        .unwrap()
+        .unwrap();
         let lease = get_lease_for_issue(&c, "o/r", 5).unwrap().unwrap();
         assert_eq!(lease.status, LeaseStatus::Running);
         assert_eq!(

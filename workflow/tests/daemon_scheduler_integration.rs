@@ -360,7 +360,7 @@ fn two_issues_same_config_get_distinct_run_paths() {
         parent_path_bases: BTreeMap::new(),
     };
     let summary = run_multi_target_once(
-        std::slice::from_ref(&target),
+        &[target],
         &[&query as &dyn GithubIssueQuery],
         &conn,
         &launcher,

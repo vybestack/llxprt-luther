@@ -55,7 +55,7 @@ impl StepExecutor for LlxprtExecutor {
 /// Mirrors the `*WithRunner` dependency-injection idiom used elsewhere in this
 /// crate (e.g. `GithubPrChecksExecutorWithRunner`). The production
 /// [`LlxprtExecutor`] is a thin wrapper that delegates to the same
-/// [`execute_llxprt`] free function with a [`GitChangedPathDetector`].
+/// change-detection execution path with a [`GitChangedPathDetector`].
 pub struct LlxprtExecutorWithDetector<D> {
     detector: D,
 }

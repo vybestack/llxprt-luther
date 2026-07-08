@@ -657,15 +657,14 @@ fn load_heartbeat_runs<'a>(
     };
     let mut runs = std::collections::BTreeMap::new();
     for run_id in run_ids {
-        if runs.contains_key(run_id) {
-            continue;
-        }
-        match store.get_run(run_id) {
-            Ok(Some(md)) => {
-                runs.insert(run_id.to_string(), md);
+        if let std::collections::btree_map::Entry::Vacant(entry) = runs.entry(run_id.to_string()) {
+            match store.get_run(run_id) {
+                Ok(Some(md)) => {
+                    entry.insert(md);
+                }
+                Ok(None) => {}
+                Err(err) => eprintln!("Warning: failed to load run '{run_id}' for process view: {err}"),
             }
-            Ok(None) => {}
-            Err(err) => eprintln!("Warning: failed to load run '{run_id}' for process view: {err}"),
         }
     }
     runs
