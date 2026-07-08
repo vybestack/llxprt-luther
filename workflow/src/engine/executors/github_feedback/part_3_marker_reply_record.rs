@@ -232,34 +232,44 @@ fn graphql_error_summary(parsed: &Value) -> String {
 fn graphql_error_messages(errors: &[Value]) -> String {
     const MAX_GRAPHQL_ERROR_SUMMARY_CHARS: usize = 500;
     const GRAPHQL_ERROR_SEPARATOR: &str = "; ";
+    let separator_len = GRAPHQL_ERROR_SEPARATOR.chars().count();
     let mut summary = String::new();
+    let mut summary_len = 0;
     for message in errors
         .iter()
         .filter_map(|error| error.get("message").and_then(Value::as_str))
         .filter(|message| !message.is_empty())
     {
         if !summary.is_empty() {
-            let remaining = MAX_GRAPHQL_ERROR_SUMMARY_CHARS.saturating_sub(summary.chars().count());
-            if remaining <= GRAPHQL_ERROR_SEPARATOR.chars().count() {
+            let remaining = MAX_GRAPHQL_ERROR_SUMMARY_CHARS.saturating_sub(summary_len);
+            if remaining <= separator_len {
                 break;
             }
-            append_truncated(
-                &mut summary,
-                GRAPHQL_ERROR_SEPARATOR,
-                MAX_GRAPHQL_ERROR_SUMMARY_CHARS,
-            );
+            summary.push_str(GRAPHQL_ERROR_SEPARATOR);
+            summary_len += separator_len;
         }
-        append_truncated(&mut summary, message, MAX_GRAPHQL_ERROR_SUMMARY_CHARS);
-        if summary.chars().count() >= MAX_GRAPHQL_ERROR_SUMMARY_CHARS {
+        summary_len += append_truncated(&mut summary, message, summary_len, MAX_GRAPHQL_ERROR_SUMMARY_CHARS);
+        if summary_len >= MAX_GRAPHQL_ERROR_SUMMARY_CHARS {
             break;
         }
     }
     summary
 }
 
-fn append_truncated(target: &mut String, value: &str, max_chars: usize) {
-    let remaining = max_chars.saturating_sub(target.chars().count());
-    target.extend(value.chars().take(remaining));
+fn append_truncated(
+    target: &mut String,
+    value: &str,
+    current_chars: usize,
+    max_chars: usize,
+) -> usize {
+    let remaining = max_chars.saturating_sub(current_chars);
+    let take = value
+        .char_indices()
+        .nth(remaining)
+        .map_or(value.len(), |(idx, _)| idx);
+    let truncated = &value[..take];
+    target.push_str(truncated);
+    truncated.chars().count()
 }
 
 fn graphql_parse_error_summary(parsed: &Value) -> Option<String> {
@@ -309,21 +319,18 @@ fn rest_reply_error_message(parsed: &Value) -> Option<&str> {
 
 fn truncated_raw_response_preview(response: &str) -> String {
     const MAX_RAW_RESPONSE_PREVIEW_CHARS: usize = 500;
-    let chars: Vec<char> = response
-        .chars()
-        .take(MAX_RAW_RESPONSE_PREVIEW_CHARS + 1)
-        .collect();
-    let truncated = chars.len() > MAX_RAW_RESPONSE_PREVIEW_CHARS;
-    let mut preview: String = chars
-        .into_iter()
-        .take(MAX_RAW_RESPONSE_PREVIEW_CHARS)
-        .collect();
-    if truncated {
-        preview.push_str("...[truncated]");
-    }
+    let Some((end, _)) = response.char_indices().nth(MAX_RAW_RESPONSE_PREVIEW_CHARS) else {
+        return response.to_string();
+    };
+    let mut preview = response[..end].to_string();
+    preview.push_str("...[truncated]");
     preview
 }
 
 fn is_rest_error_response(parsed: &Value) -> bool {
     parsed.get("documentation_url").is_some()
+        || parsed
+            .get("errors")
+            .and_then(Value::as_array)
+            .is_some_and(|errors| !errors.is_empty())
 }

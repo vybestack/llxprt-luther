@@ -488,16 +488,19 @@ pub fn commit_continuation(
             tx.commit()?;
             Ok(metadata)
         }
-        Err(err) => {
-            if let Err(rollback_err) = tx.rollback() {
+        Err(err) => match tx.rollback() {
+            Ok(()) => Err(err),
+            Err(rollback_err) => {
                 tracing::warn!(
                     error = %err,
                     rollback_error = %rollback_err,
                     "rollback failed after continuation commit error"
                 );
+                Err(ContinuationError::Persistence(format!(
+                    "rollback failed after continuation commit error: original={err}; rollback={rollback_err}"
+                )))
             }
-            Err(err)
-        }
+        },
     }
 }
 
