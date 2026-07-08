@@ -482,6 +482,7 @@ pub fn commit_continuation(
     request: &ContinuationRequest,
     step_id: &str,
 ) -> Result<RunMetadata, ContinuationError> {
+    // `conn` is intentionally not reused until `tx` commits or rolls back.
     let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
     match commit_continuation_in_transaction(&tx, request, step_id) {
         Ok(metadata) => {
