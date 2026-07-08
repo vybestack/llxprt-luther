@@ -1,3 +1,19 @@
+/// Open the run registry, exiting with a clear error when it is absent.
+/// @plan:PLAN-20260623-LUTHER-CONTINUATION
+fn require_runs_store(run_id: &str) -> SqliteStore {
+    match open_runs_store() {
+        Ok(Some(store)) => store,
+        Ok(None) => {
+            eprintln!("Error: run '{run_id}' not found (no run registry)");
+            process::exit(1);
+        }
+        Err(e) => {
+            eprintln!("Error: {e}");
+            process::exit(1);
+        }
+    }
+}
+
 /// Load a run record from the store, exiting cleanly when absent.
 /// @plan:PLAN-20260623-LUTHER-CONTINUATION
 fn load_run_or_exit(store: &SqliteStore, run_id: &str) -> RunMetadata {
