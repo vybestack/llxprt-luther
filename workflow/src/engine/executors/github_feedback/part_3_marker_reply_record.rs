@@ -148,7 +148,7 @@ fn marker_reply_record(input: MarkerReplyRecordInput<'_>) -> Value {
         "in_reply_to_id": input.in_reply_to_id,
         "body_hash": stable_hash(input.body),
         "body_path": input.body_path.display().to_string(),
-        "action_id": input.action.value.get("action_id").cloned().unwrap_or(Value::Null),
+        "action_id": marker_action_id(input.action),
         "warnings": input.warnings,
         "source": delivery_status.source(),
         "github_delivery_status": delivery_status.as_str(),
@@ -176,7 +176,6 @@ fn marker_reply_delivery_status(input: &MarkerReplyRecordInput<'_>) -> DeliveryS
 
 fn marker_reply_warnings_include_unknown_delivery(warnings: &Value) -> bool {
     let Some(warnings) = warnings.as_array() else {
-        debug_assert!(warnings.is_array(), "warnings should be a JSON array, got: {warnings}");
         tracing::warn!("warnings should be a JSON array, got: {warnings}");
         return true;
     };
@@ -232,13 +231,23 @@ fn graphql_error_summary(parsed: &Value) -> String {
 
 fn graphql_error_messages(errors: &[Value]) -> String {
     const MAX_GRAPHQL_ERROR_SUMMARY_CHARS: usize = 500;
+    const GRAPHQL_ERROR_SEPARATOR: &str = "; ";
     let mut summary = String::new();
     for message in errors
         .iter()
         .filter_map(|error| error.get("message").and_then(Value::as_str))
+        .filter(|message| !message.is_empty())
     {
         if !summary.is_empty() {
-            append_truncated(&mut summary, "; ", MAX_GRAPHQL_ERROR_SUMMARY_CHARS);
+            let remaining = MAX_GRAPHQL_ERROR_SUMMARY_CHARS.saturating_sub(summary.chars().count());
+            if remaining <= GRAPHQL_ERROR_SEPARATOR.chars().count() {
+                break;
+            }
+            append_truncated(
+                &mut summary,
+                GRAPHQL_ERROR_SEPARATOR,
+                MAX_GRAPHQL_ERROR_SUMMARY_CHARS,
+            );
         }
         append_truncated(&mut summary, message, MAX_GRAPHQL_ERROR_SUMMARY_CHARS);
         if summary.chars().count() >= MAX_GRAPHQL_ERROR_SUMMARY_CHARS {
@@ -300,7 +309,19 @@ fn rest_reply_error_message(parsed: &Value) -> Option<&str> {
 
 fn truncated_raw_response_preview(response: &str) -> String {
     const MAX_RAW_RESPONSE_PREVIEW_CHARS: usize = 500;
-    response.chars().take(MAX_RAW_RESPONSE_PREVIEW_CHARS).collect()
+    let chars: Vec<char> = response
+        .chars()
+        .take(MAX_RAW_RESPONSE_PREVIEW_CHARS + 1)
+        .collect();
+    let truncated = chars.len() > MAX_RAW_RESPONSE_PREVIEW_CHARS;
+    let mut preview: String = chars
+        .into_iter()
+        .take(MAX_RAW_RESPONSE_PREVIEW_CHARS)
+        .collect();
+    if truncated {
+        preview.push_str("...[truncated]");
+    }
+    preview
 }
 
 fn is_rest_error_response(parsed: &Value) -> bool {

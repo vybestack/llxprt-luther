@@ -296,15 +296,31 @@ fn marker_action_claims_review_thread_identity(action: &PendingMarkerAction) -> 
 }
 
 fn raw_thread_id_declares_review_thread_identity(value: &Value) -> bool {
-    direct_review_thread_id(value).is_some()
+    [
+        "/thread_id",
+        "/evidence/thread_id",
+        "/original_feedback_identity/thread_id",
+    ]
+    .into_iter()
+    .filter_map(|path| value.pointer(path).and_then(Value::as_str))
+    .any(|thread_id| {
+        thread_id
+            .trim()
+            .starts_with(REVIEW_THREAD_NODE_ID_PREFIX)
+    })
 }
 
 fn raw_stable_marker_declares_review_thread_identity(stable_marker_key: &str) -> bool {
-    parse_review_thread_id_from_stable_marker_key(stable_marker_key).is_some()
+    stable_marker_key
+        .trim()
+        .starts_with(STABLE_MARKER_THREAD_PREFIX)
 }
 
 fn raw_graphql_item_declares_review_thread_identity(item_id: &str) -> bool {
-    parse_review_thread_id_from_graphql_item_id(item_id).is_some()
+    item_id
+        .trim()
+        .strip_prefix(GRAPHQL_NODE_ID_PREFIX)
+        .is_some_and(|suffix| suffix.starts_with(REVIEW_THREAD_NODE_ID_PREFIX))
 }
 
 fn post_marker_reply_via_rest_review_comment(

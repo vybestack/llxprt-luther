@@ -8796,9 +8796,72 @@ fn marker_blocks_all_github_calls_when_response_text_missing() {
     );
 }
 
+/// Malformed review-thread-like identities must fail validation rather than
+/// silently falling back to a top-level PR comment.
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P15
-/// @requirement:REQ-PRFU-015,REQ-PRFU-016,REQ-PRFU-017,REQ-PRFU-026
+/// @requirement:REQ-PRFU-015,REQ-PRFU-017,REQ-PRFU-026
 /// @pseudocode lines 41-49
+#[test]
+fn marker_blocks_malformed_review_thread_identity_before_mutation() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_p15_validated_fixed_pending(&temp);
+    let path = p11_current_artifact_path(&temp, "pending-feedback-marker-actions");
+    let mut pending = read_json(&path);
+    let action = pending["pending_actions"][0]
+        .as_object_mut()
+        .expect("pending action object");
+    action.insert(
+        "stable_marker_key".to_string(),
+        serde_json::json!("thread:"),
+    );
+    action.insert("item_id".to_string(), serde_json::json!("graphql:PRRT_"));
+    action.insert(
+        "original_feedback_identity".to_string(),
+        serde_json::json!({
+            "item_id": "graphql:PRRT_",
+            "stable_marker_key": "thread:",
+            "body_hash": "hash-valid",
+            "source_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }),
+    );
+    action.remove("thread_id");
+    action.remove("comment_database_id");
+    std::fs::write(
+        &path,
+        serde_json::to_vec_pretty(&pending).expect("pending malformed thread identity"),
+    )
+    .expect("write malformed thread identity");
+
+    let runner = P15MarkerRunner::default();
+    let mut context = p11_context(&temp);
+    let outcome = GithubFeedbackMarkerExecutorWithRunner::new(runner.clone(), FixedClock)
+        .execute(&mut context, &p11_params(&temp))
+        .expect("marker pre-mutation validation");
+    assert_expected_outcome(
+        outcome,
+        StepOutcome::Fatal,
+        "malformed review-thread identity must fail before any GitHub side effect",
+    );
+    assert!(
+        runner.calls().is_empty(),
+        "no GitHub command may run when review-thread identity is malformed: {:?}",
+        runner.calls()
+    );
+    let report = read_json(&p11_current_artifact_path(
+        &temp,
+        "pr-feedback-marker-report",
+    ));
+    let report_text = report.to_string();
+    assert!(
+        report_text.contains("resolution_required_without_thread_id"),
+        "validation artifact must name the missing thread-id violation: {report}"
+    );
+    assert!(
+        report_text.contains("review_thread_identity_without_reply_target"),
+        "validation artifact must name the missing reply target violation: {report}"
+    );
+}
+
 #[test]
 fn marker_rejects_fixed_action_without_validator_success_evidence() {
     let temp = tempfile::tempdir().expect("tempdir");
