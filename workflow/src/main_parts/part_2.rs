@@ -739,7 +739,7 @@ fn print_queue_json(conn: &rusqlite::Connection, leases: &[IssueLease]) {
         .iter()
         .map(|l| {
             let wait = l.run_id.as_deref().and_then(|run_id| waits.get(run_id));
-            let metadata = l.run_id.as_deref().and_then(|run_id| metadata.get(run_id));
+            let run_metadata = l.run_id.as_deref().and_then(|run_id| metadata.get(run_id));
             serde_json::json!({
                 "issue_repo": l.issue_repo,
                 "issue_number": l.issue_number,
@@ -748,8 +748,8 @@ fn print_queue_json(conn: &rusqlite::Connection, leases: &[IssueLease]) {
                 "status": l.status.to_string(),
                 "active_slot_used": l.status.is_active(),
                 "wait": wait,
-                "workspace_path": metadata.as_ref().and_then(|md| md.workspace_path.clone()),
-                "artifact_root": metadata.as_ref().and_then(|md| md.artifact_root.clone()),
+                "workspace_path": run_metadata.as_ref().and_then(|md| md.workspace_path.clone()),
+                "artifact_root": run_metadata.as_ref().and_then(|md| md.artifact_root.clone()),
             })
         })
         .collect();
@@ -797,8 +797,11 @@ fn print_queue_text(conn: &rusqlite::Connection, leases: &[IssueLease]) {
                 .and_then(|run_id| waits.get(run_id))
                 .map(|w| format!(" wait={}", format_wait_summary(w)))
                 .unwrap_or_default();
-            let metadata = lease.run_id.as_deref().and_then(|run_id| metadata.get(run_id));
-            let paths = metadata
+            let run_metadata = lease
+                .run_id
+                .as_deref()
+                .and_then(|run_id| metadata.get(run_id));
+            let paths = run_metadata
                 .map(|md| {
                     let workspace = md.workspace_path.as_deref().unwrap_or("(none)");
                     let artifact = md.artifact_root.as_deref().unwrap_or("(none)");

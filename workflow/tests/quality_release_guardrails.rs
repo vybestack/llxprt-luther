@@ -798,14 +798,19 @@ fn test_ocr_pr_review_concurrency_cancels_duplicates() {
         content.contains("cancel-in-progress: true"),
         "Concurrency must cancel in-progress duplicate runs"
     );
-    // Group must be keyed by PR/issue number for per-PR cancellation.
-    let concurrency_block = yaml_block_after(&content, "concurrency:");
     assert!(
-        concurrency_block.contains("github.event.pull_request.number")
-            && concurrency_block.contains("github.event.issue.number")
-            && concurrency_block.contains("inputs.pr_number"),
-        "Concurrency group must key on the PR/issue number for automatic, comment, and manual runs"
+        content.contains("group: ${{ needs.gate.outputs.group_key }}"),
+        "Code review concurrency group must reuse the centralized gate output"
     );
+    assert!(
+        content.contains("const prNumber = context.payload.pull_request && context.payload.pull_request.number")
+            && content.contains("const issueNumber = context.payload.issue && context.payload.issue.number")
+            && content.contains("const dispatchNumber = context.payload.inputs && context.payload.inputs.pr_number")
+            && content.contains("const groupNumber = prNumber || issueNumber || dispatchNumber")
+            && content.contains("shouldRun ? `ocr-pr-review-${groupNumber}` : `ocr-pr-review-skip-${context.runId}`"),
+        "Centralized gate must key runnable automatic, comment, and manual runs by PR/issue number while isolating skipped comment runs"
+    );
+    let concurrency_block = yaml_block_after(&content, "concurrency:");
     assert!(
         !concurrency_block.contains("github.ref"),
         "Concurrency must not fall back to github.ref for PR review runs"
@@ -1062,27 +1067,23 @@ fn test_ocr_pr_review_manual_triggers_are_gated() {
         "Workflow must support manual dispatch"
     );
     assert!(
-        content.contains("github.event.issue.pull_request != null"),
+        content.contains("Boolean(context.payload.issue && context.payload.issue.pull_request)"),
         "Comment trigger must only run on PR-linked comments"
     );
     for command in ["/ocr", "/open-code-review"] {
         assert!(
-            content.contains(&format!("github.event.comment.body == '{command}'")),
+            content.contains(&format!("'{command}'")),
             "Comment trigger must support standalone {command} comments"
         );
-        assert!(
-            content.contains(&format!(
-                "startsWith(github.event.comment.body, '{command} ')"
-            )) && content.contains(&format!(
-                "startsWith(toJSON(github.event.comment.body), '\"{command}\\n')"
-            )) && content.contains(&format!(
-                "startsWith(toJSON(github.event.comment.body), '\"{command}\\r\\n')"
-            )) && content.contains(&format!(
-                "startsWith(toJSON(github.event.comment.body), '\"{command}\\t')"
-            )),
-            "Comment trigger must support {command} followed by a space, LF, CRLF, or tab"
-        );
     }
+    assert!(
+        content.contains("body === command")
+            && content.contains("body.startsWith(`${command} `)")
+            && content.contains("body.startsWith(`${command}\\n`)")
+            && content.contains("body.startsWith(`${command}\\r\\n`)")
+            && content.contains("body.startsWith(`${command}\\t`)"),
+        "Comment trigger must support each command followed by a space, LF, CRLF, or tab"
+    );
     let trigger_guard = content
         .split("jobs:")
         .next()
@@ -1091,14 +1092,13 @@ fn test_ocr_pr_review_manual_triggers_are_gated() {
         !trigger_guard.contains('\u{000C}') && !trigger_guard.contains('\u{000B}'),
         "Comment trigger must only match documented space, LF, CRLF, and tab separators"
     );
-    for association in ["OWNER", "MEMBER", "COLLABORATOR"] {
-        assert!(
-            content.contains(&format!(
-                "github.event.comment.author_association == '{association}'"
-            )),
-            "Comment trigger must allow trusted association {association}"
-        );
-    }
+    assert!(
+        content
+            .contains("const trustedAssociations = new Set(['OWNER', 'MEMBER', 'COLLABORATOR'])")
+            && content
+                .contains("context.payload.comment && context.payload.comment.author_association"),
+        "Comment trigger must allow trusted owner, member, and collaborator associations"
+    );
     assert!(
         content.contains("pr_number:"),
         "workflow_dispatch must require a pr_number input"
