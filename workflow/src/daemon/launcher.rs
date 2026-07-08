@@ -10,6 +10,8 @@
 //! @plan:PLAN-20260415-DAEMON-DISCOVERY.P06
 //! @requirement:REQ-DAEMON-DISCOVERY-005,REQ-DAEMON-DISCOVERY-006
 
+use std::path::PathBuf;
+
 use rusqlite::Connection;
 
 use crate::adapters::github_issues::GithubIssue;
@@ -48,6 +50,12 @@ pub struct LaunchRequest {
     pub run_id: String,
     pub repo: String,
     pub issue_number: u64,
+    /// Resolved per-run work directory (`base/issue-N/run-id`), or `None` when
+    /// no daemon path base is available (one-shot CLI runs).
+    pub work_dir: Option<PathBuf>,
+    /// Resolved per-run artifact directory (`base/issue-N/run-id`), or `None`
+    /// when no daemon path base is available.
+    pub artifact_dir: Option<PathBuf>,
 }
 
 /// Seam for executing a workflow run for a claimed issue.
@@ -72,6 +80,51 @@ fn new_run_id() -> String {
     format!("run-{}", uuid::Uuid::new_v4())
 }
 
+/// Structured daemon base roots used to construct isolated per-run paths.
+///
+/// Configured `work_dir`/`artifact_dir` values from the resolved
+/// [`WorkflowConfig`] variables are treated as base roots; each daemon-launched
+/// run gets `base / issue-N / run-id` so concurrent runs for the same config
+/// cannot collide. Bases are optional: a one-shot CLI run has no daemon bases,
+/// so existing engine fallbacks continue to apply.
+/// @plan:issue-117
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DaemonPathBases {
+    pub work_dir_base: Option<PathBuf>,
+    pub artifact_dir_base: Option<PathBuf>,
+}
+
+impl DaemonPathBases {
+    /// Build the per-run work and artifact directories for an issue + run id.
+    ///
+    /// Returns `None` for a directory when its base is absent. Paths are
+    /// constructed with [`PathBuf::join`] (no string concatenation) using the
+    /// generated internal `run_id` component, not user-provided shell text.
+    /// @plan:issue-117
+    #[must_use]
+    pub fn per_run_paths(&self, issue_number: u64, run_id: &str) -> PerRunPaths {
+        let issue_segment = format!("issue-{issue_number}");
+        PerRunPaths {
+            work_dir: self
+                .work_dir_base
+                .as_ref()
+                .map(|base| base.join(&issue_segment).join(run_id)),
+            artifact_dir: self
+                .artifact_dir_base
+                .as_ref()
+                .map(|base| base.join(&issue_segment).join(run_id)),
+        }
+    }
+}
+
+/// Resolved per-run work/artifact directories for a single daemon launch.
+/// @plan:issue-117
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PerRunPaths {
+    pub work_dir: Option<PathBuf>,
+    pub artifact_dir: Option<PathBuf>,
+}
+
 pub struct ClaimedLaunch {
     pub lease_id: String,
     pub request: LaunchRequest,
@@ -82,6 +135,7 @@ pub fn claim_for_launch(
     cfg: &DiscoveryConfig,
     conn: &Connection,
     config_id: &str,
+    bases: &DaemonPathBases,
 ) -> Result<Result<ClaimedLaunch, SkipReason>, rusqlite::Error> {
     let repo = cfg.repo.clone().unwrap_or_default();
     let lease = match try_claim(conn, &repo, issue.number, config_id)? {
@@ -101,6 +155,7 @@ pub fn claim_for_launch(
 
     let run_id = new_run_id();
     update_lease_status(conn, &lease.lease_id, LeaseStatus::Running, Some(&run_id))?;
+    let paths = bases.per_run_paths(issue.number, &run_id);
     Ok(Ok(ClaimedLaunch {
         lease_id: lease.lease_id,
         request: LaunchRequest {
@@ -109,6 +164,8 @@ pub fn claim_for_launch(
             run_id,
             repo,
             issue_number: issue.number,
+            work_dir: paths.work_dir,
+            artifact_dir: paths.artifact_dir,
         },
     }))
 }
@@ -166,8 +223,9 @@ pub fn claim_and_launch(
     conn: &Connection,
     launcher: &dyn WorkflowLauncher,
     config_id: &str,
+    bases: &DaemonPathBases,
 ) -> Result<LaunchOutcome, rusqlite::Error> {
-    let claimed = match claim_for_launch(issue, cfg, conn, config_id)? {
+    let claimed = match claim_for_launch(issue, cfg, conn, config_id, bases)? {
         Ok(claimed) => claimed,
         Err(reason) => return Ok(LaunchOutcome::Skipped(reason)),
     };
@@ -196,6 +254,10 @@ pub fn prepare_resume_lease(
             run_id,
             repo: lease.issue_repo.clone(),
             issue_number: lease.issue_number,
+            // Resumes reuse persisted RunMetadata paths; do not synthesize new
+            // per-run paths for a resumed run. @plan:issue-117
+            work_dir: None,
+            artifact_dir: None,
         },
     }))
 }
@@ -299,7 +361,15 @@ mod tests {
     fn launch_wins_claim_and_completes() {
         let c = conn();
         let l = MockLauncher::new(WorkflowLaunchResult::CompletedSuccess);
-        let outcome = claim_and_launch(&issue(1), &cfg(2), &c, &l, "cfg").unwrap();
+        let outcome = claim_and_launch(
+            &issue(1),
+            &cfg(2),
+            &c,
+            &l,
+            "cfg",
+            &DaemonPathBases::default(),
+        )
+        .unwrap();
         match outcome {
             LaunchOutcome::Launched { success, .. } => assert!(success),
             other => panic!("unexpected: {other:?}"),
@@ -316,10 +386,26 @@ mod tests {
         let c = conn();
         let l = MockLauncher::new(WorkflowLaunchResult::CompletedSuccess);
         // First wins and completes (lease no longer active).
-        claim_and_launch(&issue(1), &cfg(2), &c, &l, "cfg").unwrap();
+        claim_and_launch(
+            &issue(1),
+            &cfg(2),
+            &c,
+            &l,
+            "cfg",
+            &DaemonPathBases::default(),
+        )
+        .unwrap();
         // Pre-existing active claim from another config blocks relaunch.
         try_claim(&c, "o/r", 2, "other").unwrap();
-        let outcome = claim_and_launch(&issue(2), &cfg(2), &c, &l, "cfg").unwrap();
+        let outcome = claim_and_launch(
+            &issue(2),
+            &cfg(2),
+            &c,
+            &l,
+            "cfg",
+            &DaemonPathBases::default(),
+        )
+        .unwrap();
         assert_eq!(outcome, LaunchOutcome::Skipped(SkipReason::HasActiveLease));
     }
 
@@ -327,7 +413,15 @@ mod tests {
     fn failed_run_marks_lease_failed() {
         let c = conn();
         let l = MockLauncher::new(WorkflowLaunchResult::CompletedFailure);
-        let outcome = claim_and_launch(&issue(3), &cfg(2), &c, &l, "cfg").unwrap();
+        let outcome = claim_and_launch(
+            &issue(3),
+            &cfg(2),
+            &c,
+            &l,
+            "cfg",
+            &DaemonPathBases::default(),
+        )
+        .unwrap();
         match outcome {
             LaunchOutcome::Launched { success, .. } => assert!(!success),
             other => panic!("unexpected: {other:?}"),
@@ -340,7 +434,15 @@ mod tests {
     fn suspended_run_marks_lease_waiting_external() {
         let c = conn();
         let l = MockLauncher::new(WorkflowLaunchResult::SuspendedExternalWait);
-        let outcome = claim_and_launch(&issue(5), &cfg(2), &c, &l, "cfg").unwrap();
+        let outcome = claim_and_launch(
+            &issue(5),
+            &cfg(2),
+            &c,
+            &l,
+            "cfg",
+            &DaemonPathBases::default(),
+        )
+        .unwrap();
         let run_id = match outcome {
             LaunchOutcome::WaitingExternal { run_id } => run_id,
             other => panic!("unexpected: {other:?}"),
@@ -359,7 +461,15 @@ mod tests {
         let pre = try_claim(&c, "o/r", 100, "cfg").unwrap().unwrap();
         update_lease_status(&c, &pre.lease_id, LeaseStatus::Running, Some("r0")).unwrap();
         // max=1 => claiming a new issue over-claims and must be released.
-        let outcome = claim_and_launch(&issue(4), &cfg(1), &c, &l, "cfg").unwrap();
+        let outcome = claim_and_launch(
+            &issue(4),
+            &cfg(1),
+            &c,
+            &l,
+            "cfg",
+            &DaemonPathBases::default(),
+        )
+        .unwrap();
         assert_eq!(
             outcome,
             LaunchOutcome::Skipped(SkipReason::ConcurrencyLimitReached)
@@ -373,7 +483,7 @@ mod tests {
     fn lease_running_during_launch() {
         let c = conn();
         let l = MockLauncher::new(WorkflowLaunchResult::CompletedSuccess);
-        let outcome = claim_for_launch(&issue(5), &cfg(2), &c, "cfg")
+        let outcome = claim_for_launch(&issue(5), &cfg(2), &c, "cfg", &DaemonPathBases::default())
             .unwrap()
             .unwrap();
         let lease = get_lease_for_issue(&c, "o/r", 5).unwrap().unwrap();
@@ -389,5 +499,56 @@ mod tests {
             l.launch(&outcome.request),
         )
         .unwrap();
+    }
+
+    #[test]
+    fn per_run_paths_isolate_concurrent_issues() {
+        let bases = DaemonPathBases {
+            work_dir_base: Some(std::path::PathBuf::from(
+                "/tmp/luther-workspaces/llxprt-luther",
+            )),
+            artifact_dir_base: Some(std::path::PathBuf::from(
+                "/tmp/luther-artifacts/llxprt-luther",
+            )),
+        };
+        let paths_109 = bases.per_run_paths(109, "run-aaa");
+        let paths_110 = bases.per_run_paths(110, "run-bbb");
+        assert_ne!(paths_109.work_dir, paths_110.work_dir);
+        assert_ne!(paths_109.artifact_dir, paths_110.artifact_dir);
+        assert_eq!(
+            paths_109.work_dir.as_deref().unwrap().to_str().unwrap(),
+            "/tmp/luther-workspaces/llxprt-luther/issue-109/run-aaa"
+        );
+        assert_eq!(
+            paths_109.artifact_dir.as_deref().unwrap().to_str().unwrap(),
+            "/tmp/luther-artifacts/llxprt-luther/issue-109/run-aaa"
+        );
+    }
+
+    #[test]
+    fn claim_for_launch_attaches_generated_run_id_paths() {
+        let c = conn();
+        let bases = DaemonPathBases {
+            work_dir_base: Some(std::path::PathBuf::from(
+                "/tmp/luther-workspaces/llxprt-luther",
+            )),
+            artifact_dir_base: Some(std::path::PathBuf::from(
+                "/tmp/luther-artifacts/llxprt-luther",
+            )),
+        };
+        let claimed = claim_for_launch(&issue(7), &cfg(2), &c, "cfg", &bases)
+            .unwrap()
+            .unwrap();
+        let work = claimed.request.work_dir.as_deref().unwrap();
+        let artifact = claimed.request.artifact_dir.as_deref().unwrap();
+        // The run-id path component matches the generated internal run_id.
+        assert!(work.to_str().unwrap().ends_with(&claimed.request.run_id));
+        assert!(artifact
+            .to_str()
+            .unwrap()
+            .ends_with(&claimed.request.run_id));
+        // And contains the issue segment.
+        assert!(work.to_str().unwrap().contains("issue-7"));
+        assert!(artifact.to_str().unwrap().contains("issue-7"));
     }
 }

@@ -19,8 +19,8 @@ use rusqlite::Connection;
 use crate::adapters::github_issues::GithubIssueQuery;
 use crate::daemon::discovery::discover;
 use crate::daemon::launcher::{
-    claim_for_launch, finish_lease_after_result, prepare_resume_lease, LaunchOutcome,
-    LaunchRequest, WorkflowLauncher,
+    claim_for_launch, finish_lease_after_result, prepare_resume_lease, DaemonPathBases,
+    LaunchOutcome, LaunchRequest, WorkflowLauncher,
 };
 use crate::daemon::poller::{apply_poll_decision, ExternalWaitPoller, SystemExternalWaitPoller};
 use crate::persistence::leases::{
@@ -48,6 +48,24 @@ pub struct RunSummary {
 pub struct SchedulerTarget {
     pub config_id: String,
     pub discovery: DiscoveryConfig,
+    /// Resolved daemon base roots for this target's launch config, used to
+    /// construct isolated per-run work/artifact directories. @plan:issue-117
+    pub path_bases: DaemonPathBases,
+    /// Parent-routed base roots keyed by config id, used when a routed parent
+    /// issue launches under a parent config id. @plan:issue-117
+    pub parent_path_bases: BTreeMap<String, DaemonPathBases>,
+}
+
+impl SchedulerTarget {
+    #[must_use]
+    pub fn new(config_id: String, discovery: DiscoveryConfig) -> Self {
+        Self {
+            config_id,
+            discovery,
+            path_bases: DaemonPathBases::default(),
+            parent_path_bases: BTreeMap::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -90,10 +108,7 @@ pub fn run_once_with_poller(
     poller: &dyn ExternalWaitPoller,
     config_id: &str,
 ) -> Result<RunSummary, rusqlite::Error> {
-    let target = SchedulerTarget {
-        config_id: config_id.to_string(),
-        discovery: cfg.clone(),
-    };
+    let target = SchedulerTarget::new(config_id.to_string(), cfg.clone());
     run_multi_target_once_with_poller(&[target], &[q], conn, launcher, poller)
 }
 
@@ -265,7 +280,13 @@ fn collect_launch_units(
                 summary.skipped += 1;
                 continue;
             }
-            match claim_for_launch(&routed.issue, &launch_discovery, conn, launch_config_id) {
+            match claim_for_launch(
+                &routed.issue,
+                &launch_discovery,
+                conn,
+                launch_config_id,
+                path_bases_for(target, launch_config_id),
+            ) {
                 Ok(Ok(mut claimed)) => {
                     claimed.request.workflow_type_id = routed.workflow_type_id.clone();
                     units.push(DispatchUnit {
@@ -301,6 +322,22 @@ fn launch_discovery_for<'a>(
         return Ok(Cow::Borrowed(discovery));
     }
     parent_capacity_discovery(&target.discovery, limits).map(Cow::Owned)
+}
+
+/// Select the daemon path bases for a routed launch.
+///
+/// When the launch config id matches the target's own config, use the target's
+/// own bases. When the launch config id is a parent config, use the
+/// parent-routed bases registered for that parent config id, falling back to
+/// empty bases (engine fallbacks apply). @plan:issue-117
+fn path_bases_for<'a>(target: &'a SchedulerTarget, launch_config_id: &str) -> &'a DaemonPathBases {
+    if launch_config_id == target.config_id {
+        return &target.path_bases;
+    }
+    target
+        .parent_path_bases
+        .get(launch_config_id)
+        .unwrap_or(&target.path_bases)
 }
 
 fn parent_launch_discoveries(
@@ -732,25 +769,25 @@ mod tests {
     fn multi_target_respects_global_and_repository_limits() {
         let c = conn();
         let targets = vec![
-            SchedulerTarget {
-                config_id: "cfg-a".to_string(),
-                discovery: DiscoveryConfig {
+            SchedulerTarget::new(
+                "cfg-a".to_string(),
+                DiscoveryConfig {
                     max_concurrent_active_runs: Some(2),
                     max_concurrent_runs_per_repository: Some(1),
                     max_concurrent_runs: Some(2),
                     ..cfg(2)
                 },
-            },
-            SchedulerTarget {
-                config_id: "cfg-b".to_string(),
-                discovery: DiscoveryConfig {
+            ),
+            SchedulerTarget::new(
+                "cfg-b".to_string(),
+                DiscoveryConfig {
                     repo: Some("o/other".to_string()),
                     max_concurrent_active_runs: Some(2),
                     max_concurrent_runs_per_repository: Some(1),
                     max_concurrent_runs: Some(2),
                     ..cfg(2)
                 },
-            },
+            ),
         ];
         let q1 = MockQuery {
             issues: vec![issue(1), issue(2)],

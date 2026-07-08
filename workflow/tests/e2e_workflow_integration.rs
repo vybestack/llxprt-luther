@@ -2420,6 +2420,26 @@ fn luther_profile_uses_nested_project_paths_without_manifest_path_prefixes() {
     );
 }
 
+#[test]
+fn luther_profile_keeps_shared_path_values_as_daemon_bases() {
+    let config = workflow_config("llxprt-luther");
+    assert_eq!(
+        config.variables.get("work_dir").map(String::as_str),
+        Some("/tmp/luther-workspaces/llxprt-luther")
+    );
+    assert_eq!(
+        config.variables.get("artifact_dir").map(String::as_str),
+        Some("/tmp/luther-artifacts/llxprt-luther")
+    );
+    assert!(
+        !config
+            .variables
+            .get("work_dir")
+            .is_some_and(|path| path.contains("{issue_number}") || path.contains("{run_id}")),
+        "workflow config should keep daemon path roots, not TOML path templates"
+    );
+}
+
 /// @plan:PLAN-20260408-LLXPRT-FIRST.P17
 /// @requirement:REQ-LF-VERIFY-002
 #[test]
@@ -3219,6 +3239,19 @@ fn parent_issue_orchestrator_workflow_loads_with_target_configs() {
             expected_child_config
         );
     }
+}
+
+#[test]
+fn production_and_fixture_llxprt_luther_configs_are_equivalent() {
+    let production = std::fs::read_to_string("config/workflow-configs/llxprt-luther.toml")
+        .expect("read production luther config TOML");
+    let fixture =
+        std::fs::read_to_string("tests/fixtures/workflow-configs/valid/llxprt-luther.toml")
+            .expect("read fixture luther config TOML");
+    assert_eq!(
+        production, fixture,
+        "fixture llxprt-luther config must track production daemon path-base config"
+    );
 }
 
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P17

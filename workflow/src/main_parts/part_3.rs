@@ -82,8 +82,16 @@ async fn handle_daemon_run(
         if let Some(path) = scheduler_config {
             run_daemon_supervisor_loop(store, &mut state, &shutdown, path, config_dir, once).await;
         } else {
-            run_daemon_discovery_loop(store, &mut state, &shutdown, &discovery, &config_id, once)
-                .await;
+            run_daemon_discovery_loop(
+                store,
+                &mut state,
+                &shutdown,
+                &discovery,
+                &config_id,
+                config_dir,
+                once,
+            )
+            .await;
         }
     } else {
         run_daemon_heartbeat_loop(store, &mut state, &shutdown).await;
@@ -125,6 +133,8 @@ fn scheduler_target(
             return None;
         }
     };
+    let path_bases = daemon_path_bases_from_config(&cfg);
+    let parent_path_bases = parent_path_bases_from_config(&cfg, config_root);
     let mut discovery = resolve_discovery_config(&cfg);
     discovery.max_concurrent_active_runs = discovery
         .max_concurrent_active_runs
@@ -143,7 +153,75 @@ fn scheduler_target(
         .then(|| luther_workflow::daemon::scheduler::SchedulerTarget {
             config_id: target.config_id.clone(),
             discovery,
+            path_bases,
+            parent_path_bases,
         })
+}
+
+/// Build the single-config scheduler target used by `daemon run/start` without
+/// a supervisor config. This keeps one-shot and long-running daemon discovery
+/// on the same per-run path isolation path as the multi-target scheduler.
+/// @plan:issue-117
+fn discovery_scheduler_target(
+    config_id: &str,
+    discovery: &luther_workflow::workflow::schema::DiscoveryConfig,
+    config_root: &std::path::Path,
+) -> Option<luther_workflow::daemon::scheduler::SchedulerTarget> {
+    let cfg = match resolve_workflow_config(config_id, config_root) {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            eprintln!("Error: Failed to resolve config '{config_id}': {e}");
+            return None;
+        }
+    };
+    Some(luther_workflow::daemon::scheduler::SchedulerTarget {
+        config_id: config_id.to_string(),
+        discovery: discovery.clone(),
+        path_bases: daemon_path_bases_from_config(&cfg),
+        parent_path_bases: parent_path_bases_from_config(&cfg, config_root),
+    })
+}
+
+fn parent_path_bases_from_config(
+    cfg: &luther_workflow::workflow::schema::WorkflowConfig,
+    config_root: &std::path::Path,
+) -> std::collections::BTreeMap<String, luther_workflow::daemon::launcher::DaemonPathBases> {
+    cfg.discovery
+        .as_ref()
+        .and_then(|d| d.parent_config_id.as_deref())
+        .and_then(|parent_config_id| parent_path_bases_entry(parent_config_id, config_root))
+        .into_iter()
+        .collect()
+}
+
+fn parent_path_bases_entry(
+    parent_config_id: &str,
+    config_root: &std::path::Path,
+) -> Option<(String, luther_workflow::daemon::launcher::DaemonPathBases)> {
+    let parent_cfg = resolve_workflow_config(parent_config_id, config_root).ok()?;
+    Some((
+        parent_config_id.to_string(),
+        daemon_path_bases_from_config(&parent_cfg),
+    ))
+}
+
+/// Extract structured daemon base roots (`work_dir`/`artifact_dir`) from the
+/// fully resolved config variables. These are treated as base roots; per-run
+/// `issue-N/run-id` suffixes are constructed by the launcher.
+/// @plan:issue-117
+fn daemon_path_bases_from_config(
+    cfg: &luther_workflow::workflow::schema::WorkflowConfig,
+) -> luther_workflow::daemon::launcher::DaemonPathBases {
+    luther_workflow::daemon::launcher::DaemonPathBases {
+        work_dir_base: cfg
+            .variables
+            .get("work_dir")
+            .map(std::path::PathBuf::from),
+        artifact_dir_base: cfg
+            .variables
+            .get("artifact_dir")
+            .map(std::path::PathBuf::from),
+    }
 }
 fn recover_stale_daemon_leases(
     conn: &rusqlite::Connection,
@@ -244,10 +322,17 @@ async fn run_daemon_discovery_loop(
     shutdown: &std::sync::Arc<std::sync::atomic::AtomicBool>,
     discovery: &luther_workflow::workflow::schema::DiscoveryConfig,
     config_id: &str,
+    config_dir: &Option<std::path::PathBuf>,
     once: bool,
 ) {
     use std::sync::atomic::Ordering;
 
+    let config_root = config_dir
+        .clone()
+        .unwrap_or_else(|| std::path::PathBuf::from("config"));
+    let Some(target) = discovery_scheduler_target(config_id, discovery, &config_root) else {
+        return;
+    };
     let conn = open_daemon_db();
     let query = SystemGithubIssueQuery::new(SystemGithubCommandRunner);
     let launcher = DaemonWorkflowLauncher::new(config_id.to_string());
@@ -266,8 +351,11 @@ async fn run_daemon_discovery_loop(
         if shutdown.load(Ordering::SeqCst) {
             break;
         }
-        match luther_workflow::daemon::scheduler::run_once(
-            discovery, &query, &conn, &launcher, config_id,
+        match luther_workflow::daemon::scheduler::run_multi_target_once(
+            std::slice::from_ref(&target),
+            &[&query as &dyn luther_workflow::adapters::github_issues::GithubIssueQuery],
+            &conn,
+            &launcher,
         ) {
             Ok(summary)
                 if summary.launched > 0

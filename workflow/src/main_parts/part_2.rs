@@ -728,6 +728,10 @@ fn print_queue_json(conn: &rusqlite::Connection, leases: &[IssueLease]) {
         .iter()
         .map(|l| {
             let wait = l.run_id.as_deref().and_then(|run_id| waits.get(run_id));
+            let metadata = l
+                .run_id
+                .as_deref()
+                .and_then(|run_id| queue_run_metadata(conn, run_id));
             serde_json::json!({
                 "issue_repo": l.issue_repo,
                 "issue_number": l.issue_number,
@@ -736,6 +740,8 @@ fn print_queue_json(conn: &rusqlite::Connection, leases: &[IssueLease]) {
                 "status": l.status.to_string(),
                 "active_slot_used": l.status.is_active(),
                 "wait": wait,
+                "workspace_path": metadata.as_ref().and_then(|md| md.workspace_path.clone()),
+                "artifact_root": metadata.as_ref().and_then(|md| md.artifact_root.clone()),
             })
         })
         .collect();
@@ -782,9 +788,33 @@ fn print_queue_text(conn: &rusqlite::Connection, leases: &[IssueLease]) {
                 .and_then(|run_id| waits.get(run_id))
                 .map(|w| format!(" wait={}", format_wait_summary(w)))
                 .unwrap_or_default();
+            let metadata = lease
+                .run_id
+                .as_deref()
+                .and_then(|run_id| queue_run_metadata(conn, run_id));
+            let paths = metadata
+                .as_ref()
+                .map(|md| {
+                    let workspace = md
+                        .workspace_path
+                        .as_deref()
+                        .unwrap_or("(none)");
+                    let artifact = md
+                        .artifact_root
+                        .as_deref()
+                        .unwrap_or("(none)");
+                    format!(" work={workspace} artifacts={artifact}")
+                })
+                .unwrap_or_default();
             println!(
-                "  {}#{} config={} run={} active_slot_used={}{}",
-                lease.issue_repo, lease.issue_number, lease.config_id, run, active_slot, wait
+                "  {}#{} config={} run={} active_slot_used={}{}{}",
+                lease.issue_repo,
+                lease.issue_number,
+                lease.config_id,
+                run,
+                active_slot,
+                wait,
+                paths
             );
         }
     }
@@ -815,6 +845,17 @@ fn queue_wait_summaries(
             )
         })
         .collect()
+}
+
+/// Load persisted run metadata for a queue lease's run id, if any.
+/// @plan:issue-117
+fn queue_run_metadata(
+    conn: &rusqlite::Connection,
+    run_id: &str,
+) -> Option<luther_workflow::persistence::RunMetadata> {
+    luther_workflow::persistence::get_run_with_conn(conn, run_id)
+        .ok()
+        .flatten()
 }
 
 fn format_wait_summary(wait: &serde_json::Value) -> String {
