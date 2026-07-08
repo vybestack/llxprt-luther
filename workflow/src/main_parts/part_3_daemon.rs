@@ -278,8 +278,8 @@ fn recover_stale_daemon_leases(
 
 fn run_supervisor_scheduler_pass(
     targets: Vec<luther_workflow::daemon::scheduler::SchedulerTarget>,
-) -> Result<luther_workflow::daemon::scheduler::RunSummary, rusqlite::Error> {
-    let conn = open_daemon_db();
+) -> Result<luther_workflow::daemon::scheduler::RunSummary, luther_workflow::persistence::PersistenceError> {
+    let conn = open_daemon_db()?;
     let queries = targets
         .iter()
         .map(|_| SystemGithubIssueQuery::new(SystemGithubCommandRunner))
@@ -295,12 +295,13 @@ fn run_supervisor_scheduler_pass(
         &conn,
         &launcher,
     )
+    .map_err(luther_workflow::persistence::PersistenceError::from)
 }
 
 fn run_discovery_scheduler_pass(
     target: luther_workflow::daemon::scheduler::SchedulerTarget,
-) -> Result<luther_workflow::daemon::scheduler::RunSummary, rusqlite::Error> {
-    let conn = open_daemon_db();
+) -> Result<luther_workflow::daemon::scheduler::RunSummary, luther_workflow::persistence::PersistenceError> {
+    let conn = open_daemon_db()?;
     let query = SystemGithubIssueQuery::new(SystemGithubCommandRunner);
     let launcher = DaemonWorkflowLauncher::new(target.config_id.clone());
     luther_workflow::daemon::scheduler::run_multi_target_once(
@@ -309,6 +310,7 @@ fn run_discovery_scheduler_pass(
         &conn,
         &launcher,
     )
+    .map_err(luther_workflow::persistence::PersistenceError::from)
 }
 
 async fn run_daemon_supervisor_loop(
@@ -333,7 +335,13 @@ async fn run_daemon_supervisor_loop(
         .poll_interval_seconds
         .unwrap_or(300)
         .saturating_mul(4);
-    let recovery_conn = open_daemon_db();
+    let recovery_conn = match open_daemon_db() {
+        Ok(conn) => conn,
+        Err(e) => {
+            eprintln!("Error: failed to open daemon database: {e}");
+            return Some(format!("failed to open daemon database: {e}"));
+        }
+    };
     if let Err(e) = recover_stale_daemon_leases(&recovery_conn, stale_timeout) {
         eprintln!("Error: stale lease recovery failed: {e}");
 
@@ -397,7 +405,13 @@ async fn run_daemon_discovery_loop(
         .unwrap_or(300)
         .saturating_mul(4);
 
-    let recovery_conn = open_daemon_db();
+    let recovery_conn = match open_daemon_db() {
+        Ok(conn) => conn,
+        Err(e) => {
+            eprintln!("Error: failed to open daemon database: {e}");
+            return Some(format!("failed to open daemon database: {e}"));
+        }
+    };
     if let Err(e) = recover_stale_daemon_leases(&recovery_conn, stale_timeout) {
         eprintln!("Error: stale lease recovery failed: {e}");
         return Some(format!("stale lease recovery failed: {e}"));

@@ -592,13 +592,14 @@ fn resolve_config_and_discovery_for(
 
 /// Open the shared checkpoints database (creating schema if needed).
 /// @plan:PLAN-20260415-DAEMON-DISCOVERY.P05
-fn open_daemon_db() -> rusqlite::Connection {
+fn open_daemon_db() -> Result<rusqlite::Connection, luther_workflow::persistence::PersistenceError> {
     let db_path = luther_workflow::runtime_paths::get_data_dir().join("checkpoints.db");
-    if let Err(e) = init_database(&db_path) {
-        eprintln!("Error: Failed to initialize database: {e}");
-        process::exit(1);
-    }
-    match rusqlite::Connection::open(&db_path) {
+    init_database(&db_path)?;
+    rusqlite::Connection::open(&db_path).map_err(luther_workflow::persistence::PersistenceError::from)
+}
+
+fn open_daemon_db_or_exit() -> rusqlite::Connection {
+    match open_daemon_db() {
         Ok(conn) => conn,
         Err(e) => {
             eprintln!("Error: Failed to open database: {e}");
@@ -613,7 +614,7 @@ fn open_daemon_db() -> rusqlite::Connection {
 fn handle_daemon_discover_command(args: &luther_workflow::cli::DaemonDiscoverArgs) {
     let discovery = resolve_discovery_for(&args.config, &args.config_dir);
     let config_id = daemon_config_id(&args.config);
-    let conn = open_daemon_db();
+    let conn = open_daemon_db_or_exit();
     let active =
         luther_workflow::persistence::leases::count_active_leases_for_config(&conn, &config_id)
             .unwrap_or(0);
@@ -691,7 +692,7 @@ fn print_discovery_text(result: &DiscoveryResult) {
 /// @plan:PLAN-20260415-DAEMON-DISCOVERY.P05
 /// @requirement:REQ-DAEMON-DISCOVERY-002
 fn handle_daemon_queue_command(args: &luther_workflow::cli::DaemonQueueArgs) {
-    let conn = open_daemon_db();
+    let conn = open_daemon_db_or_exit();
     let leases = collect_queue_leases(&conn, args);
     if args.json {
         print_queue_json(&conn, &leases);
