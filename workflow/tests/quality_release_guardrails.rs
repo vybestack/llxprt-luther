@@ -875,7 +875,7 @@ fn test_ocr_pr_review_test_scope_guard_fails_closed() {
         "Changed-test detection must include common language-specific test filenames outside test directories"
     );
     assert!(
-        content.contains("if ! ocr review --preview --from \"$BASE_SHA\" --to \"$HEAD_SHA\"")
+        content.contains("if ! \"$OCR_BIN\" review --preview --from \"$BASE_SHA\" --to \"$HEAD_SHA\"")
             && content.contains("Could not verify OCR preview scope for changed test files")
             && content.contains("OCR preview did not list changed test files in the reviewed set")
             && content.contains("/^Will review[[:space:]]*\\(/ { in_section = 1; next }")

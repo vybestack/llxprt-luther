@@ -307,12 +307,12 @@ fn build_remediation_plan(
         }
     }
 
-    let plan_state = if !needs_user_judgment.is_empty() {
-        PlanState::BlockedNeedsUserJudgment
-    } else if must_fix.is_empty() {
-        PlanState::Clean
-    } else {
+    let plan_state = if !must_fix.is_empty() {
         PlanState::NeedsRemediation
+    } else if !needs_user_judgment.is_empty() {
+        PlanState::BlockedNeedsUserJudgment
+    } else {
+        PlanState::Clean
     };
 
     let payload = RemediationPlanArtifact {

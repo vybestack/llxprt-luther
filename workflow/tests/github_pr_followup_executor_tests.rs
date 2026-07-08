@@ -2372,15 +2372,15 @@ fn pr_checks_api_error_is_retryable_without_in_process_retry_loop() {
 /// @requirement:REQ-PRFU-007
 /// @pseudocode lines 1-21
 #[test]
-fn ci_failure_failed_pending_collects_logs_preserves_pending_and_routes_terminal() {
+fn ci_failure_failed_pending_collects_logs_preserves_pending_and_continues_to_planning() {
     let outcome = execute_step(GithubCheckFailuresExecutorWithRunner::new(
         FixtureGithubPrCommandRunner,
         FixedClock,
     ));
     assert_expected_outcome(
         outcome,
-        StepOutcome::Fatal,
-        "failed+pending CI collection must collect concrete failure logs, preserve pending_or_unknown, and route terminal",
+        StepOutcome::Success,
+        "failed+pending CI collection must collect concrete failure logs, preserve pending_or_unknown, and continue to remediation planning",
     );
 }
 
@@ -3403,7 +3403,7 @@ fn p09_feedback_item(item_id: &str, key: &str, hash: &str) -> serde_json::Value 
     serde_json::json!({
         "item_id": item_id,
         "stable_marker_key": key,
-        "thread_id": "thread-p09",
+        "thread_id": "PRRT_thread_p09",
         "comment_id": item_id,
         "review_id": null,
         "author_login": "coderabbitai[bot]",
@@ -4579,9 +4579,14 @@ fn remediation_plan_routes_only_concrete_failures_and_valid_feedback_to_must_fix
         serde_json::json!([{ "failure_id": "ci-1", "check_name": "build", "conclusion": "failure" }]),
         serde_json::json!([]),
         serde_json::json!([
-            p10_accepted("cr-valid", "thread-valid", "hash-valid", "valid"),
-            p10_accepted("cr-invalid", "thread-invalid", "hash-invalid", "invalid"),
-            p10_accepted("cr-out", "thread-out", "hash-out", "out_of_scope")
+            p10_accepted("cr-valid", "PRRT_thread_valid", "hash-valid", "valid"),
+            p10_accepted(
+                "cr-invalid",
+                "PRRT_thread_invalid",
+                "hash-invalid",
+                "invalid"
+            ),
+            p10_accepted("cr-out", "PRRT_thread_out", "hash-out", "out_of_scope")
         ]),
         serde_json::json!([]),
         serde_json::json!([]),
@@ -4647,8 +4652,13 @@ fn remediation_plan_invalid_out_of_scope_only_writes_pending_marker_actions_and_
         serde_json::json!([]),
         serde_json::json!([]),
         serde_json::json!([
-            p10_accepted("cr-invalid", "thread-invalid", "hash-invalid", "invalid"),
-            p10_accepted("cr-out", "thread-out", "hash-out", "out_of_scope")
+            p10_accepted(
+                "cr-invalid",
+                "PRRT_thread_invalid",
+                "hash-invalid",
+                "invalid"
+            ),
+            p10_accepted("cr-out", "PRRT_thread_out", "hash-out", "out_of_scope")
         ]),
         serde_json::json!([]),
         serde_json::json!([]),
@@ -4840,8 +4850,13 @@ fn pending_marker_actions_invalid_out_of_scope_have_no_remediation_output_head_a
         serde_json::json!([]),
         serde_json::json!([]),
         serde_json::json!([
-            p10_accepted("cr-invalid", "thread-invalid", "hash-invalid", "invalid"),
-            p10_accepted("cr-out", "thread-out", "hash-out", "out_of_scope")
+            p10_accepted(
+                "cr-invalid",
+                "PRRT_thread_invalid",
+                "hash-invalid",
+                "invalid"
+            ),
+            p10_accepted("cr-out", "PRRT_thread_out", "hash-out", "out_of_scope")
         ]),
         serde_json::json!([]),
         serde_json::json!([]),
@@ -4887,7 +4902,7 @@ fn pending_marker_actions_invalid_out_of_scope_have_no_remediation_output_head_a
 /// @requirement:REQ-PRFU-013
 /// @pseudocode lines 4,8,10-11
 #[test]
-fn remediation_plan_needs_user_judgment_returns_fatal() {
+fn remediation_plan_with_must_fix_defers_user_judgment_and_remediates_actionable_items() {
     let temp = tempfile::tempdir().expect("tempdir");
     write_p10_inputs(
         &temp,
@@ -4895,12 +4910,81 @@ fn remediation_plan_needs_user_judgment_returns_fatal() {
         serde_json::json!([{ "source": "watch_pr_checks", "reason": "pending_timeout", "check_name": "slow" }]),
         serde_json::json!([p10_accepted(
             "cr-judge",
-            "thread-judge",
+            "PRRT_thread_judge",
             "hash-judge",
             "needs_user_judgment"
         )]),
         serde_json::json!([{ "item_id": "cr-unevaluated", "reason": "unresolved_ambiguity" }]),
         serde_json::json!([{ "item_id": "cr-budget", "reason": "budget_exhausted" }]),
+    );
+    let mut context = p10_context(&temp);
+    let outcome = PrRemediationPlanExecutor
+        .execute(&mut context, &p10_params(&temp))
+        .expect("build remediation plan with actionable items");
+    let artifact = read_json(&p10_plan_path(&temp));
+
+    assert_expected_outcome(
+        outcome,
+        StepOutcome::Fixable,
+        "actionable must_fix items should still be remediated while user-judgment items remain out of scope",
+    );
+    assert_eq!(
+        artifact
+            .get("plan_state")
+            .and_then(serde_json::Value::as_str),
+        Some("needs_remediation")
+    );
+    let must_fix = artifact
+        .get("must_fix")
+        .and_then(serde_json::Value::as_array)
+        .expect("must_fix");
+    assert!(
+        !must_fix.is_empty(),
+        "must_fix should contain actionable items: {artifact}"
+    );
+    assert!(must_fix.iter().all(|item| {
+        item.get("source_type").and_then(serde_json::Value::as_str) != Some("ci_pending_or_unknown")
+            && item.get("decision").and_then(serde_json::Value::as_str)
+                != Some("needs_user_judgment")
+    }));
+    assert!(
+        must_fix.iter().any(|item| {
+            item.get("source_type").and_then(serde_json::Value::as_str) == Some("ci_failure")
+                && item.get("source_id").and_then(serde_json::Value::as_str) == Some("ci-1")
+        }),
+        "must_fix should contain the concrete CI failure item: {artifact}"
+    );
+    let needs_user_judgment = artifact
+        .get("needs_user_judgment")
+        .and_then(serde_json::Value::as_array)
+        .expect("needs_user_judgment");
+    assert!(!needs_user_judgment.is_empty());
+    assert!(
+        needs_user_judgment.iter().any(|item| {
+            item.get("source_id").and_then(serde_json::Value::as_str) == Some("cr-judge")
+        }),
+        "needs_user_judgment should contain cr-judge: {artifact}"
+    );
+}
+
+/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P10
+/// @requirement:REQ-PRFU-013
+/// @pseudocode lines 4,8,10-11
+#[test]
+fn remediation_plan_needs_user_judgment_only_returns_fatal() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_p10_inputs(
+        &temp,
+        serde_json::json!([]),
+        serde_json::json!([]),
+        serde_json::json!([p10_accepted(
+            "cr-judge",
+            "PRRT_thread_judge",
+            "hash-judge",
+            "needs_user_judgment"
+        )]),
+        serde_json::json!([]),
+        serde_json::json!([]),
     );
     let mut context = p10_context(&temp);
     let outcome = PrRemediationPlanExecutor
@@ -4911,7 +4995,7 @@ fn remediation_plan_needs_user_judgment_returns_fatal() {
     assert_expected_outcome(
         outcome,
         StepOutcome::Fatal,
-        "needs_user_judgment and pending_or_unknown evidence must route fatal",
+        "needs_user_judgment-only plans still require human intervention",
     );
     assert_eq!(
         artifact
@@ -4923,13 +5007,7 @@ fn remediation_plan_needs_user_judgment_returns_fatal() {
         .get("must_fix")
         .and_then(serde_json::Value::as_array)
         .expect("must_fix")
-        .iter()
-        .all(|item| {
-            item.get("source_type").and_then(serde_json::Value::as_str)
-                != Some("ci_pending_or_unknown")
-                && item.get("decision").and_then(serde_json::Value::as_str)
-                    != Some("needs_user_judgment")
-        }));
+        .is_empty());
     assert!(!artifact
         .get("needs_user_judgment")
         .and_then(serde_json::Value::as_array)
@@ -5046,14 +5124,14 @@ fn p11_plan_items() -> Vec<serde_json::Value> {
         serde_json::json!({
             "source_type": "coderabbit_feedback",
             "source_id": "cr-valid",
-            "stable_marker_key": "thread-valid",
+            "stable_marker_key": "PRRT_thread_valid",
             "reason": "valid feedback",
             "recommended_action": "fix valid feedback",
             "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             "source_artifact_sequence": 4,
             "decision": "valid",
             "body_hash": "hash-valid",
-            "evidence": { "item_id": "cr-valid", "stable_marker_key": "thread-valid" }
+            "evidence": { "item_id": "cr-valid", "stable_marker_key": "PRRT_thread_valid" }
         }),
     ]
 }
@@ -5216,7 +5294,7 @@ fn remediation_validator_rejects_stale_input_head_without_burning_model_attempts
         &temp,
         serde_json::json!([
             { "source_type": "ci_failure", "source_id": "ci-build", "status": "not_fixed", "input_head_sha": "old-head", "action": "attempted", "evidence": { "kind": "test", "current_head_sha": "old-head", "commands": [] }, "response_text": "stale result", "evidence_paths": [] },
-            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "thread-valid", "body_hash": "hash-valid", "status": "not_fixed", "input_head_sha": "old-head", "action": "attempted", "evidence": { "kind": "test", "current_head_sha": "old-head", "commands": [] }, "response_text": "stale result", "evidence_paths": [] }
+            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "PRRT_thread_valid", "body_hash": "hash-valid", "status": "not_fixed", "input_head_sha": "old-head", "action": "attempted", "evidence": { "kind": "test", "current_head_sha": "old-head", "commands": [] }, "response_text": "stale result", "evidence_paths": [] }
         ]),
     );
     rewrite_p11_result(&temp, |result| {
@@ -5363,7 +5441,7 @@ fn remediation_validator_accepts_retry_scope_only_normal_counters() {
         &temp,
         serde_json::json!([
             { "source_type": "ci_failure", "source_id": "ci-build", "status": "fixed", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "fixed", "evidence": { "kind": "change", "current_head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "paths": ["src/lib.rs"] }, "response_text": "Luther addressed this CI failure and will post the remediation evidence on the original thread.", "evidence_paths": ["src/lib.rs"] },
-            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "thread-valid", "body_hash": "hash-valid", "status": "fixed", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "fixed", "evidence": { "kind": "change", "current_head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "paths": ["src/lib.rs"] }, "response_text": "Luther addressed this CodeRabbit item and will post the remediation evidence on the original thread.", "evidence_paths": ["src/lib.rs"] }
+            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "PRRT_thread_valid", "body_hash": "hash-valid", "status": "fixed", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "fixed", "evidence": { "kind": "change", "current_head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "paths": ["src/lib.rs"] }, "response_text": "Luther addressed this CodeRabbit item and will post the remediation evidence on the original thread.", "evidence_paths": ["src/lib.rs"] }
         ]),
     );
     rewrite_p11_result(&temp, |result| {
@@ -5414,7 +5492,7 @@ fn remediation_validator_waits_for_correctly_scoped_artifact_after_stale_result(
         &temp,
         serde_json::json!([
             { "source_type": "ci_failure", "source_id": "ci-build", "status": "fixed", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "fixed", "evidence": { "kind": "change", "current_head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "paths": ["src/lib.rs"] }, "response_text": "Luther addressed this CI failure and will post the remediation evidence on the original thread.", "evidence_paths": ["src/lib.rs"] },
-            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "thread-valid", "body_hash": "hash-valid", "status": "fixed", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "fixed", "evidence": { "kind": "change", "current_head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "paths": ["src/lib.rs"] }, "response_text": "Luther addressed this CodeRabbit item and will post the remediation evidence on the original thread.", "evidence_paths": ["src/lib.rs"] }
+            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "PRRT_thread_valid", "body_hash": "hash-valid", "status": "fixed", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "fixed", "evidence": { "kind": "change", "current_head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "paths": ["src/lib.rs"] }, "response_text": "Luther addressed this CodeRabbit item and will post the remediation evidence on the original thread.", "evidence_paths": ["src/lib.rs"] }
         ]),
     );
     let correct_result = read_json(&p11_result_path(&temp));
@@ -5461,7 +5539,7 @@ fn remediation_validator_restores_engine_known_plan_sequence_for_agent_result() 
         &temp,
         serde_json::json!([
             { "source_type": "ci_failure", "source_id": "ci-build", "status": "fixed", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "fixed", "evidence": { "kind": "change", "current_head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "paths": ["src/lib.rs"] }, "response_text": "Luther addressed this CI failure and will post the remediation evidence on the original thread.", "evidence_paths": ["src/lib.rs"] },
-            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "thread-valid", "body_hash": "hash-valid", "status": "fixed", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "fixed", "evidence": { "kind": "change", "current_head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "paths": ["src/lib.rs"] }, "response_text": "Luther addressed this CodeRabbit item and will post the remediation evidence on the original thread.", "evidence_paths": ["src/lib.rs"] }
+            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "PRRT_thread_valid", "body_hash": "hash-valid", "status": "fixed", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "fixed", "evidence": { "kind": "change", "current_head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "paths": ["src/lib.rs"] }, "response_text": "Luther addressed this CodeRabbit item and will post the remediation evidence on the original thread.", "evidence_paths": ["src/lib.rs"] }
         ]),
     );
     let mut result = read_json(&p11_result_path(&temp));
@@ -5526,7 +5604,7 @@ fn remediation_result_rejects_not_fixed_skipped_failed_before_push_success() {
         &temp,
         serde_json::json!([
             { "source_type": "ci_failure", "source_id": "ci-build", "status": "not_fixed", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "attempted", "evidence": { "kind": "test", "current_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "commands": [{ "id": "cargo-test", "status": "failed" }] }, "response_text": "Luther addressed this review item and posted the remediation evidence on the original thread.", "evidence_paths": [] },
-            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "thread-valid", "body_hash": "hash-valid", "status": "skipped", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "skipped", "evidence": { "kind": "policy", "current_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "paths": ["src/lib.rs"] }, "response_text": "Luther addressed this review item and posted the remediation evidence on the original thread.", "evidence_paths": [] }
+            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "PRRT_thread_valid", "body_hash": "hash-valid", "status": "skipped", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "skipped", "evidence": { "kind": "policy", "current_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "paths": ["src/lib.rs"] }, "response_text": "Luther addressed this review item and posted the remediation evidence on the original thread.", "evidence_paths": [] }
         ]),
     );
     let mut context = p11_context(&temp);
@@ -5619,7 +5697,7 @@ fn remediation_result_accepts_already_satisfied_and_not_reproduced_only_with_det
         &temp,
         serde_json::json!([
             { "source_type": "ci_failure", "source_id": "ci-build", "status": "already_satisfied", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "verified", "evidence": { "kind": "current_repository_test", "current_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "commands": [{ "id": "cargo-test", "status": "passed", "argv": ["cargo", "test"] }] }, "response_text": "Luther addressed this review item and posted the remediation evidence on the original thread.", "evidence_paths": [] },
-            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "thread-valid", "body_hash": "hash-valid", "status": "not_reproduced", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "verified", "evidence": { "kind": "api_lookup", "current_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "api_lookups": [{ "endpoint": "/repos/example/workflow/pulls/1910/comments", "normalized_status": "not_found" }] }, "response_text": "Luther addressed this review item and posted the remediation evidence on the original thread.", "evidence_paths": [] }
+            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "PRRT_thread_valid", "body_hash": "hash-valid", "status": "not_reproduced", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "verified", "evidence": { "kind": "api_lookup", "current_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "api_lookups": [{ "endpoint": "/repos/example/workflow/pulls/1910/comments", "normalized_status": "not_found" }] }, "response_text": "Luther addressed this review item and posted the remediation evidence on the original thread.", "evidence_paths": [] }
         ]),
     );
     let mut context = p11_context(&temp);
@@ -5644,7 +5722,7 @@ fn remediation_result_accepts_already_satisfied_and_not_reproduced_only_with_det
         &command_only_evidence,
         serde_json::json!([
             { "source_type": "ci_failure", "source_id": "ci-build", "status": "already_satisfied", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "verified", "evidence": { "current_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "commands": [{ "id": "cargo-test", "status": "passed", "argv": ["cargo", "test"] }] }, "response_text": "Luther addressed this review item and posted the remediation evidence on the original thread.", "evidence_paths": [] },
-            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "thread-valid", "body_hash": "hash-valid", "status": "not_reproduced", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "verified", "evidence": { "kind": "api_lookup", "current_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "api_lookups": [{ "endpoint": "/repos/example/workflow/pulls/1910/comments", "normalized_status": "not_found" }] }, "response_text": "Luther addressed this review item and posted the remediation evidence on the original thread.", "evidence_paths": [] }
+            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "PRRT_thread_valid", "body_hash": "hash-valid", "status": "not_reproduced", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "verified", "evidence": { "kind": "api_lookup", "current_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "api_lookups": [{ "endpoint": "/repos/example/workflow/pulls/1910/comments", "normalized_status": "not_found" }] }, "response_text": "Luther addressed this review item and posted the remediation evidence on the original thread.", "evidence_paths": [] }
         ]),
     );
     let mut command_only_context = p11_context(&command_only_evidence);
@@ -5672,7 +5750,7 @@ fn remediation_result_accepts_already_satisfied_and_not_reproduced_only_with_det
         &missing_evidence,
         serde_json::json!([
             { "source_type": "ci_failure", "source_id": "ci-build", "status": "already_satisfied", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "verified", "evidence": { "kind": "current_repository_test", "current_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "commands": [] }, "response_text": "Luther addressed this review item and posted the remediation evidence on the original thread.", "evidence_paths": [] },
-            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "thread-valid", "body_hash": "hash-valid", "status": "not_reproduced", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "verified", "evidence": { "kind": "api_lookup", "current_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "api_lookups": [] }, "response_text": "Luther addressed this review item and posted the remediation evidence on the original thread.", "evidence_paths": [] }
+            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "PRRT_thread_valid", "body_hash": "hash-valid", "status": "not_reproduced", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "verified", "evidence": { "kind": "api_lookup", "current_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "api_lookups": [] }, "response_text": "Luther addressed this review item and posted the remediation evidence on the original thread.", "evidence_paths": [] }
         ]),
     );
     let mut missing_context = p11_context(&missing_evidence);
@@ -5697,7 +5775,7 @@ fn remediation_result_accepts_already_satisfied_and_not_reproduced_only_with_det
         &mismatched_head,
         serde_json::json!([
             { "source_type": "ci_failure", "source_id": "ci-build", "status": "already_satisfied", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "verified", "evidence": { "kind": "current_repository_test", "current_head_sha": "cccccccccccccccccccccccccccccccccccccccc", "commands": [{ "id": "cargo-test", "status": "passed", "argv": ["cargo", "test"] }] }, "response_text": "Luther addressed this review item and posted the remediation evidence on the original thread.", "evidence_paths": [] },
-            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "thread-valid", "body_hash": "hash-valid", "status": "not_reproduced", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "verified", "evidence": { "kind": "api_lookup", "current_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "api_lookups": [{ "endpoint": "/repos/example/workflow/pulls/1910/comments", "normalized_status": "not_found" }] }, "response_text": "Luther addressed this review item and posted the remediation evidence on the original thread.", "evidence_paths": [] }
+            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "PRRT_thread_valid", "body_hash": "hash-valid", "status": "not_reproduced", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "verified", "evidence": { "kind": "api_lookup", "current_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "api_lookups": [{ "endpoint": "/repos/example/workflow/pulls/1910/comments", "normalized_status": "not_found" }] }, "response_text": "Luther addressed this review item and posted the remediation evidence on the original thread.", "evidence_paths": [] }
         ]),
     );
     let mut mismatch_context = p11_context(&mismatched_head);
@@ -5730,7 +5808,7 @@ fn remediation_validator_same_head_no_change_attempt_cap_reaches_post_pr_failure
         &temp,
         serde_json::json!([
             { "source_type": "ci_failure", "source_id": "ci-build", "status": "failed", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "attempted", "evidence": { "kind": "test", "current_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "commands": [{ "id": "cargo-test", "status": "failed" }] }, "response_text": "Luther addressed this review item and posted the remediation evidence on the original thread.", "evidence_paths": [] },
-            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "thread-valid", "body_hash": "hash-valid", "status": "not_fixed", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "attempted", "evidence": { "kind": "test", "current_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "commands": [{ "id": "cargo-test", "status": "failed" }] }, "response_text": "Luther addressed this review item and posted the remediation evidence on the original thread.", "evidence_paths": [] }
+            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "PRRT_thread_valid", "body_hash": "hash-valid", "status": "not_fixed", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "attempted", "evidence": { "kind": "test", "current_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "commands": [{ "id": "cargo-test", "status": "failed" }] }, "response_text": "Luther addressed this review item and posted the remediation evidence on the original thread.", "evidence_paths": [] }
         ]),
     );
     let mut result = read_json(&p11_result_path(&temp));
@@ -5772,7 +5850,7 @@ fn remediation_validator_wraps_raw_llxprt_result_without_store_metadata() {
         &temp,
         serde_json::json!([
             { "source_type": "ci_failure", "source_id": "ci-build", "status": "not_fixed", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "attempted", "evidence": { "kind": "test", "current_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "commands": [{ "id": "cargo-test", "status": "failed" }] }, "response_text": "Luther addressed this review item and posted the remediation evidence on the original thread.", "evidence_paths": [] },
-            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "thread-valid", "body_hash": "hash-valid", "status": "not_fixed", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "attempted", "evidence": { "kind": "test", "current_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "commands": [{ "id": "cargo-test", "status": "failed" }] }, "response_text": "Luther addressed this review item and posted the remediation evidence on the original thread.", "evidence_paths": [] }
+            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "PRRT_thread_valid", "body_hash": "hash-valid", "status": "not_fixed", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "attempted", "evidence": { "kind": "test", "current_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "commands": [{ "id": "cargo-test", "status": "failed" }] }, "response_text": "Luther addressed this review item and posted the remediation evidence on the original thread.", "evidence_paths": [] }
         ]),
     );
     let plan = read_json(&p11_current_artifact_path(&temp, "pr-remediation-plan"));
@@ -5788,7 +5866,7 @@ fn remediation_validator_wraps_raw_llxprt_result_without_store_metadata() {
             "overall_status": "failed",
             "results": [
                 { "source_type": "ci_failure", "source_id": "ci-build", "status": "not_fixed", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "attempted", "evidence": { "kind": "test", "current_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "commands": [{ "id": "cargo-test", "status": "failed" }] }, "response_text": "Luther addressed this review item and posted the remediation evidence on the original thread.", "evidence_paths": [] },
-                { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "thread-valid", "body_hash": "hash-valid", "status": "not_fixed", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "attempted", "evidence": { "kind": "test", "current_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "commands": [{ "id": "cargo-test", "status": "failed" }] }, "response_text": "Luther addressed this review item and posted the remediation evidence on the original thread.", "evidence_paths": [] }
+                { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "PRRT_thread_valid", "body_hash": "hash-valid", "status": "not_fixed", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "attempted", "evidence": { "kind": "test", "current_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "commands": [{ "id": "cargo-test", "status": "failed" }] }, "response_text": "Luther addressed this review item and posted the remediation evidence on the original thread.", "evidence_paths": [] }
             ],
             "plan_artifact_sequence": plan.get("artifact_sequence"),
             "retry_scope": { "scope_kind": "remediation_result_validation", "run_id": "run-p11", "repository_owner": "example", "repository_name": "workflow", "pr_number": 1910, "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "output_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "plan_artifact_sequence": plan.get("artifact_sequence"), "remediation_attempt_index": 1, "max_remediation_attempts": 2, "validation_retry_index": 0, "max_validation_retries": 2 },
@@ -5833,7 +5911,7 @@ fn remediation_validator_status_enum() {
         &temp,
         serde_json::json!([
             { "source_type": "ci_failure", "source_id": "ci-build", "status": "fixed", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "fixed", "evidence": { "kind": "change", "current_head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "paths": ["src/lib.rs"] }, "response_text": "Luther addressed this review item and posted the remediation evidence on the original thread.", "evidence_paths": ["src/lib.rs"] },
-            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "thread-valid", "body_hash": "hash-valid", "status": "changed", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "changed", "evidence": { "kind": "change", "current_head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "paths": ["src/lib.rs"] }, "response_text": "Luther addressed this review item and posted the remediation evidence on the original thread.", "evidence_paths": ["src/lib.rs"] }
+            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "PRRT_thread_valid", "body_hash": "hash-valid", "status": "changed", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "changed", "evidence": { "kind": "change", "current_head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "paths": ["src/lib.rs"] }, "response_text": "Luther addressed this review item and posted the remediation evidence on the original thread.", "evidence_paths": ["src/lib.rs"] }
         ]),
     );
     let mut context = p11_context(&temp);
@@ -5851,7 +5929,7 @@ fn remediation_validator_status_enum() {
         &unknown,
         serde_json::json!([
             { "source_type": "ci_failure", "source_id": "ci-build", "status": "needs_user_judgment", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "invalid", "evidence": { "kind": "text" }, "response_text": "Luther addressed this review item and posted the remediation evidence on the original thread.", "evidence_paths": [] },
-            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "thread-valid", "body_hash": "hash-valid", "status": "fixed", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "fixed", "evidence": { "kind": "change", "current_head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "paths": ["src/lib.rs"] }, "response_text": "Luther addressed this review item and posted the remediation evidence on the original thread.", "evidence_paths": ["src/lib.rs"] }
+            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "PRRT_thread_valid", "body_hash": "hash-valid", "status": "fixed", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "fixed", "evidence": { "kind": "change", "current_head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "paths": ["src/lib.rs"] }, "response_text": "Luther addressed this review item and posted the remediation evidence on the original thread.", "evidence_paths": ["src/lib.rs"] }
         ]),
     );
     let mut unknown_context = p11_context(&unknown);
@@ -5875,7 +5953,7 @@ fn remediation_validator_rejects_unknown_status_outside_canonical_enum() {
         &temp,
         serde_json::json!([
             { "source_type": "ci_failure", "source_id": "ci-build", "status": "needs_user_judgment", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "invalid", "evidence": { "kind": "text" }, "response_text": "Luther addressed this review item and posted the remediation evidence on the original thread.", "evidence_paths": [] },
-            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "thread-valid", "body_hash": "hash-valid", "status": "fixed", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "fixed", "evidence": { "kind": "change", "current_head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "paths": ["src/lib.rs"] }, "response_text": "Luther addressed this review item and posted the remediation evidence on the original thread.", "evidence_paths": ["src/lib.rs"] }
+            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "PRRT_thread_valid", "body_hash": "hash-valid", "status": "fixed", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "fixed", "evidence": { "kind": "change", "current_head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "paths": ["src/lib.rs"] }, "response_text": "Luther addressed this review item and posted the remediation evidence on the original thread.", "evidence_paths": ["src/lib.rs"] }
         ]),
     );
     let mut context = p11_context(&temp);
@@ -5900,7 +5978,7 @@ fn remediation_validator_rejects_unknown_status_outside_canonical_enum() {
         &changed,
         serde_json::json!([
             { "source_type": "ci_failure", "source_id": "ci-build", "status": "fixed", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "fixed", "evidence": { "kind": "change", "current_head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "paths": ["src/lib.rs"] }, "response_text": "Luther addressed this review item and posted the remediation evidence on the original thread.", "evidence_paths": ["src/lib.rs"] },
-            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "thread-valid", "body_hash": "hash-valid", "status": "changed", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "changed", "evidence": { "kind": "change", "current_head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "paths": ["src/lib.rs"] }, "response_text": "Luther addressed this review item and posted the remediation evidence on the original thread.", "evidence_paths": ["src/lib.rs"] }
+            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "PRRT_thread_valid", "body_hash": "hash-valid", "status": "changed", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "changed", "evidence": { "kind": "change", "current_head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "paths": ["src/lib.rs"] }, "response_text": "Luther addressed this review item and posted the remediation evidence on the original thread.", "evidence_paths": ["src/lib.rs"] }
         ]),
     );
     let mut changed_context = p11_context(&changed);
@@ -5934,7 +6012,7 @@ fn remediation_validator_ties_fixed_evidence_to_post_remediation_head() {
         &stale,
         serde_json::json!([
             { "source_type": "ci_failure", "source_id": "ci-build", "status": "fixed", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "fixed", "evidence": { "kind": "change", "current_head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "paths": ["src/lib.rs"] }, "response_text": "Luther addressed this review item and posted the remediation evidence on the original thread.", "evidence_paths": ["src/lib.rs"] },
-            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "thread-valid", "body_hash": "hash-valid", "status": "fixed", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "fixed", "evidence": { "kind": "change", "current_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "paths": ["src/lib.rs"] }, "response_text": "Luther addressed this review item and posted the remediation evidence on the original thread.", "evidence_paths": ["src/lib.rs"] }
+            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "PRRT_thread_valid", "body_hash": "hash-valid", "status": "fixed", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "fixed", "evidence": { "kind": "change", "current_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "paths": ["src/lib.rs"] }, "response_text": "Luther addressed this review item and posted the remediation evidence on the original thread.", "evidence_paths": ["src/lib.rs"] }
         ]),
     );
     let mut stale_context = p11_context(&stale);
@@ -5961,7 +6039,7 @@ fn remediation_validator_ties_fixed_evidence_to_post_remediation_head() {
         &fresh,
         serde_json::json!([
             { "source_type": "ci_failure", "source_id": "ci-build", "status": "fixed", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "fixed", "evidence": { "kind": "change", "current_head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "paths": ["src/lib.rs"] }, "response_text": "Luther addressed this review item and posted the remediation evidence on the original thread.", "evidence_paths": ["src/lib.rs"] },
-            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "thread-valid", "body_hash": "hash-valid", "status": "fixed", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "fixed", "evidence": { "kind": "change", "current_head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "paths": ["src/lib.rs"] }, "response_text": "Luther addressed this review item and posted the remediation evidence on the original thread.", "evidence_paths": ["src/lib.rs"] }
+            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "PRRT_thread_valid", "body_hash": "hash-valid", "status": "fixed", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "fixed", "evidence": { "kind": "change", "current_head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "paths": ["src/lib.rs"] }, "response_text": "Luther addressed this review item and posted the remediation evidence on the original thread.", "evidence_paths": ["src/lib.rs"] }
         ]),
     );
     let mut fresh_context = p11_context(&fresh);
@@ -6012,7 +6090,7 @@ fn remediation_validator_requires_complete_exact_plan_coverage_before_success() 
         serde_json::json!([
             { "source_type": "ci_failure", "source_id": "ci-build", "status": "fixed", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "fixed", "evidence": { "kind": "change", "current_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "paths": ["src/lib.rs"] }, "response_text": "Luther addressed this review item and posted the remediation evidence on the original thread.", "evidence_paths": ["src/lib.rs"] },
             { "source_type": "ci_failure", "source_id": "ci-build", "status": "fixed", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "fixed", "evidence": { "kind": "change", "current_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "paths": ["src/lib.rs"] }, "response_text": "Luther addressed this review item and posted the remediation evidence on the original thread.", "evidence_paths": ["src/lib.rs"] },
-            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "thread-valid", "body_hash": "hash-valid", "status": "fixed", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "fixed", "evidence": { "kind": "change", "current_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "paths": ["src/lib.rs"] }, "response_text": "Luther addressed this review item and posted the remediation evidence on the original thread.", "evidence_paths": ["src/lib.rs"] }
+            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "PRRT_thread_valid", "body_hash": "hash-valid", "status": "fixed", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "fixed", "evidence": { "kind": "change", "current_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "paths": ["src/lib.rs"] }, "response_text": "Luther addressed this review item and posted the remediation evidence on the original thread.", "evidence_paths": ["src/lib.rs"] }
         ]),
     );
     let mut duplicate_context = p11_context(&duplicate);
@@ -6045,7 +6123,7 @@ fn remediation_validator_writes_pending_marker_action_for_fixed_valid_feedback_b
         &temp,
         serde_json::json!([
             { "source_type": "ci_failure", "source_id": "ci-build", "status": "fixed", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "fixed", "evidence": { "kind": "change", "current_head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "paths": ["src/lib.rs"] }, "response_text": "Luther addressed this review item and posted the remediation evidence on the original thread.", "evidence_paths": ["src/lib.rs"] },
-            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "thread-valid", "body_hash": "hash-valid", "status": "fixed", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "fixed", "evidence": { "kind": "change", "current_head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "paths": ["src/lib.rs"] }, "response_text": "Luther addressed this review item and posted the remediation evidence on the original thread.", "evidence_paths": ["src/lib.rs"] }
+            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "PRRT_thread_valid", "body_hash": "hash-valid", "status": "fixed", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "fixed", "evidence": { "kind": "change", "current_head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "paths": ["src/lib.rs"] }, "response_text": "Luther addressed this review item and posted the remediation evidence on the original thread.", "evidence_paths": ["src/lib.rs"] }
         ]),
     );
     let mut context = p11_context(&temp);
@@ -6077,7 +6155,7 @@ fn remediation_validator_writes_pending_marker_action_for_fixed_valid_feedback_b
         action
             .get("stable_marker_key")
             .and_then(serde_json::Value::as_str),
-        Some("thread-valid")
+        Some("PRRT_thread_valid")
     );
     assert_eq!(
         action.get("body_hash").and_then(serde_json::Value::as_str),
@@ -6104,7 +6182,7 @@ fn remediation_validator_writes_pending_marker_action_for_fixed_valid_feedback_b
     assert!(action
         .get("idempotency_key")
         .and_then(serde_json::Value::as_str)
-        .is_some_and(|key| key.contains("thread-valid")));
+        .is_some_and(|key| key.contains("PRRT_thread_valid")));
     assert_eq!(
         action
             .pointer("/original_feedback_identity/item_id")
@@ -6213,7 +6291,7 @@ fn write_p12_plan(temp: &tempfile::TempDir) {
         serde_json::json!([]),
         serde_json::json!([p10_accepted(
             "cr-valid",
-            "thread-valid",
+            "PRRT_thread_valid",
             "hash-valid",
             "valid"
         )]),
@@ -7094,7 +7172,7 @@ fn run_post_pr_tests_fixable_failures_use_artifact_backed_retry_cap() {
             {
                 "source_type": "coderabbit_feedback",
                 "source_id": "cr-valid",
-                "stable_marker_key": "thread-valid",
+                "stable_marker_key": "PRRT_thread_valid",
                 "body_hash": "hash-valid",
                 "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
                 "status": "changed",
@@ -7403,7 +7481,7 @@ fn push_remediation_retry_scope_includes_source_sequences_and_full_binding() {
         &temp,
         serde_json::json!([
             { "source_type": "ci_failure", "source_id": "ci-build", "status": "changed", "evidence": { "kind": "current_repository_test", "current_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } },
-            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "thread-valid", "body_hash": "hash-valid", "status": "changed", "evidence": { "kind": "current_repository_test", "current_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } }
+            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "PRRT_thread_valid", "body_hash": "hash-valid", "status": "changed", "evidence": { "kind": "current_repository_test", "current_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } }
         ]),
     );
     write_p14_post_pr_test_result(&temp, "passed");
@@ -7543,7 +7621,7 @@ fn push_remediation_retry_scope_matching_sequences_exhausts_retry_cap() {
         &temp,
         serde_json::json!([
             { "source_type": "ci_failure", "source_id": "ci-build", "status": "changed", "evidence": { "kind": "current_repository_test", "current_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } },
-            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "thread-valid", "body_hash": "hash-valid", "status": "changed", "evidence": { "kind": "current_repository_test", "current_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } }
+            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "PRRT_thread_valid", "body_hash": "hash-valid", "status": "changed", "evidence": { "kind": "current_repository_test", "current_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } }
         ]),
     );
     write_p14_post_pr_test_result(&temp, "passed");
@@ -7571,7 +7649,7 @@ fn push_remediation_retry_scope_ignores_stale_plan_artifact_sequence() {
         &temp,
         serde_json::json!([
             { "source_type": "ci_failure", "source_id": "ci-build", "status": "changed", "evidence": { "kind": "current_repository_test", "current_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } },
-            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "thread-valid", "body_hash": "hash-valid", "status": "changed", "evidence": { "kind": "current_repository_test", "current_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } }
+            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "PRRT_thread_valid", "body_hash": "hash-valid", "status": "changed", "evidence": { "kind": "current_repository_test", "current_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } }
         ]),
     );
     write_p14_post_pr_test_result(&temp, "passed");
@@ -7599,7 +7677,7 @@ fn push_remediation_retry_scope_ignores_stale_remediation_result_artifact_sequen
         &temp,
         serde_json::json!([
             { "source_type": "ci_failure", "source_id": "ci-build", "status": "changed", "evidence": { "kind": "current_repository_test", "current_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } },
-            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "thread-valid", "body_hash": "hash-valid", "status": "changed", "evidence": { "kind": "current_repository_test", "current_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } }
+            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "PRRT_thread_valid", "body_hash": "hash-valid", "status": "changed", "evidence": { "kind": "current_repository_test", "current_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } }
         ]),
     );
     write_p14_post_pr_test_result(&temp, "passed");
@@ -7627,7 +7705,7 @@ fn push_remediation_observation_failures_use_matching_retry_scope_for_cap() {
         &temp,
         serde_json::json!([
             { "source_type": "ci_failure", "source_id": "ci-build", "status": "changed", "evidence": { "kind": "current_repository_test", "current_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } },
-            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "thread-valid", "body_hash": "hash-valid", "status": "changed", "evidence": { "kind": "current_repository_test", "current_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } }
+            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "PRRT_thread_valid", "body_hash": "hash-valid", "status": "changed", "evidence": { "kind": "current_repository_test", "current_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } }
         ]),
     );
     write_p14_post_pr_test_result(&temp, "passed");
@@ -7691,7 +7769,7 @@ fn push_remediation_changes_no_change_routes_fixable_for_marker_handling() {
         &temp,
         serde_json::json!([
             { "source_type": "ci_failure", "source_id": "ci-build", "status": "already_satisfied", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "verified", "evidence": { "current_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "commands": [{ "id": "cargo-test", "status": "passed", "argv": ["cargo", "test"] }] }, "response_text": "Luther addressed this review item and posted the remediation evidence on the original thread.", "evidence_paths": [] },
-            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "thread-valid", "body_hash": "hash-valid", "status": "already_satisfied", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "verified", "evidence": { "current_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "commands": [{ "id": "cargo-test", "status": "passed", "argv": ["cargo", "test"] }] }, "response_text": "Luther addressed this review item and posted the remediation evidence on the original thread.", "evidence_paths": [] }
+            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "PRRT_thread_valid", "body_hash": "hash-valid", "status": "already_satisfied", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "verified", "evidence": { "current_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "commands": [{ "id": "cargo-test", "status": "passed", "argv": ["cargo", "test"] }] }, "response_text": "Luther addressed this review item and posted the remediation evidence on the original thread.", "evidence_paths": [] }
         ]),
     );
     write_p14_post_pr_test_result(&temp, "passed");
@@ -7731,7 +7809,7 @@ fn push_remediation_changes_rejects_false_validator_success_evidence() {
         &temp,
         serde_json::json!([
             { "source_type": "ci_failure", "source_id": "ci-build", "status": "changed", "evidence": false },
-            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "thread-valid", "body_hash": "hash-valid", "status": "changed", "evidence": { "kind": "change", "current_head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" } }
+            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "PRRT_thread_valid", "body_hash": "hash-valid", "status": "changed", "evidence": { "kind": "change", "current_head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" } }
         ]),
     );
     write_p14_post_pr_test_result(&temp, "passed");
@@ -7767,7 +7845,7 @@ fn push_remediation_changes_rejects_zero_numeric_validator_success_evidence() {
         &temp,
         serde_json::json!([
             { "source_type": "ci_failure", "source_id": "ci-build", "status": "changed", "evidence": 0 },
-            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "thread-valid", "body_hash": "hash-valid", "status": "changed", "evidence": { "kind": "change", "current_head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" } }
+            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "PRRT_thread_valid", "body_hash": "hash-valid", "status": "changed", "evidence": { "kind": "change", "current_head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" } }
         ]),
     );
     write_p14_post_pr_test_result(&temp, "passed");
@@ -7803,7 +7881,7 @@ fn push_remediation_changes_pushes_clean_local_head_when_already_committed() {
         &temp,
         serde_json::json!([
             { "source_type": "ci_failure", "source_id": "ci-build", "status": "changed", "evidence": { "kind": "current_repository_test", "current_head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" } },
-            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "thread-valid", "body_hash": "hash-valid", "status": "changed", "evidence": { "kind": "current_repository_test", "current_head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" } }
+            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "PRRT_thread_valid", "body_hash": "hash-valid", "status": "changed", "evidence": { "kind": "current_repository_test", "current_head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" } }
         ]),
     );
     write_p14_post_pr_test_result(&temp, "passed");
@@ -7933,12 +8011,31 @@ fn push_remediation_changes_uses_configured_remote_for_push_and_remote_head_veri
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P15
 /// @requirement:REQ-PRFU-015,REQ-PRFU-016,REQ-PRFU-017,REQ-PRFU-026
 /// @pseudocode lines 41-49
+#[derive(Clone, Copy, Debug, Default)]
+enum P15GraphqlReplyMode {
+    #[default]
+    Normal,
+    WithoutComment,
+    ErrorsWithComment,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+enum P15RestReplyMode {
+    #[default]
+    Normal,
+    NonJson,
+    NonObjectJson,
+    ApiError,
+}
+
 #[derive(Clone, Debug, Default)]
 struct P15MarkerRunner {
     calls: Arc<Mutex<Vec<Vec<String>>>>,
     remote_comments: Arc<Mutex<Vec<serde_json::Value>>>,
     pull_review_comments: Arc<Mutex<Vec<serde_json::Value>>>,
     fail_resolution: bool,
+    graphql_reply_mode: P15GraphqlReplyMode,
+    rest_reply_mode: P15RestReplyMode,
 }
 
 /// @pseudocode lines 42-47
@@ -7964,6 +8061,41 @@ impl P15MarkerRunner {
         }
     }
 
+    fn graphql_reply_without_comment() -> Self {
+        Self {
+            graphql_reply_mode: P15GraphqlReplyMode::WithoutComment,
+            ..Self::default()
+        }
+    }
+
+    fn graphql_reply_errors_with_comment() -> Self {
+        Self {
+            graphql_reply_mode: P15GraphqlReplyMode::ErrorsWithComment,
+            ..Self::default()
+        }
+    }
+
+    fn rest_reply_non_json() -> Self {
+        Self {
+            rest_reply_mode: P15RestReplyMode::NonJson,
+            ..Self::default()
+        }
+    }
+
+    fn rest_reply_non_object_json() -> Self {
+        Self {
+            rest_reply_mode: P15RestReplyMode::NonObjectJson,
+            ..Self::default()
+        }
+    }
+
+    fn rest_reply_api_error() -> Self {
+        Self {
+            rest_reply_mode: P15RestReplyMode::ApiError,
+            ..Self::default()
+        }
+    }
+
     fn calls(&self) -> Vec<Vec<String>> {
         self.calls.lock().expect("p15 calls").clone()
     }
@@ -7983,6 +8115,18 @@ impl GithubPrCommandRunner for P15MarkerRunner {
             .iter()
             .any(|arg| arg.contains("/pulls/1910/comments/") && arg.contains("/replies"))
         {
+            match self.rest_reply_mode {
+                P15RestReplyMode::NonJson => return Ok("not json".to_string()),
+                P15RestReplyMode::NonObjectJson => return Ok("[1,2]".to_string()),
+                P15RestReplyMode::ApiError => {
+                    return Ok(serde_json::json!({
+                        "message": "Validation Failed",
+                        "documentation_url": "https://docs.github.com/rest"
+                    })
+                    .to_string());
+                }
+                P15RestReplyMode::Normal => {}
+            }
             // In-thread review reply endpoint.
             Ok(serde_json::json!({
                 "id": 9101,
@@ -8015,6 +8159,24 @@ impl GithubPrCommandRunner for P15MarkerRunner {
         } else if argv.iter().any(|arg| arg.contains("/issues/1910/comments")) {
             Ok(serde_json::json!({ "id": 9001, "html_url": "https://github.com/example/workflow/pull/1910#issuecomment-9001" }).to_string())
         } else if argv.iter().any(|arg| arg == "graphql") {
+            if argv
+                .iter()
+                .any(|arg| arg.contains("addPullRequestReviewThreadReply"))
+            {
+                return match self.graphql_reply_mode {
+                    P15GraphqlReplyMode::WithoutComment => Ok(serde_json::json!({
+                        "data": { "addPullRequestReviewThreadReply": null },
+                        "errors": [{ "message": "reply was not created" }]
+                    })
+                    .to_string()),
+                    P15GraphqlReplyMode::ErrorsWithComment => Ok(serde_json::json!({
+                        "data": { "addPullRequestReviewThreadReply": { "comment": { "id": "PRRC_reply_9101", "databaseId": 9101, "url": "https://github.com/example/workflow/pull/1910#discussion_r9101" } } },
+                        "errors": [{ "message": "field selection warning" }]
+                    })
+                    .to_string()),
+                    P15GraphqlReplyMode::Normal => Ok(serde_json::json!({ "data": { "addPullRequestReviewThreadReply": { "comment": { "id": "PRRC_reply_9101", "databaseId": 9101, "url": "https://github.com/example/workflow/pull/1910#discussion_r9101" } } } }).to_string()),
+                };
+            }
             if self.fail_resolution {
                 return Err(
                     luther_workflow::engine::runner::EngineError::StepExecutionError {
@@ -8023,7 +8185,7 @@ impl GithubPrCommandRunner for P15MarkerRunner {
                     },
                 );
             }
-            Ok(serde_json::json!({ "data": { "resolveReviewThread": { "thread": { "id": "thread-valid", "isResolved": true } } } }).to_string())
+            Ok(serde_json::json!({ "data": { "resolveReviewThread": { "thread": { "id": "PRRT_thread_valid", "isResolved": true } } } }).to_string())
         } else {
             Ok("[]".to_string())
         }
@@ -8046,8 +8208,13 @@ fn write_p15_invalid_out_of_scope_pending(temp: &tempfile::TempDir) {
         serde_json::json!([]),
         serde_json::json!([]),
         serde_json::json!([
-            p10_accepted("cr-invalid", "thread-invalid", "hash-invalid", "invalid"),
-            p10_accepted("cr-out", "thread-out", "hash-out", "out_of_scope")
+            p10_accepted(
+                "cr-invalid",
+                "PRRT_thread_invalid",
+                "hash-invalid",
+                "invalid"
+            ),
+            p10_accepted("cr-out", "PRRT_thread_out", "hash-out", "out_of_scope")
         ]),
         serde_json::json!([]),
         serde_json::json!([]),
@@ -8075,9 +8242,8 @@ fn write_p15_validated_fixed_pending(temp: &tempfile::TempDir) {
             {
                 "source_type": "coderabbit_feedback",
                 "source_id": "cr-valid",
-                "thread_id": "thread-valid",
-
-                "stable_marker_key": "thread-valid",
+                "thread_id": "PRRT_thread_valid",
+                "stable_marker_key": "PRRT_thread_valid",
                 "body_hash": "hash-valid",
                 "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
                 "status": "changed",
@@ -8098,24 +8264,24 @@ fn write_p15_validated_fixed_pending(temp: &tempfile::TempDir) {
                 9,
                 &serde_json::json!({
                     "pending_actions": [{
-                        "action_id": "comment_fixed:thread-valid:hash-valid:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                        "action_id": "comment_fixed:PRRT_thread_valid:hash-valid:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
                         "action_kind": "comment_fixed",
                         "item_id": "cr-valid",
-                        "stable_marker_key": "thread-valid",
+                        "stable_marker_key": "PRRT_thread_valid",
                         "source_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
                         "remediation_input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
                         "remediation_output_head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
                         "remediation_output_head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
                         "body_hash": "hash-valid",
-                        "idempotency_key": "run-p11:example:workflow:1910:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb:thread-valid:comment_fixed",
+                        "idempotency_key": "run-p11:example:workflow:1910:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb:PRRT_thread_valid:comment_fixed",
                         "resolution_required": true,
-                        "thread_id": "thread-valid",
+                        "thread_id": "PRRT_thread_valid",
                         "comment_database_id": 7001,
                         "response_text": "Luther addressed this review item and posted the remediation evidence on the original thread.",
                         "status": "pending",
                         "reason": "fixed valid feedback",
                         "remediation_result_evidence": { "kind": "current_repository_test", "current_head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" },
-                        "original_feedback_identity": { "item_id": "cr-valid", "stable_marker_key": "thread-valid", "body_hash": "hash-valid", "source_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "thread_id": "thread-valid", "comment_database_id": 7001 }
+                        "original_feedback_identity": { "item_id": "cr-valid", "stable_marker_key": "PRRT_thread_valid", "body_hash": "hash-valid", "source_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "thread_id": "PRRT_thread_valid", "comment_database_id": 7001 }
                     }],
                     "carry_forward_from_artifact_sequence": null,
                     "marker_policy": {},
@@ -8252,7 +8418,7 @@ fn marker_executor_derives_current_invalid_actions_without_pending_artifact() {
         serde_json::json!([]),
         serde_json::json!([p10_accepted(
             "cr-invalid",
-            "thread-invalid",
+            "PRRT_thread_invalid",
             "hash-invalid",
             "invalid"
         )]),
@@ -8314,7 +8480,12 @@ fn marker_refresh_suppresses_summary_but_keeps_actionable_invalid_action() {
         serde_json::json!([]),
         serde_json::json!([
             summary,
-            p10_accepted("cr-invalid", "thread-invalid", "hash-invalid", "invalid")
+            p10_accepted(
+                "cr-invalid",
+                "PRRT_thread_invalid",
+                "hash-invalid",
+                "invalid"
+            )
         ]),
         serde_json::json!([]),
         serde_json::json!([]),
@@ -8517,7 +8688,7 @@ fn marker_remote_only_resume_skips_duplicate_fixed_resolution_attempt() {
     write_p15_validated_fixed_pending(&temp);
     let remote_marker = serde_json::json!({
         "id": 77,
-        "body": "Luther follow-up\n\n<!-- luther-pr-followup marker_key=thread-valid source_head=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa remediation_output_head=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb body=hash-valid action=comment_fixed run_id=run-p11 -->"
+        "body": "Luther follow-up\n\n<!-- luther-pr-followup marker_key=PRRT_thread_valid source_head=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa remediation_output_head=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb body=hash-valid action=comment_fixed run_id=run-p11 -->"
     });
     let runner = P15MarkerRunner::with_remote_comments(vec![remote_marker]);
     let mut context = p11_context(&temp);
@@ -8549,7 +8720,7 @@ fn marker_remote_review_comment_marker_skips_duplicate_in_thread_reply() {
         "id": 88,
         "in_reply_to_id": 7001,
         "user": { "login": "coderabbitai" },
-        "body": "Luther follow-up\n\n<!-- luther-pr-followup marker_key=thread-valid source_head=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa remediation_output_head=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb body=hash-valid action=comment_fixed run_id=run-p11 -->"
+        "body": "Luther follow-up\n\n<!-- luther-pr-followup marker_key=PRRT_thread_valid source_head=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa remediation_output_head=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb body=hash-valid action=comment_fixed run_id=run-p11 -->"
     });
     let runner = P15MarkerRunner::with_pull_review_comments(vec![remote_review_comment]);
     let mut context = p11_context(&temp);
@@ -8625,9 +8796,72 @@ fn marker_blocks_all_github_calls_when_response_text_missing() {
     );
 }
 
+/// Malformed review-thread-like identities must fail validation rather than
+/// silently falling back to a top-level PR comment.
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P15
-/// @requirement:REQ-PRFU-015,REQ-PRFU-016,REQ-PRFU-017,REQ-PRFU-026
+/// @requirement:REQ-PRFU-015,REQ-PRFU-017,REQ-PRFU-026
 /// @pseudocode lines 41-49
+#[test]
+fn marker_blocks_malformed_review_thread_identity_before_mutation() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_p15_validated_fixed_pending(&temp);
+    let path = p11_current_artifact_path(&temp, "pending-feedback-marker-actions");
+    let mut pending = read_json(&path);
+    let action = pending["pending_actions"][0]
+        .as_object_mut()
+        .expect("pending action object");
+    action.insert(
+        "stable_marker_key".to_string(),
+        serde_json::json!("thread:"),
+    );
+    action.insert("item_id".to_string(), serde_json::json!("graphql:PRRT_"));
+    action.insert(
+        "original_feedback_identity".to_string(),
+        serde_json::json!({
+            "item_id": "graphql:PRRT_",
+            "stable_marker_key": "thread:",
+            "body_hash": "hash-valid",
+            "source_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }),
+    );
+    action.remove("thread_id");
+    action.remove("comment_database_id");
+    std::fs::write(
+        &path,
+        serde_json::to_vec_pretty(&pending).expect("pending malformed thread identity"),
+    )
+    .expect("write malformed thread identity");
+
+    let runner = P15MarkerRunner::default();
+    let mut context = p11_context(&temp);
+    let outcome = GithubFeedbackMarkerExecutorWithRunner::new(runner.clone(), FixedClock)
+        .execute(&mut context, &p11_params(&temp))
+        .expect("marker pre-mutation validation");
+    assert_expected_outcome(
+        outcome,
+        StepOutcome::Fatal,
+        "malformed review-thread identity must fail before any GitHub side effect",
+    );
+    assert!(
+        runner.calls().is_empty(),
+        "no GitHub command may run when review-thread identity is malformed: {:?}",
+        runner.calls()
+    );
+    let report = read_json(&p11_current_artifact_path(
+        &temp,
+        "pr-feedback-marker-report",
+    ));
+    let report_text = report.to_string();
+    assert!(
+        report_text.contains("resolution_required_without_thread_id"),
+        "validation artifact must name the missing thread-id violation: {report}"
+    );
+    assert!(
+        report_text.contains("review_thread_identity_without_reply_target"),
+        "validation artifact must name the missing reply target violation: {report}"
+    );
+}
+
 #[test]
 fn marker_rejects_fixed_action_without_validator_success_evidence() {
     let temp = tempfile::tempdir().expect("tempdir");
@@ -8811,10 +9045,10 @@ fn p15_thread_audit_entry(report: &serde_json::Value) -> serde_json::Value {
             entry
                 .get("review_thread_id")
                 .and_then(serde_json::Value::as_str)
-                == Some("thread-valid")
+                == Some("PRRT_thread_valid")
         })
         .cloned()
-        .expect("audit entry for thread-valid")
+        .expect("audit entry for PRRT_thread_valid")
 }
 
 /// Fixed/changed items must post the agent reply on the original review thread
@@ -8877,11 +9111,238 @@ fn marker_posts_in_thread_reply_for_fixed_and_resolves_thread() {
     );
 }
 
+fn single_posted_comment_with_warning<'a>(
+    report: &'a serde_json::Value,
+    warning: &str,
+) -> &'a serde_json::Value {
+    let posted_comments = report
+        .get("posted_comments")
+        .and_then(serde_json::Value::as_array)
+        .expect("posted_comments");
+    assert_eq!(
+        posted_comments.len(),
+        1,
+        "exactly one posted comment expected to avoid duplicate replies: {posted_comments:?}"
+    );
+    posted_comments
+        .iter()
+        .find(|comment| marker_warnings_include(comment, warning))
+        .unwrap_or_else(|| panic!("no posted comment contained expected warning: {warning}"))
+}
+
+fn marker_warnings_include(comment: &serde_json::Value, expected: &str) -> bool {
+    comment
+        .get("warnings")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|warnings| {
+            warnings
+                .iter()
+                .any(|warning| warning.as_str() == Some(expected))
+        })
+}
+
+fn assert_unknown_marker_reply_record(posted: &serde_json::Value) {
+    assert_eq!(
+        posted.get("source").and_then(serde_json::Value::as_str),
+        Some("posted_result_unknown")
+    );
+    assert_eq!(
+        posted
+            .get("github_delivery_status")
+            .and_then(serde_json::Value::as_str),
+        Some("unknown")
+    );
+    assert_eq!(
+        posted
+            .get("retry_suppressed")
+            .and_then(serde_json::Value::as_bool),
+        Some(true)
+    );
+}
+
+fn rest_reply_call_count(calls: &[Vec<String>]) -> usize {
+    calls
+        .iter()
+        .filter(|call| {
+            call.iter()
+                .any(|arg| arg.contains("/pulls/1910/comments/") && arg.contains("/replies"))
+        })
+        .count()
+}
+
+fn graphql_reply_call_count(calls: &[Vec<String>]) -> usize {
+    calls
+        .iter()
+        .filter(|call| {
+            call.iter()
+                .any(|arg| arg.contains("addPullRequestReviewThreadReply"))
+        })
+        .count()
+}
+
 /// The resolve call must send the real GraphQL mutation text and bind the
 /// `threadId` variable, not a placeholder named query.
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P15
 /// @requirement:REQ-PRFU-016
 /// @pseudocode lines 41-49
+
+#[test]
+fn marker_records_rest_reply_when_response_is_not_json() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_p15_validated_fixed_pending_with_database_id(&temp, 7001);
+    let runner = P15MarkerRunner::rest_reply_non_json();
+    let mut context = p11_context(&temp);
+
+    let outcome = GithubFeedbackMarkerExecutorWithRunner::new(runner.clone(), FixedClock)
+        .execute(&mut context, &p11_params(&temp))
+        .expect("non-JSON REST reply response should record an ambiguous post attempt");
+
+    assert_expected_outcome(
+        outcome,
+        StepOutcome::Success,
+        "ambiguous REST post response should be recorded to avoid duplicate replies on retry",
+    );
+    let report = read_json(&p11_current_artifact_path(
+        &temp,
+        "pr-feedback-marker-report",
+    ));
+    let posted = single_posted_comment_with_warning(&report, "rest_reply_response_not_json");
+    assert_unknown_marker_reply_record(posted);
+    let summary = posted
+        .get("github_response_summary")
+        .and_then(serde_json::Value::as_str)
+        .expect("github_response_summary should be present for non-JSON REST response");
+    assert!(
+        !summary.is_empty() && !summary.contains("not json"),
+        "REST parse summary should contain sanitized error context, not raw response: {summary}"
+    );
+    assert!(
+        summary.contains("response parse error") && summary.contains("raw_response_hash"),
+        "REST parse summary should include sanitized parse diagnostics: {summary}"
+    );
+    let preview = posted
+        .get("github_response_preview")
+        .and_then(serde_json::Value::as_str)
+        .expect("github_response_preview should be present for non-JSON REST response");
+    assert_eq!(preview, "not json");
+    let calls = runner.calls();
+    assert!(
+        calls.iter().any(|call| {
+            call.iter().any(|arg| arg == "POST")
+                && call
+                    .iter()
+                    .any(|arg| arg.contains("/pulls/1910/comments/7001/replies"))
+        }),
+        "test must exercise REST in-thread reply path: {calls:?}"
+    );
+    let initial_rest_reply_call_count = rest_reply_call_count(&calls);
+
+    let second_outcome = GithubFeedbackMarkerExecutorWithRunner::new(runner.clone(), FixedClock)
+        .execute(&mut p11_context(&temp), &p11_params(&temp))
+        .expect("ambiguous non-JSON REST reply rerun should use local marker completion");
+    assert_expected_outcome(
+        second_outcome,
+        StepOutcome::Success,
+        "ambiguous non-JSON REST record should suppress duplicate replies on rerun",
+    );
+    let second_calls = runner.calls();
+    let second_rest_reply_call_count = rest_reply_call_count(&second_calls);
+    assert_eq!(
+        second_rest_reply_call_count, initial_rest_reply_call_count,
+        "local idempotency record should suppress duplicate REST replies"
+    );
+}
+
+#[test]
+fn marker_records_rest_reply_when_response_is_non_object_json() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_p15_validated_fixed_pending_with_database_id(&temp, 7001);
+    let runner = P15MarkerRunner::rest_reply_non_object_json();
+    let mut context = p11_context(&temp);
+
+    let outcome = GithubFeedbackMarkerExecutorWithRunner::new(runner.clone(), FixedClock)
+        .execute(&mut context, &p11_params(&temp))
+        .expect("non-object JSON REST response should record an ambiguous post attempt");
+
+    assert_expected_outcome(
+        outcome,
+        StepOutcome::Success,
+        "non-object JSON REST response should be recorded to avoid duplicate replies on retry",
+    );
+    let report = read_json(&p11_current_artifact_path(
+        &temp,
+        "pr-feedback-marker-report",
+    ));
+    let posted = single_posted_comment_with_warning(&report, "rest_reply_response_not_json");
+    assert_unknown_marker_reply_record(posted);
+    let summary = posted
+        .get("github_response_summary")
+        .and_then(serde_json::Value::as_str)
+        .expect("github_response_summary should be present for non-object REST JSON");
+    assert!(
+        summary.contains("expected JSON object, got array")
+            && summary.contains("raw_response_hash"),
+        "REST non-object JSON summary should include sanitized diagnostics: {summary}"
+    );
+    assert_eq!(
+        posted
+            .get("github_response_preview")
+            .and_then(serde_json::Value::as_str),
+        Some("[1,2]")
+    );
+}
+
+#[test]
+fn marker_records_rest_reply_when_response_is_api_error() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_p15_validated_fixed_pending_with_database_id(&temp, 7001);
+    let runner = P15MarkerRunner::rest_reply_api_error();
+    let mut context = p11_context(&temp);
+
+    let outcome = GithubFeedbackMarkerExecutorWithRunner::new(runner.clone(), FixedClock)
+        .execute(&mut context, &p11_params(&temp))
+        .expect("REST API error response should record an ambiguous post attempt");
+
+    assert_expected_outcome(
+        outcome,
+        StepOutcome::Success,
+        "ambiguous REST API error response should be recorded to avoid duplicate replies on retry",
+    );
+    let report = read_json(&p11_current_artifact_path(
+        &temp,
+        "pr-feedback-marker-report",
+    ));
+    let posted = single_posted_comment_with_warning(&report, "rest_reply_response_error_message");
+    assert_unknown_marker_reply_record(posted);
+    assert_eq!(
+        posted
+            .get("github_response_summary")
+            .and_then(serde_json::Value::as_str),
+        Some("Validation Failed")
+    );
+    assert!(
+        posted.get("github_response_preview").is_none(),
+        "API error responses should not include a raw response preview: {posted:?}"
+    );
+    let calls = runner.calls();
+    let initial_rest_reply_call_count = rest_reply_call_count(&calls);
+
+    let second_outcome = GithubFeedbackMarkerExecutorWithRunner::new(runner.clone(), FixedClock)
+        .execute(&mut p11_context(&temp), &p11_params(&temp))
+        .expect("ambiguous REST API error rerun should use local marker completion");
+    assert_expected_outcome(
+        second_outcome,
+        StepOutcome::Success,
+        "ambiguous REST API error record should suppress duplicate replies on rerun",
+    );
+    let second_calls = runner.calls();
+    let second_rest_reply_call_count = rest_reply_call_count(&second_calls);
+    assert_eq!(
+        second_rest_reply_call_count, initial_rest_reply_call_count,
+        "local idempotency record should suppress duplicate REST replies"
+    );
+}
+
 #[test]
 fn marker_resolve_uses_real_mutation_and_thread_variable() {
     let temp = tempfile::tempdir().expect("tempdir");
@@ -8905,7 +9366,7 @@ fn marker_resolve_uses_real_mutation_and_thread_variable() {
     assert!(
         graphql_call
             .iter()
-            .any(|arg| arg == "threadId=thread-valid"),
+            .any(|arg| arg == "threadId=PRRT_thread_valid"),
         "resolve must bind the threadId variable: {graphql_call:?}"
     );
     assert!(
@@ -9066,13 +9527,13 @@ fn marker_posts_comment_only_for_rest_review_action_without_thread_id() {
     );
 }
 
-/// Review-thread marker actions without a numeric review-comment id must fail
-/// validation before any GitHub mutation instead of posting to the PR timeline.
+/// Review-thread marker actions without a numeric REST review-comment id can
+/// still post an in-thread reply through GraphQL when the thread id is known.
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P15
 /// @requirement:REQ-PRFU-015,REQ-PRFU-016
 /// @pseudocode lines 41-49
 #[test]
-fn marker_rejects_review_thread_action_when_database_id_missing() {
+fn marker_posts_graphql_thread_reply_when_database_id_missing() {
     let temp = tempfile::tempdir().expect("tempdir");
     write_p15_validated_fixed_pending_with_database_id(&temp, 7001);
     let path = p11_current_artifact_path(&temp, "pending-feedback-marker-actions");
@@ -9094,26 +9555,418 @@ fn marker_rejects_review_thread_action_when_database_id_missing() {
     let mut context = p11_context(&temp);
     let outcome = GithubFeedbackMarkerExecutorWithRunner::new(runner.clone(), FixedClock)
         .execute(&mut context, &p11_params(&temp))
-        .expect("reject fixed feedback without database id");
+        .expect("mark fixed feedback without database id");
     assert_expected_outcome(
         outcome,
-        StepOutcome::Fatal,
-        "review-thread marker actions without comment_database_id must fail before mutation",
+        StepOutcome::Success,
+        "thread-id marker actions without comment_database_id should use GraphQL replies",
+    );
+    let calls = runner.calls();
+    assert!(
+        calls.iter().any(|call| call
+            .iter()
+            .any(|arg| arg.contains("addPullRequestReviewThreadReply"))),
+        "missing-database-id thread replies must use GraphQL: {calls:?}"
     );
     assert!(
-        runner.calls().is_empty(),
-        "no GitHub command may run when review-thread reply validation fails: {:?}",
-        runner.calls()
+        calls.iter().any(|call| {
+            call.iter()
+                .any(|arg| arg.contains("addPullRequestReviewThreadReply"))
+                && call.iter().any(|arg| arg == "threadId=PRRT_thread_valid")
+        }),
+        "GraphQL thread reply must target the original review thread: {calls:?}"
+    );
+    assert!(
+        calls
+            .iter()
+            .any(|call| call.iter().any(|arg| arg.contains("resolveReviewThread"))),
+        "fixed feedback should still resolve the thread: {calls:?}"
+    );
+    assert!(
+        !calls.iter().any(|call| {
+            call.iter()
+                .any(|arg| arg.contains("/comments/") && arg.contains("/replies"))
+        }),
+        "REST replies endpoint must not be used when comment_database_id is missing: {calls:?}"
     );
     let report = read_json(&p11_current_artifact_path(
         &temp,
         "pr-feedback-marker-report",
     ));
-    assert!(
+    assert_eq!(
         report
-            .to_string()
-            .contains("review_thread_reply_without_comment_database_id"),
-        "validation artifact must name the missing comment_database_id violation: {report}"
+            .get("marker_state")
+            .and_then(serde_json::Value::as_str),
+        Some("complete")
+    );
+    let has_graphql_reply_audit = report
+        .get("action_audit")
+        .and_then(serde_json::Value::as_array)
+        .expect("action_audit array")
+        .iter()
+        .any(|entry| {
+            entry
+                .get("in_thread_reply")
+                .and_then(serde_json::Value::as_bool)
+                == Some(true)
+                && entry
+                    .get("reply_comment_id")
+                    .and_then(serde_json::Value::as_i64)
+                    == Some(9101)
+        });
+    assert!(
+        has_graphql_reply_audit,
+        "GraphQL thread reply should be recorded as an in-thread reply with its comment id"
+    );
+}
+
+#[test]
+fn marker_records_graphql_thread_reply_when_response_has_comment_and_errors() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_p15_validated_fixed_pending_with_database_id(&temp, 7001);
+    let path = p11_current_artifact_path(&temp, "pending-feedback-marker-actions");
+    let mut pending = read_json(&path);
+    pending["pending_actions"][0]
+        .as_object_mut()
+        .expect("pending action object")
+        .remove("comment_database_id");
+    pending["pending_actions"][0]["original_feedback_identity"]
+        .as_object_mut()
+        .expect("original feedback identity object")
+        .remove("comment_database_id");
+    std::fs::write(
+        &path,
+        serde_json::to_vec_pretty(&pending).expect("pending without database id"),
+    )
+    .expect("write pending without comment_database_id");
+
+    let runner = P15MarkerRunner::graphql_reply_errors_with_comment();
+    let mut context = p11_context(&temp);
+    let outcome = GithubFeedbackMarkerExecutorWithRunner::new(runner.clone(), FixedClock)
+        .execute(&mut context, &p11_params(&temp))
+        .expect("GraphQL reply with comment plus errors should record partial success");
+
+    assert_expected_outcome(
+        outcome,
+        StepOutcome::Success,
+        "posted GraphQL comment object should be recorded to avoid duplicate replies on retry",
+    );
+    let report = read_json(&p11_current_artifact_path(
+        &temp,
+        "pr-feedback-marker-report",
+    ));
+    let audit = p15_thread_audit_entry(&report);
+    assert_eq!(
+        audit
+            .get("reply_comment_id")
+            .and_then(serde_json::Value::as_i64),
+        Some(9101)
+    );
+    let posted_comments = report
+        .get("posted_comments")
+        .and_then(serde_json::Value::as_array)
+        .expect("posted_comments");
+    assert_eq!(
+        posted_comments.len(),
+        1,
+        "exactly one posted comment expected to avoid duplicate replies: {posted_comments:?}"
+    );
+    let posted = posted_comments
+        .iter()
+        .find(|comment| {
+            comment
+                .get("comment_id")
+                .and_then(serde_json::Value::as_i64)
+                == Some(9101)
+        })
+        .expect("posted comment record for GraphQL partial success");
+    let warnings = posted
+        .get("warnings")
+        .and_then(serde_json::Value::as_array)
+        .expect("warnings");
+    assert!(warnings
+        .iter()
+        .any(|warning| { warning.as_str() == Some("partial_success_graphql_errors_present") }));
+    assert_eq!(
+        posted
+            .get("github_response_summary")
+            .and_then(serde_json::Value::as_str),
+        Some("field selection warning")
+    );
+}
+
+#[test]
+fn marker_uses_fallback_direct_thread_id_when_primary_candidate_is_invalid() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_p15_validated_fixed_pending_with_database_id(&temp, 7001);
+    let path = p11_current_artifact_path(&temp, "pending-feedback-marker-actions");
+    let mut pending = read_json(&path);
+    let action = pending["pending_actions"][0]
+        .as_object_mut()
+        .expect("pending action object");
+    action.insert("thread_id".to_string(), serde_json::json!("12345"));
+    action.insert(
+        "evidence".to_string(),
+        serde_json::json!({ "thread_id": "PRRT_evidence_thread" }),
+    );
+    action.remove("comment_database_id");
+    let identity = action
+        .get_mut("original_feedback_identity")
+        .and_then(serde_json::Value::as_object_mut)
+        .expect("original feedback identity object");
+    identity.remove("comment_database_id");
+    std::fs::write(
+        &path,
+        serde_json::to_vec_pretty(&pending).expect("pending with fallback thread id"),
+    )
+    .expect("write pending with fallback thread id");
+
+    let runner = P15MarkerRunner::default();
+    let mut context = p11_context(&temp);
+    let outcome = GithubFeedbackMarkerExecutorWithRunner::new(runner.clone(), FixedClock)
+        .execute(&mut context, &p11_params(&temp))
+        .expect("mark fixed feedback with fallback direct thread id");
+
+    assert_expected_outcome(
+        outcome,
+        StepOutcome::Success,
+        "fallback direct thread id should be used when primary candidate is not a review thread node",
+    );
+    let calls = runner.calls();
+    assert!(
+        calls.iter().any(|call| {
+            call.iter()
+                .any(|arg| arg == "threadId=PRRT_evidence_thread")
+        }),
+        "fallback direct thread id must be passed to GraphQL: {calls:?}"
+    );
+}
+
+#[test]
+fn marker_records_graphql_thread_reply_when_response_has_no_comment() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_p15_validated_fixed_pending_with_database_id(&temp, 7001);
+    let path = p11_current_artifact_path(&temp, "pending-feedback-marker-actions");
+    let mut pending = read_json(&path);
+    pending["pending_actions"][0]
+        .as_object_mut()
+        .expect("pending action object")
+        .remove("comment_database_id");
+    pending["pending_actions"][0]["original_feedback_identity"]
+        .as_object_mut()
+        .expect("original feedback identity object")
+        .remove("comment_database_id");
+    std::fs::write(
+        &path,
+        serde_json::to_vec_pretty(&pending).expect("pending without database id"),
+    )
+    .expect("write pending without comment_database_id");
+
+    let runner = P15MarkerRunner::graphql_reply_without_comment();
+    let mut context = p11_context(&temp);
+    let outcome = GithubFeedbackMarkerExecutorWithRunner::new(runner.clone(), FixedClock)
+        .execute(&mut context, &p11_params(&temp))
+        .expect("missing GraphQL reply comment should record an ambiguous post attempt");
+
+    assert_expected_outcome(
+        outcome,
+        StepOutcome::Success,
+        "ambiguous GraphQL post response should be recorded to avoid duplicate replies on retry",
+    );
+    let report = read_json(&p11_current_artifact_path(
+        &temp,
+        "pr-feedback-marker-report",
+    ));
+    let posted =
+        single_posted_comment_with_warning(&report, "non_idempotent_graphql_reply_result_unknown");
+    assert_unknown_marker_reply_record(posted);
+    assert_eq!(
+        posted
+            .get("github_response_summary")
+            .and_then(serde_json::Value::as_str),
+        Some("reply was not created")
+    );
+    let calls = runner.calls();
+    let initial_graphql_reply_call_count = graphql_reply_call_count(&calls);
+    assert_eq!(
+        initial_graphql_reply_call_count, 1,
+        "malformed GraphQL reply test must exercise the GraphQL mutation path exactly once: {calls:?}"
+    );
+
+    let second_outcome = GithubFeedbackMarkerExecutorWithRunner::new(runner.clone(), FixedClock)
+        .execute(&mut p11_context(&temp), &p11_params(&temp))
+        .expect("ambiguous GraphQL reply rerun should use local marker completion");
+    assert_expected_outcome(
+        second_outcome,
+        StepOutcome::Success,
+        "ambiguous GraphQL post record should suppress duplicate replies on rerun",
+    );
+    let second_calls = runner.calls();
+    let second_graphql_reply_call_count = graphql_reply_call_count(&second_calls);
+    assert_eq!(
+        second_graphql_reply_call_count, initial_graphql_reply_call_count,
+        "local idempotency key should suppress duplicate GraphQL replies: {second_calls:?}"
+    );
+}
+
+/// CodeRabbit GraphQL feedback may encode only the review-thread node id in the
+/// stable marker key. The marker step must hydrate that id instead of treating
+/// the action as unresolvable before mutation.
+/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P15
+/// @requirement:REQ-PRFU-015,REQ-PRFU-016
+/// @pseudocode lines 41-49
+#[test]
+fn marker_derives_thread_id_from_thread_stable_marker_key() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_p15_validated_fixed_pending_with_database_id(&temp, 7001);
+    let path = p11_current_artifact_path(&temp, "pending-feedback-marker-actions");
+    let mut pending = read_json(&path);
+    let action = pending["pending_actions"][0]
+        .as_object_mut()
+        .expect("pending action object");
+    action.insert(
+        "stable_marker_key".to_string(),
+        serde_json::json!("thread:PRRT_thread_node:sha256:body"),
+    );
+    action.remove("thread_id");
+    action.remove("comment_database_id");
+    let identity = action
+        .get_mut("original_feedback_identity")
+        .and_then(serde_json::Value::as_object_mut)
+        .expect("original feedback identity object");
+    identity.insert(
+        "stable_marker_key".to_string(),
+        serde_json::json!("thread:PRRT_thread_node:sha256:body"),
+    );
+    identity.remove("thread_id");
+    identity.remove("comment_database_id");
+    std::fs::write(
+        &path,
+        serde_json::to_vec_pretty(&pending).expect("pending without explicit thread id"),
+    )
+    .expect("write pending without explicit thread id");
+    let result_path = p11_current_artifact_path(&temp, "pr-remediation-result");
+    let mut result = read_json(&result_path);
+    let result_item = result["results"]
+        .as_array_mut()
+        .and_then(|items| {
+            items.iter_mut().find(|item| {
+                item.get("source_type").and_then(serde_json::Value::as_str)
+                    == Some("coderabbit_feedback")
+            })
+        })
+        .and_then(serde_json::Value::as_object_mut)
+        .expect("coderabbit remediation result object");
+    result_item.insert(
+        "stable_marker_key".to_string(),
+        serde_json::json!("thread:PRRT_thread_node:sha256:body"),
+    );
+    result_item.remove("thread_id");
+    std::fs::write(
+        result_path,
+        serde_json::to_vec_pretty(&result).expect("result with thread marker key"),
+    )
+    .expect("write result with thread marker key");
+
+    let runner = P15MarkerRunner::default();
+    let mut context = p11_context(&temp);
+    let outcome = GithubFeedbackMarkerExecutorWithRunner::new(runner.clone(), FixedClock)
+        .execute(&mut context, &p11_params(&temp))
+        .expect("mark fixed feedback with stable-marker thread id");
+
+    assert_expected_outcome(
+        outcome,
+        StepOutcome::Success,
+        "thread stable marker keys should provide the review-thread node id",
+    );
+    let calls = runner.calls();
+    assert!(
+        calls
+            .iter()
+            .any(|call| call.iter().any(|arg| arg == "threadId=PRRT_thread_node")),
+        "derived thread id must be passed to GraphQL: {calls:?}"
+    );
+}
+
+#[test]
+fn marker_derives_thread_id_from_later_graphql_identity_candidate() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_p15_validated_fixed_pending_with_database_id(&temp, 7001);
+    let path = p11_current_artifact_path(&temp, "pending-feedback-marker-actions");
+    let mut pending = read_json(&path);
+    let action = pending["pending_actions"][0]
+        .as_object_mut()
+        .expect("pending action object");
+    action.insert(
+        "stable_marker_key".to_string(),
+        serde_json::json!("threadless"),
+    );
+    action.insert(
+        "source_id".to_string(),
+        serde_json::json!("graphql:PRRT_later_thread:PRRC_comment"),
+    );
+    action.remove("thread_id");
+    action.remove("comment_database_id");
+    let identity = action
+        .get_mut("original_feedback_identity")
+        .and_then(serde_json::Value::as_object_mut)
+        .expect("original feedback identity object");
+    identity.insert(
+        "stable_marker_key".to_string(),
+        serde_json::json!("threadless"),
+    );
+    identity.insert(
+        "item_id".to_string(),
+        serde_json::json!("graphql:PRRC_comment"),
+    );
+    identity.remove("thread_id");
+    identity.remove("comment_database_id");
+    std::fs::write(
+        &path,
+        serde_json::to_vec_pretty(&pending).expect("pending with source thread id"),
+    )
+    .expect("write pending with source thread id");
+
+    let result_path = p11_current_artifact_path(&temp, "pr-remediation-result");
+    let mut result = read_json(&result_path);
+    let result_item = result["results"]
+        .as_array_mut()
+        .and_then(|items| {
+            items.iter_mut().find(|item| {
+                item.get("source_type").and_then(serde_json::Value::as_str)
+                    == Some("coderabbit_feedback")
+            })
+        })
+        .and_then(serde_json::Value::as_object_mut)
+        .expect("coderabbit remediation result object");
+    result_item.insert(
+        "stable_marker_key".to_string(),
+        serde_json::json!("threadless"),
+    );
+    result_item.remove("thread_id");
+    std::fs::write(
+        result_path,
+        serde_json::to_vec_pretty(&result).expect("result with threadless marker key"),
+    )
+    .expect("write result with threadless marker key");
+
+    let runner = P15MarkerRunner::default();
+    let mut context = p11_context(&temp);
+    let outcome = GithubFeedbackMarkerExecutorWithRunner::new(runner.clone(), FixedClock)
+        .execute(&mut context, &p11_params(&temp))
+        .expect("mark fixed feedback with source graphQL thread id");
+
+    assert_expected_outcome(
+        outcome,
+        StepOutcome::Success,
+        "later GraphQL identity candidates should be considered when earlier candidates do not contain a thread id",
+    );
+    let calls = runner.calls();
+    assert!(
+        calls
+            .iter()
+            .any(|call| call.iter().any(|arg| arg == "threadId=PRRT_later_thread")),
+        "derived source thread id must be passed to GraphQL: {calls:?}"
     );
 }
 

@@ -180,7 +180,13 @@ jobs:
         run: |
           # Global install of OCR only; package lifecycle scripts are disabled.
           npm install -g --ignore-scripts @alibaba-group/open-code-review@1.6.1
-          ocr version > ocr-version.txt
+          OCR_BIN="$(command -v ocr)"
+          if [ -z "${OCR_BIN}" ]; then
+            echo "::error::ocr executable was not found after installation"
+            exit 1
+          fi
+          echo "OCR_BIN=${OCR_BIN}" >> "$GITHUB_ENV"
+          "$OCR_BIN" version > ocr-version.txt
           cat ocr-version.txt
 
       - name: Configure OCR review rules
@@ -263,7 +269,7 @@ jobs:
             echo "$changed_tests"
             # Inspect OCR preview scope. Each changed test must appear in
             # the reviewed set and must not appear in the excluded set.
-            if ! ocr review --preview --from "$BASE_SHA" --to "$HEAD_SHA" \
+            if ! "$OCR_BIN" review --preview --from "$BASE_SHA" --to "$HEAD_SHA" \
               > ocr-preview.txt 2> ocr-preview-stderr.log; then
               echo "::error::Could not verify OCR preview scope for changed test files."
               exit 1
@@ -340,7 +346,7 @@ jobs:
           OCR_USE_ANTHROPIC: ${{ vars.OCR_LLM_USE_ANTHROPIC }}
         run: |
           set +e
-          ocr review \
+          "$OCR_BIN" review \
             --from "$BASE_SHA" \
             --to "$HEAD_SHA" \
             --format json \

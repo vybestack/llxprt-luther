@@ -15,7 +15,7 @@
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
-use rusqlite::Connection;
+use rusqlite::{Connection, Transaction, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
@@ -23,6 +23,7 @@ use crate::persistence::{
     append_typed_event_with_conn, get_checkpoint_for_step, get_run_with_conn,
     is_resumable_checkpoint_status, list_checkpoints, load_checkpoint_before_step,
     persist_run_with_conn, set_resume_point, Checkpoint, EventType, PersistenceError, RunMetadata,
+    RunStatus,
 };
 use crate::workflow::target_profile::TargetProfileOverrides;
 
@@ -234,14 +235,33 @@ fn check_workflow_resolvable(metadata: &RunMetadata) -> SafetyCheck {
 
 /// Refuse to reopen terminal non-failed runs (Completed/Merged/Abandoned/
 /// Cancelled). `Failed` is the single intentional terminal exception, encoded in
-/// `RunStatus::is_resumable`. This refusal is NOT bypassable by `--force`, which
-/// only relaxes the safe-step whitelist.
+/// `RunStatus::is_resumable`. A `Running` run is accepted when its recorded
+/// workflow PID is stale or unrecorded, or when `--force` is specified. Force
+/// overrides even a live Running claim, so operators must only use it after
+/// confirming the recorded process is unrelated; all other terminal refusals
+/// remain non-bypassable.
 /// @plan:PLAN-20260623-LUTHER-CONTINUATION
-fn check_resumable_status(metadata: &RunMetadata) -> SafetyCheck {
+fn check_resumable_status(metadata: &RunMetadata, force: bool) -> SafetyCheck {
     if metadata.status.is_resumable() {
         pass(
             "resumable_status",
             format!("run status {} is resumable", metadata.status),
+        )
+    } else if running_claim_is_available(metadata) {
+        pass(
+            "resumable_status",
+            format!(
+                "run status {} is resumable because recorded workflow PID is stale or unrecorded",
+                metadata.status
+            ),
+        )
+    } else if metadata.status == RunStatus::Running && force {
+        pass(
+            "resumable_status",
+            format!(
+                "run status {} is resumable because --force was specified",
+                metadata.status
+            ),
         )
     } else {
         fail(
@@ -329,7 +349,7 @@ pub fn validate_continuation(
         return Ok(ContinuationValidation::from_checks(checks));
     };
     checks.push(check_workflow_resolvable(&metadata));
-    checks.push(check_resumable_status(&metadata));
+    checks.push(check_resumable_status(&metadata, request.force));
     checks.push(check_identity_recoverable(&metadata));
     checks.push(check_workspace(&metadata));
     let selection = select_checkpoint(conn, request, &metadata);
@@ -462,36 +482,109 @@ pub fn commit_continuation(
     request: &ContinuationRequest,
     step_id: &str,
 ) -> Result<RunMetadata, ContinuationError> {
-    set_resume_point(conn, &request.run_id, step_id)?;
-    reopen_run(conn, &request.run_id, &request.kind, step_id)
+    // `conn` is intentionally not reused until `tx` commits or rolls back.
+    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+    match commit_continuation_in_transaction(&tx, request, step_id) {
+        Ok(metadata) => {
+            tx.commit()?;
+            Ok(metadata)
+        }
+        Err(err) => match tx.rollback() {
+            Ok(()) => Err(err),
+            Err(rollback_err) => {
+                tracing::warn!(
+                    error = %err,
+                    rollback_error = %rollback_err,
+                    "rollback failed after continuation commit error"
+                );
+                Err(ContinuationError::Persistence(format!(
+                    "rollback failed after continuation commit error: original={err}; rollback={rollback_err}"
+                )))
+            }
+        },
+    }
+}
+
+fn commit_continuation_in_transaction(
+    tx: &Transaction<'_>,
+    request: &ContinuationRequest,
+    step_id: &str,
+) -> Result<RunMetadata, ContinuationError> {
+    let metadata = get_run_with_conn(tx, &request.run_id)?
+        .ok_or_else(|| ContinuationError::RunNotFound(request.run_id.clone()))?;
+    ensure_reopen_claim_is_available(&metadata, request)?;
+    set_resume_point(tx, &request.run_id, step_id)?;
+    reopen_run(tx, request, step_id, metadata)
 }
 
 fn reopen_run(
     conn: &Connection,
-    run_id: &str,
-    kind: &ContinuationKind,
+    request: &ContinuationRequest,
     step_id: &str,
+    mut metadata: RunMetadata,
 ) -> Result<RunMetadata, ContinuationError> {
-    let mut metadata = get_run_with_conn(conn, run_id)?
-        .ok_or_else(|| ContinuationError::RunNotFound(run_id.to_string()))?;
     let prior_status = metadata.status.to_string();
     metadata.reopen();
     metadata.set_current_step(step_id);
     persist_run_with_conn(conn, &metadata)?;
     let detail = format!(
         "continuation={} from_status={prior_status} resume_step={step_id}",
-        kind.verb()
+        request.kind.verb()
     );
-    let _ = append_typed_event_with_conn(
+    append_typed_event_with_conn(
         conn,
-        run_id,
+        &request.run_id,
         step_id,
         "reopened",
         EventType::StepStart,
         Some(&detail),
         Utc::now(),
-    );
+    )?;
     Ok(metadata)
+}
+
+fn ensure_reopen_claim_is_available(
+    metadata: &RunMetadata,
+    request: &ContinuationRequest,
+) -> Result<(), ContinuationError> {
+    // This runs inside the IMMEDIATE transaction after re-reading metadata, so
+    // a second concurrent continuation attempt observes the first claim's PID
+    // before deciding whether the Running record is still available.
+    if !reopen_status_is_allowed(metadata) {
+        return Err(ContinuationError::InvalidTarget(format!(
+            "run {} status {} is not resumable; terminal states other than failed cannot be continued",
+            request.run_id, metadata.status
+        )));
+    }
+    if !request.force {
+        if let Some(pid) = live_running_claim_pid(metadata) {
+            return Err(ContinuationError::InvalidTarget(format!(
+                "run {} is already running with live workflow PID {pid}; retry with --force only if that process is unrelated",
+                request.run_id
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn reopen_status_is_allowed(metadata: &RunMetadata) -> bool {
+    metadata.status.is_resumable() || metadata.status == RunStatus::Running
+}
+
+fn running_claim_is_available(metadata: &RunMetadata) -> bool {
+    metadata.status == RunStatus::Running
+        && (metadata.is_process_stale() || metadata.process_pid.is_none())
+}
+
+fn live_running_claim_pid(metadata: &RunMetadata) -> Option<u32> {
+    if metadata.status == RunStatus::Running
+        && metadata.process_pid.is_some()
+        && !metadata.is_process_stale()
+    {
+        metadata.process_pid
+    } else {
+        None
+    }
 }
 
 /// Directory under which continuation artifacts for a run are written.
@@ -643,469 +736,4 @@ pub fn prepare_continuation(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::persistence::checkpoint::init_checkpoint_table;
-    use crate::persistence::run_metadata::init_runs_table;
-    use crate::persistence::{
-        save_checkpoint_with_conn, RunStatus, StateSnapshot, CHECKPOINT_STATUS_WAITING,
-    };
-    use std::collections::HashMap;
-
-    fn test_conn() -> Connection {
-        let conn = Connection::open_in_memory().expect("in-memory db");
-        init_checkpoint_table(&conn).expect("checkpoint table");
-        init_runs_table(&conn).expect("runs table");
-        conn
-    }
-
-    fn seed_run(conn: &Connection, run_id: &str, status: RunStatus, current_step: &str) {
-        let mut md = RunMetadata::new(run_id, "llxprt-issue-fix", "llxprt-issue-fix-v1");
-        md.status = status;
-        md.current_step = Some(current_step.to_string());
-        md.repository = Some("vybestack/llxprt-code".to_string());
-        md.issue_number = Some(2133);
-        md.pr_number = Some(2138);
-        md.workspace_path = Some("/tmp/ws".to_string());
-        persist_run_with_conn(conn, &md).expect("persist run");
-    }
-
-    fn seed_checkpoint(conn: &Connection, run_id: &str, step: &str, status: &str) {
-        let snapshot = StateSnapshot {
-            retry_count: 0,
-            loop_count: 0,
-            edge_loop_counts: HashMap::new(),
-            context: HashMap::new(),
-            status: status.to_string(),
-        };
-        let cp = Checkpoint::with_snapshot(run_id, step, snapshot);
-        save_checkpoint_with_conn(conn, &cp).expect("save checkpoint");
-        // Ensure distinct, increasing timestamps for ordering assertions.
-        std::thread::sleep(std::time::Duration::from_millis(2));
-    }
-
-    fn seed_terminal_failed_run(conn: &Connection, run_id: &str) {
-        seed_run(conn, run_id, RunStatus::Failed, TERMINAL_STEP);
-        seed_checkpoint(conn, run_id, "capture_pr_identity", "completed");
-        seed_checkpoint(conn, run_id, "post_pr_iteration_guard", "completed");
-        seed_checkpoint(conn, run_id, "watch_pr_checks", "completed");
-        seed_checkpoint(conn, run_id, "collect_ci_failures", "completed");
-        seed_checkpoint(conn, run_id, TERMINAL_STEP, "completed");
-    }
-
-    fn request(run_id: &str, kind: ContinuationKind, force: bool) -> ContinuationRequest {
-        ContinuationRequest {
-            run_id: run_id.to_string(),
-            kind,
-            force,
-        }
-    }
-
-    #[test]
-    fn validation_fails_when_run_missing() {
-        let conn = test_conn();
-        let req = request("absent", ContinuationKind::Resume, false);
-        let validation = validate_continuation(&conn, &req).expect("validate");
-        assert!(!validation.ok);
-        assert!(validation
-            .failure_reasons()
-            .iter()
-            .any(|r| r.contains("run_exists")));
-    }
-
-    #[test]
-    fn validation_passes_for_terminal_failed_resume() {
-        let conn = test_conn();
-        seed_terminal_failed_run(&conn, "run-1");
-        let req = request("run-1", ContinuationKind::Resume, false);
-        let validation = validate_continuation(&conn, &req).expect("validate");
-        assert!(validation.ok, "reasons: {:?}", validation.failure_reasons());
-    }
-
-    #[test]
-    fn validation_rejects_unsafe_step_without_force() {
-        let conn = test_conn();
-        seed_run(&conn, "run-2", RunStatus::Failed, "implement");
-        seed_checkpoint(&conn, "run-2", "implement", "completed");
-        let req = request(
-            "run-2",
-            ContinuationKind::Rewind {
-                target: RewindTarget::ToStep("implement".to_string()),
-            },
-            false,
-        );
-        let validation = validate_continuation(&conn, &req).expect("validate");
-        assert!(!validation.ok);
-        assert!(validation
-            .failure_reasons()
-            .iter()
-            .any(|r| r.contains("safe_step")));
-    }
-
-    #[test]
-    fn validation_allows_unsafe_step_with_force() {
-        let conn = test_conn();
-        seed_run(&conn, "run-3", RunStatus::Failed, "implement");
-        seed_checkpoint(&conn, "run-3", "implement", "completed");
-        let req = request(
-            "run-3",
-            ContinuationKind::Rewind {
-                target: RewindTarget::ToStep("implement".to_string()),
-            },
-            true,
-        );
-        let validation = validate_continuation(&conn, &req).expect("validate");
-        assert!(validation.ok, "reasons: {:?}", validation.failure_reasons());
-    }
-
-    #[test]
-    fn validation_rejects_missing_rewind_step() {
-        let conn = test_conn();
-        seed_terminal_failed_run(&conn, "run-4");
-        let req = request(
-            "run-4",
-            ContinuationKind::Rewind {
-                target: RewindTarget::ToStep("does_not_exist".to_string()),
-            },
-            false,
-        );
-        let validation = validate_continuation(&conn, &req).expect("validate");
-        assert!(!validation.ok);
-        assert!(validation
-            .failure_reasons()
-            .iter()
-            .any(|r| r.contains("checkpoint_exists")));
-    }
-
-    #[test]
-    fn resume_selects_checkpoint_before_terminal_step() {
-        let conn = test_conn();
-        seed_terminal_failed_run(&conn, "run-5");
-        let md = get_run_with_conn(&conn, "run-5").unwrap().unwrap();
-        let req = request("run-5", ContinuationKind::Resume, false);
-        let cp = select_checkpoint(&conn, &req, &md).expect("select");
-        assert_eq!(cp.step_id, "collect_ci_failures");
-    }
-
-    #[test]
-    fn resume_prefers_waiting_checkpoint_when_present() {
-        let conn = test_conn();
-        seed_run(
-            &conn,
-            "run-6",
-            RunStatus::WaitingForChecks,
-            "watch_pr_checks",
-        );
-        seed_checkpoint(&conn, "run-6", "capture_pr_identity", "completed");
-        seed_checkpoint(&conn, "run-6", "watch_pr_checks", CHECKPOINT_STATUS_WAITING);
-        let md = get_run_with_conn(&conn, "run-6").unwrap().unwrap();
-        let req = request("run-6", ContinuationKind::Resume, false);
-        let cp = select_checkpoint(&conn, &req, &md).expect("select");
-        assert_eq!(cp.step_id, "watch_pr_checks");
-        assert_eq!(cp.state_snapshot.status, CHECKPOINT_STATUS_WAITING);
-    }
-
-    #[test]
-    fn retry_from_failed_step_selects_watch_pr_checks() {
-        let conn = test_conn();
-        seed_terminal_failed_run(&conn, "run-7");
-        let md = get_run_with_conn(&conn, "run-7").unwrap().unwrap();
-        let req = request(
-            "run-7",
-            ContinuationKind::Retry {
-                from_failed_step: true,
-            },
-            false,
-        );
-        let cp = select_checkpoint(&conn, &req, &md).expect("select");
-        assert_eq!(cp.step_id, "watch_pr_checks");
-    }
-
-    #[test]
-    fn rewind_to_checkpoint_validates_timestamp() {
-        let conn = test_conn();
-        seed_terminal_failed_run(&conn, "run-8");
-        let md = get_run_with_conn(&conn, "run-8").unwrap().unwrap();
-        let guard = get_checkpoint_for_step(&conn, "run-8", "post_pr_iteration_guard")
-            .unwrap()
-            .unwrap();
-        let identity = checkpoint_identity(&guard);
-        let req = request(
-            "run-8",
-            ContinuationKind::Rewind {
-                target: RewindTarget::ToCheckpoint(identity),
-            },
-            false,
-        );
-        let cp = select_checkpoint(&conn, &req, &md).expect("select");
-        assert_eq!(cp.step_id, "post_pr_iteration_guard");
-    }
-
-    #[test]
-    fn rewind_to_checkpoint_rejects_timestamp_mismatch() {
-        let conn = test_conn();
-        seed_terminal_failed_run(&conn, "run-9");
-        let bogus = "watch_pr_checks@2000-01-01T00:00:00+00:00".to_string();
-        let err = select_rewind_checkpoint(&conn, "run-9", &RewindTarget::ToCheckpoint(bogus))
-            .expect_err("mismatch must error");
-        assert!(matches!(err, ContinuationError::InvalidTarget(_)));
-    }
-
-    #[test]
-    fn commit_continuation_reopens_run_and_rearms_checkpoint() {
-        let conn = test_conn();
-        seed_terminal_failed_run(&conn, "run-10");
-        let req = request("run-10", ContinuationKind::Resume, false);
-        let md = commit_continuation(&conn, &req, "collect_ci_failures").expect("commit");
-        assert_eq!(md.status, RunStatus::Running);
-        // The re-stamped checkpoint becomes the newest and is ready_to_resume.
-        let newest = crate::persistence::load_checkpoint_with_conn(&conn, "run-10")
-            .unwrap()
-            .unwrap();
-        assert_eq!(newest.step_id, "collect_ci_failures");
-        assert_eq!(
-            newest.state_snapshot.status,
-            crate::persistence::CHECKPOINT_STATUS_READY_TO_RESUME
-        );
-    }
-
-    #[test]
-    fn prepare_continuation_writes_artifacts() {
-        let conn = test_conn();
-        let temp = tempfile::tempdir().expect("tempdir");
-        seed_terminal_failed_run(&conn, "run-11");
-        let mut md = get_run_with_conn(&conn, "run-11").unwrap().unwrap();
-        md.artifact_root = Some(temp.path().to_string_lossy().to_string());
-        let req = request("run-11", ContinuationKind::Resume, false);
-        let plan = prepare_continuation(&conn, &req, &md).expect("prepare");
-        assert!(plan.validation.ok);
-        assert!(plan.artifact_dir.join("continuation-request.json").exists());
-        assert!(plan
-            .artifact_dir
-            .join("continuation-validation.json")
-            .exists());
-        assert!(plan.artifact_dir.join("checkpoint-selection.json").exists());
-    }
-
-    #[test]
-    fn prepare_continuation_writes_validation_on_failure() {
-        let conn = test_conn();
-        let temp = tempfile::tempdir().expect("tempdir");
-        seed_run(&conn, "run-12", RunStatus::Failed, "implement");
-        seed_checkpoint(&conn, "run-12", "implement", "completed");
-        let mut md = get_run_with_conn(&conn, "run-12").unwrap().unwrap();
-        md.artifact_root = Some(temp.path().to_string_lossy().to_string());
-        let req = request(
-            "run-12",
-            ContinuationKind::Rewind {
-                target: RewindTarget::ToStep("implement".to_string()),
-            },
-            false,
-        );
-        let plan = prepare_continuation(&conn, &req, &md).expect("prepare");
-        assert!(!plan.validation.ok);
-        assert!(plan.selected.is_none());
-        assert!(plan
-            .artifact_dir
-            .join("continuation-validation.json")
-            .exists());
-    }
-
-    #[test]
-    fn result_artifact_name_differs_for_retry() {
-        assert_eq!(
-            result_artifact_name(&ContinuationKind::Resume),
-            "resume-result.json"
-        );
-        assert_eq!(
-            result_artifact_name(&ContinuationKind::Retry {
-                from_failed_step: true
-            }),
-            "retry-result.json"
-        );
-    }
-
-    /// Continuation kinds that should be rejected uniformly when a run is in a
-    /// non-resumable terminal state, regardless of `--force`.
-    fn resumable_kinds() -> Vec<ContinuationKind> {
-        vec![
-            ContinuationKind::Resume,
-            ContinuationKind::Retry {
-                from_failed_step: false,
-            },
-            ContinuationKind::Retry {
-                from_failed_step: true,
-            },
-            ContinuationKind::Rewind {
-                target: RewindTarget::ToStep("watch_pr_checks".to_string()),
-            },
-        ]
-    }
-
-    /// Seed a run in `status` with a whitelisted, resumable `watch_pr_checks`
-    /// checkpoint, then assert every continuation kind is rejected with a
-    /// `resumable_status` failure, even with `force = true`.
-    fn assert_non_resumable_rejected(status: RunStatus) {
-        let conn = test_conn();
-        seed_run(&conn, "term", status.clone(), "watch_pr_checks");
-        seed_checkpoint(&conn, "term", "watch_pr_checks", CHECKPOINT_STATUS_WAITING);
-        for kind in resumable_kinds() {
-            for force in [false, true] {
-                let req = request("term", kind.clone(), force);
-                let validation = validate_continuation(&conn, &req).expect("validate");
-                assert!(
-                    !validation.ok,
-                    "status {status:?} kind {kind:?} force={force} must be rejected"
-                );
-                assert!(
-                    validation
-                        .failure_reasons()
-                        .iter()
-                        .any(|r| r.contains("resumable_status")),
-                    "expected resumable_status failure for {status:?} (got {:?})",
-                    validation.failure_reasons()
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn validation_rejects_completed_run() {
-        // @plan:PLAN-20260623-LUTHER-CONTINUATION
-        assert_non_resumable_rejected(RunStatus::Completed);
-    }
-
-    #[test]
-    fn validation_rejects_merged_run() {
-        // @plan:PLAN-20260623-LUTHER-CONTINUATION
-        assert_non_resumable_rejected(RunStatus::Merged);
-    }
-
-    #[test]
-    fn validation_rejects_abandoned_run() {
-        // @plan:PLAN-20260623-LUTHER-CONTINUATION
-        assert_non_resumable_rejected(RunStatus::Abandoned);
-    }
-
-    #[test]
-    fn validation_rejects_cancelled_run() {
-        // @plan:PLAN-20260623-LUTHER-CONTINUATION
-        assert_non_resumable_rejected(RunStatus::Cancelled);
-    }
-
-    #[test]
-    fn validation_accepts_resumable_statuses() {
-        // @plan:PLAN-20260623-LUTHER-CONTINUATION
-        for status in [
-            RunStatus::Failed,
-            RunStatus::WaitingForChecks,
-            RunStatus::Paused,
-            RunStatus::Blocked,
-        ] {
-            let conn = test_conn();
-            seed_run(&conn, "ok", status.clone(), "watch_pr_checks");
-            seed_checkpoint(&conn, "ok", "watch_pr_checks", CHECKPOINT_STATUS_WAITING);
-            let req = request("ok", ContinuationKind::Resume, false);
-            let validation = validate_continuation(&conn, &req).expect("validate");
-            assert!(
-                validation.ok,
-                "status {status:?} should be resumable; reasons: {:?}",
-                validation.failure_reasons()
-            );
-        }
-    }
-
-    #[test]
-    fn validation_rejects_repo_only_identity() {
-        // @plan:PLAN-20260623-LUTHER-CONTINUATION
-        let conn = test_conn();
-        let mut md = RunMetadata::new("anchorless", "wf", "cfg");
-        md.status = RunStatus::Failed;
-        md.current_step = Some("watch_pr_checks".to_string());
-        md.repository = Some("vybestack/llxprt-code".to_string());
-        // Neither issue_number nor pr_number recorded.
-        persist_run_with_conn(&conn, &md).expect("persist run");
-        seed_checkpoint(
-            &conn,
-            "anchorless",
-            "watch_pr_checks",
-            CHECKPOINT_STATUS_WAITING,
-        );
-        let req = request("anchorless", ContinuationKind::Resume, false);
-        let validation = validate_continuation(&conn, &req).expect("validate");
-        assert!(!validation.ok);
-        assert!(validation
-            .failure_reasons()
-            .iter()
-            .any(|r| r.contains("identity_recoverable")));
-    }
-
-    #[test]
-    fn continuation_overrides_maps_recorded_identity() {
-        // @plan:PLAN-20260623-LUTHER-CONTINUATION
-        let mut md = RunMetadata::new("r", "wf", "cfg");
-        md.repository = Some("vybestack/llxprt-luther".to_string());
-        md.issue_number = Some(65);
-        md.workspace_path = Some("/tmp/luther-workspaces/llxprt-luther".to_string());
-        md.artifact_root = Some("/tmp/luther-artifacts/llxprt-luther".to_string());
-
-        let overrides = continuation_overrides(&md);
-
-        assert_eq!(overrides.repo.as_deref(), Some("vybestack/llxprt-luther"));
-        assert_eq!(overrides.issue.as_deref(), Some("65"));
-        assert_eq!(
-            overrides.work_dir,
-            Some(PathBuf::from("/tmp/luther-workspaces/llxprt-luther"))
-        );
-        assert_eq!(
-            overrides.artifact_dir,
-            Some(PathBuf::from("/tmp/luther-artifacts/llxprt-luther"))
-        );
-    }
-
-    #[test]
-    fn continuation_overrides_omits_unrecorded_fields() {
-        // @plan:PLAN-20260623-LUTHER-CONTINUATION
-        let md = RunMetadata::new("r", "wf", "cfg");
-        let overrides = continuation_overrides(&md);
-        assert!(
-            overrides.is_empty(),
-            "a run with no recorded identity must not emit overrides"
-        );
-    }
-
-    #[test]
-    fn continuation_overrides_falls_back_to_pr_anchor() {
-        // A PR-only continuation (no issue_number, only pr_number) is accepted by
-        // check_identity_recoverable, so the rebuilt overrides must preserve the
-        // PR anchor instead of silently dropping to the default issue.
-        // @plan:PLAN-20260623-LUTHER-CONTINUATION
-        let mut md = RunMetadata::new("r", "wf", "cfg");
-        md.repository = Some("vybestack/llxprt-luther".to_string());
-        md.issue_number = None;
-        md.pr_number = Some(66);
-
-        let overrides = continuation_overrides(&md);
-
-        assert_eq!(overrides.repo.as_deref(), Some("vybestack/llxprt-luther"));
-        assert_eq!(
-            overrides.issue.as_deref(),
-            Some("66"),
-            "a PR-only run must reuse pr_number as the issue anchor"
-        );
-    }
-
-    #[test]
-    fn continuation_overrides_prefers_issue_over_pr_anchor() {
-        // When both anchors are recorded, the issue number wins so a run that
-        // recorded an explicit issue keeps targeting it.
-        // @plan:PLAN-20260623-LUTHER-CONTINUATION
-        let mut md = RunMetadata::new("r", "wf", "cfg");
-        md.issue_number = Some(65);
-        md.pr_number = Some(66);
-
-        let overrides = continuation_overrides(&md);
-
-        assert_eq!(overrides.issue.as_deref(), Some("65"));
-    }
-}
+mod tests;

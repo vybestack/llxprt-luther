@@ -1400,7 +1400,7 @@ fn coderabbit_actionable_threads() -> Value {
     json!({
         "data": { "repository": { "pullRequest": { "reviewThreads": {
             "nodes": [{
-                "id": "thread-1",
+                "id": "PRRT_thread_1",
                 "isResolved": false,
                 "isOutdated": false,
                 "path": "src/lib.rs",
