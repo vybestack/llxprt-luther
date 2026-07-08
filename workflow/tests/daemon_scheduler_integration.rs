@@ -17,7 +17,9 @@ use luther_workflow::adapters::github_issues::{
 use luther_workflow::daemon::launcher::{
     DaemonPathBases, LaunchRequest, WorkflowLaunchResult, WorkflowLauncher,
 };
-use luther_workflow::daemon::scheduler::{run_multi_target_once, run_once, SchedulerTarget};
+use luther_workflow::daemon::scheduler::{
+    run_multi_target_once, run_once_with_bases, SchedulerTarget,
+};
 use luther_workflow::persistence::leases::{
     count_active_leases_for_config, init_leases_table, list_all_leases, mark_stale_leases,
     try_claim, update_lease_status, LeaseStatus,
@@ -120,6 +122,24 @@ fn memory_db() -> Connection {
     conn
 }
 
+fn run_once_for_test(
+    cfg: &DiscoveryConfig,
+    query: &dyn GithubIssueQuery,
+    conn: &Connection,
+    launcher: &dyn WorkflowLauncher,
+    config_id: &str,
+) -> Result<luther_workflow::daemon::scheduler::RunSummary, rusqlite::Error> {
+    run_once_with_bases(
+        cfg,
+        query,
+        conn,
+        launcher,
+        config_id,
+        DaemonPathBases::default(),
+        BTreeMap::new(),
+    )
+}
+
 #[test]
 fn run_once_launches_up_to_concurrency_limit() {
     let query = MockQuery {
@@ -129,7 +149,7 @@ fn run_once_launches_up_to_concurrency_limit() {
     let launcher = RecordingLauncher::default();
     let conn = memory_db();
 
-    let summary = run_once(&cfg(2), &query, &conn, &launcher, "cfg-a").expect("run once");
+    let summary = run_once_for_test(&cfg(2), &query, &conn, &launcher, "cfg-a").expect("run once");
     assert_eq!(
         summary.launched, 2,
         "only two issues launched under limit 2"
@@ -149,12 +169,12 @@ fn second_pass_does_not_duplicate_completed_work() {
     let launcher = RecordingLauncher::default();
     let conn = memory_db();
 
-    run_once(&cfg(1), &query, &conn, &launcher, "cfg-a").expect("pass 1");
+    run_once_for_test(&cfg(1), &query, &conn, &launcher, "cfg-a").expect("pass 1");
     assert_eq!(launcher.launched.lock().unwrap().len(), 1);
 
     // The lease is Completed; a second discovery pass must not relaunch it
     // because the issue already has a (terminal) lease record.
-    run_once(&cfg(1), &query, &conn, &launcher, "cfg-a").expect("pass 2");
+    run_once_for_test(&cfg(1), &query, &conn, &launcher, "cfg-a").expect("pass 2");
     assert_eq!(
         launcher.launched.lock().unwrap().len(),
         1,
@@ -175,7 +195,7 @@ fn parent_routing_launches_with_parent_config_and_workflow_type() {
     discovery.parent_config_id = Some("parent-orchestrator-luther".to_string());
     discovery.parent_workflow_type_id = Some("parent-issue-orchestrator-v1".to_string());
 
-    let summary = run_once(&discovery, &query, &conn, &launcher, "llxprt-luther")
+    let summary = run_once_for_test(&discovery, &query, &conn, &launcher, "llxprt-luther")
         .expect("run once with routed parent issue");
 
     assert_eq!(summary.launched, 1);
@@ -230,7 +250,7 @@ fn parent_routed_ready_lease_resumes_from_originating_scheduler_target() {
     )
     .expect("persist parent checkpoint");
 
-    let summary = run_once(&discovery, &query, &conn, &launcher, "llxprt-luther")
+    let summary = run_once_for_test(&discovery, &query, &conn, &launcher, "llxprt-luther")
         .expect("run once resumes parent lease");
 
     assert_eq!(summary.resumed, 1);
@@ -258,7 +278,7 @@ fn mark_stale_recovers_lease_on_restart() {
     // First pass launches issue 5; force its lease back to Running so it counts
 
     // as active for the stale sweep.
-    run_once(&cfg(1), &query, &conn, &launcher, "cfg-a").expect("pass 1");
+    run_once_for_test(&cfg(1), &query, &conn, &launcher, "cfg-a").expect("pass 1");
     let lease = &list_all_leases(&conn).expect("leases")[0];
     update_lease_status(
         &conn,

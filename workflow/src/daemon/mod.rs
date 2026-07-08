@@ -31,7 +31,7 @@ pub mod scheduler;
 pub use discovery::{discover, DiscoveryResult, SkipReason};
 pub use launcher::{claim_and_launch, LaunchOutcome, WorkflowLaunchResult};
 pub use poller::{apply_poll_decision, PollClassification, PollDecision};
-pub use scheduler::{run_once, RunSummary};
+pub use scheduler::{run_once_with_bases, RunSummary};
 
 /// Lifecycle status of a per-config daemon instance.
 ///
