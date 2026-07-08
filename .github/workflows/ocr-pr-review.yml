@@ -30,26 +30,28 @@ on:
         type: string
 
 # Duplicate OCR runs for the same PR are cancelled so only the latest
-# head SHA is reviewed. Non-command issue comments still create skipped
-# workflow runs; they must not cancel an active PR review.
+# head SHA is reviewed. Non-command issue comments use a per-run group so
+# skipped comment-triggered runs cannot cancel an active PR review.
 concurrency:
-  group: ocr-pr-review-${{ github.event.pull_request.number || github.event.issue.number || inputs.pr_number }}
-  cancel-in-progress: >-
-    ${{ github.event_name != 'issue_comment' ||
-        (github.event.issue.pull_request != null &&
-         (github.event.comment.author_association == 'OWNER' ||
-          github.event.comment.author_association == 'MEMBER' ||
-          github.event.comment.author_association == 'COLLABORATOR') &&
-         (github.event.comment.body == '/ocr' ||
-          startsWith(github.event.comment.body, '/ocr ') ||
-          startsWith(toJSON(github.event.comment.body), '"/ocr\n') ||
-          startsWith(toJSON(github.event.comment.body), '"/ocr\r\n') ||
-          startsWith(toJSON(github.event.comment.body), '"/ocr\t') ||
-          github.event.comment.body == '/open-code-review' ||
-          startsWith(github.event.comment.body, '/open-code-review ') ||
-          startsWith(toJSON(github.event.comment.body), '"/open-code-review\n') ||
-          startsWith(toJSON(github.event.comment.body), '"/open-code-review\r\n') ||
-          startsWith(toJSON(github.event.comment.body), '"/open-code-review\t'))) }}
+  group: >-
+    ${{ github.event_name == 'issue_comment' &&
+        (github.event.issue.pull_request == null ||
+         !(github.event.comment.author_association == 'OWNER' ||
+           github.event.comment.author_association == 'MEMBER' ||
+           github.event.comment.author_association == 'COLLABORATOR') ||
+         !(github.event.comment.body == '/ocr' ||
+           startsWith(github.event.comment.body, '/ocr ') ||
+           startsWith(toJSON(github.event.comment.body), '"/ocr\n') ||
+           startsWith(toJSON(github.event.comment.body), '"/ocr\r\n') ||
+           startsWith(toJSON(github.event.comment.body), '"/ocr\t') ||
+           github.event.comment.body == '/open-code-review' ||
+           startsWith(github.event.comment.body, '/open-code-review ') ||
+           startsWith(toJSON(github.event.comment.body), '"/open-code-review\n') ||
+           startsWith(toJSON(github.event.comment.body), '"/open-code-review\r\n') ||
+           startsWith(toJSON(github.event.comment.body), '"/open-code-review\t'))) &&
+        format('ocr-pr-review-skip-{0}', github.run_id) ||
+        format('ocr-pr-review-{0}', github.event.pull_request.number || github.event.issue.number || inputs.pr_number) }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
