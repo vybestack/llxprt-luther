@@ -2436,7 +2436,14 @@ fn luther_profile_keeps_shared_path_values_as_daemon_bases() {
             .variables
             .get("work_dir")
             .is_some_and(|path| path.contains("{issue_number}") || path.contains("{run_id}")),
-        "workflow config should keep daemon path roots, not TOML path templates"
+        "workflow config should keep daemon work path roots, not TOML path templates"
+    );
+    assert!(
+        !config
+            .variables
+            .get("artifact_dir")
+            .is_some_and(|path| { path.contains("{issue_number}") || path.contains("{run_id}") }),
+        "workflow config should keep daemon artifact path roots, not TOML path templates"
     );
 }
 

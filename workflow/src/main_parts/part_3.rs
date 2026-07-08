@@ -1,6 +1,5 @@
 include!("part_3_daemon.rs");
 
-
 /// Handle `daemon stop` for a single config or `--all`.
 /// @plan:PLAN-20260404-INITIAL-RUNTIME.P09
 fn handle_daemon_stop(store: &DaemonStore, args: &luther_workflow::cli::DaemonStopArgs) {

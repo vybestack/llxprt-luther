@@ -108,7 +108,6 @@ fn wait_poll_identity_rejects_missing_pr_check_identity() {
     assert!(err.contains("missing PR number or head SHA"));
 }
 
-
 #[test]
 fn wait_poll_identity_requires_child_run_id_for_child_workflow_wait() {
     let tmp = tempfile::tempdir().unwrap();

@@ -546,6 +546,7 @@ fn ensure_daemon_run_dir(kind: &str, path: Option<&std::path::Path>) -> Result<(
     std::fs::create_dir_all(path)
         .map_err(|e| format!("failed to create {kind} dir {}: {e}", path.display()))
 }
+
 fn resume_daemon_workflow(
     request: &luther_workflow::daemon::launcher::LaunchRequest,
 ) -> Result<luther_workflow::daemon::launcher::WorkflowLaunchResult, String> {
