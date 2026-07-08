@@ -9,7 +9,8 @@ fn write_config_root(root: &std::path::Path, wf: &str, restored_step: &str) {
         "workflow_type_id": wf,
         "steps": [
             {"step_id": "prepare_custom_resume", "step_type": "noop"},
-            {"step_id": restored_step, "step_type": "noop"}
+            {"step_id": restored_step, "step_type": "noop"},
+            {"step_id": "post_restore_sentinel", "step_type": "noop"}
         ],
         "transitions": [],
         "guards": {"max_retries": 1, "timeout_seconds": 30}
@@ -52,7 +53,12 @@ fn reconstructs_runner_from_non_default_config_dir() {
     let db_path = temp.path().join("checkpoints.db");
     write_config_root(&config_root, "custom-resume-v1", "custom_marker_step");
     let store = SqliteStore::open(&db_path).expect("open store");
-    let md = seed_run(&store, "custom-config-run", "custom-resume-v1", "custom_marker_step");
+    let md = seed_run(
+        &store,
+        "custom-config-run",
+        "custom-resume-v1",
+        "custom_marker_step",
+    );
     let runner = reconstruct_runner(&md, &md.run_id, &db_path, &Some(config_root))
         .expect("custom config root reconstructs runner");
     assert_eq!(runner.current_step(), "custom_marker_step");

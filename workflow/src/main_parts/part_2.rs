@@ -566,18 +566,28 @@ fn resolve_discovery_for(
     config: &std::path::Path,
     config_dir: &Option<std::path::PathBuf>,
 ) -> luther_workflow::workflow::schema::DiscoveryConfig {
-    let config_root = config_dir
-        .clone()
-        .unwrap_or_else(|| std::path::PathBuf::from("config"));
     let config_id = daemon_config_id(config);
-    let cfg = match resolve_workflow_config(&config_id, &config_root) {
+    let (_, discovery) = resolve_config_and_discovery_for(&config_id, config_dir);
+    discovery
+}
+
+fn resolve_config_and_discovery_for(
+    config_id: &str,
+    config_dir: &Option<std::path::PathBuf>,
+) -> (
+    luther_workflow::workflow::schema::WorkflowConfig,
+    luther_workflow::workflow::schema::DiscoveryConfig,
+) {
+    let config_root = config_dir.as_deref().unwrap_or(std::path::Path::new("config"));
+    let cfg = match resolve_workflow_config(config_id, config_root) {
         Ok(cfg) => cfg,
         Err(e) => {
             eprintln!("Error: Failed to resolve config '{config_id}': {e}");
             process::exit(1);
         }
     };
-    resolve_discovery_config(&cfg)
+    let discovery = resolve_discovery_config(&cfg);
+    (cfg, discovery)
 }
 
 /// Open the shared checkpoints database (creating schema if needed).

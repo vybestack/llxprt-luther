@@ -532,7 +532,6 @@ fn launch_daemon_workflow(
     run_daemon_runner(request, &wait_config, &db_path, &mut runner)
 }
 
-
 fn ensure_daemon_run_dirs(
     request: &luther_workflow::daemon::launcher::LaunchRequest,
 ) -> Result<(), String> {

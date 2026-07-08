@@ -8,7 +8,7 @@ fn require_runs_store(run_id: &str) -> SqliteStore {
             process::exit(1);
         }
         Err(e) => {
-            eprintln!("Error: {e}");
+            eprintln!("Error: failed to open run registry while loading run '{run_id}': {e}");
             process::exit(1);
         }
     }
@@ -557,7 +557,11 @@ async fn handle_runs_tail(args: &luther_workflow::cli::RunsTailArgs) {
     let log_path = match open_runs_store() {
         Ok(Some(store)) => match store.get_run(&run_id) {
             Ok(Some(md)) => effective_log_path(&md, &run_id),
-            _ => run_log_path(&run_id),
+            Ok(None) => run_log_path(&run_id),
+            Err(err) => {
+                eprintln!("Warning: failed to read run '{run_id}' for log path: {err}");
+                run_log_path(&run_id)
+            }
         },
         _ => run_log_path(&run_id),
     };
@@ -644,6 +648,29 @@ struct PsRow {
     stale_child_pids: Vec<u32>,
 }
 
+fn load_heartbeat_runs<'a>(
+    store: Option<&SqliteStore>,
+    run_ids: impl Iterator<Item = &'a str>,
+) -> std::collections::BTreeMap<String, RunMetadata> {
+    let Some(store) = store else {
+        return std::collections::BTreeMap::new();
+    };
+    let mut runs = std::collections::BTreeMap::new();
+    for run_id in run_ids {
+        if runs.contains_key(run_id) {
+            continue;
+        }
+        match store.get_run(run_id) {
+            Ok(Some(md)) => {
+                runs.insert(run_id.to_string(), md);
+            }
+            Ok(None) => {}
+            Err(err) => eprintln!("Warning: failed to load run '{run_id}' for process view: {err}"),
+        }
+    }
+    runs
+}
+
 /// Build the `runs ps` rows from heartbeats and the run registry (issue #51).
 /// @plan:issue-51
 async fn build_ps_rows(config: Option<&str>) -> Result<Vec<PsRow>, String> {
@@ -651,23 +678,14 @@ async fn build_ps_rows(config: Option<&str>) -> Result<Vec<PsRow>, String> {
         .await
         .map_err(|e| format!("failed to read heartbeats: {e}"))?;
     let store = open_runs_store()?;
-    let all_runs = match store.as_ref() {
-        Some(store) => store
-            .list_runs()
-            .map_err(|e| format!("failed to list run metadata: {e}"))?,
-        None => Vec::new(),
-    };
-    let run_index = all_runs
-        .iter()
-        .map(|md| (md.run_id.as_str(), md))
-        .collect::<std::collections::BTreeMap<_, _>>();
+    let run_index = load_heartbeat_runs(
+        store.as_ref(),
+        heartbeats.values().filter_map(|hb| hb.run_id.as_deref()),
+    );
     let now = chrono::Utc::now().timestamp();
     let mut rows = Vec::new();
     for hb in heartbeats.values() {
-        let md = hb
-            .run_id
-            .as_deref()
-            .and_then(|rid| run_index.get(rid).copied());
+        let md = hb.run_id.as_deref().and_then(|rid| run_index.get(rid));
         let config_id = md.as_ref().map(|m| m.config_id.clone());
         if let Some(want) = config {
             if config_id.as_deref() != Some(want) {

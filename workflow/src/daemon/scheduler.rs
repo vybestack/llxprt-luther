@@ -96,8 +96,34 @@ pub fn run_once(
     launcher: &dyn WorkflowLauncher,
     config_id: &str,
 ) -> Result<RunSummary, rusqlite::Error> {
+    run_once_with_bases(
+        cfg,
+        q,
+        conn,
+        launcher,
+        config_id,
+        DaemonPathBases::default(),
+        BTreeMap::new(),
+    )
+}
+
+pub fn run_once_with_bases(
+    cfg: &DiscoveryConfig,
+    q: &dyn GithubIssueQuery,
+    conn: &Connection,
+    launcher: &dyn WorkflowLauncher,
+    config_id: &str,
+    path_bases: DaemonPathBases,
+    parent_path_bases: BTreeMap<String, DaemonPathBases>,
+) -> Result<RunSummary, rusqlite::Error> {
     let poller = SystemExternalWaitPoller::new();
-    run_once_with_poller(cfg, q, conn, launcher, &poller, config_id)
+    let target = SchedulerTarget {
+        config_id: config_id.to_string(),
+        discovery: cfg.clone(),
+        path_bases,
+        parent_path_bases,
+    };
+    run_multi_target_once_with_poller(&[target], &[q], conn, launcher, &poller)
 }
 
 pub fn run_once_with_poller(
@@ -330,7 +356,7 @@ fn launch_discovery_for<'a>(
 /// When the launch config id matches the target's own config, use the target's
 /// own bases. When the launch config id is a parent config, use the
 /// parent-routed bases registered for that parent config id, falling back to
-/// empty bases (engine fallbacks apply). @plan:issue-117
+/// empty bases (engine fallbacks apply) with a warning. @plan:issue-117
 fn path_bases_for<'a>(
     target: &'a SchedulerTarget,
     launch_config_id: &str,
@@ -338,10 +364,15 @@ fn path_bases_for<'a>(
     if launch_config_id == target.config_id {
         return Cow::Borrowed(&target.path_bases);
     }
-    target
-        .parent_path_bases
-        .get(launch_config_id)
-        .map_or_else(|| Cow::Owned(DaemonPathBases::default()), Cow::Borrowed)
+    match target.parent_path_bases.get(launch_config_id) {
+        Some(bases) => Cow::Borrowed(bases),
+        None => {
+            eprintln!(
+                "Warning: no daemon path bases found for routed parent config={launch_config_id}; using empty path bases"
+            );
+            Cow::Owned(DaemonPathBases::default())
+        }
+    }
 }
 
 fn parent_launch_discoveries(
@@ -537,7 +568,15 @@ pub fn run_loop(
 
     let poll = cfg.poll_interval_secs.unwrap_or(300);
     while !shutdown.load(Ordering::SeqCst) {
-        let summary = run_once(cfg, q, conn, launcher, config_id)?;
+        let summary = run_once_with_bases(
+            cfg,
+            q,
+            conn,
+            launcher,
+            config_id,
+            DaemonPathBases::default(),
+            BTreeMap::new(),
+        )?;
         if summary.launched > 0
             || summary.resumed > 0
             || summary.suspended > 0
@@ -835,7 +874,7 @@ mod tests {
     }
 
     #[test]
-    fn parent_routed_launch_without_parent_bases_uses_empty_fallback() {
+    fn parent_routed_launch_without_parent_bases_warns_and_uses_empty_fallback() {
         let target = SchedulerTarget {
             config_id: "child-cfg".to_string(),
             discovery: DiscoveryConfig {

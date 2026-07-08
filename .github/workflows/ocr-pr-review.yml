@@ -31,7 +31,8 @@ on:
 
 # Duplicate OCR runs for the same PR are cancelled so only the latest
 # head SHA is reviewed. Non-command issue comments use a per-run group so
-# skipped comment-triggered runs cannot cancel an active PR review.
+# skipped comment-triggered runs cannot cancel an active PR review. Keep the
+# issue_comment authorization and command checks in sync with jobs.code-review.if.
 concurrency:
   group: >-
     ${{ github.event_name == 'issue_comment' &&
@@ -71,6 +72,7 @@ jobs:
     # For issue_comment, only run on PR comments requesting a review.
     # The toJSON checks intentionally support LF, CRLF, and tab after the
     # command; other whitespace is not matched to keep triggers predictable.
+    # Keep this issue_comment authorization/command logic in sync with concurrency.group.
     if: |
       github.event_name == 'pull_request_target' ||
       github.event_name == 'workflow_dispatch' ||
