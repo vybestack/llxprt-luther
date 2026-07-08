@@ -119,6 +119,16 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - name: Initialize OCR artifact files
+        run: |
+          : > ocr-result.json
+          : > ocr-stdout.raw
+          : > ocr-stderr.log
+          : > ocr-version.txt
+          : > ocr-preview.txt
+          : > ocr-preview-stderr.log
+          : > ocr-exit-code.txt
+
       - name: Fetch PR head and compute merge-base
         env:
           PR_NUMBER: ${{ steps.pr-context.outputs.number }}
@@ -181,16 +191,6 @@ jobs:
             echo "BASE_SHA=${BASE_SHA}"
             echo "HEAD_SHA=${HEAD_SHA}"
           } >> "$GITHUB_ENV"
-
-      - name: Initialize OCR artifact files
-        run: |
-          : > ocr-result.json
-          : > ocr-stdout.raw
-          : > ocr-stderr.log
-          : > ocr-version.txt
-          : > ocr-preview.txt
-          : > ocr-preview-stderr.log
-          : > ocr-exit-code.txt
 
       - name: Install OpenCodeReview
         run: |
