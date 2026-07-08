@@ -724,14 +724,12 @@ fn parse_status_or_exit(status: &str) -> LeaseStatus {
 /// @plan:PLAN-20260415-DAEMON-DISCOVERY.P05
 fn print_queue_json(conn: &rusqlite::Connection, leases: &[IssueLease]) {
     let waits = queue_wait_summaries(conn);
+    let metadata = queue_run_metadata(conn, leases);
     let items: Vec<serde_json::Value> = leases
         .iter()
         .map(|l| {
             let wait = l.run_id.as_deref().and_then(|run_id| waits.get(run_id));
-            let metadata = l
-                .run_id
-                .as_deref()
-                .and_then(|run_id| queue_run_metadata(conn, run_id));
+            let metadata = l.run_id.as_deref().and_then(|run_id| metadata.get(run_id));
             serde_json::json!({
                 "issue_repo": l.issue_repo,
                 "issue_number": l.issue_number,
@@ -759,6 +757,7 @@ fn print_queue_text(conn: &rusqlite::Connection, leases: &[IssueLease]) {
         return;
     }
     let waits = queue_wait_summaries(conn);
+    let metadata = queue_run_metadata(conn, leases);
     for status in [
         LeaseStatus::Pending,
         LeaseStatus::Claimed,
@@ -788,21 +787,11 @@ fn print_queue_text(conn: &rusqlite::Connection, leases: &[IssueLease]) {
                 .and_then(|run_id| waits.get(run_id))
                 .map(|w| format!(" wait={}", format_wait_summary(w)))
                 .unwrap_or_default();
-            let metadata = lease
-                .run_id
-                .as_deref()
-                .and_then(|run_id| queue_run_metadata(conn, run_id));
+            let metadata = lease.run_id.as_deref().and_then(|run_id| metadata.get(run_id));
             let paths = metadata
-                .as_ref()
                 .map(|md| {
-                    let workspace = md
-                        .workspace_path
-                        .as_deref()
-                        .unwrap_or("(none)");
-                    let artifact = md
-                        .artifact_root
-                        .as_deref()
-                        .unwrap_or("(none)");
+                    let workspace = md.workspace_path.as_deref().unwrap_or("(none)");
+                    let artifact = md.artifact_root.as_deref().unwrap_or("(none)");
                     format!(" work={workspace} artifacts={artifact}")
                 })
                 .unwrap_or_default();
@@ -847,15 +836,27 @@ fn queue_wait_summaries(
         .collect()
 }
 
-/// Load persisted run metadata for a queue lease's run id, if any.
+/// Load persisted run metadata for queue leases in one batch.
 /// @plan:issue-117
 fn queue_run_metadata(
     conn: &rusqlite::Connection,
-    run_id: &str,
-) -> Option<luther_workflow::persistence::RunMetadata> {
-    luther_workflow::persistence::get_run_with_conn(conn, run_id)
-        .ok()
-        .flatten()
+    leases: &[IssueLease],
+) -> std::collections::HashMap<String, luther_workflow::persistence::RunMetadata> {
+    let run_ids: std::collections::BTreeSet<&str> = leases
+        .iter()
+        .filter_map(|lease| lease.run_id.as_deref())
+        .collect();
+    let runs = match luther_workflow::persistence::list_runs_with_conn(conn) {
+        Ok(runs) => runs,
+        Err(e) => {
+            eprintln!("Warning: failed to load queue run metadata: {e}");
+            return std::collections::HashMap::new();
+        }
+    };
+    runs.into_iter()
+        .filter(|run| run_ids.contains(run.run_id.as_str()))
+        .map(|run| (run.run_id.clone(), run))
+        .collect()
 }
 
 fn format_wait_summary(wait: &serde_json::Value) -> String {

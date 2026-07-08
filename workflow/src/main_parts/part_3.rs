@@ -78,11 +78,12 @@ async fn handle_daemon_run(
     install_interrupt_handlers(shutdown.clone());
 
     let discovery = resolve_discovery_for(config, config_dir);
+    let mut daemon_failure = None;
     if discovery.enabled {
         if let Some(path) = scheduler_config {
             run_daemon_supervisor_loop(store, &mut state, &shutdown, path, config_dir, once).await;
         } else {
-            run_daemon_discovery_loop(
+            daemon_failure = run_daemon_discovery_loop(
                 store,
                 &mut state,
                 &shutdown,
@@ -95,6 +96,11 @@ async fn handle_daemon_run(
         }
     } else {
         run_daemon_heartbeat_loop(store, &mut state, &shutdown).await;
+    }
+
+    if let Some(error) = daemon_failure {
+        eprintln!("Error: daemon exiting after failure: {error}");
+        process::exit(1);
     }
 
     state.set_status(DaemonStatus::Stopping);
@@ -198,7 +204,13 @@ fn parent_path_bases_entry(
     parent_config_id: &str,
     config_root: &std::path::Path,
 ) -> Option<(String, luther_workflow::daemon::launcher::DaemonPathBases)> {
-    let parent_cfg = resolve_workflow_config(parent_config_id, config_root).ok()?;
+    let parent_cfg = match resolve_workflow_config(parent_config_id, config_root) {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            eprintln!("Warning: failed to resolve parent config '{parent_config_id}': {e}");
+            return None;
+        }
+    };
     Some((
         parent_config_id.to_string(),
         daemon_path_bases_from_config(&parent_cfg),
@@ -324,14 +336,14 @@ async fn run_daemon_discovery_loop(
     config_id: &str,
     config_dir: &Option<std::path::PathBuf>,
     once: bool,
-) {
+) -> Option<String> {
     use std::sync::atomic::Ordering;
 
     let config_root = config_dir
         .clone()
         .unwrap_or_else(|| std::path::PathBuf::from("config"));
     let Some(target) = discovery_scheduler_target(config_id, discovery, &config_root) else {
-        return;
+        return Some(format!("failed to resolve scheduler target for config '{config_id}'"));
     };
     let conn = open_daemon_db();
     let query = SystemGithubIssueQuery::new(SystemGithubCommandRunner);
@@ -343,7 +355,7 @@ async fn run_daemon_discovery_loop(
 
     if let Err(e) = recover_stale_daemon_leases(&conn, stale_timeout) {
         eprintln!("Error: stale lease recovery failed: {e}");
-        return;
+        return Some(format!("stale lease recovery failed: {e}"));
     }
 
     let poll = discovery.poll_interval_secs.unwrap_or(300);
@@ -382,6 +394,7 @@ async fn run_daemon_discovery_loop(
         }
         sleep_secs_with_shutdown(poll, shutdown).await;
     }
+    None
 }
 
 /// Async sleep up to `secs` that wakes early when shutdown is requested.
@@ -701,7 +714,10 @@ fn reconstruct_runner(
             .map_err(|e| format!("invalid continuation profile: {e}"))?;
     }
     let run_context = run_context_from_metadata(md, run_id);
-    let instance = WorkflowInstance::create_with_run_id(workflow_type, config, run_id);
+    let mut instance = WorkflowInstance::create_with_run_id(workflow_type, config, run_id);
+    if let Some(step) = md.current_step.as_deref().filter(|step| !step.is_empty()) {
+        instance.transition_to(step);
+    }
     let registry = ExecutorRegistry::with_defaults();
     EngineRunner::with_db_path_and_context(instance, registry, db_path, run_context)
         .map_err(|e| format!("create runner: {e}"))

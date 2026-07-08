@@ -10,7 +10,7 @@
 //! @plan:PLAN-20260415-DAEMON-DISCOVERY.P06
 //! @requirement:REQ-DAEMON-DISCOVERY-005,REQ-DAEMON-DISCOVERY-006
 
-use std::path::PathBuf;
+use std::path::{Component, PathBuf};
 
 use rusqlite::Connection;
 
@@ -97,14 +97,14 @@ pub struct DaemonPathBases {
 impl DaemonPathBases {
     /// Build the per-run work and artifact directories for an issue + run id.
     ///
-    /// Returns `None` for a directory when its base is absent. Paths are
-    /// constructed with [`PathBuf::join`] (no string concatenation) using the
-    /// generated internal `run_id` component, not user-provided shell text.
+    /// Returns `None` for a directory when its base is absent. The `run_id` must
+    /// be a single relative path component before it is joined under the daemon
+    /// base root.
     /// @plan:issue-117
-    #[must_use]
-    pub fn per_run_paths(&self, issue_number: u64, run_id: &str) -> PerRunPaths {
+    pub fn per_run_paths(&self, issue_number: u64, run_id: &str) -> Result<PerRunPaths, String> {
+        validate_run_id_path_component(run_id)?;
         let issue_segment = format!("issue-{issue_number}");
-        PerRunPaths {
+        Ok(PerRunPaths {
             work_dir: self
                 .work_dir_base
                 .as_ref()
@@ -113,7 +113,20 @@ impl DaemonPathBases {
                 .artifact_dir_base
                 .as_ref()
                 .map(|base| base.join(&issue_segment).join(run_id)),
-        }
+        })
+    }
+}
+fn validate_run_id_path_component(run_id: &str) -> Result<(), String> {
+    if run_id.is_empty() {
+        return Err("run_id must not be empty".to_string());
+    }
+    let run_id_path = PathBuf::from(run_id);
+    let mut components = run_id_path.components();
+    match (components.next(), components.next()) {
+        (Some(Component::Normal(_)), None) => Ok(()),
+        _ => Err(format!(
+            "run_id must be a single safe path component: {run_id}"
+        )),
     }
 }
 
@@ -155,7 +168,12 @@ pub fn claim_for_launch(
 
     let run_id = new_run_id();
     update_lease_status(conn, &lease.lease_id, LeaseStatus::Running, Some(&run_id))?;
-    let paths = bases.per_run_paths(issue.number, &run_id);
+    let paths = bases.per_run_paths(issue.number, &run_id).map_err(|e| {
+        rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            e,
+        )))
+    })?;
     Ok(Ok(ClaimedLaunch {
         lease_id: lease.lease_id,
         request: LaunchRequest {
@@ -511,8 +529,8 @@ mod tests {
                 "/tmp/luther-artifacts/llxprt-luther",
             )),
         };
-        let paths_109 = bases.per_run_paths(109, "run-aaa");
-        let paths_110 = bases.per_run_paths(110, "run-bbb");
+        let paths_109 = bases.per_run_paths(109, "run-aaa").unwrap();
+        let paths_110 = bases.per_run_paths(110, "run-bbb").unwrap();
         assert_ne!(paths_109.work_dir, paths_110.work_dir);
         assert_ne!(paths_109.artifact_dir, paths_110.artifact_dir);
         assert_eq!(
@@ -523,6 +541,17 @@ mod tests {
             paths_109.artifact_dir.as_deref().unwrap().to_str().unwrap(),
             "/tmp/luther-artifacts/llxprt-luther/issue-109/run-aaa"
         );
+    }
+
+    #[test]
+    fn per_run_paths_rejects_unsafe_run_id_components() {
+        let bases = DaemonPathBases {
+            work_dir_base: Some(std::path::PathBuf::from("/tmp/work")),
+            artifact_dir_base: Some(std::path::PathBuf::from("/tmp/artifacts")),
+        };
+
+        assert!(bases.per_run_paths(1, "../escape").is_err());
+        assert!(bases.per_run_paths(1, "/tmp/escape").is_err());
     }
 
     #[test]

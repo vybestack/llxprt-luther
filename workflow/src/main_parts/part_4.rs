@@ -24,7 +24,7 @@ fn load_run_or_exit(store: &SqliteStore, run_id: &str) -> RunMetadata {
             process::exit(1);
         }
         Err(e) => {
-            eprintln!("Error: failed to read run '{run_id}': {e}");
+            eprintln!("Error: failed to read run '{run_id}' from run registry: {e}");
             process::exit(1);
         }
     }

@@ -1,23 +1,26 @@
 use super::*;
 
-fn write_config_root(root: &std::path::Path, wf: &str, step: &str) {
+fn write_config_root(root: &std::path::Path, wf: &str, restored_step: &str) {
     let workflows = root.join("workflows");
     let configs = root.join("workflow-configs");
     std::fs::create_dir_all(&workflows).expect("workflow dir");
     std::fs::create_dir_all(&configs).expect("config dir");
     let workflow = serde_json::json!({
         "workflow_type_id": wf,
-        "steps": [{"step_id": step, "step_type": "noop"}],
+        "steps": [
+            {"step_id": "prepare_custom_resume", "step_type": "noop"},
+            {"step_id": restored_step, "step_type": "noop"}
+        ],
         "transitions": [],
         "guards": {"max_retries": 1, "timeout_seconds": 30}
-});
+    });
     let config = serde_json::json!({
         "config_id": "custom-resume-config",
         "workflow_type_id": wf,
         "runtime": {"timeout_seconds": 30, "max_retries": 1},
         "repository": {"workspace_strategy": "temp", "branch_template": "test-{run_id}", "base_branch": "main"},
         "guards": {"max_iterations": 1, "max_file_changes": 10, "max_tokens": 1000, "max_cost": 1.0}
-});
+    });
     std::fs::write(workflows.join(format!("{wf}.json")), workflow.to_string())
         .expect("workflow file");
     std::fs::write(configs.join("custom-resume-config.json"), config.to_string())
@@ -53,5 +56,7 @@ fn reconstructs_runner_from_non_default_config_dir() {
     let runner = reconstruct_runner(&md, &md.run_id, &db_path, &Some(config_root))
         .expect("custom config root reconstructs runner");
     assert_eq!(runner.current_step(), "custom_marker_step");
+    assert_eq!(runner.workflow_type_id(), "custom-resume-v1");
+    assert_eq!(runner.config_id(), "custom-resume-config");
 }
 

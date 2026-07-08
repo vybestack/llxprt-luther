@@ -525,7 +525,7 @@ fn launch_daemon_workflow(
     };
     apply_target_profile_overrides(&mut config, &overrides)
         .map_err(|e| format!("apply overrides: {e}"))?;
-    ensure_daemon_run_dirs(request);
+    ensure_daemon_run_dirs(request)?;
     let db_path = luther_workflow::runtime_paths::get_data_dir().join("checkpoints.db");
     let wait_config = config.clone();
     let mut runner = create_durable_runner(workflow_type, config, &request.run_id, &db_path);
@@ -533,18 +533,19 @@ fn launch_daemon_workflow(
 }
 
 
-fn ensure_daemon_run_dirs(request: &luther_workflow::daemon::launcher::LaunchRequest) {
-    ensure_daemon_run_dir("artifact", request.artifact_dir.as_deref());
-    ensure_daemon_run_dir("work", request.work_dir.as_deref());
+fn ensure_daemon_run_dirs(
+    request: &luther_workflow::daemon::launcher::LaunchRequest,
+) -> Result<(), String> {
+    ensure_daemon_run_dir("artifact", request.artifact_dir.as_deref())?;
+    ensure_daemon_run_dir("work", request.work_dir.as_deref())
 }
 
-fn ensure_daemon_run_dir(kind: &str, path: Option<&std::path::Path>) {
+fn ensure_daemon_run_dir(kind: &str, path: Option<&std::path::Path>) -> Result<(), String> {
     let Some(path) = path else {
-        return;
+        return Ok(());
     };
-    if let Err(e) = std::fs::create_dir_all(path) {
-        eprintln!("Warning: failed to create {kind} dir {}: {e}", path.display());
-    }
+    std::fs::create_dir_all(path)
+        .map_err(|e| format!("failed to create {kind} dir {}: {e}", path.display()))
 }
 fn resume_daemon_workflow(
     request: &luther_workflow::daemon::launcher::LaunchRequest,

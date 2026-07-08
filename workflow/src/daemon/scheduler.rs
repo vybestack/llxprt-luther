@@ -280,12 +280,13 @@ fn collect_launch_units(
                 summary.skipped += 1;
                 continue;
             }
+            let launch_path_bases = path_bases_for(target, launch_config_id);
             match claim_for_launch(
                 &routed.issue,
                 &launch_discovery,
                 conn,
                 launch_config_id,
-                path_bases_for(target, launch_config_id),
+                launch_path_bases.as_ref(),
             ) {
                 Ok(Ok(mut claimed)) => {
                     claimed.request.workflow_type_id = routed.workflow_type_id.clone();
@@ -330,14 +331,17 @@ fn launch_discovery_for<'a>(
 /// own bases. When the launch config id is a parent config, use the
 /// parent-routed bases registered for that parent config id, falling back to
 /// empty bases (engine fallbacks apply). @plan:issue-117
-fn path_bases_for<'a>(target: &'a SchedulerTarget, launch_config_id: &str) -> &'a DaemonPathBases {
+fn path_bases_for<'a>(
+    target: &'a SchedulerTarget,
+    launch_config_id: &str,
+) -> Cow<'a, DaemonPathBases> {
     if launch_config_id == target.config_id {
-        return &target.path_bases;
+        return Cow::Borrowed(&target.path_bases);
     }
     target
         .parent_path_bases
         .get(launch_config_id)
-        .unwrap_or(&target.path_bases)
+        .map_or_else(|| Cow::Owned(DaemonPathBases::default()), Cow::Borrowed)
 }
 
 fn parent_launch_discoveries(
@@ -828,6 +832,26 @@ mod tests {
         run_loop(&cfg(1), &q, &c, &l, "cfg", shutdown, 300).unwrap();
         let recovered = get_lease_for_issue(&c, "o/r", 9).unwrap().unwrap();
         assert_eq!(recovered.status, LeaseStatus::Stale);
+    }
+
+    #[test]
+    fn parent_routed_launch_without_parent_bases_uses_empty_fallback() {
+        let target = SchedulerTarget {
+            config_id: "child-cfg".to_string(),
+            discovery: DiscoveryConfig {
+                parent_config_id: Some("parent-cfg".to_string()),
+                ..cfg(1)
+            },
+            path_bases: DaemonPathBases {
+                work_dir_base: Some(std::path::PathBuf::from("/tmp/child-work")),
+                artifact_dir_base: Some(std::path::PathBuf::from("/tmp/child-artifacts")),
+            },
+            parent_path_bases: BTreeMap::new(),
+        };
+
+        let bases = path_bases_for(&target, "parent-cfg");
+
+        assert_eq!(bases.as_ref(), &DaemonPathBases::default());
     }
 
     #[test]
