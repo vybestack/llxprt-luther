@@ -7,14 +7,19 @@
 //!
 //! @plan:PLAN-20260415-DAEMON-DISCOVERY.P06
 //! @requirement:REQ-DAEMON-DISCOVERY-005,REQ-DAEMON-DISCOVERY-006,REQ-DAEMON-DISCOVERY-007
+use std::collections::BTreeMap;
 use std::sync::Mutex;
 
 use luther_workflow::adapters::github::GithubError;
 use luther_workflow::adapters::github_issues::{
     GithubIssue, GithubIssueQuery, GithubSubIssue, SubIssueSource,
 };
-use luther_workflow::daemon::launcher::{LaunchRequest, WorkflowLaunchResult, WorkflowLauncher};
-use luther_workflow::daemon::scheduler::run_once;
+use luther_workflow::daemon::launcher::{
+    DaemonPathBases, LaunchRequest, WorkflowLaunchResult, WorkflowLauncher,
+};
+use luther_workflow::daemon::scheduler::{
+    run_multi_target_once, run_once_with_bases, RunSummary, SchedulerTarget,
+};
 use luther_workflow::persistence::leases::{
     count_active_leases_for_config, init_leases_table, list_all_leases, mark_stale_leases,
     try_claim, update_lease_status, LeaseStatus,
@@ -117,6 +122,24 @@ fn memory_db() -> Connection {
     conn
 }
 
+fn run_once_for_test(
+    cfg: &DiscoveryConfig,
+    query: &dyn GithubIssueQuery,
+    conn: &Connection,
+    launcher: &dyn WorkflowLauncher,
+    config_id: &str,
+) -> Result<RunSummary, rusqlite::Error> {
+    run_once_with_bases(
+        cfg,
+        query,
+        conn,
+        launcher,
+        config_id,
+        DaemonPathBases::default(),
+        BTreeMap::new(),
+    )
+}
+
 #[test]
 fn run_once_launches_up_to_concurrency_limit() {
     let query = MockQuery {
@@ -126,7 +149,7 @@ fn run_once_launches_up_to_concurrency_limit() {
     let launcher = RecordingLauncher::default();
     let conn = memory_db();
 
-    let summary = run_once(&cfg(2), &query, &conn, &launcher, "cfg-a").expect("run once");
+    let summary = run_once_for_test(&cfg(2), &query, &conn, &launcher, "cfg-a").expect("run once");
     assert_eq!(
         summary.launched, 2,
         "only two issues launched under limit 2"
@@ -146,12 +169,12 @@ fn second_pass_does_not_duplicate_completed_work() {
     let launcher = RecordingLauncher::default();
     let conn = memory_db();
 
-    run_once(&cfg(1), &query, &conn, &launcher, "cfg-a").expect("pass 1");
+    run_once_for_test(&cfg(1), &query, &conn, &launcher, "cfg-a").expect("pass 1");
     assert_eq!(launcher.launched.lock().unwrap().len(), 1);
 
     // The lease is Completed; a second discovery pass must not relaunch it
     // because the issue already has a (terminal) lease record.
-    run_once(&cfg(1), &query, &conn, &launcher, "cfg-a").expect("pass 2");
+    run_once_for_test(&cfg(1), &query, &conn, &launcher, "cfg-a").expect("pass 2");
     assert_eq!(
         launcher.launched.lock().unwrap().len(),
         1,
@@ -172,7 +195,7 @@ fn parent_routing_launches_with_parent_config_and_workflow_type() {
     discovery.parent_config_id = Some("parent-orchestrator-luther".to_string());
     discovery.parent_workflow_type_id = Some("parent-issue-orchestrator-v1".to_string());
 
-    let summary = run_once(&discovery, &query, &conn, &launcher, "llxprt-luther")
+    let summary = run_once_for_test(&discovery, &query, &conn, &launcher, "llxprt-luther")
         .expect("run once with routed parent issue");
 
     assert_eq!(summary.launched, 1);
@@ -227,7 +250,7 @@ fn parent_routed_ready_lease_resumes_from_originating_scheduler_target() {
     )
     .expect("persist parent checkpoint");
 
-    let summary = run_once(&discovery, &query, &conn, &launcher, "llxprt-luther")
+    let summary = run_once_for_test(&discovery, &query, &conn, &launcher, "llxprt-luther")
         .expect("run once resumes parent lease");
 
     assert_eq!(summary.resumed, 1);
@@ -255,7 +278,7 @@ fn mark_stale_recovers_lease_on_restart() {
     // First pass launches issue 5; force its lease back to Running so it counts
 
     // as active for the stale sweep.
-    run_once(&cfg(1), &query, &conn, &launcher, "cfg-a").expect("pass 1");
+    run_once_for_test(&cfg(1), &query, &conn, &launcher, "cfg-a").expect("pass 1");
     let lease = &list_all_leases(&conn).expect("leases")[0];
     update_lease_status(
         &conn,
@@ -313,4 +336,145 @@ fn parse_daemon_scheduler_config_toml_empty_returns_defaults() {
 #[test]
 fn parse_daemon_scheduler_config_toml_malformed_returns_error() {
     assert!(parse_daemon_scheduler_config_toml("not valid toml =").is_err());
+}
+
+#[test]
+fn two_issues_same_config_get_distinct_run_paths() {
+    let query = MockQuery {
+        issues: vec![issue(107), issue(108)],
+        parent_issue_numbers: vec![],
+    };
+    let launcher = RecordingLauncher::default();
+    let conn = memory_db();
+    let target = SchedulerTarget {
+        config_id: "llxprt-luther".to_string(),
+        discovery: cfg(2),
+        path_bases: DaemonPathBases {
+            work_dir_base: Some(std::path::PathBuf::from(
+                "/tmp/luther-workspaces/llxprt-luther",
+            )),
+            artifact_dir_base: Some(std::path::PathBuf::from(
+                "/tmp/luther-artifacts/llxprt-luther",
+            )),
+        },
+        parent_path_bases: BTreeMap::new(),
+    };
+    let summary = run_multi_target_once(
+        &[target],
+        &[&query as &dyn GithubIssueQuery],
+        &conn,
+        &launcher,
+    )
+    .expect("run once");
+    assert_eq!(summary.launched, 2);
+    let launched = launcher.launched.lock().unwrap();
+    assert_eq!(launched.len(), 2);
+    let work_dirs: Vec<_> = launched
+        .iter()
+        .map(|request| request.work_dir.as_ref().expect("launch has work_dir"))
+        .collect();
+    let artifact_dirs: Vec<_> = launched
+        .iter()
+        .map(|request| {
+            request
+                .artifact_dir
+                .as_ref()
+                .expect("launch has artifact_dir")
+        })
+        .collect();
+    assert_ne!(work_dirs[0], work_dirs[1], "work dirs are distinct");
+    assert_ne!(
+        artifact_dirs[0], artifact_dirs[1],
+        "artifact dirs are distinct"
+    );
+    for request in launched.iter() {
+        let work = request.work_dir.as_ref().expect("launch has work_dir");
+        assert!(
+            work.to_str()
+                .unwrap()
+                .contains(&format!("issue-{}", request.issue_number)),
+            "work dir contains issue segment"
+        );
+        assert!(
+            work.to_str().unwrap().ends_with(&request.run_id),
+            "work dir ends with run id"
+        );
+
+        let artifact = request
+            .artifact_dir
+            .as_ref()
+            .expect("launch has artifact_dir");
+        assert!(
+            artifact
+                .to_str()
+                .unwrap()
+                .contains(&format!("issue-{}", request.issue_number)),
+            "artifact dir contains issue segment"
+        );
+        assert!(
+            artifact.to_str().unwrap().ends_with(&request.run_id),
+            "artifact dir ends with run id"
+        );
+    }
+}
+
+#[test]
+fn parent_routed_issue_uses_parent_path_bases() {
+    let query = MockQuery {
+        issues: vec![issue(61)],
+        parent_issue_numbers: vec![61],
+    };
+    let launcher = RecordingLauncher::default();
+    let conn = memory_db();
+    let mut discovery = cfg(1);
+    discovery.route_parent_issues = true;
+    discovery.parent_config_id = Some("parent-orchestrator-luther".to_string());
+    discovery.parent_workflow_type_id = Some("parent-issue-orchestrator-v1".to_string());
+    let mut parent_path_bases = BTreeMap::new();
+    parent_path_bases.insert(
+        "parent-orchestrator-luther".to_string(),
+        DaemonPathBases {
+            work_dir_base: Some(std::path::PathBuf::from("/tmp/luther-workspaces/parent")),
+            artifact_dir_base: Some(std::path::PathBuf::from("/tmp/luther-artifacts/parent")),
+        },
+    );
+    let target = SchedulerTarget {
+        config_id: "llxprt-luther".to_string(),
+        discovery,
+        path_bases: DaemonPathBases {
+            work_dir_base: Some(std::path::PathBuf::from(
+                "/tmp/luther-workspaces/llxprt-luther",
+            )),
+            artifact_dir_base: Some(std::path::PathBuf::from(
+                "/tmp/luther-artifacts/llxprt-luther",
+            )),
+        },
+        parent_path_bases,
+    };
+    let summary = run_multi_target_once(
+        &[target],
+        &[&query as &dyn GithubIssueQuery],
+        &conn,
+        &launcher,
+    )
+    .expect("run once");
+    assert_eq!(summary.launched, 1);
+    let launched = launcher.launched.lock().unwrap();
+    assert_eq!(launched.len(), 1);
+    let work = launched[0].work_dir.as_deref().unwrap();
+    let artifact = launched[0].artifact_dir.as_deref().unwrap();
+    // Routed parent issue uses the parent config bases, not the child target bases.
+    assert!(
+        work.to_str()
+            .unwrap()
+            .starts_with("/tmp/luther-workspaces/parent"),
+        "parent routed work dir uses parent bases"
+    );
+    assert!(
+        artifact
+            .to_str()
+            .unwrap()
+            .starts_with("/tmp/luther-artifacts/parent"),
+        "parent routed artifact dir uses parent bases"
+    );
 }

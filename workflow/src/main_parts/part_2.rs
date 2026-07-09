@@ -566,29 +566,40 @@ fn resolve_discovery_for(
     config: &std::path::Path,
     config_dir: &Option<std::path::PathBuf>,
 ) -> luther_workflow::workflow::schema::DiscoveryConfig {
-    let config_root = config_dir
-        .clone()
-        .unwrap_or_else(|| std::path::PathBuf::from("config"));
     let config_id = daemon_config_id(config);
-    let cfg = match resolve_workflow_config(&config_id, &config_root) {
+    let (_, discovery) = resolve_config_and_discovery_for(&config_id, config_dir);
+    discovery
+}
+
+fn resolve_config_and_discovery_for(
+    config_id: &str,
+    config_dir: &Option<std::path::PathBuf>,
+) -> (
+    luther_workflow::workflow::schema::WorkflowConfig,
+    luther_workflow::workflow::schema::DiscoveryConfig,
+) {
+    let config_root = config_dir.as_deref().unwrap_or(std::path::Path::new("config"));
+    let cfg = match resolve_workflow_config(config_id, config_root) {
         Ok(cfg) => cfg,
         Err(e) => {
             eprintln!("Error: Failed to resolve config '{config_id}': {e}");
             process::exit(1);
         }
     };
-    resolve_discovery_config(&cfg)
+    let discovery = resolve_discovery_config(&cfg);
+    (cfg, discovery)
 }
 
 /// Open the shared checkpoints database (creating schema if needed).
 /// @plan:PLAN-20260415-DAEMON-DISCOVERY.P05
-fn open_daemon_db() -> rusqlite::Connection {
+fn open_daemon_db() -> Result<rusqlite::Connection, luther_workflow::persistence::PersistenceError> {
     let db_path = luther_workflow::runtime_paths::get_data_dir().join("checkpoints.db");
-    if let Err(e) = init_database(&db_path) {
-        eprintln!("Error: Failed to initialize database: {e}");
-        process::exit(1);
-    }
-    match rusqlite::Connection::open(&db_path) {
+    init_database(&db_path)?;
+    rusqlite::Connection::open(&db_path).map_err(luther_workflow::persistence::PersistenceError::from)
+}
+
+fn open_daemon_db_or_exit() -> rusqlite::Connection {
+    match open_daemon_db() {
         Ok(conn) => conn,
         Err(e) => {
             eprintln!("Error: Failed to open database: {e}");
@@ -603,7 +614,7 @@ fn open_daemon_db() -> rusqlite::Connection {
 fn handle_daemon_discover_command(args: &luther_workflow::cli::DaemonDiscoverArgs) {
     let discovery = resolve_discovery_for(&args.config, &args.config_dir);
     let config_id = daemon_config_id(&args.config);
-    let conn = open_daemon_db();
+    let conn = open_daemon_db_or_exit();
     let active =
         luther_workflow::persistence::leases::count_active_leases_for_config(&conn, &config_id)
             .unwrap_or(0);
@@ -681,7 +692,7 @@ fn print_discovery_text(result: &DiscoveryResult) {
 /// @plan:PLAN-20260415-DAEMON-DISCOVERY.P05
 /// @requirement:REQ-DAEMON-DISCOVERY-002
 fn handle_daemon_queue_command(args: &luther_workflow::cli::DaemonQueueArgs) {
-    let conn = open_daemon_db();
+    let conn = open_daemon_db_or_exit();
     let leases = collect_queue_leases(&conn, args);
     if args.json {
         print_queue_json(&conn, &leases);
@@ -724,10 +735,12 @@ fn parse_status_or_exit(status: &str) -> LeaseStatus {
 /// @plan:PLAN-20260415-DAEMON-DISCOVERY.P05
 fn print_queue_json(conn: &rusqlite::Connection, leases: &[IssueLease]) {
     let waits = queue_wait_summaries(conn);
+    let metadata = queue_run_metadata(conn, leases);
     let items: Vec<serde_json::Value> = leases
         .iter()
         .map(|l| {
             let wait = l.run_id.as_deref().and_then(|run_id| waits.get(run_id));
+            let run_metadata = l.run_id.as_deref().and_then(|run_id| metadata.get(run_id));
             serde_json::json!({
                 "issue_repo": l.issue_repo,
                 "issue_number": l.issue_number,
@@ -736,6 +749,8 @@ fn print_queue_json(conn: &rusqlite::Connection, leases: &[IssueLease]) {
                 "status": l.status.to_string(),
                 "active_slot_used": l.status.is_active(),
                 "wait": wait,
+                "workspace_path": run_metadata.as_ref().and_then(|md| md.workspace_path.clone()),
+                "artifact_root": run_metadata.as_ref().and_then(|md| md.artifact_root.clone()),
             })
         })
         .collect();
@@ -753,6 +768,7 @@ fn print_queue_text(conn: &rusqlite::Connection, leases: &[IssueLease]) {
         return;
     }
     let waits = queue_wait_summaries(conn);
+    let metadata = queue_run_metadata(conn, leases);
     for status in [
         LeaseStatus::Pending,
         LeaseStatus::Claimed,
@@ -782,9 +798,26 @@ fn print_queue_text(conn: &rusqlite::Connection, leases: &[IssueLease]) {
                 .and_then(|run_id| waits.get(run_id))
                 .map(|w| format!(" wait={}", format_wait_summary(w)))
                 .unwrap_or_default();
+            let run_metadata = lease
+                .run_id
+                .as_deref()
+                .and_then(|run_id| metadata.get(run_id));
+            let paths = run_metadata
+                .map(|md| {
+                    let workspace = md.workspace_path.as_deref().unwrap_or("(none)");
+                    let artifact = md.artifact_root.as_deref().unwrap_or("(none)");
+                    format!(" work={workspace} artifacts={artifact}")
+                })
+                .unwrap_or_default();
             println!(
-                "  {}#{} config={} run={} active_slot_used={}{}",
-                lease.issue_repo, lease.issue_number, lease.config_id, run, active_slot, wait
+                "  {}#{} config={} run={} active_slot_used={}{}{}",
+                lease.issue_repo,
+                lease.issue_number,
+                lease.config_id,
+                run,
+                active_slot,
+                wait,
+                paths
             );
         }
     }
@@ -814,6 +847,28 @@ fn queue_wait_summaries(
                 }),
             )
         })
+        .collect()
+}
+
+/// Load persisted run metadata for queue leases in one batch.
+/// @plan:issue-117
+fn queue_run_metadata(
+    conn: &rusqlite::Connection,
+    leases: &[IssueLease],
+) -> std::collections::HashMap<String, luther_workflow::persistence::RunMetadata> {
+    let run_ids = leases
+        .iter()
+        .filter_map(|lease| lease.run_id.as_deref())
+        .collect::<Vec<_>>();
+    let runs = match luther_workflow::persistence::list_runs_by_ids_with_conn(conn, &run_ids) {
+        Ok(runs) => runs,
+        Err(e) => {
+            eprintln!("Warning: failed to load queue run metadata: {e}");
+            return std::collections::HashMap::new();
+        }
+    };
+    runs.into_iter()
+        .map(|run| (run.run_id.clone(), run))
         .collect()
 }
 

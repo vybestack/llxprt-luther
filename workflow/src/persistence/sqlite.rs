@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use rusqlite::{params, Connection, Result as SqliteResult};
 
-use crate::persistence::run_metadata::{
+use super::run_metadata::{
     deserialize_pid_list, deserialize_string_list, migrate_runs_table, serialize_pid_list,
     serialize_string_list, RunMetadata, RunStatus,
 };
@@ -68,6 +68,12 @@ impl SqliteStore {
     /// @plan:PLAN-20260404-INITIAL-RUNTIME.P05
     pub fn list_runs(&self) -> SqliteResult<Vec<RunMetadata>> {
         list_runs_with_conn(&self.conn)
+    }
+
+    /// List selected runs by id.
+    /// @plan:issue-117
+    pub fn list_runs_by_ids(&self, run_ids: &[&str]) -> SqliteResult<Vec<RunMetadata>> {
+        list_runs_by_ids_with_conn(&self.conn, run_ids)
     }
 
     /// List runs filtered by status.
@@ -151,6 +157,12 @@ impl<'a> SqliteStoreRef<'a> {
     /// @plan:PLAN-20260404-INITIAL-RUNTIME.P05
     pub fn list_runs(&self) -> SqliteResult<Vec<RunMetadata>> {
         list_runs_with_conn(self.conn)
+    }
+
+    /// List selected runs by id.
+    /// @plan:issue-117
+    pub fn list_runs_by_ids(&self, run_ids: &[&str]) -> SqliteResult<Vec<RunMetadata>> {
+        list_runs_by_ids_with_conn(self.conn, run_ids)
     }
 }
 
@@ -267,6 +279,48 @@ pub fn list_runs_with_conn(conn: &Connection) -> SqliteResult<Vec<RunMetadata>> 
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map([], map_run_row)?;
     rows.collect()
+}
+
+const RUN_ID_QUERY_CHUNK_SIZE: usize = 500;
+
+/// List selected run records using a borrowed connection.
+/// @plan:issue-117
+pub fn list_runs_by_ids_with_conn(
+    conn: &Connection,
+    run_ids: &[&str],
+) -> SqliteResult<Vec<RunMetadata>> {
+    let run_ids = unique_run_ids(run_ids);
+    if run_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut runs = Vec::with_capacity(run_ids.len());
+    for chunk in run_ids.chunks(RUN_ID_QUERY_CHUNK_SIZE) {
+        runs.extend(list_runs_by_id_chunk(conn, chunk)?);
+    }
+    runs.sort_by_key(|run| std::cmp::Reverse(run.created_at));
+    Ok(runs)
+}
+
+fn list_runs_by_id_chunk(conn: &Connection, run_ids: &[&str]) -> SqliteResult<Vec<RunMetadata>> {
+    let placeholders = std::iter::repeat_n("?", run_ids.len())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql = format!(
+        "SELECT {} FROM runs WHERE run_id IN ({}) ORDER BY created_at DESC",
+        RUN_SELECT_COLUMNS, placeholders
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(rusqlite::params_from_iter(run_ids), map_run_row)?;
+    rows.collect()
+}
+
+fn unique_run_ids<'a>(run_ids: &'a [&'a str]) -> Vec<&'a str> {
+    let mut seen = std::collections::HashSet::new();
+    run_ids
+        .iter()
+        .copied()
+        .filter(|run_id| seen.insert(*run_id))
+        .collect()
 }
 
 /// Map a SQLite row into a `RunMetadata`.

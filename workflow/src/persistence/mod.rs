@@ -30,7 +30,8 @@ pub use leases::{
 };
 pub use run_metadata::{is_pid_stale, run_metadata_from_ref, RunMetadata, RunStatus};
 pub use sqlite::{
-    get_run_with_conn, list_runs_with_conn, persist_run_with_conn, SqliteStore, SqliteStoreRef,
+    get_run_with_conn, list_runs_by_ids_with_conn, list_runs_with_conn, persist_run_with_conn,
+    SqliteStore, SqliteStoreRef,
 };
 pub use trace::{
     export_trace, load_trace, save_trace, SmokeTrace, TraceEvent, TraceOutcome, SCHEMA_VERSION,

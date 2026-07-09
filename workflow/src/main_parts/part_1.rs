@@ -12,6 +12,7 @@ use luther_workflow::adapters::llxprt::{
 };
 use luther_workflow::cli::{parse_args, Commands};
 use luther_workflow::daemon::discovery::{discover, DiscoveryResult};
+use luther_workflow::daemon::scheduler::{RunSummary, SchedulerTarget};
 use luther_workflow::daemon::{
     is_daemon_alive, stop_daemon, DaemonState, DaemonStatus, DaemonStore, StopOutcome,
 };
@@ -520,15 +521,31 @@ fn launch_daemon_workflow(
     let overrides = TargetProfileOverrides {
         repo: Some(request.repo.clone()),
         issue: Some(request.issue_number.to_string()),
-        work_dir: None,
-        artifact_dir: None,
+        work_dir: request.work_dir.clone(),
+        artifact_dir: request.artifact_dir.clone(),
     };
     apply_target_profile_overrides(&mut config, &overrides)
         .map_err(|e| format!("apply overrides: {e}"))?;
+    ensure_daemon_run_dirs(request)?;
     let db_path = luther_workflow::runtime_paths::get_data_dir().join("checkpoints.db");
     let wait_config = config.clone();
     let mut runner = create_durable_runner(workflow_type, config, &request.run_id, &db_path);
     run_daemon_runner(request, &wait_config, &db_path, &mut runner)
+}
+
+fn ensure_daemon_run_dirs(
+    request: &luther_workflow::daemon::launcher::LaunchRequest,
+) -> Result<(), String> {
+    ensure_daemon_run_dir("artifact", request.artifact_dir.as_deref())?;
+    ensure_daemon_run_dir("work", request.work_dir.as_deref())
+}
+
+fn ensure_daemon_run_dir(kind: &str, path: Option<&std::path::Path>) -> Result<(), String> {
+    let Some(path) = path else {
+        return Ok(());
+    };
+    std::fs::create_dir_all(path)
+        .map_err(|e| format!("failed to create {kind} dir {}: {e}", path.display()))
 }
 
 fn resume_daemon_workflow(

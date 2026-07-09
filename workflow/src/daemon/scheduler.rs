@@ -1,7 +1,7 @@
 //! Daemon scheduler loop: discover -> claim+launch up to the concurrency limit.
 //!
-//! `run_once` performs a single discovery/launch pass; `run_loop` recovers
-//! stale leases at startup then repeats `run_once` on the configured poll
+//! `run_once_with_bases` performs a single-target discovery/launch pass; `run_loop` recovers
+//! stale leases at startup then repeats `run_multi_target_once` on the configured poll
 //! interval until a shutdown flag is set.
 //!
 //! @plan:PLAN-20260415-DAEMON-DISCOVERY.P06
@@ -19,8 +19,8 @@ use rusqlite::Connection;
 use crate::adapters::github_issues::GithubIssueQuery;
 use crate::daemon::discovery::discover;
 use crate::daemon::launcher::{
-    claim_for_launch, finish_lease_after_result, prepare_resume_lease, LaunchOutcome,
-    LaunchRequest, WorkflowLauncher,
+    claim_for_launch, finish_lease_after_result, prepare_resume_lease, DaemonPathBases,
+    LaunchOutcome, LaunchRequest, WorkflowLauncher,
 };
 use crate::daemon::poller::{apply_poll_decision, ExternalWaitPoller, SystemExternalWaitPoller};
 use crate::persistence::leases::{
@@ -48,6 +48,29 @@ pub struct RunSummary {
 pub struct SchedulerTarget {
     pub config_id: String,
     pub discovery: DiscoveryConfig,
+    /// Resolved daemon base roots for this target's launch config, used to
+    /// construct isolated per-run work/artifact directories. @plan:issue-117
+    pub path_bases: DaemonPathBases,
+    /// Parent-routed base roots keyed by config id, used when a routed parent
+    /// issue launches under a parent config id. @plan:issue-117
+    pub parent_path_bases: BTreeMap<String, DaemonPathBases>,
+}
+
+impl SchedulerTarget {
+    #[must_use]
+    pub fn new(
+        config_id: String,
+        discovery: DiscoveryConfig,
+        path_bases: DaemonPathBases,
+        parent_path_bases: BTreeMap<String, DaemonPathBases>,
+    ) -> Self {
+        Self {
+            config_id,
+            discovery,
+            path_bases,
+            parent_path_bases,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -71,30 +94,23 @@ struct DispatchUnit {
 /// reach the per-config concurrency budget.
 /// @plan:PLAN-20260415-DAEMON-DISCOVERY.P06
 /// @requirement:REQ-DAEMON-DISCOVERY-006
-pub fn run_once(
+pub fn run_once_with_bases(
     cfg: &DiscoveryConfig,
     q: &dyn GithubIssueQuery,
     conn: &Connection,
     launcher: &dyn WorkflowLauncher,
     config_id: &str,
+    path_bases: DaemonPathBases,
+    parent_path_bases: BTreeMap<String, DaemonPathBases>,
 ) -> Result<RunSummary, rusqlite::Error> {
     let poller = SystemExternalWaitPoller::new();
-    run_once_with_poller(cfg, q, conn, launcher, &poller, config_id)
-}
-
-pub fn run_once_with_poller(
-    cfg: &DiscoveryConfig,
-    q: &dyn GithubIssueQuery,
-    conn: &Connection,
-    launcher: &dyn WorkflowLauncher,
-    poller: &dyn ExternalWaitPoller,
-    config_id: &str,
-) -> Result<RunSummary, rusqlite::Error> {
-    let target = SchedulerTarget {
-        config_id: config_id.to_string(),
-        discovery: cfg.clone(),
-    };
-    run_multi_target_once_with_poller(&[target], &[q], conn, launcher, poller)
+    let target = SchedulerTarget::new(
+        config_id.to_string(),
+        cfg.clone(),
+        path_bases,
+        parent_path_bases,
+    );
+    run_multi_target_once_with_poller(&[target], &[q], conn, launcher, &poller)
 }
 
 pub fn run_multi_target_once(
@@ -265,7 +281,14 @@ fn collect_launch_units(
                 summary.skipped += 1;
                 continue;
             }
-            match claim_for_launch(&routed.issue, &launch_discovery, conn, launch_config_id) {
+            let launch_path_bases = path_bases_for(target, launch_config_id);
+            match claim_for_launch(
+                &routed.issue,
+                &launch_discovery,
+                conn,
+                launch_config_id,
+                launch_path_bases.as_ref(),
+            ) {
                 Ok(Ok(mut claimed)) => {
                     claimed.request.workflow_type_id = routed.workflow_type_id.clone();
                     units.push(DispatchUnit {
@@ -301,6 +324,31 @@ fn launch_discovery_for<'a>(
         return Ok(Cow::Borrowed(discovery));
     }
     parent_capacity_discovery(&target.discovery, limits).map(Cow::Owned)
+}
+
+/// Select the daemon path bases for a routed launch.
+///
+/// When the launch config id matches the target's own config, use the target's
+/// own bases. When the launch config id is a parent config, use the
+/// parent-routed bases registered for that parent config id, falling back to
+/// empty bases (engine fallbacks apply) with a warning. @plan:issue-117
+fn path_bases_for<'a>(
+    target: &'a SchedulerTarget,
+    launch_config_id: &str,
+) -> Cow<'a, DaemonPathBases> {
+    if launch_config_id == target.config_id {
+        return Cow::Borrowed(&target.path_bases);
+    }
+    match target.parent_path_bases.get(launch_config_id) {
+        Some(bases) => Cow::Borrowed(bases),
+        None => {
+            tracing::warn!(
+                launch_config_id,
+                "no daemon path bases found for routed parent config; using empty path bases"
+            );
+            Cow::Owned(DaemonPathBases::default())
+        }
+    }
 }
 
 fn parent_launch_discoveries(
@@ -345,6 +393,7 @@ fn parent_capacity_discovery(
     parent.max_concurrent_runs_per_config = Some(limit);
     Ok(parent)
 }
+
 fn dispatch_units(
     conn: &Connection,
     launcher: &dyn WorkflowLauncher,
@@ -472,17 +521,16 @@ fn poll_due_waits(
 /// Run the scheduler loop until `shutdown` is set.
 ///
 /// Recovers stale leases once at startup (so a crashed previous instance does
-/// not permanently block issues), then repeats `run_once` and sleeps the
+/// not permanently block issues), then repeats `run_multi_target_once` and sleeps the
 /// configured poll interval, checking the shutdown flag frequently for
 /// responsiveness.
 /// @plan:PLAN-20260415-DAEMON-DISCOVERY.P06
 /// @requirement:REQ-DAEMON-DISCOVERY-007
 pub fn run_loop(
-    cfg: &DiscoveryConfig,
+    target: SchedulerTarget,
     q: &dyn GithubIssueQuery,
     conn: &Connection,
     launcher: &dyn WorkflowLauncher,
-    config_id: &str,
     shutdown: Arc<AtomicBool>,
     stale_timeout_secs: u64,
 ) -> Result<(), rusqlite::Error> {
@@ -494,9 +542,9 @@ pub fn run_loop(
         );
     }
 
-    let poll = cfg.poll_interval_secs.unwrap_or(300);
+    let poll = target.discovery.poll_interval_secs.unwrap_or(300);
     while !shutdown.load(Ordering::SeqCst) {
-        let summary = run_once(cfg, q, conn, launcher, config_id)?;
+        let summary = run_multi_target_once(std::slice::from_ref(&target), &[q], conn, launcher)?;
         if summary.launched > 0
             || summary.resumed > 0
             || summary.suspended > 0
@@ -636,7 +684,20 @@ mod tests {
             launched: Mutex::new(vec![]),
         };
 
-        let summary = run_once_with_poller(&cfg(1), &q, &c, &l, &ReadyPoller, "cfg").unwrap();
+        let target = SchedulerTarget::new(
+            "cfg".to_string(),
+            cfg(1),
+            DaemonPathBases::default(),
+            BTreeMap::new(),
+        );
+        let summary = run_multi_target_once_with_poller(
+            &[target],
+            &[&q as &dyn GithubIssueQuery],
+            &c,
+            &l,
+            &ReadyPoller,
+        )
+        .unwrap();
 
         assert_eq!(summary.pollable_waits, 1);
         assert_eq!(summary.polls_applied, 1);
@@ -670,7 +731,16 @@ mod tests {
         let l = MockLauncher {
             launched: Mutex::new(vec![]),
         };
-        let summary = run_once(&cfg(2), &q, &c, &l, "cfg").unwrap();
+        let summary = run_once_with_bases(
+            &cfg(2),
+            &q,
+            &c,
+            &l,
+            "cfg",
+            DaemonPathBases::default(),
+            BTreeMap::new(),
+        )
+        .unwrap();
         assert_eq!(summary.eligible, 2);
         assert_eq!(summary.launched, 2);
         assert_eq!(l.launched.lock().unwrap().len(), 2);
@@ -686,12 +756,30 @@ mod tests {
             launched: Mutex::new(vec![]),
         };
         // First pass launches and completes issue 1.
-        run_once(&cfg(2), &q, &c, &l, "cfg").unwrap();
+        run_once_with_bases(
+            &cfg(2),
+            &q,
+            &c,
+            &l,
+            "cfg",
+            DaemonPathBases::default(),
+            BTreeMap::new(),
+        )
+        .unwrap();
         // Manually re-mark the completed lease active to emulate a still-open
         // claim; a second pass must not relaunch it.
         let lease = get_lease_for_issue(&c, "o/r", 1).unwrap().unwrap();
         update_lease_status(&c, &lease.lease_id, LeaseStatus::Running, None).unwrap();
-        let summary2 = run_once(&cfg(2), &q, &c, &l, "cfg").unwrap();
+        let summary2 = run_once_with_bases(
+            &cfg(2),
+            &q,
+            &c,
+            &l,
+            "cfg",
+            DaemonPathBases::default(),
+            BTreeMap::new(),
+        )
+        .unwrap();
         assert_eq!(
             summary2.eligible, 0,
             "active lease should suppress eligibility"
@@ -722,7 +810,20 @@ mod tests {
         let l = MockLauncher {
             launched: Mutex::new(vec![]),
         };
-        let summary = run_once_with_poller(&cfg(1), &q, &c, &l, &ReadyPoller, "cfg").unwrap();
+        let target = SchedulerTarget::new(
+            "cfg".to_string(),
+            cfg(1),
+            DaemonPathBases::default(),
+            BTreeMap::new(),
+        );
+        let summary = run_multi_target_once_with_poller(
+            &[target],
+            &[&q as &dyn GithubIssueQuery],
+            &c,
+            &l,
+            &ReadyPoller,
+        )
+        .unwrap();
         assert_eq!(summary.pollable_waits, 1);
         assert_eq!(summary.resumed, 1);
         assert_eq!(summary.launched, 0);
@@ -732,25 +833,29 @@ mod tests {
     fn multi_target_respects_global_and_repository_limits() {
         let c = conn();
         let targets = vec![
-            SchedulerTarget {
-                config_id: "cfg-a".to_string(),
-                discovery: DiscoveryConfig {
+            SchedulerTarget::new(
+                "cfg-a".to_string(),
+                DiscoveryConfig {
                     max_concurrent_active_runs: Some(2),
                     max_concurrent_runs_per_repository: Some(1),
                     max_concurrent_runs: Some(2),
                     ..cfg(2)
                 },
-            },
-            SchedulerTarget {
-                config_id: "cfg-b".to_string(),
-                discovery: DiscoveryConfig {
+                DaemonPathBases::default(),
+                BTreeMap::new(),
+            ),
+            SchedulerTarget::new(
+                "cfg-b".to_string(),
+                DiscoveryConfig {
                     repo: Some("o/other".to_string()),
                     max_concurrent_active_runs: Some(2),
                     max_concurrent_runs_per_repository: Some(1),
                     max_concurrent_runs: Some(2),
                     ..cfg(2)
                 },
-            },
+                DaemonPathBases::default(),
+                BTreeMap::new(),
+            ),
         ];
         let q1 = MockQuery {
             issues: vec![issue(1), issue(2)],
@@ -788,9 +893,35 @@ mod tests {
             launched: Mutex::new(vec![]),
         };
         let shutdown = Arc::new(AtomicBool::new(true)); // stop immediately after startup sweep
-        run_loop(&cfg(1), &q, &c, &l, "cfg", shutdown, 300).unwrap();
+        let target = SchedulerTarget::new(
+            "cfg".to_string(),
+            cfg(1),
+            DaemonPathBases::default(),
+            BTreeMap::new(),
+        );
+        run_loop(target, &q, &c, &l, shutdown, 300).unwrap();
         let recovered = get_lease_for_issue(&c, "o/r", 9).unwrap().unwrap();
         assert_eq!(recovered.status, LeaseStatus::Stale);
+    }
+
+    #[test]
+    fn parent_routed_launch_without_parent_bases_warns_and_uses_empty_fallback() {
+        let target = SchedulerTarget::new(
+            "child-cfg".to_string(),
+            DiscoveryConfig {
+                parent_config_id: Some("parent-cfg".to_string()),
+                ..cfg(1)
+            },
+            DaemonPathBases {
+                work_dir_base: Some(std::path::PathBuf::from("/tmp/child-work")),
+                artifact_dir_base: Some(std::path::PathBuf::from("/tmp/child-artifacts")),
+            },
+            BTreeMap::new(),
+        );
+
+        let bases = path_bases_for(&target, "parent-cfg");
+
+        assert_eq!(bases.as_ref(), &DaemonPathBases::default());
     }
 
     #[test]

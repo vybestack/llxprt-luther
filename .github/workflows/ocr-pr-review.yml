@@ -29,12 +29,6 @@ on:
         required: true
         type: string
 
-# Duplicate OCR runs for the same PR are cancelled so only the latest
-# head SHA is reviewed.
-concurrency:
-  group: ocr-pr-review-${{ github.event.pull_request.number || github.event.issue.number || inputs.pr_number }}
-  cancel-in-progress: true
-
 permissions:
   contents: read
   pull-requests: write
@@ -47,33 +41,66 @@ env:
   NO_COLOR: "1"
 
 jobs:
+  gate:
+    name: Resolve OpenCodeReview trigger
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      should_run: ${{ steps.trigger.outputs.should_run }}
+      group_key: ${{ steps.trigger.outputs.group_key }}
+    steps:
+      - name: Resolve trigger
+        id: trigger
+        # actions/github-script@v7
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b
+        with:
+          script: |
+            const eventName = context.eventName;
+            const prNumber = context.payload.pull_request && context.payload.pull_request.number;
+            const issueNumber = context.payload.issue && context.payload.issue.number;
+            const dispatchNumber = context.payload.inputs && context.payload.inputs.pr_number;
+            const trustedAssociations = new Set(['OWNER', 'MEMBER', 'COLLABORATOR']);
+            const reviewCommands = ['/ocr', '/open-code-review'];
+            const body = String((context.payload.comment && context.payload.comment.body) || '');
+            const isReviewCommand = reviewCommands.some((command) => (
+              body === command ||
+              body.startsWith(`${command} `) ||
+              body.startsWith(`${command}\n`) ||
+              body.startsWith(`${command}\r\n`) ||
+              body.startsWith(`${command}\t`)
+            ));
+            const trustedComment = trustedAssociations.has(
+              context.payload.comment && context.payload.comment.author_association
+            );
+            const shouldRun = eventName === 'pull_request_target' ||
+              eventName === 'workflow_dispatch' ||
+              (eventName === 'issue_comment' &&
+                Boolean(context.payload.issue && context.payload.issue.pull_request) &&
+                trustedComment &&
+                isReviewCommand);
+            const groupNumber = prNumber || issueNumber || dispatchNumber;
+            core.setOutput('should_run', shouldRun ? 'true' : 'false');
+            core.setOutput(
+              'group_key',
+              shouldRun ? `ocr-pr-review-${groupNumber}` : `ocr-pr-review-skip-${context.runId}`
+            );
+
   code-review:
     name: OpenCodeReview
     runs-on: ubuntu-latest
+    timeout-minutes: 45
+    needs: gate
+    concurrency:
+      group: ${{ needs.gate.outputs.group_key }}
+      cancel-in-progress: true
     # For issue_comment, only run on PR comments requesting a review.
-    # The toJSON checks intentionally support LF, CRLF, and tab after the
-    # command; other whitespace is not matched to keep triggers predictable.
-    if: |
-      github.event_name == 'pull_request_target' ||
-      github.event_name == 'workflow_dispatch' ||
-      (github.event_name == 'issue_comment' &&
-       github.event.issue.pull_request != null &&
-       (github.event.comment.author_association == 'OWNER' ||
-        github.event.comment.author_association == 'MEMBER' ||
-        github.event.comment.author_association == 'COLLABORATOR') &&
-       (github.event.comment.body == '/ocr' ||
-        startsWith(github.event.comment.body, '/ocr ') ||
-        startsWith(toJSON(github.event.comment.body), '"/ocr\n') ||
-        startsWith(toJSON(github.event.comment.body), '"/ocr\r\n') ||
-        startsWith(toJSON(github.event.comment.body), '"/ocr\t') ||
-        github.event.comment.body == '/open-code-review' ||
-        startsWith(github.event.comment.body, '/open-code-review ') ||
-        startsWith(toJSON(github.event.comment.body), '"/open-code-review\n') ||
-        startsWith(toJSON(github.event.comment.body), '"/open-code-review\r\n') ||
-        startsWith(toJSON(github.event.comment.body), '"/open-code-review\t')))
+    # The gate job computes the comment authorization, command check, and
+    # concurrency key once so skip/run decisions cannot drift.
+    if: needs.gate.outputs.should_run == 'true'
     steps:
       - name: Resolve PR context
-        uses: actions/github-script@v7
+        # actions/github-script@v7
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b
         id: pr-context
         with:
           script: |
@@ -102,6 +129,16 @@ jobs:
           ref: ${{ steps.pr-context.outputs.base_sha }}
           fetch-depth: 0
           persist-credentials: false
+
+      - name: Initialize OCR artifact files
+        run: |
+          : > ocr-result.json
+          : > ocr-stdout.raw
+          : > ocr-stderr.log
+          : > ocr-version.txt
+          : > ocr-preview.txt
+          : > ocr-preview-stderr.log
+          : > ocr-exit-code.txt
 
       - name: Fetch PR head and compute merge-base
         env:
@@ -165,16 +202,6 @@ jobs:
             echo "BASE_SHA=${BASE_SHA}"
             echo "HEAD_SHA=${HEAD_SHA}"
           } >> "$GITHUB_ENV"
-
-      - name: Initialize OCR artifact files
-        run: |
-          : > ocr-result.json
-          : > ocr-stdout.raw
-          : > ocr-stderr.log
-          : > ocr-version.txt
-          : > ocr-preview.txt
-          : > ocr-preview-stderr.log
-          : > ocr-exit-code.txt
 
       - name: Install OpenCodeReview
         run: |
@@ -374,7 +401,8 @@ jobs:
           if-no-files-found: error
 
       - name: Post OCR results
-        uses: actions/github-script@v7
+        # actions/github-script@v7
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b
         env:
           BASE_SHA: ${{ env.BASE_SHA }}
           HEAD_SHA: ${{ env.HEAD_SHA }}

@@ -706,6 +706,18 @@ impl EngineRunner {
         &self.instance.run_id
     }
 
+    /// Get the workflow type id for this execution.
+    /// @plan:issue-117
+    pub fn workflow_type_id(&self) -> &str {
+        self.instance.workflow_type_id()
+    }
+
+    /// Get the workflow config id for this execution.
+    /// @plan:issue-117
+    pub fn config_id(&self) -> &str {
+        self.instance.config_id()
+    }
+
     fn step_parameters_with_config_manifest(
         &self,
         step_def: &StepDef,

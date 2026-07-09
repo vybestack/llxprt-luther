@@ -1,341 +1,4 @@
-/// Acquire the per-config singleton lock, honoring `--force` recovery.
-///
-/// Returns the held guard on success, or `None` after printing a clear error
-/// when another live daemon owns the lock.
-/// @plan:PLAN-20260404-INITIAL-RUNTIME.P09
-fn acquire_daemon_lock(
-    store: &DaemonStore,
-    config_id: &str,
-    force: bool,
-) -> Option<luther_workflow::monitor::SingletonGuard> {
-    use luther_workflow::monitor::{acquire_singleton_lock, process::MonitorError};
-
-    let lock_path = store.lock_path(config_id).to_string_lossy().to_string();
-    match acquire_singleton_lock(&lock_path) {
-        Ok(guard) => Some(guard),
-        Err(MonitorError::LockHeld { pid }) => {
-            if force {
-                luther_workflow::daemon::terminate_pid(pid);
-                let _ = std::fs::remove_file(&lock_path);
-                match acquire_singleton_lock(&lock_path) {
-                    Ok(guard) => Some(guard),
-                    Err(e) => {
-                        eprintln!("Error: failed to replace daemon lock for '{config_id}': {e}");
-                        None
-                    }
-                }
-            } else {
-                eprintln!(
-                    "Error: daemon already running (config={config_id}, pid={pid}). \
-                     Use --force to replace it."
-                );
-                None
-            }
-        }
-        Err(e) => {
-            eprintln!("Error: failed to acquire daemon lock for '{config_id}': {e}");
-            None
-        }
-    }
-}
-
-/// Run a foreground daemon for the given config with clean Ctrl-C handling.
-///
-/// When the resolved `[discovery]` config is enabled, the daemon drives the
-/// discovery/launch scheduler (still writing heartbeats); otherwise it keeps
-/// the original heartbeat-only behavior. `once` performs a single pass.
-/// @plan:PLAN-20260404-INITIAL-RUNTIME.P09
-/// @plan:PLAN-20260415-DAEMON-DISCOVERY.P06
-async fn handle_daemon_run(
-    store: &DaemonStore,
-    config: &std::path::Path,
-    force: bool,
-    config_dir: &Option<std::path::PathBuf>,
-    once: bool,
-    scheduler_config: &Option<std::path::PathBuf>,
-) {
-    let config_id = daemon_config_id(config);
-
-    let _guard = match acquire_daemon_lock(store, &config_id, force) {
-        Some(guard) => guard,
-        None => process::exit(1),
-    };
-
-    let mut state = DaemonState::new(&config_id);
-    if let Err(e) = store.write(&state) {
-        eprintln!("Error: failed to persist daemon state: {e}");
-        process::exit(1);
-    }
-    state.set_status(DaemonStatus::Running);
-    if let Err(e) = store.write(&state) {
-        eprintln!("Error: failed to persist daemon running state: {e}");
-        process::exit(1);
-    }
-
-    println!("Daemon running (config={config_id}, pid={}).", state.pid);
-
-    let shutdown = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    install_interrupt_handlers(shutdown.clone());
-
-    let discovery = resolve_discovery_for(config, config_dir);
-    if discovery.enabled {
-        if let Some(path) = scheduler_config {
-            run_daemon_supervisor_loop(store, &mut state, &shutdown, path, config_dir, once).await;
-        } else {
-            run_daemon_discovery_loop(store, &mut state, &shutdown, &discovery, &config_id, once)
-                .await;
-        }
-    } else {
-        run_daemon_heartbeat_loop(store, &mut state, &shutdown).await;
-    }
-
-    state.set_status(DaemonStatus::Stopping);
-    let _ = store.write(&state);
-    state.set_status(DaemonStatus::Stopped);
-    let _ = store.write(&state);
-    println!("Daemon stopped (config={config_id}).");
-}
-
-fn scheduler_targets(
-    scheduler: &luther_workflow::workflow::schema::DaemonSchedulerConfig,
-    config_dir: &Option<std::path::PathBuf>,
-) -> Vec<luther_workflow::daemon::scheduler::SchedulerTarget> {
-    let config_root = config_dir
-        .clone()
-        .unwrap_or_else(|| std::path::PathBuf::from("config"));
-    scheduler
-        .targets
-        .iter()
-        .filter_map(|target| scheduler_target(target, scheduler, &config_root))
-        .collect()
-}
-
-fn scheduler_target(
-    target: &luther_workflow::workflow::schema::DaemonTargetConfig,
-    scheduler: &luther_workflow::workflow::schema::DaemonSchedulerConfig,
-    config_root: &std::path::Path,
-) -> Option<luther_workflow::daemon::scheduler::SchedulerTarget> {
-    let cfg = match resolve_workflow_config(&target.config_id, config_root) {
-        Ok(cfg) => cfg,
-        Err(e) => {
-            eprintln!(
-                "Error: Failed to resolve config '{}': {e}",
-                target.config_id
-            );
-            return None;
-        }
-    };
-    let mut discovery = resolve_discovery_config(&cfg);
-    discovery.max_concurrent_active_runs = discovery
-        .max_concurrent_active_runs
-        .or(scheduler.max_concurrent_active_runs);
-    discovery.max_concurrent_runs_per_config = discovery
-        .max_concurrent_runs_per_config
-        .or(scheduler.max_concurrent_runs_per_config);
-    discovery.max_concurrent_runs_per_repository = discovery
-        .max_concurrent_runs_per_repository
-        .or(scheduler.max_concurrent_runs_per_repository);
-    if discovery.poll_interval_secs.is_none() {
-        discovery.poll_interval_secs = scheduler.poll_interval_seconds;
-    }
-    discovery
-        .enabled
-        .then(|| luther_workflow::daemon::scheduler::SchedulerTarget {
-            config_id: target.config_id.clone(),
-            discovery,
-        })
-}
-fn recover_stale_daemon_leases(
-    conn: &rusqlite::Connection,
-    stale_timeout: u64,
-) -> Result<(), rusqlite::Error> {
-    let recovered = luther_workflow::persistence::leases::mark_stale_leases(conn, stale_timeout)?;
-    let ready_recovered = luther_workflow::persistence::leases::mark_stale_ready_to_resume_leases(
-        conn,
-        stale_timeout,
-    )?;
-    if recovered > 0 || ready_recovered > 0 {
-        println!(
-            "recovered {recovered} active stale lease(s) and {ready_recovered} ready-to-resume stale lease(s) on startup"
-        );
-    }
-    Ok(())
-}
-
-async fn run_daemon_supervisor_loop(
-    store: &DaemonStore,
-    state: &mut DaemonState,
-    shutdown: &std::sync::Arc<std::sync::atomic::AtomicBool>,
-    scheduler_path: &std::path::Path,
-    config_dir: &Option<std::path::PathBuf>,
-    once: bool,
-) {
-    use std::sync::atomic::Ordering;
-
-    let scheduler = match load_daemon_scheduler_config(scheduler_path) {
-        Ok(config) => config,
-        Err(e) => {
-            eprintln!("Error: Failed to load daemon scheduler config: {e}");
-            return;
-        }
-    };
-    let targets = scheduler_targets(&scheduler, config_dir);
-    let conn = open_daemon_db();
-    let queries = targets
-        .iter()
-        .map(|_| SystemGithubIssueQuery::new(SystemGithubCommandRunner))
-        .collect::<Vec<_>>();
-    let query_refs = queries
-        .iter()
-        .map(|query| query as &dyn luther_workflow::adapters::github_issues::GithubIssueQuery)
-        .collect::<Vec<_>>();
-    let stale_timeout = scheduler
-        .poll_interval_seconds
-        .unwrap_or(300)
-        .saturating_mul(4);
-    if let Err(e) = recover_stale_daemon_leases(&conn, stale_timeout) {
-        eprintln!("Error: stale lease recovery failed: {e}");
-        return;
-    }
-    let launcher = DaemonWorkflowLauncher::new("supervisor".to_string());
-    let poll = scheduler.poll_interval_seconds.unwrap_or(300);
-    while !shutdown.load(Ordering::SeqCst) {
-        match luther_workflow::daemon::scheduler::run_multi_target_once(
-            &targets,
-            &query_refs,
-            &conn,
-            &launcher,
-        ) {
-            Ok(summary)
-                if summary.launched > 0
-                    || summary.resumed > 0
-                    || summary.suspended > 0
-                    || summary.failed > 0 =>
-            {
-                println!(
-                    "scheduler pass: {} launched, {} resumed, {} suspended, {} failed, {} skipped",
-                    summary.launched,
-                    summary.resumed,
-                    summary.suspended,
-                    summary.failed,
-                    summary.skipped
-                );
-            }
-            Ok(_) => {}
-            Err(e) => eprintln!("scheduler error: {e}"),
-        }
-        state.touch_heartbeat();
-        let _ = store.write(state);
-        if once {
-            break;
-        }
-        sleep_secs_with_shutdown(poll, shutdown).await;
-    }
-}
-
-/// Drive the discovery/launch scheduler, writing heartbeats between passes.
-///
-/// Runs in a blocking task because the scheduler and SQLite access are
-/// synchronous; the heartbeat is refreshed on the async side between passes.
-/// @plan:PLAN-20260415-DAEMON-DISCOVERY.P06
-async fn run_daemon_discovery_loop(
-    store: &DaemonStore,
-    state: &mut DaemonState,
-    shutdown: &std::sync::Arc<std::sync::atomic::AtomicBool>,
-    discovery: &luther_workflow::workflow::schema::DiscoveryConfig,
-    config_id: &str,
-    once: bool,
-) {
-    use std::sync::atomic::Ordering;
-
-    let conn = open_daemon_db();
-    let query = SystemGithubIssueQuery::new(SystemGithubCommandRunner);
-    let launcher = DaemonWorkflowLauncher::new(config_id.to_string());
-    let stale_timeout = discovery
-        .poll_interval_secs
-        .unwrap_or(300)
-        .saturating_mul(4);
-
-    if let Err(e) = recover_stale_daemon_leases(&conn, stale_timeout) {
-        eprintln!("Error: stale lease recovery failed: {e}");
-        return;
-    }
-
-    let poll = discovery.poll_interval_secs.unwrap_or(300);
-    loop {
-        if shutdown.load(Ordering::SeqCst) {
-            break;
-        }
-        match luther_workflow::daemon::scheduler::run_once(
-            discovery, &query, &conn, &launcher, config_id,
-        ) {
-            Ok(summary)
-                if summary.launched > 0
-                    || summary.resumed > 0
-                    || summary.suspended > 0
-                    || summary.failed > 0 =>
-            {
-                println!(
-                    "scheduler pass: {} launched, {} resumed, {} suspended, {} failed, {} skipped",
-                    summary.launched,
-                    summary.resumed,
-                    summary.suspended,
-                    summary.failed,
-                    summary.skipped
-                );
-            }
-            Ok(_) => {}
-            Err(e) => eprintln!("scheduler error: {e}"),
-        }
-        state.touch_heartbeat();
-        let _ = store.write(state);
-        if once {
-            break;
-        }
-        sleep_secs_with_shutdown(poll, shutdown).await;
-    }
-}
-
-/// Async sleep up to `secs` that wakes early when shutdown is requested.
-/// @plan:PLAN-20260415-DAEMON-DISCOVERY.P06
-async fn sleep_secs_with_shutdown(
-    secs: u64,
-    shutdown: &std::sync::Arc<std::sync::atomic::AtomicBool>,
-) {
-    use std::sync::atomic::Ordering;
-    let ticks = secs.saturating_mul(5);
-    for _ in 0..ticks {
-        if shutdown.load(Ordering::SeqCst) {
-            return;
-        }
-        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
-    }
-}
-
-/// Refresh the heartbeat until the shutdown flag is set.
-///
-/// Uses a short tick so Ctrl-C is responsive while only writing the heartbeat
-/// roughly every 30 seconds.
-/// @plan:PLAN-20260404-INITIAL-RUNTIME.P09
-async fn run_daemon_heartbeat_loop(
-    store: &DaemonStore,
-    state: &mut DaemonState,
-    shutdown: &std::sync::Arc<std::sync::atomic::AtomicBool>,
-) {
-    use std::sync::atomic::Ordering;
-
-    let mut ticks: u32 = 0;
-    while !shutdown.load(Ordering::SeqCst) {
-        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
-        ticks += 1;
-        if ticks >= 150 {
-            ticks = 0;
-            state.touch_heartbeat();
-            let _ = store.write(state);
-        }
-    }
-}
-
+include!("part_3_daemon.rs");
 /// Handle `daemon stop` for a single config or `--all`.
 /// @plan:PLAN-20260404-INITIAL-RUNTIME.P09
 fn handle_daemon_stop(store: &DaemonStore, args: &luther_workflow::cli::DaemonStopArgs) {
@@ -486,10 +149,27 @@ fn daemon_status_all(store: &DaemonStore, json: bool) {
 ///
 /// Returns `None` when the heartbeat has no run id or the run is not recorded.
 /// @plan:issue-51
-fn heartbeat_config_id(store: Option<&SqliteStore>, hb_run_id: Option<&str>) -> Option<String> {
-    let store = store?;
-    let run_id = hb_run_id?;
-    store.get_run(run_id).ok().flatten().map(|md| md.config_id)
+fn heartbeat_run_index(
+    store: Option<&SqliteStore>,
+    heartbeats: &std::collections::HashMap<String, luther_workflow::monitor::heartbeat::Heartbeat>,
+) -> std::collections::BTreeMap<String, RunMetadata> {
+    let Some(store) = store else {
+        return std::collections::BTreeMap::new();
+    };
+    let run_ids = heartbeats
+        .values()
+        .filter_map(|hb| hb.run_id.as_deref())
+        .collect::<Vec<_>>();
+    match store.list_runs_by_ids(&run_ids) {
+        Ok(runs) => runs
+            .into_iter()
+            .map(|metadata| (metadata.run_id.clone(), metadata))
+            .collect(),
+        Err(err) => {
+            eprintln!("Warning: failed to read heartbeat runs for filtering: {err}");
+            std::collections::BTreeMap::new()
+        }
+    }
 }
 
 /// Filter status heartbeats and run registry results by config id (issue #51).
@@ -512,12 +192,15 @@ fn filter_status_by_config(
             None
         }
     };
+    let heartbeat_runs = heartbeat_run_index(store.as_ref(), &heartbeats);
     let filtered_hbs = if store.is_some() {
         heartbeats
             .into_iter()
             .filter(|(_, hb)| {
-                heartbeat_config_id(store.as_ref(), hb.run_id.as_deref()).as_deref()
-                    == Some(config_id)
+                hb.run_id
+                    .as_deref()
+                    .and_then(|run_id| heartbeat_runs.get(run_id))
+                    .is_some_and(|metadata| metadata.config_id == config_id)
             })
             .collect()
     } else {
@@ -560,22 +243,6 @@ async fn handle_runs_command(args: &luther_workflow::cli::RunsArgs) {
         RunsCommand::Resume(resume_args) => handle_runs_resume(resume_args),
         RunsCommand::Retry(retry_args) => handle_runs_retry(retry_args),
         RunsCommand::Rewind(rewind_args) => handle_runs_rewind(rewind_args),
-    }
-}
-
-/// Open the run registry, exiting with a clear error when it is absent.
-/// @plan:PLAN-20260623-LUTHER-CONTINUATION
-fn require_runs_store(run_id: &str) -> SqliteStore {
-    match open_runs_store() {
-        Ok(Some(store)) => store,
-        Ok(None) => {
-            eprintln!("Error: run '{run_id}' not found (no run registry)");
-            process::exit(1);
-        }
-        Err(e) => {
-            eprintln!("Error: {e}");
-            process::exit(1);
-        }
     }
 }
 
@@ -628,7 +295,16 @@ fn reconstruct_runner(
             .map_err(|e| format!("invalid continuation profile: {e}"))?;
     }
     let run_context = run_context_from_metadata(md, run_id);
-    let instance = WorkflowInstance::create_with_run_id(workflow_type, config, run_id);
+    let mut instance = WorkflowInstance::create_with_run_id(workflow_type, config, run_id);
+    if let Some(step) = md.current_step.as_deref().filter(|step| !step.is_empty()) {
+        if !instance.workflow_type.steps.iter().any(|def| def.step_id == step) {
+            return Err(format!(
+                "run '{run_id}' current_step '{step}' is not present in workflow type '{}'",
+                md.workflow_type_id
+            ));
+        }
+        instance.transition_to(step);
+    }
     let registry = ExecutorRegistry::with_defaults();
     EngineRunner::with_db_path_and_context(instance, registry, db_path, run_context)
         .map_err(|e| format!("create runner: {e}"))
@@ -919,61 +595,4 @@ fn handle_runs_rewind(args: &luther_workflow::cli::RunsRewindArgs) {
 }
 
 #[cfg(test)]
-mod part3_tests {
-    use super::*;
-
-    fn write_config_root(root: &std::path::Path, wf: &str, step: &str) {
-        let workflows = root.join("workflows");
-        let configs = root.join("workflow-configs");
-        std::fs::create_dir_all(&workflows).expect("workflow dir");
-        std::fs::create_dir_all(&configs).expect("config dir");
-        let workflow = serde_json::json!({
-            "workflow_type_id": wf,
-            "steps": [{"step_id": step, "step_type": "noop"}],
-            "transitions": [],
-            "guards": {"max_retries": 1, "timeout_seconds": 30}
-        });
-        let config = serde_json::json!({
-            "config_id": "custom-resume-config",
-            "workflow_type_id": wf,
-            "runtime": {"timeout_seconds": 30, "max_retries": 1},
-            "repository": {"workspace_strategy": "temp", "branch_template": "test-{run_id}", "base_branch": "main"},
-            "guards": {"max_iterations": 1, "max_file_changes": 10, "max_tokens": 1000, "max_cost": 1.0}
-        });
-        std::fs::write(workflows.join(format!("{wf}.json")), workflow.to_string())
-            .expect("workflow file");
-        std::fs::write(configs.join("custom-resume-config.json"), config.to_string())
-            .expect("config file");
-    }
-
-    fn seed_run(store: &SqliteStore, run_id: &str, wf: &str, step: &str) -> RunMetadata {
-        let mut md = RunMetadata::new(run_id, wf, "custom-resume-config");
-        md.status = RunStatus::Failed;
-        md.current_step = Some(step.to_string());
-        persist_run_with_conn(store.conn(), &md).expect("persist run");
-        let cp = luther_workflow::persistence::Checkpoint::with_snapshot(
-            run_id,
-            step,
-            luther_workflow::persistence::StateSnapshot {
-                status: luther_workflow::persistence::CHECKPOINT_STATUS_INTERRUPTED.to_string(),
-                ..Default::default()
-            },
-        );
-        luther_workflow::persistence::save_checkpoint_with_conn(store.conn(), &cp)
-            .expect("save checkpoint");
-        md
-    }
-
-    #[test]
-    fn reconstructs_runner_from_non_default_config_dir() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let config_root = temp.path().join("custom-config");
-        let db_path = temp.path().join("checkpoints.db");
-        write_config_root(&config_root, "custom-resume-v1", "custom_marker_step");
-        let store = SqliteStore::open(&db_path).expect("open store");
-        let md = seed_run(&store, "custom-config-run", "custom-resume-v1", "custom_marker_step");
-        let runner = reconstruct_runner(&md, &md.run_id, &db_path, &Some(config_root))
-            .expect("custom config root reconstructs runner");
-        assert_eq!(runner.current_step(), "custom_marker_step");
-    }
-}
+mod part_3_tests;

@@ -69,6 +69,8 @@ fn wait_poll_identity_reads_captured_pr_artifact_when_metadata_is_empty() {
         run_id: "run-identity".to_string(),
         repo: "owner/repo".to_string(),
         issue_number: 62,
+        work_dir: None,
+        artifact_dir: None,
     };
     let identity = wait_poll_identity(
         &request,
@@ -91,6 +93,8 @@ fn wait_poll_identity_rejects_missing_pr_check_identity() {
         run_id: "run-missing".to_string(),
         repo: "owner/repo".to_string(),
         issue_number: 62,
+        work_dir: None,
+        artifact_dir: None,
     };
 
     let err = wait_poll_identity(
@@ -103,7 +107,6 @@ fn wait_poll_identity_rejects_missing_pr_check_identity() {
 
     assert!(err.contains("missing PR number or head SHA"));
 }
-
 
 #[test]
 fn wait_poll_identity_requires_child_run_id_for_child_workflow_wait() {
@@ -124,6 +127,8 @@ fn wait_poll_identity_requires_child_run_id_for_child_workflow_wait() {
         run_id: "run-parent".to_string(),
         repo: "owner/repo".to_string(),
         issue_number: 62,
+        work_dir: None,
+        artifact_dir: None,
     };
 
     let err = wait_poll_identity(
@@ -157,6 +162,8 @@ fn wait_poll_identity_reads_child_workflow_wait_run_id() {
         run_id: "run-parent".to_string(),
         repo: "owner/repo".to_string(),
         issue_number: 62,
+        work_dir: None,
+        artifact_dir: None,
     };
 
     let identity = wait_poll_identity(
@@ -237,6 +244,8 @@ fn child_workflow_wait_request() -> luther_workflow::daemon::launcher::LaunchReq
         run_id: "parent-run-62".to_string(),
         repo: "owner/repo".to_string(),
         issue_number: 62,
+        work_dir: None,
+        artifact_dir: None,
     }
 }
 
@@ -343,6 +352,8 @@ fn wait_poll_identity_prefers_captured_pr_artifact_over_stale_metadata() {
         run_id: "run-stale".to_string(),
         repo: "owner/repo".to_string(),
         issue_number: 62,
+        work_dir: None,
+        artifact_dir: None,
     };
     let mut metadata = RunMetadata::new("run-stale", "wf", "cfg");
     metadata.pr_number = Some(1);
