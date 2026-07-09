@@ -315,12 +315,11 @@ fn list_runs_by_id_chunk(conn: &Connection, run_ids: &[&str]) -> SqliteResult<Ve
 }
 
 fn unique_run_ids<'a>(run_ids: &'a [&'a str]) -> Vec<&'a str> {
+    let mut seen = std::collections::HashSet::new();
     run_ids
         .iter()
         .copied()
-        .scan(std::collections::HashSet::new(), |seen, run_id| {
-            seen.insert(run_id).then_some(run_id)
-        })
+        .filter(|run_id| seen.insert(*run_id))
         .collect()
 }
 

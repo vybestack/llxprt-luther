@@ -175,12 +175,8 @@ pub fn claim_for_launch(
     let paths = match bases.per_run_paths(issue.number, &run_id) {
         Ok(paths) => paths,
         Err(error) => {
-            eprintln!(
-                "path validation error for config={} issue={}: {}",
-                config_id, issue.number, error
-            );
             update_lease_status(conn, &lease.lease_id, LeaseStatus::Abandoned, None)?;
-            return Err(invalid_path_error(error));
+            return Ok(Err(SkipReason::InvalidPath(error)));
         }
     };
     update_lease_status(conn, &lease.lease_id, LeaseStatus::Running, Some(&run_id))?;
@@ -196,13 +192,6 @@ pub fn claim_for_launch(
             artifact_dir: paths.artifact_dir,
         },
     }))
-}
-
-fn invalid_path_error(error: String) -> rusqlite::Error {
-    rusqlite::Error::SqliteFailure(
-        rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CONSTRAINT),
-        Some(error),
-    )
 }
 
 pub fn finish_lease_after_result(
@@ -581,17 +570,13 @@ mod tests {
     }
 
     #[test]
-    fn invalid_path_error_preserves_validation_message() {
-        let error = invalid_path_error(
-            "run_id must be a single safe path component: ../escape".to_string(),
-        );
+    fn per_run_paths_rejects_windows_style_separators() {
+        let bases = DaemonPathBases {
+            work_dir_base: Some(std::path::PathBuf::from("/tmp/work")),
+            artifact_dir_base: Some(std::path::PathBuf::from("/tmp/artifacts")),
+        };
 
-        match error {
-            rusqlite::Error::SqliteFailure(_, Some(message)) => {
-                assert!(message.contains("run_id must be a single safe path component: ../escape"));
-            }
-            other => panic!("unexpected error variant: {other:?}"),
-        }
+        assert!(bases.per_run_paths(1, "foo\\..\\escape").is_err());
     }
 
     #[test]

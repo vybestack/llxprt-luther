@@ -104,7 +104,7 @@ impl StepContext {
     }
 
     /// Set a context value.
-    /// If current_step_id is set, also stores in namespaced_vars\[step_id\]\[key\].
+    /// If current_step_id is set, also stores in namespaced_vars[step_id][key].
     /// Always stores bare key in variables for backward compatibility.
     /// @plan:PLAN-20260408-LLXPRT-FIRST.P11
     pub fn set(&mut self, key: &str, value: &str) {

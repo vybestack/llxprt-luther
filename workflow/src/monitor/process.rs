@@ -172,12 +172,19 @@ fn create_lock_file(lock_file: &Path) -> Result<(), MonitorError> {
         .create_new(true)
         .open(lock_file)
         .map_err(|e| lock_creation_error(e, lock_file))?;
-    write!(file, "{}", std::process::id()).map_err(|e| MonitorError::LockError {
-        message: format!("Failed to write lock file: {e}"),
-    })?;
-    file.flush().map_err(|e| MonitorError::LockError {
-        message: format!("Failed to flush lock file: {e}"),
-    })
+    if let Err(error) = write!(file, "{}", std::process::id()) {
+        let _ = fs::remove_file(lock_file);
+        return Err(MonitorError::LockError {
+            message: format!("Failed to write lock file: {error}"),
+        });
+    }
+    if let Err(error) = file.flush() {
+        let _ = fs::remove_file(lock_file);
+        return Err(MonitorError::LockError {
+            message: format!("Failed to flush lock file: {error}"),
+        });
+    }
+    Ok(())
 }
 fn lock_creation_error(error: std::io::Error, lock_file: &Path) -> MonitorError {
     if error.kind() == std::io::ErrorKind::AlreadyExists {

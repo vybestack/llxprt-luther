@@ -1,7 +1,7 @@
 //! Daemon scheduler loop: discover -> claim+launch up to the concurrency limit.
 //!
-//! `run_once` performs a single discovery/launch pass; `run_loop` recovers
-//! stale leases at startup then repeats `run_once` on the configured poll
+//! `run_once_with_bases` performs a single-target discovery/launch pass; `run_loop` recovers
+//! stale leases at startup then repeats `run_multi_target_once` on the configured poll
 //! interval until a shutdown flag is set.
 //!
 //! @plan:PLAN-20260415-DAEMON-DISCOVERY.P06
@@ -521,7 +521,7 @@ fn poll_due_waits(
 /// Run the scheduler loop until `shutdown` is set.
 ///
 /// Recovers stale leases once at startup (so a crashed previous instance does
-/// not permanently block issues), then repeats `run_once` and sleeps the
+/// not permanently block issues), then repeats `run_multi_target_once` and sleeps the
 /// configured poll interval, checking the shutdown flag frequently for
 /// responsiveness.
 /// @plan:PLAN-20260415-DAEMON-DISCOVERY.P06

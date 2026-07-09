@@ -76,11 +76,11 @@ fn daemon_lock_pid_matches_current_executable(pid: u32) -> bool {
         return false;
     };
     std::process::Command::new("ps")
-        .args(["-p", &pid.to_string(), "-o", "comm="])
+        .args(["-p", &pid.to_string(), "-o", "args="])
         .output()
         .ok()
         .and_then(|output| String::from_utf8(output.stdout).ok())
-        .is_some_and(|command| command.trim_end().ends_with(current_name))
+        .is_some_and(|command| command.split_whitespace().any(|arg| arg.ends_with(current_name)))
 }
 
 /// Run a foreground daemon for the given config with clean Ctrl-C handling.

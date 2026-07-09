@@ -31,6 +31,7 @@ pub enum SkipReason {
     ChildOfActiveParent,
     ConcurrencyLimitReached,
     InvalidLeaseState,
+    InvalidPath(String),
     RoutingFailed(String),
 }
 
@@ -50,6 +51,7 @@ impl std::fmt::Display for SkipReason {
                 write!(f, "per-config concurrency limit reached")
             }
             SkipReason::InvalidLeaseState => write!(f, "invalid lease state"),
+            SkipReason::InvalidPath(detail) => write!(f, "invalid launch path: {detail}"),
             SkipReason::RoutingFailed(detail) => write!(f, "parent issue routing failed: {detail}"),
         }
     }
@@ -70,6 +72,7 @@ impl SkipReason {
             SkipReason::HasOpenPr => "has_open_pr",
             SkipReason::ConcurrencyLimitReached => "concurrency_limit_reached",
             SkipReason::InvalidLeaseState => "invalid_lease_state",
+            SkipReason::InvalidPath(_) => "invalid_path",
             SkipReason::RoutingFailed(_) => "routing_failed",
         }
     }
