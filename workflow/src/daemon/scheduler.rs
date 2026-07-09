@@ -104,12 +104,12 @@ pub fn run_once_with_bases(
     parent_path_bases: BTreeMap<String, DaemonPathBases>,
 ) -> Result<RunSummary, rusqlite::Error> {
     let poller = SystemExternalWaitPoller::new();
-    let target = SchedulerTarget {
-        config_id: config_id.to_string(),
-        discovery: cfg.clone(),
+    let target = SchedulerTarget::new(
+        config_id.to_string(),
+        cfg.clone(),
         path_bases,
         parent_path_bases,
-    };
+    );
     run_multi_target_once_with_poller(&[target], &[q], conn, launcher, &poller)
 }
 
@@ -906,18 +906,18 @@ mod tests {
 
     #[test]
     fn parent_routed_launch_without_parent_bases_warns_and_uses_empty_fallback() {
-        let target = SchedulerTarget {
-            config_id: "child-cfg".to_string(),
-            discovery: DiscoveryConfig {
+        let target = SchedulerTarget::new(
+            "child-cfg".to_string(),
+            DiscoveryConfig {
                 parent_config_id: Some("parent-cfg".to_string()),
                 ..cfg(1)
             },
-            path_bases: DaemonPathBases {
+            DaemonPathBases {
                 work_dir_base: Some(std::path::PathBuf::from("/tmp/child-work")),
                 artifact_dir_base: Some(std::path::PathBuf::from("/tmp/child-artifacts")),
             },
-            parent_path_bases: BTreeMap::new(),
-        };
+            BTreeMap::new(),
+        );
 
         let bases = path_bases_for(&target, "parent-cfg");
 

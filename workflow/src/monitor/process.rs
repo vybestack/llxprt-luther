@@ -413,9 +413,24 @@ mod tests {
         assert!(!Path::new(&lock_path).exists());
     }
 
+    struct LockPathCleanup {
+        path: String,
+    }
+
+    impl Drop for LockPathCleanup {
+        fn drop(&mut self) {
+            if fs::remove_file(&self.path).is_err() {
+                let _ = fs::remove_dir(&self.path);
+            }
+        }
+    }
+
     #[test]
     fn test_lock_creation_error_reports_invalid_existing_lock_file() {
         let lock_path = format!("/tmp/luther-invalid-lock-{}.lock", std::process::id());
+        let _cleanup = LockPathCleanup {
+            path: lock_path.clone(),
+        };
         fs::write(&lock_path, "not-a-pid").expect("write invalid lock file");
 
         let error = lock_creation_error(
@@ -423,7 +438,6 @@ mod tests {
             Path::new(&lock_path),
         );
 
-        let _ = fs::remove_file(&lock_path);
         assert!(matches!(
             error,
             MonitorError::LockError { message }
@@ -434,6 +448,9 @@ mod tests {
     #[test]
     fn test_lock_creation_error_reports_unreadable_existing_lock_file() {
         let lock_path = format!("/tmp/luther-unreadable-lock-{}.lock", std::process::id());
+        let _cleanup = LockPathCleanup {
+            path: lock_path.clone(),
+        };
         fs::create_dir(&lock_path).expect("create unreadable lock placeholder");
 
         let error = lock_creation_error(
@@ -441,7 +458,6 @@ mod tests {
             Path::new(&lock_path),
         );
 
-        let _ = fs::remove_dir(&lock_path);
         assert!(matches!(
             error,
             MonitorError::LockError { message }

@@ -3236,15 +3236,17 @@ fn parent_issue_orchestrator_workflow_loads_with_target_configs() {
 
 #[test]
 fn production_and_fixture_llxprt_luther_configs_are_equivalent() {
-    let production = std::fs::read_to_string("config/workflow-configs/llxprt-luther.toml")
-        .expect("read production luther config TOML");
-    let fixture =
-        std::fs::read_to_string("tests/fixtures/workflow-configs/valid/llxprt-luther.toml")
-            .expect("read fixture luther config TOML");
+    let production_path = "config/workflow-configs/llxprt-luther.toml";
+    let fixture_path = "tests/fixtures/workflow-configs/valid/llxprt-luther.toml";
+    let production =
+        std::fs::read_to_string(production_path).expect("read production luther config TOML");
+    let fixture = std::fs::read_to_string(fixture_path).expect("read fixture luther config TOML");
     assert_eq!(
         production, fixture,
         "fixture llxprt-luther config must track production daemon path-base config"
     );
+    load_workflow_config_toml(production_path);
+    load_workflow_config_toml(fixture_path);
 }
 
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P17

@@ -114,7 +114,7 @@ async fn handle_daemon_run(
 fn scheduler_targets(
     scheduler: &luther_workflow::workflow::schema::DaemonSchedulerConfig,
     config_dir: &Option<std::path::PathBuf>,
-) -> Vec<luther_workflow::daemon::scheduler::SchedulerTarget> {
+) -> Vec<SchedulerTarget> {
     let config_root = config_dir.as_deref().unwrap_or(std::path::Path::new("config"));
     scheduler
         .targets
@@ -127,7 +127,7 @@ fn scheduler_target(
     target: &luther_workflow::workflow::schema::DaemonTargetConfig,
     scheduler: &luther_workflow::workflow::schema::DaemonSchedulerConfig,
     config_root: &std::path::Path,
-) -> Option<luther_workflow::daemon::scheduler::SchedulerTarget> {
+) -> Option<SchedulerTarget> {
     let cfg = match resolve_workflow_config(&target.config_id, config_root) {
         Ok(cfg) => cfg,
         Err(e) => {
@@ -153,14 +153,14 @@ fn scheduler_target(
     if discovery.poll_interval_secs.is_none() {
         discovery.poll_interval_secs = scheduler.poll_interval_seconds;
     }
-    discovery
-        .enabled
-        .then(|| luther_workflow::daemon::scheduler::SchedulerTarget {
-            config_id: target.config_id.clone(),
+    discovery.enabled.then(|| {
+        SchedulerTarget::new(
+            target.config_id.clone(),
             discovery,
             path_bases,
             parent_path_bases,
-        })
+        )
+    })
 }
 
 /// Build the single-config scheduler target used by `daemon run/start` without
@@ -172,13 +172,13 @@ fn discovery_scheduler_target(
     discovery: &luther_workflow::workflow::schema::DiscoveryConfig,
     cfg: &luther_workflow::workflow::schema::WorkflowConfig,
     config_root: &std::path::Path,
-) -> luther_workflow::daemon::scheduler::SchedulerTarget {
-    luther_workflow::daemon::scheduler::SchedulerTarget {
-        config_id: config_id.to_string(),
-        discovery: discovery.clone(),
-        path_bases: daemon_path_bases_from_config(cfg),
-        parent_path_bases: parent_path_bases_from_config(cfg, config_root),
-    }
+) -> SchedulerTarget {
+    SchedulerTarget::new(
+        config_id.to_string(),
+        discovery.clone(),
+        daemon_path_bases_from_config(cfg),
+        parent_path_bases_from_config(cfg, config_root),
+    )
 }
 
 fn parent_path_bases_from_config(
@@ -281,9 +281,9 @@ fn recover_stale_daemon_leases(
 }
 
 fn run_supervisor_scheduler_pass(
-    targets: &[luther_workflow::daemon::scheduler::SchedulerTarget],
+    targets: &[SchedulerTarget],
     conn: &rusqlite::Connection,
-) -> Result<luther_workflow::daemon::scheduler::RunSummary, luther_workflow::persistence::PersistenceError> {
+) -> Result<RunSummary, luther_workflow::persistence::PersistenceError> {
     let queries = targets
         .iter()
         .map(|_| SystemGithubIssueQuery::new(SystemGithubCommandRunner))
@@ -303,8 +303,8 @@ fn run_supervisor_scheduler_pass(
 }
 
 async fn run_supervisor_scheduler_pass_blocking(
-    targets: &[luther_workflow::daemon::scheduler::SchedulerTarget],
-) -> Result<luther_workflow::daemon::scheduler::RunSummary, String> {
+    targets: &[SchedulerTarget],
+) -> Result<RunSummary, String> {
     let targets = targets.to_vec();
     match tokio::task::spawn_blocking(move || {
         let conn = open_daemon_db().map_err(|e| format!("failed to open daemon database: {e}"))?;
@@ -318,9 +318,9 @@ async fn run_supervisor_scheduler_pass_blocking(
 }
 
 fn run_discovery_scheduler_pass(
-    target: &luther_workflow::daemon::scheduler::SchedulerTarget,
+    target: &SchedulerTarget,
     conn: &rusqlite::Connection,
-) -> Result<luther_workflow::daemon::scheduler::RunSummary, luther_workflow::persistence::PersistenceError> {
+) -> Result<RunSummary, luther_workflow::persistence::PersistenceError> {
     let query = SystemGithubIssueQuery::new(SystemGithubCommandRunner);
     let launcher = DaemonWorkflowLauncher::new(target.config_id.clone());
     luther_workflow::daemon::scheduler::run_multi_target_once(
@@ -333,8 +333,8 @@ fn run_discovery_scheduler_pass(
 }
 
 async fn run_discovery_scheduler_pass_blocking(
-    target: &luther_workflow::daemon::scheduler::SchedulerTarget,
-) -> Result<luther_workflow::daemon::scheduler::RunSummary, String> {
+    target: &SchedulerTarget,
+) -> Result<RunSummary, String> {
     let target = target.clone();
     match tokio::task::spawn_blocking(move || {
         let conn = open_daemon_db().map_err(|e| format!("failed to open daemon database: {e}"))?;
@@ -447,7 +447,7 @@ async fn run_daemon_discovery_loop(
     store: &DaemonStore,
     state: &mut DaemonState,
     shutdown: &std::sync::Arc<std::sync::atomic::AtomicBool>,
-    target: luther_workflow::daemon::scheduler::SchedulerTarget,
+    target: SchedulerTarget,
     once: bool,
 ) -> Option<String> {
     use std::sync::atomic::Ordering;
