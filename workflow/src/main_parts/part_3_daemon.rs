@@ -302,6 +302,21 @@ fn run_supervisor_scheduler_pass(
     .map_err(luther_workflow::persistence::PersistenceError::from)
 }
 
+async fn run_supervisor_scheduler_pass_blocking(
+    targets: &[luther_workflow::daemon::scheduler::SchedulerTarget],
+) -> Result<luther_workflow::daemon::scheduler::RunSummary, String> {
+    let targets = targets.to_vec();
+    match tokio::task::spawn_blocking(move || {
+        let conn = open_daemon_db().map_err(|e| format!("failed to open daemon database: {e}"))?;
+        run_supervisor_scheduler_pass(&targets, &conn).map_err(|e| e.to_string())
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(e) => Err(format!("scheduler blocking task failed: {e}")),
+    }
+}
+
 fn run_discovery_scheduler_pass(
     target: &luther_workflow::daemon::scheduler::SchedulerTarget,
     conn: &rusqlite::Connection,
@@ -315,6 +330,21 @@ fn run_discovery_scheduler_pass(
         &launcher,
     )
     .map_err(luther_workflow::persistence::PersistenceError::from)
+}
+
+async fn run_discovery_scheduler_pass_blocking(
+    target: &luther_workflow::daemon::scheduler::SchedulerTarget,
+) -> Result<luther_workflow::daemon::scheduler::RunSummary, String> {
+    let target = target.clone();
+    match tokio::task::spawn_blocking(move || {
+        let conn = open_daemon_db().map_err(|e| format!("failed to open daemon database: {e}"))?;
+        run_discovery_scheduler_pass(&target, &conn).map_err(|e| e.to_string())
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(e) => Err(format!("scheduler blocking task failed: {e}")),
+    }
 }
 
 async fn backoff_after_scheduler_failure(
@@ -349,6 +379,10 @@ async fn run_daemon_supervisor_loop(
         }
     };
     let targets = scheduler_targets(&scheduler, config_dir);
+    if targets.is_empty() {
+        eprintln!("Error: daemon scheduler config resolved no enabled targets");
+        return Some("daemon scheduler config resolved no enabled targets".to_string());
+    }
     let stale_timeout = scheduler
         .poll_interval_seconds
         .unwrap_or(300)
@@ -362,14 +396,14 @@ async fn run_daemon_supervisor_loop(
     };
     if let Err(e) = recover_stale_daemon_leases(&recovery_conn, stale_timeout) {
         eprintln!("Error: stale lease recovery failed: {e}");
-
         return Some(format!("stale lease recovery failed: {e}"));
     }
+    drop(recovery_conn);
     let poll = scheduler.poll_interval_seconds.unwrap_or(300);
     let mut heartbeat_failures = 0;
     let mut scheduler_failures = 0;
     while !shutdown.load(Ordering::SeqCst) {
-        match run_supervisor_scheduler_pass(&targets, &recovery_conn) {
+        match run_supervisor_scheduler_pass_blocking(&targets).await {
             Ok(summary)
                 if summary.launched > 0
                     || summary.resumed > 0
@@ -435,6 +469,7 @@ async fn run_daemon_discovery_loop(
         eprintln!("Error: stale lease recovery failed: {e}");
         return Some(format!("stale lease recovery failed: {e}"));
     }
+    drop(recovery_conn);
 
     let poll = target.discovery.poll_interval_secs.unwrap_or(300);
     let mut heartbeat_failures = 0;
@@ -443,7 +478,7 @@ async fn run_daemon_discovery_loop(
         if shutdown.load(Ordering::SeqCst) {
             break;
         }
-        match run_discovery_scheduler_pass(&target, &recovery_conn) {
+        match run_discovery_scheduler_pass_blocking(&target).await {
             Ok(summary)
                 if summary.launched > 0
                     || summary.resumed > 0

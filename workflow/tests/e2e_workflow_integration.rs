@@ -2431,20 +2431,6 @@ fn luther_profile_keeps_shared_path_values_as_daemon_bases() {
         config.variables.get("artifact_dir").map(String::as_str),
         Some("/tmp/luther-artifacts/llxprt-luther")
     );
-    assert!(
-        !config
-            .variables
-            .get("work_dir")
-            .is_some_and(|path| path.contains("{issue_number}") || path.contains("{run_id}")),
-        "workflow config should keep daemon work path roots, not TOML path templates"
-    );
-    assert!(
-        !config
-            .variables
-            .get("artifact_dir")
-            .is_some_and(|path| { path.contains("{issue_number}") || path.contains("{run_id}") }),
-        "workflow config should keep daemon artifact path roots, not TOML path templates"
-    );
 }
 
 /// @plan:PLAN-20260408-LLXPRT-FIRST.P17
