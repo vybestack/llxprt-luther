@@ -4,8 +4,6 @@
 use std::fs;
 use std::io::{ErrorKind, Write};
 use std::path::Path;
-#[cfg(not(target_os = "linux"))]
-use std::process::Command;
 use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
@@ -109,93 +107,80 @@ impl Drop for SingletonGuard {
 /// # Errors
 /// Returns MonitorError::LockHeld if another process holds the lock
 pub fn acquire_singleton_lock(scope: &str) -> Result<SingletonGuard, MonitorError> {
-    // Determine the lock path - if it ends with .lock, treat as full path
-    let lock_path = if scope.ends_with(".lock") {
-        scope.to_string()
-    } else {
-        format!("/tmp/{}.lock", scope.replace("/", "_"))
-    };
+    let lock_path = lock_path_for_scope(scope);
     let lock_file = Path::new(&lock_path);
-
-    // Create parent directory if needed
-    if let Some(parent) = lock_file.parent() {
-        let _ = fs::create_dir_all(parent);
-    }
-
-    // Check if lock file exists
-    if lock_file.exists() {
-        let contents = fs::read_to_string(lock_file).map_err(|e| MonitorError::LockError {
-            message: format!("Failed to read lock file: {}", e),
-        })?;
-
-        let pid: u32 = contents
-            .trim()
-            .parse()
-            .map_err(|_| MonitorError::LockError {
-                message: "Lock file contains invalid PID".to_string(),
-            })?;
-
-        // Check if process is still alive
-        // On Linux, check /proc/PID
-        // On macOS and other Unix systems, try to send signal 0 to check if process exists
-        #[cfg(target_os = "linux")]
-        let process_exists = Path::new(&format!("/proc/{}", pid)).exists();
-
-        #[cfg(not(target_os = "linux"))]
-        let process_exists = {
-            Command::new("kill")
-                .args(["-0", &pid.to_string()])
-                .output()
-                .map(|output| output.status.success())
-                .unwrap_or(false)
-        };
-
-        // If the lock is held by a DIFFERENT process, we cannot acquire it
-        if process_exists && pid != std::process::id() {
-            return Err(MonitorError::LockHeld { pid });
-        }
-
-        // If the lock is held by THIS process, we also cannot acquire it again
-        // (this handles the test case of starting two monitors in the same process)
-        if pid == std::process::id() {
-            return Err(MonitorError::LockHeld {
-                pid: std::process::id(),
-            });
-        }
-
-        // Process is dead, remove the stale lock before the atomic create below.
-        if let Err(error) = fs::remove_file(lock_file) {
-            if error.kind() != ErrorKind::NotFound {
-                return Err(MonitorError::LockError {
-                    message: format!("Failed to remove stale lock file: {error}"),
-                });
-            }
-        }
-    }
-
-    // Atomically create the lock so another process cannot win between the
-    // stale-lock check above and the write.
-    let mut file = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(lock_file)
-        .map_err(|e| lock_creation_error(e, lock_file))?;
-    write!(file, "{}", std::process::id()).map_err(|e| MonitorError::LockError {
-        message: format!("Failed to write lock file: {}", e),
-    })?;
-    file.flush().map_err(|e| MonitorError::LockError {
-        message: format!("Failed to flush lock file: {e}"),
-    })?;
+    ensure_lock_parent(lock_file);
+    clear_stale_lock_if_present(lock_file)?;
+    create_lock_file(lock_file)?;
 
     Ok(SingletonGuard {
         lock_path,
         released: Arc::new(Mutex::new(false)),
     })
 }
+
+fn lock_path_for_scope(scope: &str) -> String {
+    if scope.ends_with(".lock") {
+        scope.to_string()
+    } else {
+        format!("/tmp/{}.lock", scope.replace("/", "_"))
+    }
+}
+
+fn ensure_lock_parent(lock_file: &Path) {
+    if let Some(parent) = lock_file.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+}
+
+fn clear_stale_lock_if_present(lock_file: &Path) -> Result<(), MonitorError> {
+    if !lock_file.exists() {
+        return Ok(());
+    }
+    let pid = read_lock_pid(lock_file)?;
+    if is_process_alive(pid) || pid == std::process::id() {
+        return Err(MonitorError::LockHeld { pid });
+    }
+    remove_stale_lock(lock_file)
+}
+
+fn read_lock_pid(lock_file: &Path) -> Result<u32, MonitorError> {
+    let contents = fs::read_to_string(lock_file).map_err(|e| MonitorError::LockError {
+        message: format!("Failed to read existing lock file: {e}"),
+    })?;
+    contents
+        .trim()
+        .parse()
+        .map_err(|_| MonitorError::LockError {
+            message: "Existing lock file contains invalid PID".to_string(),
+        })
+}
+
+fn remove_stale_lock(lock_file: &Path) -> Result<(), MonitorError> {
+    match fs::remove_file(lock_file) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(MonitorError::LockError {
+            message: format!("Failed to remove stale lock file: {error}"),
+        }),
+    }
+}
+
+fn create_lock_file(lock_file: &Path) -> Result<(), MonitorError> {
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(lock_file)
+        .map_err(|e| lock_creation_error(e, lock_file))?;
+    write!(file, "{}", std::process::id()).map_err(|e| MonitorError::LockError {
+        message: format!("Failed to write lock file: {e}"),
+    })?;
+    file.flush().map_err(|e| MonitorError::LockError {
+        message: format!("Failed to flush lock file: {e}"),
+    })
+}
 fn lock_creation_error(error: std::io::Error, lock_file: &Path) -> MonitorError {
-    if error.kind() == std::io::ErrorKind::AlreadyExists
-        || error.raw_os_error() == Some(libc::EEXIST)
-    {
+    if error.kind() == std::io::ErrorKind::AlreadyExists {
         return lock_held_error_from_file(lock_file);
     }
     MonitorError::LockError {
@@ -204,20 +189,17 @@ fn lock_creation_error(error: std::io::Error, lock_file: &Path) -> MonitorError 
 }
 
 fn lock_held_error_from_file(lock_file: &Path) -> MonitorError {
-    let contents = match fs::read_to_string(lock_file) {
-        Ok(contents) => contents,
-        Err(error) => {
-            return MonitorError::LockError {
-                message: format!("Failed to read existing lock file: {error}"),
-            };
+    let mut last_error = None;
+    for _ in 0..3 {
+        match read_lock_pid(lock_file) {
+            Ok(pid) => return MonitorError::LockHeld { pid },
+            Err(error) => last_error = Some(error),
         }
-    };
-    match contents.trim().parse::<u32>() {
-        Ok(pid) => MonitorError::LockHeld { pid },
-        Err(error) => MonitorError::LockError {
-            message: format!("Existing lock file contains invalid PID: {error}"),
-        },
+        std::thread::sleep(Duration::from_millis(10));
     }
+    last_error.unwrap_or_else(|| MonitorError::LockError {
+        message: "Existing lock file contains invalid PID".to_string(),
+    })
 }
 
 /// Release a singleton lock explicitly.

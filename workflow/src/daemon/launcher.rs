@@ -122,6 +122,11 @@ fn validate_run_id_path_component(run_id: &str) -> Result<(), String> {
     }
     let run_id_path = PathBuf::from(run_id);
     let mut components = run_id_path.components();
+    if run_id.contains('\\') {
+        return Err(format!(
+            "run_id must be a single safe path component: {run_id}"
+        ));
+    }
     match (components.next(), components.next()) {
         (Some(Component::Normal(_)), None) => Ok(()),
         _ => Err(format!(
@@ -170,6 +175,10 @@ pub fn claim_for_launch(
     let paths = match bases.per_run_paths(issue.number, &run_id) {
         Ok(paths) => paths,
         Err(error) => {
+            eprintln!(
+                "path validation error for config={} issue={}: {}",
+                config_id, issue.number, error
+            );
             update_lease_status(conn, &lease.lease_id, LeaseStatus::Abandoned, None)?;
             return Err(invalid_path_error(error));
         }

@@ -99,6 +99,7 @@ jobs:
     if: needs.gate.outputs.should_run == 'true'
     steps:
       - name: Resolve PR context
+        # actions/github-script@v7
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b
         id: pr-context
         with:
@@ -400,6 +401,7 @@ jobs:
           if-no-files-found: error
 
       - name: Post OCR results
+        # actions/github-script@v7
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b
         env:
           BASE_SHA: ${{ env.BASE_SHA }}

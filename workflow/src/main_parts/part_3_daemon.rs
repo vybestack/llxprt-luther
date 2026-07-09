@@ -68,8 +68,19 @@ fn daemon_lock_pid_matches_current_executable(pid: u32) -> bool {
 }
 
 #[cfg(not(target_os = "linux"))]
-fn daemon_lock_pid_matches_current_executable(_pid: u32) -> bool {
-    true
+fn daemon_lock_pid_matches_current_executable(pid: u32) -> bool {
+    let Ok(current_exe) = std::env::current_exe() else {
+        return false;
+    };
+    let Some(current_name) = current_exe.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    std::process::Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "comm="])
+        .output()
+        .ok()
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .is_some_and(|command| command.trim_end().ends_with(current_name))
 }
 
 /// Run a foreground daemon for the given config with clean Ctrl-C handling.

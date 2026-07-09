@@ -281,9 +281,9 @@ pub fn list_runs_with_conn(conn: &Connection) -> SqliteResult<Vec<RunMetadata>> 
     rows.collect()
 }
 
-/// List selected run records using a borrowed connection.
 const RUN_ID_QUERY_CHUNK_SIZE: usize = 500;
 
+/// List selected run records using a borrowed connection.
 /// @plan:issue-117
 pub fn list_runs_by_ids_with_conn(
     conn: &Connection,
