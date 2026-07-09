@@ -3,6 +3,7 @@
 //! @pseudocode lines 1-53
 //! @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P06
 //! Registry introspection and Phase 04 behavioral TDD coverage for PR follow-through executors.
+use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -6303,6 +6304,203 @@ fn write_p12_plan(temp: &tempfile::TempDir) {
     PrRemediationPlanExecutor
         .execute(&mut plan_context, &p10_params(temp))
         .expect("build p10 plan");
+}
+
+fn write_p10_failed_post_pr_test_result(temp: &tempfile::TempDir) {
+    let store = PrFollowupArtifactStore::new(temp.path().join("artifacts"));
+    let binding = p10_binding();
+    store
+        .write_json_artifact(
+            &binding,
+            "post-pr-test-result",
+            "run_post_pr_tests",
+            11,
+            &serde_json::json!({
+                "test_state": "failed",
+                "verification_retry_index": 0,
+                "max_verification_retries": 2,
+                "verification_retry_exhausted": false,
+                "commands": [{
+                    "command_id": "cargo-test",
+                    "status": "failed",
+                    "failure_classification": "local_test_failed",
+                    "argv": ["cargo", "test"],
+                    "exit_code": 101,
+                    "bounded_stdout": "test_ocr_pr_review_concurrency_cancels_duplicates --- FAILED",
+                    "bounded_stderr": "error: test failed, to rerun pass --test quality_release_guardrails"
+                }]
+            }),
+            None,
+            &FixedClock,
+        )
+        .expect("write failed post-pr test result");
+}
+fn write_p10_mixed_post_pr_test_result(temp: &tempfile::TempDir) {
+    let store = PrFollowupArtifactStore::new(temp.path().join("artifacts"));
+    let binding = p10_binding();
+    store
+        .write_json_artifact(
+            &binding,
+            "post-pr-test-result",
+            "run_post_pr_tests",
+            11,
+            &serde_json::json!({
+                "test_state": "failed",
+                "commands": [
+                    {
+                        "command_id": "cargo-fmt",
+                        "status": "passed",
+                        "failure_classification": "not_a_failure"
+                    },
+                    {
+                        "command_id": "cargo-test",
+                        "status": "failed",
+                        "failure_classification": "local_test_failed"
+                    },
+                    {
+                        "command_id": "cargo-clippy",
+                        "status": "error",
+                        "failure_classification": "local_test_error"
+                    },
+                    {
+                        "command_id": "optional-docs",
+                        "status": "skipped",
+                        "failure_classification": "not_a_failure"
+                    }
+                ]
+            }),
+            None,
+            &FixedClock,
+        )
+        .expect("write mixed post-pr test result");
+}
+
+#[test]
+fn pr_followup_remediation_rebuilds_plan_for_failed_post_pr_tests() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_p12_plan(&temp);
+    let stale_plan = read_json(&p10_plan_path(&temp));
+    assert!(
+        stale_plan
+            .get("source_artifacts")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|sources| !sources.is_empty() && sources.iter().all(|source| source
+                .get("artifact_family")
+                .and_then(serde_json::Value::as_str)
+                != Some("post-pr-test-result"))),
+        "initial CI/review plan should include source artifacts but not already cover local test failures"
+    );
+    write_p10_failed_post_pr_test_result(&temp);
+    let test_result = read_json(
+        &PrFollowupArtifactStore::new(temp.path().join("artifacts"))
+            .canonical_path(&p10_binding(), "post-pr-test-result"),
+    );
+    let test_sequence = test_result
+        .get("artifact_sequence")
+        .and_then(serde_json::Value::as_u64)
+        .expect("post-pr-test-result artifact sequence");
+    let runner = P12FakeLlxprtRunner::new(p12_result("success"));
+    let mut context = p12_context(&temp);
+
+    PrFollowupRemediationExecutorWithRunner::new(runner, FixedClock)
+        .execute(&mut context, &p12_params(&temp))
+        .expect("run remediation with failed post-pr tests");
+
+    let plan = read_json(&p10_plan_path(&temp));
+    assert!(
+        plan.get("source_artifacts")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|sources| sources.iter().any(|source| {
+                source
+                    .get("artifact_family")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("post-pr-test-result")
+                    && source
+                        .get("artifact_sequence")
+                        .and_then(serde_json::Value::as_u64)
+                        == Some(test_sequence)
+            })),
+        "remediation must rebuild the stale plan with the current post-pr test result sequence: {plan}"
+    );
+    assert!(
+        plan.get("must_fix")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|items| items.iter().any(|item| {
+                item.get("source_type").and_then(serde_json::Value::as_str)
+                    == Some("post_pr_test_failure")
+                    && item
+                        .get("recommended_action")
+                        .and_then(serde_json::Value::as_str)
+                        == Some("fix_post_pr_local_verification_failure")
+                    && item.get("reason").and_then(serde_json::Value::as_str)
+                        == Some("local_test_failed")
+            })),
+        "rebuilt plan must make failed local post-pr tests actionable: {plan}"
+    );
+}
+
+#[test]
+fn pr_followup_remediation_propagates_corrupt_post_pr_test_result() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_p12_plan(&temp);
+    let store = PrFollowupArtifactStore::new(temp.path().join("artifacts"));
+    let binding = p10_binding();
+    let path = store.canonical_path(&binding, "post-pr-test-result");
+    fs::create_dir_all(path.parent().expect("artifact parent")).expect("create artifact parent");
+    fs::write(&path, "{not-json").expect("write corrupt post-pr test artifact");
+    let runner = P12FakeLlxprtRunner::new(p12_result("success"));
+    let mut context = p12_context(&temp);
+
+    let result = PrFollowupRemediationExecutorWithRunner::new(runner, FixedClock)
+        .execute(&mut context, &p12_params(&temp));
+
+    assert!(
+        result
+            .expect_err("corrupt post-pr-test-result must propagate the artifact read error")
+            .to_string()
+            .contains("parse"),
+        "corrupt post-pr-test-result should fail with a parse error"
+    );
+}
+
+#[test]
+fn pr_followup_remediation_only_promotes_failed_post_pr_commands() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_p12_plan(&temp);
+    write_p10_mixed_post_pr_test_result(&temp);
+    let runner = P12FakeLlxprtRunner::new(p12_result("success"));
+    let mut context = p12_context(&temp);
+
+    PrFollowupRemediationExecutorWithRunner::new(runner, FixedClock)
+        .execute(&mut context, &p12_params(&temp))
+        .expect("run remediation with mixed post-pr tests");
+
+    let plan = read_json(&p10_plan_path(&temp));
+    let post_pr_items: Vec<&serde_json::Value> = plan
+        .get("must_fix")
+        .and_then(serde_json::Value::as_array)
+        .expect("must_fix array")
+        .iter()
+        .filter(|item| {
+            item.get("source_type").and_then(serde_json::Value::as_str)
+                == Some("post_pr_test_failure")
+        })
+        .collect();
+
+    assert_eq!(
+        post_pr_items.len(),
+        2,
+        "failed and error commands should be actionable: {plan}"
+    );
+    assert!(post_pr_items.iter().any(|item| {
+        item.get("source_id").and_then(serde_json::Value::as_str) == Some("post-pr-test-cargo-test")
+            && item.get("reason").and_then(serde_json::Value::as_str) == Some("local_test_failed")
+    }));
+    assert!(post_pr_items.iter().any(|item| {
+        item.get("source_id").and_then(serde_json::Value::as_str)
+            == Some("post-pr-test-cargo-clippy")
+            && item.get("reason").and_then(serde_json::Value::as_str) == Some("local_test_error")
+    }));
 }
 
 #[test]

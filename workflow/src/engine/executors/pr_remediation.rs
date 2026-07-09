@@ -5,6 +5,7 @@
 //! @requirement:REQ-PRFU-013,REQ-PRFU-015,REQ-PRFU-017,REQ-PRFU-020
 //! @pseudocode lines 1-53
 
+mod post_pr_plan_inputs;
 mod post_pr_stages;
 mod post_pr_test_process;
 mod push_auth_preflight;
@@ -12,6 +13,10 @@ mod push_porcelain;
 mod push_stages;
 mod push_support;
 mod result_freshness;
+use self::post_pr_plan_inputs::{
+    append_pending_ci_judgment, append_post_pr_test_failures, read_plan_inputs,
+    remediation_plan_covers_current_post_pr_test_result, remediation_plan_source_artifacts,
+};
 use self::post_pr_stages::{sanitize_command_id, validate_safe_working_directory};
 pub use self::post_pr_stages::{
     PostPrFailureTerminalExecutor, PostPrIterationGuardExecutor, PostPrTestCommandRequest,
@@ -168,24 +173,12 @@ fn build_remediation_plan(
     let mut needs_user_judgment = Vec::new();
     let mut pending_or_unknown = Vec::new();
 
-    if let Some(pending) = inputs
-        .ci_failures
-        .get("pending_or_unknown")
-        .and_then(Value::as_array)
-    {
-        for entry in pending {
-            pending_or_unknown.push(entry.clone());
-            needs_user_judgment.push(json!({
-                "source_type": "ci_pending_or_unknown",
-                "source_id": stable_source_id(entry, "pending_or_unknown"),
-                "reason": "pending_or_unknown_check_state",
-                "recommended_action": "human_review_required",
-                "input_head_sha": binding.head_sha,
-                "source_artifact_sequence": artifact_sequence(&inputs.ci_failures),
-                "evidence": entry
-            }));
-        }
-    }
+    append_pending_ci_judgment(
+        &inputs.ci_failures,
+        &binding,
+        &mut pending_or_unknown,
+        &mut needs_user_judgment,
+    );
 
     if inputs
         .coderabbit_feedback
@@ -218,6 +211,10 @@ fn build_remediation_plan(
             &binding,
             &inputs.ci_failures,
         ));
+    }
+
+    if let Some(post_pr_test_result) = inputs.post_pr_test_result.as_ref() {
+        append_post_pr_test_failures(post_pr_test_result, &binding, &mut must_fix);
     }
 
     if inputs
@@ -315,18 +312,15 @@ fn build_remediation_plan(
         PlanState::Clean
     };
 
+    let source_artifacts = remediation_plan_source_artifacts(&pr, &inputs);
+
     let payload = RemediationPlanArtifact {
         plan_state,
         must_fix,
         mark_invalid: mark_invalid.clone(),
         needs_user_judgment,
         pending_or_unknown,
-        source_artifacts: vec![
-            source_artifact(&pr, "pr"),
-            source_artifact(&inputs.ci_failures, "ci-failures"),
-            source_artifact(&inputs.coderabbit_feedback, "coderabbit-feedback"),
-            source_artifact(&inputs.evaluations, "feedback-evaluations"),
-        ],
+        source_artifacts,
         built_at: clock.now_rfc3339(),
     };
 
@@ -361,30 +355,6 @@ fn build_remediation_plan(
         PlanState::Clean => StepOutcome::Success,
         PlanState::NeedsRemediation => StepOutcome::Fixable,
         PlanState::BlockedNeedsUserJudgment | PlanState::Fatal => StepOutcome::Fatal,
-    })
-}
-
-/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P10
-/// @requirement:REQ-PRFU-013
-/// @pseudocode lines 1-3
-#[derive(Clone, Debug)]
-struct PlanInputs {
-    ci_failures: Value,
-    coderabbit_feedback: Value,
-    evaluations: Value,
-}
-
-/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P10
-/// @requirement:REQ-PRFU-013
-/// @pseudocode lines 1-3
-fn read_plan_inputs(
-    store: &PrFollowupArtifactStore,
-    binding: &PrFollowupBinding,
-) -> Result<PlanInputs, EngineError> {
-    Ok(PlanInputs {
-        ci_failures: store.read_current_json(binding, "ci-failures")?,
-        coderabbit_feedback: store.read_current_json(binding, "coderabbit-feedback")?,
-        evaluations: store.read_current_json(binding, "feedback-evaluations")?,
     })
 }
 
@@ -1443,12 +1413,26 @@ fn read_or_build_remediation_plan(
     binding: &PrFollowupBinding,
 ) -> Result<Value, EngineError> {
     match store.read_current_json(binding, "pr-remediation-plan") {
-        Ok(plan) => Ok(plan),
-        Err(_) => {
-            build_remediation_plan(context, params, clock)?;
-            store.read_current_json(binding, "pr-remediation-plan")
+        Ok(plan) => {
+            if remediation_plan_covers_current_post_pr_test_result(store, binding, &plan)? {
+                Ok(plan)
+            } else {
+                rebuild_and_read_remediation_plan(context, params, clock, store, binding)
+            }
         }
+        Err(_) => rebuild_and_read_remediation_plan(context, params, clock, store, binding),
     }
+}
+
+fn rebuild_and_read_remediation_plan(
+    context: &StepContext,
+    params: &Value,
+    clock: &dyn ClockSleeper,
+    store: &PrFollowupArtifactStore,
+    binding: &PrFollowupBinding,
+) -> Result<Value, EngineError> {
+    build_remediation_plan(context, params, clock)?;
+    store.read_current_json(binding, "pr-remediation-plan")
 }
 
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P12

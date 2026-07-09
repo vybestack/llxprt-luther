@@ -1128,8 +1128,9 @@ max_iterations = 50
 
 [[transitions]]
 from = "push_remediation_changes"
-to = "mark_coderabbit_feedback"
+to = "capture_pr_identity"
 condition = "fixable"
+max_iterations = 50
 
 [[transitions]]
 from = "push_remediation_changes"
