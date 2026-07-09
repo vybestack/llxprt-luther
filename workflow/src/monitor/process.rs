@@ -187,17 +187,28 @@ pub fn acquire_singleton_lock(scope: &str) -> Result<SingletonGuard, MonitorErro
 }
 fn lock_creation_error(error: std::io::Error, lock_file: &Path) -> MonitorError {
     if error.kind() == std::io::ErrorKind::AlreadyExists {
-        return lock_held_error_from_file(lock_file).unwrap_or(MonitorError::LockHeld { pid: 0 });
+        return lock_held_error_from_file(lock_file);
     }
     MonitorError::LockError {
         message: format!("Failed to create lock file: {error}"),
     }
 }
 
-fn lock_held_error_from_file(lock_file: &Path) -> Option<MonitorError> {
-    let contents = fs::read_to_string(lock_file).ok()?;
-    let pid = contents.trim().parse::<u32>().ok()?;
-    Some(MonitorError::LockHeld { pid })
+fn lock_held_error_from_file(lock_file: &Path) -> MonitorError {
+    let contents = match fs::read_to_string(lock_file) {
+        Ok(contents) => contents,
+        Err(error) => {
+            return MonitorError::LockError {
+                message: format!("Failed to read existing lock file: {error}"),
+            };
+        }
+    };
+    match contents.trim().parse::<u32>() {
+        Ok(pid) => MonitorError::LockHeld { pid },
+        Err(error) => MonitorError::LockError {
+            message: format!("Existing lock file contains invalid PID: {error}"),
+        },
+    }
 }
 
 /// Release a singleton lock explicitly.
@@ -400,6 +411,42 @@ mod tests {
         release_singleton_lock(guard);
         thread::sleep(Duration::from_millis(100));
         assert!(!Path::new(&lock_path).exists());
+    }
+
+    #[test]
+    fn test_lock_creation_error_reports_invalid_existing_lock_file() {
+        let lock_path = format!("/tmp/luther-invalid-lock-{}.lock", std::process::id());
+        fs::write(&lock_path, "not-a-pid").expect("write invalid lock file");
+
+        let error = lock_creation_error(
+            std::io::Error::from(std::io::ErrorKind::AlreadyExists),
+            Path::new(&lock_path),
+        );
+
+        let _ = fs::remove_file(&lock_path);
+        assert!(matches!(
+            error,
+            MonitorError::LockError { message }
+                if message.contains("Existing lock file contains invalid PID")
+        ));
+    }
+
+    #[test]
+    fn test_lock_creation_error_reports_unreadable_existing_lock_file() {
+        let lock_path = format!("/tmp/luther-unreadable-lock-{}.lock", std::process::id());
+        fs::create_dir(&lock_path).expect("create unreadable lock placeholder");
+
+        let error = lock_creation_error(
+            std::io::Error::from(std::io::ErrorKind::AlreadyExists),
+            Path::new(&lock_path),
+        );
+
+        let _ = fs::remove_dir(&lock_path);
+        assert!(matches!(
+            error,
+            MonitorError::LockError { message }
+                if message.contains("Failed to read existing lock file")
+        ));
     }
 
     #[test]

@@ -247,7 +247,6 @@ async fn handle_runs_command(args: &luther_workflow::cli::RunsArgs) {
     }
 }
 
-
 /// Build a [`RunContext`] from an existing run record so a resumed runner keeps
 /// the original issue/PR identity and paths instead of re-deriving them.
 /// @plan:PLAN-20260623-LUTHER-CONTINUATION
