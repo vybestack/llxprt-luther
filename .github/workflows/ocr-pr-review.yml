@@ -44,6 +44,7 @@ jobs:
   gate:
     name: Resolve OpenCodeReview trigger
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     outputs:
       should_run: ${{ steps.trigger.outputs.should_run }}
       group_key: ${{ steps.trigger.outputs.group_key }}
@@ -87,6 +88,7 @@ jobs:
   code-review:
     name: OpenCodeReview
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     needs: gate
     concurrency:
       group: ${{ needs.gate.outputs.group_key }}

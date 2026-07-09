@@ -186,7 +186,10 @@ pub fn claim_for_launch(
 }
 
 fn invalid_path_error(error: String) -> rusqlite::Error {
-    rusqlite::Error::InvalidPath(PathBuf::from(error))
+    rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::new(
+        std::io::ErrorKind::InvalidInput,
+        error,
+    )))
 }
 
 pub fn finish_lease_after_result(
@@ -562,6 +565,22 @@ mod tests {
 
         assert!(bases.per_run_paths(1, "../escape").is_err());
         assert!(bases.per_run_paths(1, "/tmp/escape").is_err());
+    }
+
+    #[test]
+    fn invalid_path_error_preserves_validation_message() {
+        let error = invalid_path_error(
+            "run_id must be a single safe path component: ../escape".to_string(),
+        );
+
+        match error {
+            rusqlite::Error::ToSqlConversionFailure(inner) => {
+                assert!(inner
+                    .to_string()
+                    .contains("run_id must be a single safe path component: ../escape"));
+            }
+            other => panic!("unexpected error variant: {other:?}"),
+        }
     }
 
     #[test]
