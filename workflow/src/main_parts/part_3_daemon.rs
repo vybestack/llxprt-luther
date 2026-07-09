@@ -313,7 +313,7 @@ async fn run_supervisor_scheduler_pass_blocking(
     .await
     {
         Ok(result) => result,
-        Err(e) => Err(format!("scheduler blocking task failed: {e}")),
+        Err(e) => Err(scheduler_join_error(e)),
     }
 }
 
@@ -343,7 +343,17 @@ async fn run_discovery_scheduler_pass_blocking(
     .await
     {
         Ok(result) => result,
-        Err(e) => Err(format!("scheduler blocking task failed: {e}")),
+        Err(e) => Err(scheduler_join_error(e)),
+    }
+}
+
+fn scheduler_join_error(error: tokio::task::JoinError) -> String {
+    if error.is_panic() {
+        format!("scheduler blocking task panicked: {error}")
+    } else if error.is_cancelled() {
+        format!("scheduler blocking task was cancelled: {error}")
+    } else {
+        format!("scheduler blocking task failed: {error}")
     }
 }
 
@@ -520,7 +530,8 @@ async fn sleep_secs_with_shutdown(
     shutdown: &std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) {
     use std::sync::atomic::Ordering;
-    let ticks = secs.saturating_mul(1_000 / HEARTBEAT_TICK_MILLIS);
+    let total_millis = secs.saturating_mul(1_000);
+    let ticks = total_millis.div_ceil(HEARTBEAT_TICK_MILLIS);
     for _ in 0..ticks {
         if shutdown.load(Ordering::SeqCst) {
             return;

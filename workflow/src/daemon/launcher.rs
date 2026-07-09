@@ -167,9 +167,13 @@ pub fn claim_for_launch(
     }
 
     let run_id = new_run_id();
-    let paths = bases
-        .per_run_paths(issue.number, &run_id)
-        .map_err(invalid_path_error)?;
+    let paths = match bases.per_run_paths(issue.number, &run_id) {
+        Ok(paths) => paths,
+        Err(error) => {
+            update_lease_status(conn, &lease.lease_id, LeaseStatus::Abandoned, None)?;
+            return Err(invalid_path_error(error));
+        }
+    };
     update_lease_status(conn, &lease.lease_id, LeaseStatus::Running, Some(&run_id))?;
     Ok(Ok(ClaimedLaunch {
         lease_id: lease.lease_id,

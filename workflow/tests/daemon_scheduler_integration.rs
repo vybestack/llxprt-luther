@@ -462,11 +462,19 @@ fn parent_routed_issue_uses_parent_path_bases() {
     let launched = launcher.launched.lock().unwrap();
     assert_eq!(launched.len(), 1);
     let work = launched[0].work_dir.as_deref().unwrap();
+    let artifact = launched[0].artifact_dir.as_deref().unwrap();
     // Routed parent issue uses the parent config bases, not the child target bases.
     assert!(
         work.to_str()
             .unwrap()
             .starts_with("/tmp/luther-workspaces/parent"),
         "parent routed work dir uses parent bases"
+    );
+    assert!(
+        artifact
+            .to_str()
+            .unwrap()
+            .starts_with("/tmp/luther-artifacts/parent"),
+        "parent routed artifact dir uses parent bases"
     );
 }

@@ -282,6 +282,8 @@ pub fn list_runs_with_conn(conn: &Connection) -> SqliteResult<Vec<RunMetadata>> 
 }
 
 /// List selected run records using a borrowed connection.
+const RUN_ID_QUERY_CHUNK_SIZE: usize = 500;
+
 /// @plan:issue-117
 pub fn list_runs_by_ids_with_conn(
     conn: &Connection,
@@ -291,6 +293,15 @@ pub fn list_runs_by_ids_with_conn(
     if run_ids.is_empty() {
         return Ok(Vec::new());
     }
+    let mut runs = Vec::new();
+    for chunk in run_ids.chunks(RUN_ID_QUERY_CHUNK_SIZE) {
+        runs.extend(list_runs_by_id_chunk(conn, chunk)?);
+    }
+    runs.sort_by(|left, right| right.created_at.cmp(&left.created_at));
+    Ok(runs)
+}
+
+fn list_runs_by_id_chunk(conn: &Connection, run_ids: &[&str]) -> SqliteResult<Vec<RunMetadata>> {
     let placeholders = std::iter::repeat_n("?", run_ids.len())
         .collect::<Vec<_>>()
         .join(", ");

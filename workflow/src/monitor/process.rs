@@ -2,7 +2,7 @@
 //!
 /// @plan:PLAN-20260404-INITIAL-RUNTIME.P10
 use std::fs;
-use std::io::Write;
+use std::io::{ErrorKind, Write};
 use std::path::Path;
 #[cfg(not(target_os = "linux"))]
 use std::process::Command;
@@ -164,9 +164,13 @@ pub fn acquire_singleton_lock(scope: &str) -> Result<SingletonGuard, MonitorErro
         }
 
         // Process is dead, remove the stale lock before the atomic create below.
-        fs::remove_file(lock_file).map_err(|e| MonitorError::LockError {
-            message: format!("Failed to remove stale lock file: {}", e),
-        })?;
+        if let Err(error) = fs::remove_file(lock_file) {
+            if error.kind() != ErrorKind::NotFound {
+                return Err(MonitorError::LockError {
+                    message: format!("Failed to remove stale lock file: {error}"),
+                });
+            }
+        }
     }
 
     // Atomically create the lock so another process cannot win between the
@@ -178,6 +182,9 @@ pub fn acquire_singleton_lock(scope: &str) -> Result<SingletonGuard, MonitorErro
         .map_err(|e| lock_creation_error(e, lock_file))?;
     write!(file, "{}", std::process::id()).map_err(|e| MonitorError::LockError {
         message: format!("Failed to write lock file: {}", e),
+    })?;
+    file.flush().map_err(|e| MonitorError::LockError {
+        message: format!("Failed to flush lock file: {e}"),
     })?;
 
     Ok(SingletonGuard {
