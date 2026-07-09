@@ -230,6 +230,10 @@ fn daemon_path_bases_from_config(
 }
 
 const MAX_HEARTBEAT_WRITE_FAILURES: u32 = 3;
+const HEARTBEAT_TICK_MILLIS: u64 = 200;
+const HEARTBEAT_WRITE_TICKS: u32 = 150;
+const SCHEDULER_FAILURE_BACKOFF_SECS: u64 = 5;
+const SCHEDULER_FAILURE_BACKOFF_MAX_EXPONENT: u32 = 4;
 
 fn write_daemon_heartbeat(
     store: &DaemonStore,
@@ -277,9 +281,9 @@ fn recover_stale_daemon_leases(
 }
 
 fn run_supervisor_scheduler_pass(
-    targets: Vec<luther_workflow::daemon::scheduler::SchedulerTarget>,
+    targets: &[luther_workflow::daemon::scheduler::SchedulerTarget],
+    conn: &rusqlite::Connection,
 ) -> Result<luther_workflow::daemon::scheduler::RunSummary, luther_workflow::persistence::PersistenceError> {
-    let conn = open_daemon_db()?;
     let queries = targets
         .iter()
         .map(|_| SystemGithubIssueQuery::new(SystemGithubCommandRunner))
@@ -290,27 +294,41 @@ fn run_supervisor_scheduler_pass(
         .collect::<Vec<_>>();
     let launcher = DaemonWorkflowLauncher::new("supervisor".to_string());
     luther_workflow::daemon::scheduler::run_multi_target_once(
-        &targets,
+        targets,
         &query_refs,
-        &conn,
+        conn,
         &launcher,
     )
     .map_err(luther_workflow::persistence::PersistenceError::from)
 }
 
 fn run_discovery_scheduler_pass(
-    target: luther_workflow::daemon::scheduler::SchedulerTarget,
+    target: &luther_workflow::daemon::scheduler::SchedulerTarget,
+    conn: &rusqlite::Connection,
 ) -> Result<luther_workflow::daemon::scheduler::RunSummary, luther_workflow::persistence::PersistenceError> {
-    let conn = open_daemon_db()?;
     let query = SystemGithubIssueQuery::new(SystemGithubCommandRunner);
     let launcher = DaemonWorkflowLauncher::new(target.config_id.clone());
     luther_workflow::daemon::scheduler::run_multi_target_once(
-        std::slice::from_ref(&target),
+        std::slice::from_ref(target),
         &[&query as &dyn luther_workflow::adapters::github_issues::GithubIssueQuery],
-        &conn,
+        conn,
         &launcher,
     )
     .map_err(luther_workflow::persistence::PersistenceError::from)
+}
+
+async fn backoff_after_scheduler_failure(
+    consecutive_failures: &mut u32,
+    shutdown: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+) {
+    *consecutive_failures = consecutive_failures.saturating_add(1);
+    let exponent = (*consecutive_failures - 1).min(SCHEDULER_FAILURE_BACKOFF_MAX_EXPONENT);
+    let secs = SCHEDULER_FAILURE_BACKOFF_SECS.saturating_mul(1_u64 << exponent);
+    sleep_secs_with_shutdown(secs, shutdown).await;
+}
+
+fn reset_scheduler_failures(consecutive_failures: &mut u32) {
+    *consecutive_failures = 0;
 }
 
 async fn run_daemon_supervisor_loop(
@@ -349,17 +367,16 @@ async fn run_daemon_supervisor_loop(
     }
     let poll = scheduler.poll_interval_seconds.unwrap_or(300);
     let mut heartbeat_failures = 0;
+    let mut scheduler_failures = 0;
     while !shutdown.load(Ordering::SeqCst) {
-        let scheduler_targets = targets.clone();
-        match tokio::task::spawn_blocking(move || run_supervisor_scheduler_pass(scheduler_targets))
-            .await
-        {
-            Ok(Ok(summary))
+        match run_supervisor_scheduler_pass(&targets, &recovery_conn) {
+            Ok(summary)
                 if summary.launched > 0
                     || summary.resumed > 0
                     || summary.suspended > 0
                     || summary.failed > 0 =>
             {
+                reset_scheduler_failures(&mut scheduler_failures);
                 println!(
                     "scheduler pass: {} launched, {} resumed, {} suspended, {} failed, {} skipped",
                     summary.launched,
@@ -369,9 +386,11 @@ async fn run_daemon_supervisor_loop(
                     summary.skipped
                 );
             }
-            Ok(Ok(_)) => {}
-            Ok(Err(e)) => eprintln!("scheduler error: {e}"),
-            Err(e) => eprintln!("scheduler task failed: {e}"),
+            Ok(_) => reset_scheduler_failures(&mut scheduler_failures),
+            Err(e) => {
+                eprintln!("scheduler error: {e}");
+                backoff_after_scheduler_failure(&mut scheduler_failures, shutdown).await;
+            }
         }
         state.touch_heartbeat();
         if let Some(error) = write_daemon_heartbeat(store, state, &mut heartbeat_failures) {
@@ -419,20 +438,19 @@ async fn run_daemon_discovery_loop(
 
     let poll = target.discovery.poll_interval_secs.unwrap_or(300);
     let mut heartbeat_failures = 0;
+    let mut scheduler_failures = 0;
     loop {
         if shutdown.load(Ordering::SeqCst) {
             break;
         }
-        let scheduler_target = target.clone();
-        match tokio::task::spawn_blocking(move || run_discovery_scheduler_pass(scheduler_target))
-            .await
-        {
-            Ok(Ok(summary))
+        match run_discovery_scheduler_pass(&target, &recovery_conn) {
+            Ok(summary)
                 if summary.launched > 0
                     || summary.resumed > 0
                     || summary.suspended > 0
                     || summary.failed > 0 =>
             {
+                reset_scheduler_failures(&mut scheduler_failures);
                 println!(
                     "scheduler pass: {} launched, {} resumed, {} suspended, {} failed, {} skipped",
                     summary.launched,
@@ -442,9 +460,11 @@ async fn run_daemon_discovery_loop(
                     summary.skipped
                 );
             }
-            Ok(Ok(_)) => {}
-            Ok(Err(e)) => eprintln!("scheduler error: {e}"),
-            Err(e) => eprintln!("scheduler task failed: {e}"),
+            Ok(_) => reset_scheduler_failures(&mut scheduler_failures),
+            Err(e) => {
+                eprintln!("scheduler error: {e}");
+                backoff_after_scheduler_failure(&mut scheduler_failures, shutdown).await;
+            }
         }
         state.touch_heartbeat();
         if let Some(error) = write_daemon_heartbeat(store, state, &mut heartbeat_failures) {
@@ -465,12 +485,12 @@ async fn sleep_secs_with_shutdown(
     shutdown: &std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) {
     use std::sync::atomic::Ordering;
-    let ticks = secs.saturating_mul(5);
+    let ticks = secs.saturating_mul(1_000 / HEARTBEAT_TICK_MILLIS);
     for _ in 0..ticks {
         if shutdown.load(Ordering::SeqCst) {
             return;
         }
-        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+        tokio::time::sleep(tokio::time::Duration::from_millis(HEARTBEAT_TICK_MILLIS)).await;
     }
 }
 
@@ -489,9 +509,9 @@ async fn run_daemon_heartbeat_loop(
     let mut ticks: u32 = 0;
     let mut heartbeat_failures = 0;
     while !shutdown.load(Ordering::SeqCst) {
-        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+        tokio::time::sleep(tokio::time::Duration::from_millis(HEARTBEAT_TICK_MILLIS)).await;
         ticks += 1;
-        if ticks >= 150 {
+        if ticks >= HEARTBEAT_WRITE_TICKS {
             ticks = 0;
             state.touch_heartbeat();
             if let Some(error) = write_daemon_heartbeat(store, state, &mut heartbeat_failures) {

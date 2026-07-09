@@ -856,11 +856,11 @@ fn queue_run_metadata(
     conn: &rusqlite::Connection,
     leases: &[IssueLease],
 ) -> std::collections::HashMap<String, luther_workflow::persistence::RunMetadata> {
-    let run_ids: std::collections::BTreeSet<&str> = leases
+    let run_ids = leases
         .iter()
         .filter_map(|lease| lease.run_id.as_deref())
-        .collect();
-    let runs = match luther_workflow::persistence::list_runs_with_conn(conn) {
+        .collect::<Vec<_>>();
+    let runs = match luther_workflow::persistence::list_runs_by_ids_with_conn(conn, &run_ids) {
         Ok(runs) => runs,
         Err(e) => {
             eprintln!("Warning: failed to load queue run metadata: {e}");
@@ -868,7 +868,6 @@ fn queue_run_metadata(
         }
     };
     runs.into_iter()
-        .filter(|run| run_ids.contains(run.run_id.as_str()))
         .map(|run| (run.run_id.clone(), run))
         .collect()
 }

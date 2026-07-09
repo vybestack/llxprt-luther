@@ -175,9 +175,7 @@ pub fn acquire_singleton_lock(scope: &str) -> Result<SingletonGuard, MonitorErro
         .write(true)
         .create_new(true)
         .open(lock_file)
-        .map_err(|e| MonitorError::LockError {
-            message: format!("Failed to create lock file: {}", e),
-        })?;
+        .map_err(|e| lock_creation_error(e, lock_file))?;
     write!(file, "{}", std::process::id()).map_err(|e| MonitorError::LockError {
         message: format!("Failed to write lock file: {}", e),
     })?;
@@ -186,6 +184,20 @@ pub fn acquire_singleton_lock(scope: &str) -> Result<SingletonGuard, MonitorErro
         lock_path,
         released: Arc::new(Mutex::new(false)),
     })
+}
+fn lock_creation_error(error: std::io::Error, lock_file: &Path) -> MonitorError {
+    if error.kind() == std::io::ErrorKind::AlreadyExists {
+        return lock_held_error_from_file(lock_file).unwrap_or(MonitorError::LockHeld { pid: 0 });
+    }
+    MonitorError::LockError {
+        message: format!("Failed to create lock file: {error}"),
+    }
+}
+
+fn lock_held_error_from_file(lock_file: &Path) -> Option<MonitorError> {
+    let contents = fs::read_to_string(lock_file).ok()?;
+    let pid = contents.trim().parse::<u32>().ok()?;
+    Some(MonitorError::LockHeld { pid })
 }
 
 /// Release a singleton lock explicitly.

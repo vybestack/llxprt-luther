@@ -18,7 +18,7 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(unix)]
 use std::process::Command;
 
 // Daemon discovery/queueing/leasing/launch submodules (issue #49).

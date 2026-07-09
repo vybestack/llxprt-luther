@@ -150,15 +150,25 @@ fn daemon_status_all(store: &DaemonStore, json: bool) {
 ///
 /// Returns `None` when the heartbeat has no run id or the run is not recorded.
 /// @plan:issue-51
-fn heartbeat_config_id(store: Option<&SqliteStore>, hb_run_id: Option<&str>) -> Option<String> {
-    let store = store?;
-    let run_id = hb_run_id?;
-    match store.get_run(run_id) {
-        Ok(Some(md)) => Some(md.config_id),
-        Ok(None) => None,
+fn heartbeat_run_index(
+    store: Option<&SqliteStore>,
+    heartbeats: &std::collections::HashMap<String, luther_workflow::monitor::heartbeat::Heartbeat>,
+) -> std::collections::BTreeMap<String, RunMetadata> {
+    let Some(store) = store else {
+        return std::collections::BTreeMap::new();
+    };
+    let run_ids = heartbeats
+        .values()
+        .filter_map(|hb| hb.run_id.as_deref())
+        .collect::<Vec<_>>();
+    match store.list_runs_by_ids(&run_ids) {
+        Ok(runs) => runs
+            .into_iter()
+            .map(|metadata| (metadata.run_id.clone(), metadata))
+            .collect(),
         Err(err) => {
-            eprintln!("Warning: failed to read run '{run_id}' for heartbeat filtering: {err}");
-            None
+            eprintln!("Warning: failed to read heartbeat runs for filtering: {err}");
+            std::collections::BTreeMap::new()
         }
     }
 }
@@ -183,12 +193,15 @@ fn filter_status_by_config(
             None
         }
     };
+    let heartbeat_runs = heartbeat_run_index(store.as_ref(), &heartbeats);
     let filtered_hbs = if store.is_some() {
         heartbeats
             .into_iter()
             .filter(|(_, hb)| {
-                heartbeat_config_id(store.as_ref(), hb.run_id.as_deref()).as_deref()
-                    == Some(config_id)
+                hb.run_id
+                    .as_deref()
+                    .and_then(|run_id| heartbeat_runs.get(run_id))
+                    .is_some_and(|metadata| metadata.config_id == config_id)
             })
             .collect()
     } else {

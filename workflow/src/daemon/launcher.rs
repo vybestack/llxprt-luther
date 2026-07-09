@@ -167,13 +167,10 @@ pub fn claim_for_launch(
     }
 
     let run_id = new_run_id();
+    let paths = bases
+        .per_run_paths(issue.number, &run_id)
+        .map_err(invalid_path_error)?;
     update_lease_status(conn, &lease.lease_id, LeaseStatus::Running, Some(&run_id))?;
-    let paths = bases.per_run_paths(issue.number, &run_id).map_err(|err| {
-        rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            err,
-        )))
-    })?;
     Ok(Ok(ClaimedLaunch {
         lease_id: lease.lease_id,
         request: LaunchRequest {
@@ -186,6 +183,10 @@ pub fn claim_for_launch(
             artifact_dir: paths.artifact_dir,
         },
     }))
+}
+
+fn invalid_path_error(error: String) -> rusqlite::Error {
+    rusqlite::Error::InvalidPath(PathBuf::from(error))
 }
 
 pub fn finish_lease_after_result(

@@ -655,19 +655,17 @@ fn load_heartbeat_runs<'a>(
     let Some(store) = store else {
         return std::collections::BTreeMap::new();
     };
-    let mut runs = std::collections::BTreeMap::new();
-    for run_id in run_ids {
-        if let std::collections::btree_map::Entry::Vacant(entry) = runs.entry(run_id.to_string()) {
-            match store.get_run(run_id) {
-                Ok(Some(md)) => {
-                    entry.insert(md);
-                }
-                Ok(None) => {}
-                Err(err) => eprintln!("Warning: failed to load run '{run_id}' for process view: {err}"),
-            }
+    let run_ids = run_ids.collect::<Vec<_>>();
+    match store.list_runs_by_ids(&run_ids) {
+        Ok(runs) => runs
+            .into_iter()
+            .map(|metadata| (metadata.run_id.clone(), metadata))
+            .collect(),
+        Err(err) => {
+            eprintln!("Warning: failed to load heartbeat runs for process view: {err}");
+            std::collections::BTreeMap::new()
         }
     }
-    runs
 }
 
 /// Build the `runs ps` rows from heartbeats and the run registry (issue #51).
