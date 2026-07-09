@@ -1070,20 +1070,23 @@ fn test_ocr_pr_review_manual_triggers_are_gated() {
         content.contains("Boolean(context.payload.issue && context.payload.issue.pull_request)"),
         "Comment trigger must only run on PR-linked comments"
     );
-    for command in ["/ocr", "/open-code-review"] {
+    assert!(
+        content.contains("const reviewCommands = ['/ocr', '/open-code-review'];"),
+        "Comment trigger must support only the explicit standalone OCR commands"
+    );
+    let required_command_predicates = [
+        "body === command",
+        "body.startsWith(`${command} `)",
+        "body.startsWith(`${command}\\n`)",
+        "body.startsWith(`${command}\\r\\n`)",
+        "body.startsWith(`${command}\\t`)",
+    ];
+    for predicate in required_command_predicates {
         assert!(
-            content.contains(&format!("'{command}'")),
-            "Comment trigger must support standalone {command} comments"
+            content.contains(predicate),
+            "Comment trigger must include predicate: {predicate}"
         );
     }
-    assert!(
-        content.contains("body === command")
-            && content.contains("body.startsWith(`${command} `)")
-            && content.contains("body.startsWith(`${command}\\n`)")
-            && content.contains("body.startsWith(`${command}\\r\\n`)")
-            && content.contains("body.startsWith(`${command}\\t`)"),
-        "Comment trigger must support each command followed by a space, LF, CRLF, or tab"
-    );
     let trigger_guard = content
         .split("jobs:")
         .next()

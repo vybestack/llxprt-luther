@@ -374,7 +374,7 @@ impl Monitor {
         self.shutdown = true;
         self.set_state(heartbeat::MonitorState::Stopping).await;
 
-        for (_id, handle) in self.workers.iter_mut() {
+        for handle in self.workers.values_mut() {
             let _ = handle.child.start_kill();
             let _ = handle.child.wait().await;
         }
