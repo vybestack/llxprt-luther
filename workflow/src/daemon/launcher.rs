@@ -190,10 +190,10 @@ pub fn claim_for_launch(
 }
 
 fn invalid_path_error(error: String) -> rusqlite::Error {
-    rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::new(
-        std::io::ErrorKind::InvalidInput,
-        error,
-    )))
+    rusqlite::Error::SqliteFailure(
+        rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CONSTRAINT),
+        Some(error),
+    )
 }
 
 pub fn finish_lease_after_result(
@@ -578,10 +578,8 @@ mod tests {
         );
 
         match error {
-            rusqlite::Error::ToSqlConversionFailure(inner) => {
-                assert!(inner
-                    .to_string()
-                    .contains("run_id must be a single safe path component: ../escape"));
+            rusqlite::Error::SqliteFailure(_, Some(message)) => {
+                assert!(message.contains("run_id must be a single safe path component: ../escape"));
             }
             other => panic!("unexpected error variant: {other:?}"),
         }

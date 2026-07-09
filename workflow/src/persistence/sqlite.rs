@@ -293,11 +293,11 @@ pub fn list_runs_by_ids_with_conn(
     if run_ids.is_empty() {
         return Ok(Vec::new());
     }
-    let mut runs = Vec::new();
+    let mut runs = Vec::with_capacity(run_ids.len());
     for chunk in run_ids.chunks(RUN_ID_QUERY_CHUNK_SIZE) {
         runs.extend(list_runs_by_id_chunk(conn, chunk)?);
     }
-    runs.sort_by(|left, right| right.created_at.cmp(&left.created_at));
+    runs.sort_by_key(|run| std::cmp::Reverse(run.created_at));
     Ok(runs)
 }
 
@@ -318,8 +318,9 @@ fn unique_run_ids<'a>(run_ids: &'a [&'a str]) -> Vec<&'a str> {
     run_ids
         .iter()
         .copied()
-        .collect::<std::collections::BTreeSet<_>>()
-        .into_iter()
+        .scan(std::collections::HashSet::new(), |seen, run_id| {
+            seen.insert(run_id).then_some(run_id)
+        })
         .collect()
 }
 

@@ -15,6 +15,12 @@ fn acquire_daemon_lock(
         Ok(guard) => Some(guard),
         Err(MonitorError::LockHeld { pid }) => {
             if force {
+                if !daemon_lock_pid_matches_current_executable(pid) {
+                    eprintln!(
+                        "Error: refusing to replace daemon lock for '{config_id}' because pid {pid} does not appear to be this daemon binary"
+                    );
+                    return None;
+                }
                 if !luther_workflow::daemon::terminate_pid(pid) {
                     eprintln!(
                         "Error: failed to confirm daemon pid {pid} exited before replacing lock for '{config_id}'"
@@ -42,6 +48,28 @@ fn acquire_daemon_lock(
             None
         }
     }
+}
+
+#[cfg(target_os = "linux")]
+fn daemon_lock_pid_matches_current_executable(pid: u32) -> bool {
+    let Ok(cmdline) = std::fs::read(format!("/proc/{pid}/cmdline")) else {
+        return false;
+    };
+    let Ok(current_exe) = std::env::current_exe() else {
+        return false;
+    };
+    let Some(current_name) = current_exe.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    cmdline
+        .split(|byte| *byte == 0)
+        .filter_map(|part| std::str::from_utf8(part).ok())
+        .any(|arg| arg.ends_with(current_name))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn daemon_lock_pid_matches_current_executable(_pid: u32) -> bool {
+    true
 }
 
 /// Run a foreground daemon for the given config with clean Ctrl-C handling.
