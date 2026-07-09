@@ -186,7 +186,9 @@ pub fn acquire_singleton_lock(scope: &str) -> Result<SingletonGuard, MonitorErro
     })
 }
 fn lock_creation_error(error: std::io::Error, lock_file: &Path) -> MonitorError {
-    if error.kind() == std::io::ErrorKind::AlreadyExists {
+    if error.kind() == std::io::ErrorKind::AlreadyExists
+        || error.raw_os_error() == Some(libc::EEXIST)
+    {
         return lock_held_error_from_file(lock_file);
     }
     MonitorError::LockError {

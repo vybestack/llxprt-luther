@@ -18,7 +18,7 @@ use luther_workflow::daemon::launcher::{
     DaemonPathBases, LaunchRequest, WorkflowLaunchResult, WorkflowLauncher,
 };
 use luther_workflow::daemon::scheduler::{
-    run_multi_target_once, run_once_with_bases, SchedulerTarget,
+    run_multi_target_once, run_once_with_bases, RunSummary, SchedulerTarget,
 };
 use luther_workflow::persistence::leases::{
     count_active_leases_for_config, init_leases_table, list_all_leases, mark_stale_leases,
@@ -128,7 +128,7 @@ fn run_once_for_test(
     conn: &Connection,
     launcher: &dyn WorkflowLauncher,
     config_id: &str,
-) -> Result<luther_workflow::daemon::scheduler::RunSummary, rusqlite::Error> {
+) -> Result<RunSummary, rusqlite::Error> {
     run_once_with_bases(
         cfg,
         query,
@@ -369,19 +369,26 @@ fn two_issues_same_config_get_distinct_run_paths() {
     assert_eq!(summary.launched, 2);
     let launched = launcher.launched.lock().unwrap();
     assert_eq!(launched.len(), 2);
-    let work_dirs: Vec<_> = launched.iter().filter_map(|r| r.work_dir.clone()).collect();
+    let work_dirs: Vec<_> = launched
+        .iter()
+        .map(|request| request.work_dir.as_ref().expect("launch has work_dir"))
+        .collect();
     let artifact_dirs: Vec<_> = launched
         .iter()
-        .filter_map(|r| r.artifact_dir.clone())
+        .map(|request| {
+            request
+                .artifact_dir
+                .as_ref()
+                .expect("launch has artifact_dir")
+        })
         .collect();
-    assert_eq!(work_dirs.len(), 2, "both runs have work_dir");
-    assert_eq!(artifact_dirs.len(), 2, "both runs have artifact_dir");
     assert_ne!(work_dirs[0], work_dirs[1], "work dirs are distinct");
     assert_ne!(
         artifact_dirs[0], artifact_dirs[1],
         "artifact dirs are distinct"
     );
-    for (request, work) in launched.iter().zip(work_dirs.iter()) {
+    for request in launched.iter() {
+        let work = request.work_dir.as_ref().expect("launch has work_dir");
         assert!(
             work.to_str()
                 .unwrap()
@@ -392,8 +399,11 @@ fn two_issues_same_config_get_distinct_run_paths() {
             work.to_str().unwrap().ends_with(&request.run_id),
             "work dir ends with run id"
         );
-    }
-    for (request, artifact) in launched.iter().zip(artifact_dirs.iter()) {
+
+        let artifact = request
+            .artifact_dir
+            .as_ref()
+            .expect("launch has artifact_dir");
         assert!(
             artifact
                 .to_str()
