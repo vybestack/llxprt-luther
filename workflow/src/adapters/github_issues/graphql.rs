@@ -4,7 +4,13 @@ use serde::Deserialize;
 
 use crate::adapters::github::GithubError;
 
-use super::subissues::GraphqlPageInfo;
+#[derive(Debug, Default, Deserialize)]
+pub(super) struct GraphqlPageInfo {
+    #[serde(default, rename = "hasNextPage")]
+    pub(super) has_next_page: bool,
+    #[serde(rename = "endCursor")]
+    pub(super) end_cursor: Option<String>,
+}
 
 #[derive(Debug, Deserialize)]
 pub(super) struct GraphqlResponse<Issue> {

@@ -1,6 +1,44 @@
 use super::*;
+use crate::persistence::checkpoint::Checkpoint;
 
-pub fn persist_child_interrupted_state(
+/// Populate the `WaitStateRecord` fields shared by every child wait-state
+/// persistence path (identity, config, poll cadence, resume checkpoint). The
+/// wait-kind-specific fields (`wait_kind`, `wait_condition`,
+/// `last_observed_state`, and any PR identity) are set by the caller.
+fn populate_common_child_wait_fields(
+    record: &mut WaitStateRecord,
+    request: &ChildWorkflowLaunchRequest,
+    config: &WorkflowConfig,
+    checkpoint: &Checkpoint,
+    lease_id: Option<String>,
+) {
+    record.lease_id = lease_id;
+    record.workflow_type = config.workflow_type_id.clone();
+    record.config_id = config.config_id.clone();
+    record.repository = request.repo.clone();
+    record.issue_number = request.issue_number;
+    record.poll_interval_seconds = child_wait_poll_interval(config);
+    record.max_wait_seconds = child_wait_max_wait_seconds(config, record.wait_kind);
+    record.next_poll_at = crate::polling::next_poll_time(record.poll_interval_seconds);
+    record.resume_step = checkpoint.step_id.clone();
+    record.checkpoint_id = crate::engine::continuation::checkpoint_identity(checkpoint);
+}
+
+/// Upsert the wait-state record and write its artifact, mapping errors into the
+/// shared parent-orchestration error shape. Shared by both child wait-state
+/// persistence paths.
+fn commit_child_wait_record(
+    conn: &rusqlite::Connection,
+    run_id: &str,
+    record: &WaitStateRecord,
+) -> Result<(), EngineError> {
+    upsert_wait_state(conn, record).map_err(sql_error)?;
+    write_wait_state_artifact(run_id, record)
+        .map(|_| ())
+        .map_err(|err| parent_error(format!("write child wait-state artifact: {err}")))
+}
+
+pub(super) fn persist_child_interrupted_state(
     request: &ChildWorkflowLaunchRequest,
     config: &WorkflowConfig,
     db_path: &Path,
@@ -18,12 +56,9 @@ pub fn persist_child_interrupted_state(
     let previous = crate::persistence::get_wait_state(&conn, &request.run_id).map_err(sql_error)?;
     let mut record =
         previous.unwrap_or_else(|| WaitStateRecord::new(&request.run_id, &config.config_id));
-    record.lease_id = child_lease_id(&conn, request)?;
-    record.workflow_type = config.workflow_type_id.clone();
-    record.config_id = config.config_id.clone();
-    record.repository = request.repo.clone();
-    record.issue_number = request.issue_number;
+    let lease_id = child_lease_id(&conn, request)?;
     record.wait_kind = child_wait_kind_for_step(step_id);
+    populate_common_child_wait_fields(&mut record, request, config, &checkpoint, lease_id);
     record.wait_condition = json!({
         "step_id": step_id,
         "reason": "child_workflow_interrupted",
@@ -35,18 +70,10 @@ pub fn persist_child_interrupted_state(
         "step_id": step_id,
         "reason": "child_workflow_interrupted"
     });
-    record.poll_interval_seconds = child_wait_poll_interval(config);
-    record.max_wait_seconds = child_wait_max_wait_seconds(config, record.wait_kind);
-    record.next_poll_at = crate::polling::next_poll_time(record.poll_interval_seconds);
-    record.resume_step = checkpoint.step_id.clone();
-    record.checkpoint_id = crate::engine::continuation::checkpoint_identity(&checkpoint);
-    upsert_wait_state(&conn, &record).map_err(sql_error)?;
-    write_wait_state_artifact(&request.run_id, &record)
-        .map(|_| ())
-        .map_err(|err| parent_error(format!("write child wait-state artifact: {err}")))
+    commit_child_wait_record(&conn, &request.run_id, &record)
 }
 
-pub fn persist_child_external_wait_state(
+pub(super) fn persist_child_external_wait_state(
     request: &ChildWorkflowLaunchRequest,
     config: &WorkflowConfig,
     db_path: &Path,
@@ -68,14 +95,11 @@ pub fn persist_child_external_wait_state(
     let previous = crate::persistence::get_wait_state(&conn, &request.run_id).map_err(sql_error)?;
     let mut record =
         previous.unwrap_or_else(|| WaitStateRecord::new(&request.run_id, &config.config_id));
-    record.lease_id = child_lease_id(&conn, request)?;
-    record.workflow_type = config.workflow_type_id.clone();
-    record.config_id = config.config_id.clone();
-    record.repository = request.repo.clone();
-    record.issue_number = request.issue_number;
+    let lease_id = child_lease_id(&conn, request)?;
+    record.wait_kind = wait_kind;
+    populate_common_child_wait_fields(&mut record, request, config, &checkpoint, lease_id);
     record.pr_number = identity.pr_number;
     record.head_sha = identity.head_sha;
-    record.wait_kind = wait_kind;
     record.wait_condition = json!({
         "step_id": step_id,
         "reason": reason,
@@ -87,18 +111,10 @@ pub fn persist_child_external_wait_state(
         "step_id": step_id,
         "reason": reason
     });
-    record.poll_interval_seconds = child_wait_poll_interval(config);
-    record.max_wait_seconds = child_wait_max_wait_seconds(config, record.wait_kind);
-    record.next_poll_at = crate::polling::next_poll_time(record.poll_interval_seconds);
-    record.resume_step = checkpoint.step_id.clone();
-    record.checkpoint_id = crate::engine::continuation::checkpoint_identity(&checkpoint);
-    upsert_wait_state(&conn, &record).map_err(sql_error)?;
-    write_wait_state_artifact(&request.run_id, &record)
-        .map(|_| ())
-        .map_err(|err| parent_error(format!("write child wait-state artifact: {err}")))
+    commit_child_wait_record(&conn, &request.run_id, &record)
 }
 
-pub fn child_wait_kind_for_step(step_id: &str) -> WaitKind {
+pub(super) fn child_wait_kind_for_step(step_id: &str) -> WaitKind {
     match step_id {
         "watch_pr_checks" => WaitKind::PrChecks,
         "collect_coderabbit_feedback" => WaitKind::CoderabbitReview,
@@ -118,7 +134,7 @@ pub struct ChildWaitIdentity {
     pub head_sha: Option<String>,
 }
 
-pub fn child_wait_poll_identity(
+pub(super) fn child_wait_poll_identity(
     metadata: Option<&RunMetadata>,
     wait_kind: WaitKind,
 ) -> Result<ChildWaitIdentity, String> {
@@ -149,7 +165,7 @@ pub fn child_wait_poll_identity(
     }
 }
 
-pub fn child_wait_poll_interval(config: &WorkflowConfig) -> u64 {
+pub(super) fn child_wait_poll_interval(config: &WorkflowConfig) -> u64 {
     config
         .discovery
         .as_ref()
@@ -157,7 +173,10 @@ pub fn child_wait_poll_interval(config: &WorkflowConfig) -> u64 {
         .unwrap_or(300)
 }
 
-pub fn child_wait_max_wait_seconds(config: &WorkflowConfig, wait_kind: WaitKind) -> Option<u64> {
+pub(super) fn child_wait_max_wait_seconds(
+    config: &WorkflowConfig,
+    wait_kind: WaitKind,
+) -> Option<u64> {
     match wait_kind {
         WaitKind::DependencyChildWorkflow | WaitKind::DependencyChildMerge => Some(
             config
@@ -169,7 +188,7 @@ pub fn child_wait_max_wait_seconds(config: &WorkflowConfig, wait_kind: WaitKind)
     }
 }
 
-pub fn child_lease_id(
+pub(super) fn child_lease_id(
     conn: &rusqlite::Connection,
     request: &ChildWorkflowLaunchRequest,
 ) -> Result<Option<String>, EngineError> {
@@ -178,6 +197,6 @@ pub fn child_lease_id(
         .map_err(sql_error)
 }
 
-pub fn sql_error(err: rusqlite::Error) -> EngineError {
-    parent_error(format!("lease database error: {err}"))
+pub(super) fn sql_error(err: rusqlite::Error) -> EngineError {
+    parent_error(format!("database error: {err}"))
 }

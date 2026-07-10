@@ -1,5 +1,7 @@
 use super::*;
 use crate::engine::executor::StepContext;
+use crate::engine::executors::pr_followup_types::PR_FOLLOWUP_SCHEMA_VERSION;
+use crate::engine::runner::EngineError;
 use serde_json::json;
 
 fn marker_comment(fields: &str) -> String {

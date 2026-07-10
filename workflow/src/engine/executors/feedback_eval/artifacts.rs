@@ -98,17 +98,22 @@ pub(super) fn write_state_artifact(
     entries: Vec<Value>,
     clock: &dyn ClockSleeper,
 ) -> Result<(), EngineError> {
-    let state_index_hash = stable_json_hash(&Value::Array(entries.clone()));
+    // Build the payload first, then hash the `state_entries` array by
+    // reference. This avoids cloning `entries` into a temporary `Value::Array`
+    // solely to compute the hash before the original is consumed.
+    let mut payload = json!({
+        "state_entries": entries,
+        "state_index_hash": Value::Null,
+        "superseded_entries": []
+    });
+    let state_index_hash = stable_json_hash(&payload["state_entries"]);
+    payload["state_index_hash"] = Value::String(state_index_hash);
     store.write_json_artifact(
         binding,
         "coderabbit-feedback-state",
         step_id,
         step_order,
-        &json!({
-            "state_entries": entries,
-            "state_index_hash": state_index_hash,
-            "superseded_entries": []
-        }),
+        &payload,
         None,
         clock,
     )?;
@@ -122,27 +127,33 @@ pub(super) fn write_raw_response(
     binding: &PrFollowupBinding,
     step_id: &str,
     step_order: u64,
-
     item: &FeedbackItem,
     attempt: u64,
     raw: &str,
     clock: &dyn ClockSleeper,
 ) -> Result<PathBuf, EngineError> {
     let bounded = if raw.len() > RAW_RESPONSE_LIMIT_BYTES {
-        &raw[..RAW_RESPONSE_LIMIT_BYTES]
+        // Slicing at a fixed byte index can land inside a multi-byte UTF-8
+        // sequence and panic. Truncate at the closest char boundary at or
+        // before the limit so evaluator output containing non-ASCII text is
+        // handled safely.
+        &raw[..floor_char_boundary(raw, RAW_RESPONSE_LIMIT_BYTES)]
     } else {
         raw
     };
+    // Guard against an empty sanitized stem so distinct all-symbol item IDs
+    // cannot collapse to filenames that omit the item-specific portion and
+    // collide with one another.
+    let mut item_stem = sanitize_path_segment(&item.item_id);
+    if sanitized_stem_is_blank(&item_stem) {
+        item_stem = format!("item-{}", stable_item_id_hash(&item.item_id));
+    }
     let record = store.write_raw_text_artifact(
         binding,
         "feedback-evaluator-raw-output",
         step_id,
         step_order,
-        &format!(
-            "{}-attempt-{}-raw-output",
-            sanitize_path_segment(&item.item_id),
-            attempt
-        ),
+        &format!("{item_stem}-attempt-{attempt}-raw-output"),
         bounded,
         clock,
     )?;
@@ -179,14 +190,18 @@ pub(super) fn read_or_build_binding(
     params: &Value,
     store: &PrFollowupArtifactStore,
 ) -> Result<PrFollowupBinding, EngineError> {
+    let pr_number_raw = string_param(context, params, "pr_number", "1910");
+    let pr_number = pr_number_raw.parse().map_err(|err| {
+        // Fail explicitly rather than silently defaulting a bad pr_number to a
+        // hardcoded PR, which would route artifacts to the wrong PR.
+        feedback_eval_error(format!("invalid pr_number '{pr_number_raw}': {err}"))
+    })?;
     let requested = PrFollowupBinding {
         schema_version: PR_FOLLOWUP_SCHEMA_VERSION,
         run_id: context.run_id().to_string(),
         repository_owner: string_param(context, params, "repository_owner", "example"),
         repository_name: string_param(context, params, "repository_name", "workflow"),
-        pr_number: string_param(context, params, "pr_number", "1910")
-            .parse()
-            .unwrap_or(1910),
+        pr_number,
         head_ref: string_param(context, params, "head_ref", "feature"),
         head_sha: string_param(
             context,
@@ -313,4 +328,37 @@ pub(super) fn stable_json_hash(value: &Value) -> String {
 
 pub(super) fn feedback_eval_error(message: impl Into<String>) -> EngineError {
     EngineError::InvalidState(format!("feedback evaluator: {}", message.into()))
+}
+
+/// True when a sanitized filename stem carries no item-specific information,
+/// i.e. it is empty or made up entirely of the `_` fill byte that
+/// `sanitize_path_segment` substitutes for disallowed characters.
+fn sanitized_stem_is_blank(stem: &str) -> bool {
+    const FILL_BYTE: u8 = b'_';
+    stem.bytes().all(|byte| byte == FILL_BYTE)
+}
+
+/// Return the largest index `<= max_index` that lies on a UTF-8 char boundary
+/// of `value`. Mirrors the semantics of the unstable `str::floor_char_boundary`
+/// so truncation never splits a multi-byte code point.
+fn floor_char_boundary(value: &str, max_index: usize) -> usize {
+    if max_index >= value.len() {
+        return value.len();
+    }
+    let mut index = max_index;
+    while index > 0 && !value.is_char_boundary(index) {
+        index -= 1;
+    }
+    index
+}
+
+/// Deterministic short FNV-1a hash used to build a collision-resistant filename
+/// stem when a sanitized item ID is otherwise empty.
+fn stable_item_id_hash(value: &str) -> String {
+    let mut hash = 14_695_981_039_346_656_037_u64;
+    for byte in value.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(1_099_511_628_211);
+    }
+    format!("{hash:016x}")
 }

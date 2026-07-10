@@ -1,4 +1,14 @@
 use super::*;
+use crate::engine::executor::{StepContext, StepExecutor};
+use crate::engine::executors::github_pr::GithubPrCommandRunner;
+use crate::engine::executors::pr_followup_artifacts::{ClockSleeper, PrFollowupArtifactStore};
+use crate::engine::executors::pr_followup_types::PrFollowupBinding;
+use crate::engine::runner::EngineError;
+use crate::engine::transition::StepOutcome;
+use serde_json::{json, Value};
+use std::collections::BTreeSet;
+use std::thread;
+use std::time::Duration;
 
 pub(super) const DEFAULT_MAX_OBSERVATIONS: u64 = 6;
 pub(super) const DEFAULT_REQUIRED_STABLE_OBSERVATIONS: u64 = 2;
@@ -75,8 +85,8 @@ pub struct GithubCodeRabbitFeedbackExecutor;
 /// @pseudocode lines 1-29
 #[derive(Debug)]
 pub struct GithubCodeRabbitFeedbackExecutorWithRunner<R, C> {
-    pub runner: R,
-    pub clock: C,
+    runner: R,
+    clock: C,
 }
 
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P08
@@ -120,8 +130,8 @@ pub struct GithubFeedbackMarkerExecutor;
 /// @pseudocode lines 41-49
 #[derive(Debug)]
 pub struct GithubFeedbackMarkerExecutorWithRunner<R, C> {
-    pub runner: R,
-    pub clock: C,
+    runner: R,
+    clock: C,
 }
 
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P15
@@ -252,18 +262,18 @@ pub(super) struct PendingMarkerAction {
 /// @pseudocode lines 43-49
 #[derive(Clone, Debug)]
 pub(super) struct MarkerActionOutcome {
-    pub action: PendingMarkerAction,
-    pub status: String,
-    pub comment_key: String,
-    pub resolution_key: String,
-    pub posted_comment: Option<Value>,
-    pub resolved_thread: Option<Value>,
-    pub skipped: Vec<Value>,
-    pub partial: Option<Value>,
-    pub retryable: Option<Value>,
-    pub failed: Option<Value>,
-    pub audit: Value,
-    pub updated_action: Value,
+    pub(super) action: PendingMarkerAction,
+    pub(super) status: String,
+    pub(super) comment_key: String,
+    pub(super) resolution_key: String,
+    pub(super) posted_comment: Option<Value>,
+    pub(super) resolved_thread: Option<Value>,
+    pub(super) skipped: Vec<Value>,
+    pub(super) partial: Option<Value>,
+    pub(super) retryable: Option<Value>,
+    pub(super) failed: Option<Value>,
+    pub(super) audit: Value,
+    pub(super) updated_action: Value,
 }
 
 pub(super) struct MarkerActionProcessor<'a> {

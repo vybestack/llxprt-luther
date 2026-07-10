@@ -62,24 +62,36 @@ impl FeedbackEvaluatorCommandRunner for ProcessFeedbackEvaluatorCommandRunner {
             .stdin
             .take()
             .ok_or_else(|| feedback_eval_error("feedback evaluator command stdin unavailable"))?;
+
+        // Drain stdout and stderr on dedicated reader threads BEFORE writing
+        // stdin and waiting for the child. Reading only after the process
+        // exits can deadlock if either pipe fills while the child is still
+        // running: the child blocks on a full pipe, and we block waiting for
+        // it to exit. This mirrors the concurrent-draining pattern used by the
+        // llxprt executor.
+        let stdout_reader = child.stdout.take().map(|mut pipe| {
+            thread::spawn(move || {
+                let mut buffer = Vec::new();
+                pipe.read_to_end(&mut buffer).map(|_| buffer)
+            })
+        });
+        let stderr_reader = child.stderr.take().map(|mut pipe| {
+            thread::spawn(move || {
+                let mut buffer = Vec::new();
+                pipe.read_to_end(&mut buffer).map(|_| buffer)
+            })
+        });
+
         stdin
             .write_all(stdin_json.as_bytes())
             .map_err(|err| feedback_eval_error(format!("write feedback evaluator stdin: {err}")))?;
         drop(stdin);
 
         let status = wait_for_feedback_evaluator(&mut child, self.timeout())?;
-        let mut stdout = Vec::new();
-        let mut stderr = Vec::new();
-        if let Some(mut pipe) = child.stdout.take() {
-            pipe.read_to_end(&mut stdout).map_err(|err| {
-                feedback_eval_error(format!("read feedback evaluator stdout: {err}"))
-            })?;
-        }
-        if let Some(mut pipe) = child.stderr.take() {
-            pipe.read_to_end(&mut stderr).map_err(|err| {
-                feedback_eval_error(format!("read feedback evaluator stderr: {err}"))
-            })?;
-        }
+
+        let stdout = join_reader(stdout_reader, "stdout")?;
+        let stderr = join_reader(stderr_reader, "stderr")?;
+
         if !status.success() {
             return Err(feedback_eval_error(format!(
                 "feedback evaluator command exited with status {}: {}",
@@ -90,6 +102,23 @@ impl FeedbackEvaluatorCommandRunner for ProcessFeedbackEvaluatorCommandRunner {
         String::from_utf8(stdout).map_err(|err| {
             feedback_eval_error(format!("feedback evaluator stdout was not utf-8: {err}"))
         })
+    }
+}
+
+type ReaderHandle = thread::JoinHandle<std::io::Result<Vec<u8>>>;
+
+fn join_reader(reader: Option<ReaderHandle>, stream: &str) -> Result<Vec<u8>, EngineError> {
+    match reader {
+        Some(handle) => match handle.join() {
+            Ok(Ok(bytes)) => Ok(bytes),
+            Ok(Err(err)) => Err(feedback_eval_error(format!(
+                "read feedback evaluator {stream}: {err}"
+            ))),
+            Err(_) => Err(feedback_eval_error(format!(
+                "feedback evaluator {stream} reader thread panicked"
+            ))),
+        },
+        None => Ok(Vec::new()),
     }
 }
 

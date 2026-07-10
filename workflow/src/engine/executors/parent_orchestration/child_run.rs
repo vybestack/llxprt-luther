@@ -34,10 +34,10 @@ pub fn prepare_child_resume(
 ) -> Result<(), String> {
     let conn = open_parent_orchestration_connection(db_path)?;
     let metadata = get_run_with_conn(&conn, &request.run_id)
-        .map_err(|err| err.to_string())?
+        .map_err(|err| format!("get child run metadata: {err}"))?
         .ok_or_else(|| {
             format!(
-                "missing child run metadata for head_sha child workflow run id {}",
+                "missing child run metadata for child workflow run id {}",
                 request.run_id
             )
         })?;
@@ -106,7 +106,25 @@ pub fn child_result_from_run_outcome(
                 .map_err(|err| err.to_string())?;
             Ok(ChildWorkflowRunResult::WaitingExternal)
         }
-        RunOutcome::Failure { .. } | RunOutcome::Abandoned { .. } => {
+        RunOutcome::Failure { step_id, reason } => {
+            // Preserve the child failure diagnostics before collapsing to
+            // CompletedFailure; the caller in lease.rs returns this result
+            // directly without logging, so without this the root cause is lost.
+            tracing::warn!(
+                run_id = %request.run_id,
+                step_id = %step_id,
+                reason = %reason,
+                "child workflow failed"
+            );
+            Ok(ChildWorkflowRunResult::CompletedFailure)
+        }
+        RunOutcome::Abandoned { step_id, reason } => {
+            tracing::warn!(
+                run_id = %request.run_id,
+                step_id = %step_id,
+                reason = %reason,
+                "child workflow abandoned"
+            );
             Ok(ChildWorkflowRunResult::CompletedFailure)
         }
     }

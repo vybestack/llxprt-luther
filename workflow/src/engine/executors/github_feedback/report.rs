@@ -1,11 +1,18 @@
 use super::*;
-use crate::engine::executors::pr_followup_artifacts::ArtifactWriter;
+use crate::engine::executors::pr_followup_artifacts::{
+    ArtifactWriter, ClockSleeper, PrFollowupArtifactStore,
+};
+use crate::engine::executors::pr_followup_types::{PrFollowupBinding, PR_FOLLOWUP_SCHEMA_VERSION};
+use crate::engine::runner::EngineError;
+use serde_json::{json, Value};
+use std::collections::BTreeSet;
+use std::path::PathBuf;
 
 pub(super) struct ResolveAudit<'a> {
-    pub resolve_attempted: bool,
-    pub resolve_succeeded: bool,
-    pub resolve_error: Option<&'a str>,
-    pub final_thread_resolved_state: Option<bool>,
+    pub(super) resolve_attempted: bool,
+    pub(super) resolve_succeeded: bool,
+    pub(super) resolve_error: Option<&'a str>,
+    pub(super) final_thread_resolved_state: Option<bool>,
 }
 
 pub(super) fn marker_action_audit(

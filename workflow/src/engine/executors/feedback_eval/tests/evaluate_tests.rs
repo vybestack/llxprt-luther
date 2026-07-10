@@ -55,6 +55,25 @@ fn feedback_items_parses_valid_items() {
 
 #[test]
 fn feedback_items_prefers_commit_sha_then_head_sha() {
+    // Both fields present: commit_sha must win over head_sha.
+    let feedback = json!({
+        "items": [
+            {
+                "item_id":"i",
+                "stable_marker_key":"k",
+                "body_hash":"h",
+                "commit_sha":"preferred",
+                "head_sha":"fallback",
+                "body":"b"
+            }
+        ]
+    });
+    let items = feedback_items(&feedback).unwrap();
+    assert_eq!(items[0].head_sha, "preferred");
+}
+
+#[test]
+fn feedback_items_falls_back_to_head_sha_when_commit_sha_absent() {
     let feedback = json!({
         "items": [
             {"item_id":"i","stable_marker_key":"k","body_hash":"h","head_sha":"fallback","body":"b"}

@@ -1,6 +1,6 @@
 use super::*;
 
-pub fn load_parent_issue(
+pub(super) fn load_parent_issue(
     context: &mut StepContext,
     state: &OrchestrationState,
     query: &dyn GithubIssueQuery,
@@ -59,7 +59,7 @@ pub fn classify_subissues(
     Ok(StepOutcome::Success)
 }
 
-pub fn classify_child_with_run_state(
+pub(super) fn classify_child_with_run_state(
     state: &OrchestrationState,
     query: &dyn GithubIssueQuery,
     conn: &rusqlite::Connection,
@@ -107,7 +107,7 @@ pub fn apply_child_run_state(
     apply_child_rollup_state(state, child)
 }
 
-pub fn apply_child_rollup_state(
+pub(super) fn apply_child_rollup_state(
     state: &OrchestrationState,
     child: &mut ChildIssueState,
 ) -> Result<(), EngineError> {
@@ -121,7 +121,7 @@ pub fn apply_child_rollup_state(
     Ok(())
 }
 
-pub fn stale_child_run(
+pub(super) fn stale_child_run(
     lease: &crate::persistence::leases::IssueLease,
     poll_interval_seconds: u64,
 ) -> bool {
@@ -176,7 +176,7 @@ pub fn determine_subissue_order(
     Ok(StepOutcome::Success)
 }
 
-pub fn select_next_child(
+pub(super) fn select_next_child(
     context: &mut StepContext,
     state: &OrchestrationState,
 ) -> Result<StepOutcome, EngineError> {
@@ -560,7 +560,7 @@ pub fn post_launch_metadata(
     Ok((run_status, pr))
 }
 
-pub fn post_launch_metadata_error(
+pub(super) fn post_launch_metadata_error(
     err: EngineError,
     action: &str,
     lease_id: &str,
@@ -609,7 +609,7 @@ pub fn wait_for_child_merge(
     }
 }
 
-pub fn record_observed_child_pr_merge_wait(
+pub(super) fn record_observed_child_pr_merge_wait(
     state: &OrchestrationState,
     query: &dyn GithubIssueQuery,
     child: u64,

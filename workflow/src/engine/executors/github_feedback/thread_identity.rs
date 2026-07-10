@@ -1,4 +1,4 @@
-use super::*;
+use serde_json::Value;
 
 pub(super) const STABLE_MARKER_THREAD_PREFIX: &str = "thread:";
 pub(super) const GRAPHQL_NODE_ID_PREFIX: &str = "graphql:";

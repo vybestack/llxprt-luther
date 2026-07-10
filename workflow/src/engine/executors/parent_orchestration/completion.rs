@@ -224,12 +224,10 @@ pub fn evaluate_acceptance_criteria(
             ));
         }
     }
-    if states
-        .iter()
-        .any(|child| !child_completion_satisfied_indexed(child, &index))
-    {
-        remaining_work.push("one or more child issues are not complete".to_string());
-    }
+    // The per-child loop below emits a specific, actionable remaining_work
+    // entry for each unsatisfied child. A generic aggregate any() entry here
+    // would duplicate those messages for the same unsatisfied condition, so it
+    // is intentionally omitted to keep the completion report non-redundant.
     for child in states {
         match child.terminal_state {
             ChildIssueStatus::Closed

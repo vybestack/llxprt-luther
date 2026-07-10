@@ -1,4 +1,8 @@
 use super::*;
+use crate::engine::executors::github_pr::GithubPrCommandRunner;
+use crate::engine::runner::EngineError;
+use serde_json::{json, Value};
+use std::path::Path;
 
 pub(super) const WARN_REST_REPLY_NOT_JSON: &str = "rest_reply_response_not_json";
 pub(super) const WARN_NO_REVIEW_THREAD_IDENTITY_TOP_LEVEL: &str =
@@ -37,21 +41,21 @@ pub(super) enum DeliveryStatus {
 }
 
 impl DeliveryStatus {
-    pub fn as_str(self) -> &'static str {
+    pub(super) fn as_str(self) -> &'static str {
         match self {
             Self::Confirmed => "confirmed",
             Self::Unknown => "unknown",
         }
     }
 
-    pub fn source(self) -> &'static str {
+    pub(super) fn source(self) -> &'static str {
         match self {
             Self::Confirmed => "posted",
             Self::Unknown => "posted_result_unknown",
         }
     }
 
-    pub fn retry_suppressed(self) -> bool {
+    pub(super) fn retry_suppressed(self) -> bool {
         matches!(self, Self::Unknown)
     }
 }

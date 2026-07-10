@@ -24,41 +24,36 @@ pub fn persist_external_wait_state(
     let mut metadata = get_run_with_conn(&conn, &request.run_id).map_err(|e| e.to_string())?;
     let wait_kind = wait_kind_for_step(step_id);
     let identity = wait_poll_identity(request, config, metadata.as_ref(), wait_kind)?;
+    // The run poll-identity update and the wait-state upsert are one logical
+    // state transition. Wrap both writes in a single transaction so the
+    // metadata update does not persist if the wait-state write fails, keeping
+    // run poll identity and wait state consistent on any failure.
+    let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
     if let Some(md) = metadata.as_mut() {
-        persist_run_poll_identity(&conn, md, &identity)?;
+        persist_run_poll_identity(&tx, md, &identity)?;
     }
-    let previous = get_wait_state(&conn, &request.run_id).map_err(|e| e.to_string())?;
+    let previous = get_wait_state(&tx, &request.run_id).map_err(|e| e.to_string())?;
     let mut record =
         previous.unwrap_or_else(|| WaitStateRecord::new(&request.run_id, &config.config_id));
-    record.lease_id = lookup_lease_id(&conn, request)?;
+    record.lease_id = lookup_lease_id(&tx, request)?;
     record.workflow_type = config.workflow_type_id.clone();
     record.config_id = config.config_id.clone();
     record.repository = request.repo.clone();
     record.issue_number = request.issue_number;
     record.pr_number = identity.pr_number;
+    // NOTE: For WaitKind::DependencyChildWorkflow, `identity.head_sha` (and
+    // therefore `record.head_sha`) carries the child workflow run ID rather
+    // than a commit SHA. This dual semantics is an accepted compatibility
+    // constraint of the current wait-state schema; see the extraction in
+    // `fill_parent_dependency_wait_identity` and the `child_run_id` mirror
+    // written into `wait_condition` below.
     record.head_sha = identity.head_sha;
     record.wait_kind = wait_kind;
     let step_params = resolved_wait_step_parameters(config, step_id)?;
     record.wait_condition =
         wait_condition_payload(step_id, reason, request, wait_kind, &step_params)?;
     if wait_kind == WaitKind::DependencyChildWorkflow {
-        if let Some(child_run_id) = record.head_sha.clone() {
-            record.wait_condition["child_run_id"] = serde_json::Value::String(child_run_id);
-        }
-        if let Some(artifact_root) = wait_artifact_root(config, metadata.as_ref())? {
-            if let Some(wait) = read_child_workflow_wait_artifact(&artifact_root)? {
-                record.wait_condition["child_issue_number"] = wait
-                    .get("child_issue_number")
-                    .cloned()
-                    .unwrap_or(serde_json::Value::Null);
-                record.wait_condition["child_lease_id"] = wait
-                    .get("child_lease_id")
-                    .cloned()
-                    .unwrap_or(serde_json::Value::Null);
-                record.wait_condition["parent_run_id"] =
-                    serde_json::Value::String(request.run_id.clone());
-            }
-        }
+        enrich_dependency_child_wait_condition(&mut record, request, config, metadata.as_ref())?;
     }
     record.last_observed_state = serde_json::json!({
         "classification": "suspended",
@@ -75,12 +70,44 @@ pub fn persist_external_wait_state(
     record.next_poll_at = luther_workflow::polling::next_poll_time(poll_interval);
     record.resume_step = checkpoint.step_id.clone();
     record.checkpoint_id = luther_workflow::engine::continuation::checkpoint_identity(&checkpoint);
-    upsert_wait_state(&conn, &record).map_err(|e| e.to_string())?;
+    upsert_wait_state(&tx, &record).map_err(|e| e.to_string())?;
+    tx.commit().map_err(|e| e.to_string())?;
     if let Err(e) = write_wait_state_artifact(&request.run_id, &record) {
-        eprintln!(
-            "Warning: failed to write wait-state artifact for run {}: {e}",
-            request.run_id
+        tracing::warn!(
+            run_id = %request.run_id,
+            error = %e,
+            "failed to write wait-state artifact"
         );
+    }
+    Ok(())
+}
+
+/// Enrich a `DependencyChildWorkflow` wait-state record's `wait_condition` with
+/// the child run/issue/lease correlation fields.
+///
+/// For this wait kind `record.head_sha` carries the child workflow run ID
+/// rather than a commit SHA (an accepted compatibility constraint of the
+/// current schema); it is mirrored into `wait_condition["child_run_id"]` so
+/// downstream consumers have an unambiguous field name.
+fn enrich_dependency_child_wait_condition(
+    record: &mut WaitStateRecord,
+    request: &luther_workflow::daemon::launcher::LaunchRequest,
+    config: &WorkflowConfig,
+    metadata: Option<&RunMetadata>,
+) -> Result<(), String> {
+    if let Some(child_run_id) = record.head_sha.clone() {
+        record.wait_condition["child_run_id"] = Value::String(child_run_id);
+    }
+    if let Some(artifact_root) = wait_artifact_root(config, metadata)? {
+        if let Some(wait) = read_child_workflow_wait_artifact(&artifact_root)? {
+            record.wait_condition["child_issue_number"] = wait
+                .get("child_issue_number")
+                .cloned()
+                .unwrap_or(Value::Null);
+            record.wait_condition["child_lease_id"] =
+                wait.get("child_lease_id").cloned().unwrap_or(Value::Null);
+            record.wait_condition["parent_run_id"] = Value::String(request.run_id.clone());
+        }
     }
     Ok(())
 }

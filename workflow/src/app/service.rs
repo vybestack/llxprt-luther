@@ -74,16 +74,28 @@ pub async fn handle_service_run(args: &luther_workflow::cli::ServiceRunArgs) {
 
     match Service::start(config).await {
         Ok(mut service) => {
-            let instance_id = service
-                .get_status()
-                .await
-                .map(|s| s.instance_id)
-                .unwrap_or_default();
-            println!("Service started successfully. Instance ID: {instance_id}");
+            match service.get_status().await {
+                Ok(status) => {
+                    println!(
+                        "Service started successfully. Instance ID: {}",
+                        status.instance_id
+                    );
+                }
+                Err(e) => {
+                    // The service started, but the follow-up status query
+                    // failed. Surface the failure explicitly instead of
+                    // printing an empty instance ID as if it were authoritative.
+                    println!(
+                        "Service started successfully, but the instance ID could not be retrieved (status query failed: {e})."
+                    );
+                }
+            }
             println!("Press Ctrl+C to stop...");
             let _ = tokio::signal::ctrl_c().await;
             println!("Shutting down service...");
-            let _ = service.stop().await;
+            if let Err(e) = service.stop().await {
+                eprintln!("Warning: service shutdown reported an error: {e}");
+            }
         }
         Err(e) => {
             eprintln!("Failed to start service: {e}");

@@ -647,6 +647,16 @@ fn reusable_evaluation(
         }
         matching.push(entry.clone());
     }
+    if !stale_or_malformed.is_empty() {
+        // Surface the collected diagnostics so stale/malformed reuse-state
+        // entries are observable during triage instead of being silently
+        // discarded.
+        tracing::debug!(
+            stable_marker_key = %item.stable_marker_key,
+            diagnostics = ?stale_or_malformed,
+            "skipped stale or malformed reuse-state entries while resolving accepted evaluation"
+        );
+    }
     if matching.len() > 1 {
         return ReuseLookup::Fatal("duplicate_accepted_evaluation_state".to_string());
     }

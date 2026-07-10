@@ -23,6 +23,18 @@ pub fn acquire_daemon_lock(
                     );
                     return None;
                 }
+                // Residual PID-reuse race: the executable-identity check above
+                // and the terminate call below both operate on `pid` by number.
+                // The OS could, in principle, recycle `pid` for an unrelated
+                // process in the window between the two calls, so termination
+                // could target a different process than the one we verified.
+                // A fully race-free fix requires a stable process handle
+                // (e.g. pidfd on Linux), which is not available through the
+                // current cross-platform seam. We minimize the window by
+                // terminating immediately after the strongest available
+                // executable-identity check; the identity check is the primary
+                // guard and this residual race is an accepted limitation of
+                // PID-based termination here.
                 if !luther_workflow::daemon::terminate_pid(pid) {
                     eprintln!(
                         "Error: failed to confirm daemon pid {pid} exited before replacing lock for '{config_id}'"
@@ -84,9 +96,14 @@ pub fn daemon_lock_pid_matches_current_executable(pid: u32) -> bool {
     let Ok(target_exe) = std::fs::read_link(format!("/proc/{pid}/exe")) else {
         return false;
     };
+    // Only compare consistently canonicalized paths. If the target cannot be
+    // canonicalized we cannot establish identity confidently, so refuse to
+    // treat it as a match rather than comparing a raw symlink target against a
+    // canonicalized current executable (operands in different normalization
+    // states). Refusing termination is the safe fallback.
     match std::fs::canonicalize(&target_exe) {
         Ok(target_exe) => target_exe == current_exe,
-        Err(_) => target_exe == current_exe,
+        Err(_) => false,
     }
 }
 

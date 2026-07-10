@@ -73,9 +73,10 @@ fn is_split_component_name(name: &str) -> bool {
 }
 
 fn is_split_source_file_name(name: &str) -> bool {
-    let Some(stem) = name.strip_suffix(".rs") else {
-        return false;
-    };
+    // Callers only invoke this for files that already end in `.rs`, so stripping
+    // the suffix always yields a distinct stem; a `== name` equality guard would
+    // be unreachable here. Mirrors the xtask enforcement helper.
+    let stem = name.strip_suffix(".rs").unwrap_or(name);
     is_part_numbered_name(stem) || is_core_numbered_name(stem) || stem.ends_with("_tail")
 }
 
@@ -118,8 +119,45 @@ fn is_core_numbered_name(stem: &str) -> bool {
 }
 
 fn line_contains_include_rs(line: &str) -> bool {
-    let Some(idx) = line.find("include!") else {
+    // Mirror the xtask enforcement helper: only flag actual
+    // `include!( ... ".rs" ... )` macro invocations. Ignore comments and
+    // mentions inside string literals so guidance text or doc comments that
+    // merely reference the macro name do not trip the check.
+    let code = strip_line_comment(line);
+    let Some(idx) = code.find("include!") else {
         return false;
     };
-    line[idx..].contains(".rs\"")
+    let after = code[idx + "include!".len()..].trim_start();
+    // A real macro invocation places an opening delimiter after the name.
+    if !after.starts_with('(') && !after.starts_with('[') && !after.starts_with('{') {
+        return false;
+    }
+    after.contains(".rs\"")
+}
+
+/// Remove a trailing `//` line comment, ignoring `//` sequences that appear
+/// inside a double-quoted string literal. Mirrors the xtask helper.
+fn strip_line_comment(line: &str) -> &str {
+    let bytes = line.as_bytes();
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut idx = 0;
+    while idx < bytes.len() {
+        let byte = bytes[idx];
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                in_string = false;
+            }
+        } else if byte == b'"' {
+            in_string = true;
+        } else if byte == b'/' && idx + 1 < bytes.len() && bytes[idx + 1] == b'/' {
+            return &line[..idx];
+        }
+        idx += 1;
+    }
+    line
 }

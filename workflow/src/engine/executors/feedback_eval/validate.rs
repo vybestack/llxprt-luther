@@ -237,6 +237,15 @@ pub(super) fn validate_reusable_accepted(
         return Err(feedback_eval_error("missing reusable reason"));
     }
     if value
+        .get("recommended_action")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim()
+        .is_empty()
+    {
+        return Err(feedback_eval_error("missing reusable recommended_action"));
+    }
+    if value
         .get("response_text")
         .and_then(Value::as_str)
         .unwrap_or_default()

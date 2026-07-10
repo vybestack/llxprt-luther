@@ -1,21 +1,21 @@
 use super::*;
 
 #[derive(Clone, Debug, Default, serde::Deserialize, serde::Serialize)]
-pub struct ParentOrchestrationRollup {
-    pub parent_issue_number: u64,
-    pub children: Vec<ChildRollupEntry>,
+pub(super) struct ParentOrchestrationRollup {
+    pub(super) parent_issue_number: u64,
+    pub(super) children: Vec<ChildRollupEntry>,
 }
 
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
-pub struct ChildRollupEntry {
-    pub child_issue_number: u64,
-    pub child_run_id: Option<String>,
-    pub child_artifact_dir: Option<String>,
-    pub pr_number: Option<u64>,
-    pub pr_state: Option<String>,
-    pub merge_sha: Option<String>,
-    pub outcome: Option<String>,
-    pub non_actionable_reason: Option<String>,
+pub(super) struct ChildRollupEntry {
+    pub(super) child_issue_number: u64,
+    pub(super) child_run_id: Option<String>,
+    pub(super) child_artifact_dir: Option<String>,
+    pub(super) pr_number: Option<u64>,
+    pub(super) pr_state: Option<String>,
+    pub(super) merge_sha: Option<String>,
+    pub(super) outcome: Option<String>,
+    pub(super) non_actionable_reason: Option<String>,
 }
 
 pub fn bool_context(context: &StepContext, primary: &str, fallback: &str) -> bool {

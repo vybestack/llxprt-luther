@@ -44,6 +44,7 @@ fn validate_reusable_accepted_checks_identity_and_binding() {
         "head_sha": "sha-head",
         "decision": "invalid",
         "reason": "r",
+        "recommended_action": "do the thing",
         "response_text": "y",
         "repository_owner": "acme",
         "repository_name": "widget",
@@ -63,12 +64,56 @@ fn validate_reusable_accepted_rejects_binding_mismatch() {
         "head_sha": "sha-head",
         "decision": "invalid",
         "reason": "r",
+        "recommended_action": "do the thing",
         "response_text": "y",
         "repository_owner": "acme",
         "repository_name": "widget",
         "pr_number": 999
     });
     assert!(validate_reusable_accepted(&b, &it, &value).is_err());
+}
+
+#[test]
+fn validate_reusable_accepted_rejects_missing_recommended_action() {
+    let it = item("a");
+    let b = binding();
+    // Reused accepted evaluations must enforce the same non-empty
+    // recommended_action invariant as newly validated responses.
+    let value = json!({
+        "item_id": "a",
+        "stable_marker_key": "thread:a",
+        "body_hash": "hash-a",
+        "head_sha": "sha-head",
+        "decision": "invalid",
+        "reason": "r",
+        "recommended_action": "   ",
+        "response_text": "y",
+        "repository_owner": "acme",
+        "repository_name": "widget",
+        "pr_number": 42
+    });
+    let err = validate_reusable_accepted(&b, &it, &value).unwrap_err();
+    assert!(format!("{err:?}").contains("recommended_action"));
+}
+
+#[test]
+fn validate_reusable_accepted_rejects_absent_recommended_action() {
+    let it = item("a");
+    let b = binding();
+    let value = json!({
+        "item_id": "a",
+        "stable_marker_key": "thread:a",
+        "body_hash": "hash-a",
+        "head_sha": "sha-head",
+        "decision": "invalid",
+        "reason": "r",
+        "response_text": "y",
+        "repository_owner": "acme",
+        "repository_name": "widget",
+        "pr_number": 42
+    });
+    let err = validate_reusable_accepted(&b, &it, &value).unwrap_err();
+    assert!(format!("{err:?}").contains("recommended_action"));
 }
 
 #[test]

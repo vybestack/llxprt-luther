@@ -7,24 +7,17 @@ use serde::Deserialize;
 use crate::adapters::github::GithubError;
 
 use super::graphql::{
-    graphql_issue_argv, graphql_response_error, GraphqlIssue, GraphqlResponse, GraphqlSubIssueEdge,
+    graphql_issue_argv, graphql_response_error, GraphqlIssue, GraphqlResponse,
+    GraphqlSubIssueConnection, GraphqlSubIssueEdge,
 };
 use super::{graphql_issue_to_issue, GithubSubIssue, SubIssueSource};
-
-#[derive(Debug, Default, Deserialize)]
-pub(super) struct GraphqlPageInfo {
-    #[serde(default, rename = "hasNextPage")]
-    pub(super) has_next_page: bool,
-    #[serde(rename = "endCursor")]
-    pub(super) end_cursor: Option<String>,
-}
 
 pub(super) type GraphqlSubIssuePageResponse = GraphqlResponse<GraphqlSubIssuePageIssue>;
 
 #[derive(Debug, Deserialize)]
 pub(super) struct GraphqlSubIssuePageIssue {
     #[serde(default, rename = "subIssues")]
-    pub(super) sub_issues: super::graphql::GraphqlSubIssueConnection,
+    pub(super) sub_issues: GraphqlSubIssueConnection,
 }
 
 pub(super) const SUB_ISSUE_PAGE_LIMIT_PREFIX: &str = "sub-issue GraphQL pagination exceeded ";
