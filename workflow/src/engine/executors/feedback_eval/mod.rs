@@ -186,11 +186,81 @@ struct FeedbackEvaluationArtifact {
     source_artifacts: Vec<Value>,
 }
 
+/// Load the coderabbit-feedback artifact and confirm it is ready to evaluate.
+///
+/// Returns `Ok(None)` after writing the appropriate fatal evaluation artifact
+/// when the feedback is missing/unbindable or not in the `ready` readiness
+/// state, so the caller can short-circuit with `StepOutcome::Fatal`.
+///
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P09
 /// @requirement:REQ-PRFU-011,REQ-PRFU-012,REQ-PRFU-017
 /// @pseudocode lines 1-23
-// Pre-existing orchestration flow; split in a dedicated refactor stage.
-#[allow(clippy::too_many_lines)]
+fn load_ready_feedback(
+    store: &PrFollowupArtifactStore,
+    binding: &PrFollowupBinding,
+    step_id: &str,
+    step_order: u64,
+    max_attempts: u64,
+    clock: &dyn ClockSleeper,
+) -> Result<Option<Value>, EngineError> {
+    let feedback = match store.read_current_json(binding, "coderabbit-feedback") {
+        Ok(value) => value,
+        Err(err) => {
+            let payload = empty_artifact(
+                EvaluationState::Fatal,
+                0,
+                max_attempts,
+                vec![json!({
+                    "artifact_family": "coderabbit-feedback",
+                    "error": err.to_string()
+                })],
+            );
+            write_evaluation_artifact(
+                store,
+                binding,
+                step_id,
+                step_order,
+                &payload,
+                clock,
+                Some((
+                    "fatal",
+                    "missing_or_unbindable_feedback",
+                    json!({ "error": err.to_string() }),
+                )),
+            )?;
+            return Ok(None);
+        }
+    };
+
+    if feedback.get("readiness_state").and_then(Value::as_str) != Some("ready") {
+        let payload = empty_artifact(
+            EvaluationState::Fatal,
+            0,
+            max_attempts,
+            vec![source_artifact(&feedback, "coderabbit-feedback")],
+        );
+        write_evaluation_artifact(
+            store,
+            binding,
+            step_id,
+            step_order,
+            &payload,
+            clock,
+            Some((
+                "fatal",
+                "feedback_not_ready",
+                json!({ "readiness_state": feedback.get("readiness_state").cloned().unwrap_or(Value::Null) }),
+            )),
+        )?;
+        return Ok(None);
+    }
+
+    Ok(Some(feedback))
+}
+
+/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P09
+/// @requirement:REQ-PRFU-011,REQ-PRFU-012,REQ-PRFU-017
+/// @pseudocode lines 1-23
 fn evaluate_coderabbit_feedback(
     context: &StepContext,
     params: &Value,
@@ -205,57 +275,11 @@ fn evaluate_coderabbit_feedback(
     let step_order = u64_param(params, "step_order_index", 6);
     let max_attempts = MAX_ATTEMPTS_PER_ITEM;
 
-    let feedback = match store.read_current_json(&binding, "coderabbit-feedback") {
-        Ok(value) => value,
-        Err(err) => {
-            let payload = empty_artifact(
-                EvaluationState::Fatal,
-                0,
-                max_attempts,
-                vec![json!({
-                    "artifact_family": "coderabbit-feedback",
-                    "error": err.to_string()
-                })],
-            );
-            write_evaluation_artifact(
-                &store,
-                &binding,
-                &step_id,
-                step_order,
-                &payload,
-                clock,
-                Some((
-                    "fatal",
-                    "missing_or_unbindable_feedback",
-                    json!({ "error": err.to_string() }),
-                )),
-            )?;
-            return Ok(StepOutcome::Fatal);
-        }
-    };
-
-    if feedback.get("readiness_state").and_then(Value::as_str) != Some("ready") {
-        let payload = empty_artifact(
-            EvaluationState::Fatal,
-            0,
-            max_attempts,
-            vec![source_artifact(&feedback, "coderabbit-feedback")],
-        );
-        write_evaluation_artifact(
-            &store,
-            &binding,
-            &step_id,
-            step_order,
-            &payload,
-            clock,
-            Some((
-                "fatal",
-                "feedback_not_ready",
-                json!({ "readiness_state": feedback.get("readiness_state").cloned().unwrap_or(Value::Null) }),
-            )),
-        )?;
-        return Ok(StepOutcome::Fatal);
-    }
+    let feedback =
+        match load_ready_feedback(&store, &binding, &step_id, step_order, max_attempts, clock)? {
+            Some(feedback) => feedback,
+            None => return Ok(StepOutcome::Fatal),
+        };
 
     let mut items = feedback_items(&feedback)?;
     items.sort_by(|left, right| {
@@ -278,184 +302,305 @@ fn evaluate_coderabbit_feedback(
         .cloned()
         .unwrap_or_default();
 
-    let mut accepted_results = Vec::new();
-    let mut rejected_attempts = Vec::new();
-    let mut unevaluated_items = Vec::new();
-    let mut budget_exhausted_items = Vec::new();
-    let mut fatal_reuse_errors = Vec::new();
     let mut new_state_entries = state_entries.clone();
-    let mut reused_results_count = 0;
-
+    let mut sets = EvaluationOutcomeSets::default();
+    let run = FeedbackEvaluationRun {
+        store: &store,
+        binding: &binding,
+        adapter,
+        clock,
+        step_id: &step_id,
+        step_order,
+        max_attempts,
+    };
     for item in &items {
-        match reusable_evaluation(&binding, item, &state_entries) {
+        run.process_item(item, &state_entries, &mut new_state_entries, &mut sets)?;
+    }
+
+    run.finalize(&items, &feedback, sets, new_state_entries)
+}
+
+/// Accumulated per-item evaluation outcomes for a single evaluation pass.
+///
+/// Extracted from `evaluate_coderabbit_feedback` so the per-item control flow
+/// lives in cohesive helpers instead of one oversized orchestration function.
+#[derive(Default)]
+struct EvaluationOutcomeSets {
+    accepted_results: Vec<Value>,
+    rejected_attempts: Vec<Value>,
+    unevaluated_items: Vec<Value>,
+    budget_exhausted_items: Vec<Value>,
+    fatal_reuse_errors: Vec<Value>,
+    reused_results_count: u64,
+}
+
+/// Immutable per-pass context shared by the per-item evaluation helpers.
+struct FeedbackEvaluationRun<'a> {
+    store: &'a PrFollowupArtifactStore,
+    binding: &'a PrFollowupBinding,
+    adapter: &'a dyn FeedbackEvaluationAdapter,
+    clock: &'a dyn ClockSleeper,
+    step_id: &'a str,
+    step_order: u64,
+    max_attempts: u64,
+}
+
+/// Map the completion flags to the overall [`EvaluationState`] for a pass.
+fn derive_evaluation_state(
+    complete: bool,
+    has_budget_exhausted: bool,
+    has_fatal_reuse: bool,
+) -> EvaluationState {
+    if complete {
+        EvaluationState::Complete
+    } else if has_budget_exhausted {
+        EvaluationState::BudgetExhausted
+    } else if has_fatal_reuse {
+        EvaluationState::Fatal
+    } else {
+        EvaluationState::Incomplete
+    }
+}
+
+impl FeedbackEvaluationRun<'_> {
+    /// Derive the overall evaluation state, persist the state artifact when the
+    /// pass is complete, write the evaluation artifact, and map the result to a
+    /// terminal [`StepOutcome`].
+    fn finalize(
+        &self,
+        items: &[FeedbackItem],
+        feedback: &Value,
+        sets: EvaluationOutcomeSets,
+        new_state_entries: Vec<Value>,
+    ) -> Result<StepOutcome, EngineError> {
+        let EvaluationOutcomeSets {
+            accepted_results,
+            rejected_attempts,
+            unevaluated_items,
+            budget_exhausted_items,
+            fatal_reuse_errors,
+            reused_results_count,
+        } = sets;
+
+        let complete = fatal_reuse_errors.is_empty()
+            && budget_exhausted_items.is_empty()
+            && unevaluated_items.is_empty()
+            && exactly_one_accepted_per_item(items, &accepted_results);
+        let evaluation_state = derive_evaluation_state(
+            complete,
+            !budget_exhausted_items.is_empty(),
+            !fatal_reuse_errors.is_empty(),
+        );
+
+        let payload = FeedbackEvaluationArtifact {
+            evaluation_state,
+            items_seen: items.len() as u64,
+            accepted_results,
+            rejected_attempts,
+            unevaluated_items,
+            budget_exhausted_items,
+            max_attempts_per_item: self.max_attempts,
+            reused_results_count,
+            source_artifacts: vec![source_artifact(feedback, "coderabbit-feedback")],
+        };
+
+        if complete {
+            write_state_artifact(
+                self.store,
+                self.binding,
+                self.step_id,
+                self.step_order,
+                new_state_entries,
+                self.clock,
+            )?;
+        }
+
+        let failure = if complete {
+            None
+        } else {
+            Some((
+                evaluation_state.as_str(),
+                match evaluation_state {
+                    EvaluationState::BudgetExhausted => "evaluation_budget_exhausted",
+                    _ => "evaluation_incomplete_or_fatal",
+                },
+                json!({
+                    "fatal_reuse_errors": fatal_reuse_errors,
+                    "items_seen": items.len()
+                }),
+            ))
+        };
+        write_evaluation_artifact(
+            self.store,
+            self.binding,
+            self.step_id,
+            self.step_order,
+            &payload,
+            self.clock,
+            failure,
+        )?;
+
+        Ok(if complete {
+            StepOutcome::Success
+        } else {
+            StepOutcome::Fatal
+        })
+    }
+
+    /// Evaluate a single feedback item, routing it to reuse, fatal, or fresh
+    /// evaluation and recording the outcome in `sets`.
+    fn process_item(
+        &self,
+        item: &FeedbackItem,
+        state_entries: &[Value],
+        new_state_entries: &mut Vec<Value>,
+        sets: &mut EvaluationOutcomeSets,
+    ) -> Result<(), EngineError> {
+        match reusable_evaluation(self.binding, item, state_entries) {
             ReuseLookup::Reuse(value) => {
                 let mut reused = value;
                 set_string_field(&mut reused, "source", "reused");
                 set_string_field(&mut reused, "reuse_state", "reused_from_state");
-                accepted_results.push(reused);
-                reused_results_count += 1;
+                sets.accepted_results.push(reused);
+                sets.reused_results_count += 1;
             }
             ReuseLookup::Fatal(reason) => {
-                fatal_reuse_errors.push(json!({
+                sets.fatal_reuse_errors.push(json!({
                     "item_id": item.item_id,
                     "stable_marker_key": item.stable_marker_key,
                     "body_hash": item.body_hash,
                     "head_sha": item.head_sha,
                     "reason": reason
                 }));
-                unevaluated_items.push(unevaluated_item(item, "fatal_prior_state"));
+                sets.unevaluated_items
+                    .push(unevaluated_item(item, "fatal_prior_state"));
             }
             ReuseLookup::NoMatch => {
-                let mut accepted: Option<Value> =
-                    deterministic_feedback_evaluation(item, clock.now_rfc3339());
-                if accepted.is_some() {
-                    if let Some(accepted_value) = accepted.as_ref() {
-                        upsert_state_entry(
-                            &mut new_state_entries,
-                            &binding,
-                            item,
-                            accepted_value,
-                            clock.now_rfc3339(),
-                        );
-                    }
-                }
-                for attempt in 1..=max_attempts {
-                    if accepted.is_some() {
-                        break;
-                    }
-                    let request = build_request(&binding, item);
-                    let raw = match adapter.evaluate(&request) {
-                        Ok(raw) => raw,
-                        Err(err) => {
-                            let raw = format!("feedback evaluator command error: {err}");
-                            let raw_response_artifact_path = write_raw_response(
-                                &store, &binding, &step_id, step_order, item, attempt, &raw, clock,
-                            )?;
-                            rejected_attempts.push(json!({
-                                "attempt_number": attempt,
-                                "item_id": item.item_id,
-                                "stable_marker_key": item.stable_marker_key,
-                                "body_hash": item.body_hash,
-                                "raw_response_artifact_path": raw_response_artifact_path.display().to_string(),
-                                "reject_reason": "command_error",
-                                "command_error": err.to_string(),
-                                "parsed_decision": null,
-                                "observed_head_sha": null
-                            }));
-                            continue;
-                        }
-                    };
-                    let raw_response_artifact_path = write_raw_response(
-                        &store, &binding, &step_id, step_order, item, attempt, &raw, clock,
-                    )?;
-
-                    match validate_response(&raw, &request) {
-                        Ok(response) => {
-                            let accepted_value = accepted_result(
-                                &response,
-                                clock.now_rfc3339(),
-                                attempt,
-                                "new",
-                                "not_reused",
-                            );
-                            accepted = Some(accepted_value.clone());
-                            upsert_state_entry(
-                                &mut new_state_entries,
-                                &binding,
-                                item,
-                                &accepted_value,
-                                clock.now_rfc3339(),
-                            );
-                            break;
-                        }
-                        Err(reject) => rejected_attempts.push(json!({
-                            "attempt_number": attempt,
-                            "item_id": item.item_id,
-                            "stable_marker_key": item.stable_marker_key,
-                            "body_hash": item.body_hash,
-                            "raw_response_artifact_path": raw_response_artifact_path.display().to_string(),
-                            "reject_reason": reject.reason,
-                            "parsed_decision": reject.parsed_decision,
-                            "observed_head_sha": reject.observed_head_sha
-                        })),
-                    }
-                }
-                if let Some(value) = accepted {
-                    accepted_results.push(value);
-                } else {
-                    budget_exhausted_items.push(json!({
-                        "item_id": item.item_id,
-                        "stable_marker_key": item.stable_marker_key,
-                        "body_hash": item.body_hash,
-                        "head_sha": item.head_sha,
-                        "attempts": max_attempts
-                    }));
-                }
+                self.evaluate_fresh_item(item, new_state_entries, sets)?;
             }
         }
+        Ok(())
     }
 
-    let complete = fatal_reuse_errors.is_empty()
-        && budget_exhausted_items.is_empty()
-        && unevaluated_items.is_empty()
-        && exactly_one_accepted_per_item(&items, &accepted_results);
-    let evaluation_state = if complete {
-        EvaluationState::Complete
-    } else if !budget_exhausted_items.is_empty() {
-        EvaluationState::BudgetExhausted
-    } else if !fatal_reuse_errors.is_empty() {
-        EvaluationState::Fatal
-    } else {
-        EvaluationState::Incomplete
-    };
-
-    let payload = FeedbackEvaluationArtifact {
-        evaluation_state,
-        items_seen: items.len() as u64,
-        accepted_results,
-        rejected_attempts,
-        unevaluated_items,
-        budget_exhausted_items,
-        max_attempts_per_item: max_attempts,
-        reused_results_count,
-        source_artifacts: vec![source_artifact(&feedback, "coderabbit-feedback")],
-    };
-
-    if complete {
-        write_state_artifact(
-            &store,
-            &binding,
-            &step_id,
-            step_order,
-            new_state_entries,
-            clock,
-        )?;
+    /// Run the deterministic-then-adapter attempt loop for an item with no
+    /// reusable prior state, seeding and updating `new_state_entries`.
+    fn evaluate_fresh_item(
+        &self,
+        item: &FeedbackItem,
+        new_state_entries: &mut Vec<Value>,
+        sets: &mut EvaluationOutcomeSets,
+    ) -> Result<(), EngineError> {
+        let mut accepted = deterministic_feedback_evaluation(item, self.clock.now_rfc3339());
+        if let Some(accepted_value) = accepted.as_ref() {
+            upsert_state_entry(
+                new_state_entries,
+                self.binding,
+                item,
+                accepted_value,
+                self.clock.now_rfc3339(),
+            );
+        }
+        for attempt in 1..=self.max_attempts {
+            if accepted.is_some() {
+                break;
+            }
+            self.run_attempt(item, attempt, new_state_entries, &mut accepted, sets)?;
+        }
+        if let Some(value) = accepted {
+            sets.accepted_results.push(value);
+        } else {
+            sets.budget_exhausted_items.push(json!({
+                "item_id": item.item_id,
+                "stable_marker_key": item.stable_marker_key,
+                "body_hash": item.body_hash,
+                "head_sha": item.head_sha,
+                "attempts": self.max_attempts
+            }));
+        }
+        Ok(())
     }
 
-    let failure = if complete {
-        None
-    } else {
-        Some((
-            evaluation_state.as_str(),
-            match evaluation_state {
-                EvaluationState::BudgetExhausted => "evaluation_budget_exhausted",
-                _ => "evaluation_incomplete_or_fatal",
-            },
-            json!({
-                "fatal_reuse_errors": fatal_reuse_errors,
-                "items_seen": items.len()
-            }),
-        ))
-    };
-    write_evaluation_artifact(
-        &store, &binding, &step_id, step_order, &payload, clock, failure,
-    )?;
+    /// Execute a single evaluator attempt, persisting the raw response and
+    /// recording either an accepted evaluation or a rejected attempt.
+    fn run_attempt(
+        &self,
+        item: &FeedbackItem,
+        attempt: u64,
+        new_state_entries: &mut Vec<Value>,
+        accepted: &mut Option<Value>,
+        sets: &mut EvaluationOutcomeSets,
+    ) -> Result<(), EngineError> {
+        let request = build_request(self.binding, item);
+        let raw = match self.adapter.evaluate(&request) {
+            Ok(raw) => raw,
+            Err(err) => {
+                let raw = format!("feedback evaluator command error: {err}");
+                let raw_response_artifact_path = self.write_raw(item, attempt, &raw)?;
+                sets.rejected_attempts.push(json!({
+                    "attempt_number": attempt,
+                    "item_id": item.item_id,
+                    "stable_marker_key": item.stable_marker_key,
+                    "body_hash": item.body_hash,
+                    "raw_response_artifact_path": raw_response_artifact_path.display().to_string(),
+                    "reject_reason": "command_error",
+                    "command_error": err.to_string(),
+                    "parsed_decision": null,
+                    "observed_head_sha": null
+                }));
+                return Ok(());
+            }
+        };
+        let raw_response_artifact_path = self.write_raw(item, attempt, &raw)?;
+        match validate_response(&raw, &request) {
+            Ok(response) => {
+                let accepted_value = accepted_result(
+                    &response,
+                    self.clock.now_rfc3339(),
+                    attempt,
+                    "new",
+                    "not_reused",
+                );
+                upsert_state_entry(
+                    new_state_entries,
+                    self.binding,
+                    item,
+                    &accepted_value,
+                    self.clock.now_rfc3339(),
+                );
+                *accepted = Some(accepted_value);
+            }
+            Err(reject) => sets.rejected_attempts.push(json!({
+                "attempt_number": attempt,
+                "item_id": item.item_id,
+                "stable_marker_key": item.stable_marker_key,
+                "body_hash": item.body_hash,
+                "raw_response_artifact_path": raw_response_artifact_path.display().to_string(),
+                "reject_reason": reject.reason,
+                "parsed_decision": reject.parsed_decision,
+                "observed_head_sha": reject.observed_head_sha
+            })),
+        }
+        Ok(())
+    }
 
-    Ok(if complete {
-        StepOutcome::Success
-    } else {
-        StepOutcome::Fatal
-    })
+    /// Persist a raw evaluator response for one attempt.
+    fn write_raw(
+        &self,
+        item: &FeedbackItem,
+        attempt: u64,
+        raw: &str,
+    ) -> Result<PathBuf, EngineError> {
+        write_raw_response(
+            self.store,
+            self.binding,
+            self.step_id,
+            self.step_order,
+            item,
+            attempt,
+            raw,
+            self.clock,
+        )
+    }
 }
 
 #[derive(Debug)]
