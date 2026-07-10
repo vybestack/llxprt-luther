@@ -98,6 +98,8 @@ fn guard() -> Result<()> {
         ensure_no_pattern_in_tree(&src_dir, pattern)?;
     }
 
+    enforce_no_include_stitching(&src_dir)?;
+
     Ok(())
 }
 
@@ -220,6 +222,8 @@ fn complexity(args: &[String]) -> Result<()> {
             if tests_dir.is_dir() {
                 enforce_file_line_limits(&tests_dir)?;
             }
+
+            enforce_no_include_stitching(&workspace_root.join("src"))?;
         }
     }
 
@@ -1011,6 +1015,131 @@ fn collect_pattern_violations(
     }
 
     Ok(())
+}
+
+const INCLUDE_STITCHING_GUIDANCE: &str = "Source stitching with include!(\"*.rs\") is not allowed for Rust module assembly. Split this code into semantic mod submodules with cohesive responsibilities and narrow visibility. Do not use numbered part files, tail files, or generic support buckets to satisfy file-size limits.";
+
+fn enforce_no_include_stitching(src_dir: &Path) -> Result<()> {
+    let mut violations = collect_include_stitching_violations(src_dir, src_dir)?;
+
+    if violations.is_empty() {
+        return Ok(());
+    }
+
+    violations.sort();
+    violations.dedup();
+    let details = violations
+        .into_iter()
+        .map(|(path, line, content)| format!("{}:{}: {}", path.display(), line, content.trim()))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    bail!(
+        "forbidden include!()/split-file source stitching detected in src/:\n{details}\n\n{INCLUDE_STITCHING_GUIDANCE}"
+    )
+}
+
+fn collect_include_stitching_violations(
+    dir: &Path,
+    root: &Path,
+) -> Result<Vec<(PathBuf, usize, String)>> {
+    let mut violations = Vec::new();
+    for entry in fs::read_dir(dir).with_context(|| format!("read dir {}", dir.display()))? {
+        let entry = entry.with_context(|| format!("read dir entry under {}", dir.display()))?;
+        let path = entry.path();
+
+        if path.is_dir() {
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if is_split_component_name(name) {
+                violations.push((relative_path(&path, root), 1, format!("dir {name}")));
+            }
+            violations.extend(collect_include_stitching_violations(&path, root)?);
+            continue;
+        }
+
+        if path.extension().and_then(|ext| ext.to_str()) != Some("rs") {
+            continue;
+        }
+
+        let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        if is_split_source_file_name(file_name) {
+            violations.push((relative_path(&path, root), 1, format!("file {file_name}")));
+        }
+
+        let content = fs::read_to_string(&path)
+            .with_context(|| format!("read source file {}", path.display()))?;
+        for (idx, line) in content.lines().enumerate() {
+            if line_contains_include_rs(line) {
+                violations.push((relative_path(&path, root), idx + 1, line.to_string()));
+            }
+        }
+    }
+
+    Ok(violations)
+}
+
+fn relative_path(path: &Path, root: &Path) -> PathBuf {
+    path.strip_prefix(root)
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn is_split_component_name(name: &str) -> bool {
+    is_part_numbered_name(name) || is_core_numbered_name(name)
+}
+
+fn is_split_source_file_name(name: &str) -> bool {
+    let stem = name.strip_suffix(".rs").unwrap_or(name);
+    if stem == name {
+        return false;
+    }
+    is_part_numbered_name(stem) || is_core_numbered_name(stem) || stem.ends_with("_tail")
+}
+
+fn is_part_numbered_name(stem: &str) -> bool {
+    let Some(rest) = stem.strip_prefix("part_") else {
+        return false;
+    };
+    let mut digits = rest.chars();
+    let Some(first) = digits.next() else {
+        return false;
+    };
+    if !first.is_ascii_digit() {
+        return false;
+    }
+    let mut seen_alpha = false;
+    for ch in digits {
+        if ch.is_ascii_digit() {
+            if seen_alpha {
+                return false;
+            }
+            continue;
+        }
+        if ch.is_ascii_lowercase() {
+            if seen_alpha {
+                return false;
+            }
+            seen_alpha = true;
+            continue;
+        }
+        return false;
+    }
+    true
+}
+
+fn is_core_numbered_name(stem: &str) -> bool {
+    let Some(rest) = stem.strip_prefix("core_") else {
+        return false;
+    };
+    !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit())
+}
+
+fn line_contains_include_rs(line: &str) -> bool {
+    let Some(idx) = line.find("include!") else {
+        return false;
+    };
+    let after = &line[idx..];
+    after.contains(".rs\"")
 }
 
 fn coverage_ignore_regex() -> String {

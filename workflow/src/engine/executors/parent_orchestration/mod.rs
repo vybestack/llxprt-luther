@@ -273,9 +273,19 @@ impl OrchestrationState {
     }
 }
 
-include!("core_1.rs");
-include!("core_2.rs");
-include!("core_3.rs");
+mod child_run;
+mod child_wait;
+mod completion;
+mod context;
+mod discovery;
+mod lease;
+
+use child_run::*;
+use child_wait::*;
+use completion::*;
+use context::*;
+use discovery::*;
+use lease::*;
 
 #[cfg(test)]
 mod tests;
