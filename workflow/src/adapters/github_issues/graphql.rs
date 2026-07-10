@@ -169,3 +169,112 @@ fn non_empty_json(value: &Option<serde_json::Value>) -> Option<String> {
         _ => Some(value.to_string()),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn error(
+        message: &str,
+        path: Option<serde_json::Value>,
+        locations: Option<serde_json::Value>,
+        extensions: Option<serde_json::Value>,
+    ) -> GraphqlError {
+        GraphqlError {
+            message: message.to_string(),
+            path,
+            locations,
+            extensions,
+        }
+    }
+
+    #[test]
+    fn graphql_issue_argv_builds_owner_name_number_flags() {
+        let argv = graphql_issue_argv("acme/widgets", 42, "query Foo { bar }").unwrap();
+        assert_eq!(
+            argv,
+            vec![
+                "gh".to_string(),
+                "api".to_string(),
+                "graphql".to_string(),
+                "-f".to_string(),
+                "query=query Foo { bar }".to_string(),
+                "-F".to_string(),
+                "owner=acme".to_string(),
+                "-F".to_string(),
+                "name=widgets".to_string(),
+                "-F".to_string(),
+                "number=42".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn graphql_issue_argv_rejects_malformed_repo() {
+        assert!(graphql_issue_argv("no-slash", 1, "q").is_err());
+        assert!(graphql_issue_argv("owner/", 1, "q").is_err());
+    }
+
+    #[test]
+    fn graphql_response_error_is_none_without_errors() {
+        let argv = vec!["gh".to_string()];
+        assert!(graphql_response_error(&argv, &[]).is_none());
+    }
+
+    #[test]
+    fn graphql_response_error_joins_multiple_error_contexts() {
+        let argv = vec!["gh".to_string(), "api".to_string()];
+        let errors = vec![
+            error("first failed", None, None, None),
+            error(
+                "second failed",
+                Some(json!(["repository", "issue"])),
+                Some(json!([{ "line": 3, "column": 5 }])),
+                Some(json!({ "code": "NOT_FOUND" })),
+            ),
+        ];
+        let Some(GithubError::CommandFailed {
+            argv: reported_argv,
+            exit_code,
+            stderr,
+        }) = graphql_response_error(&argv, &errors)
+        else {
+            panic!("expected CommandFailed error");
+        };
+        assert_eq!(reported_argv, argv);
+        assert_eq!(exit_code, None);
+        assert!(stderr.contains("GitHub GraphQL returned errors:"));
+        assert!(stderr.contains("first failed"));
+        assert!(stderr.contains("second failed"));
+        assert!(stderr.contains("path="));
+        assert!(stderr.contains("locations="));
+        assert!(stderr.contains("extensions="));
+        // The two error contexts are separated by "; ".
+        assert!(stderr.contains("; "));
+    }
+
+    #[test]
+    fn graphql_error_context_omits_empty_and_null_optional_fields() {
+        // Null, empty array, and empty object are all treated as absent so the
+        // context contains only the message.
+        let only_message = error("boom", Some(json!(null)), Some(json!([])), Some(json!({})));
+        assert_eq!(graphql_error_context(&only_message), "boom");
+    }
+
+    #[test]
+    fn non_empty_json_filters_empty_containers_and_null() {
+        assert_eq!(non_empty_json(&None), None);
+        assert_eq!(non_empty_json(&Some(json!(null))), None);
+        assert_eq!(non_empty_json(&Some(json!([]))), None);
+        assert_eq!(non_empty_json(&Some(json!({}))), None);
+        assert_eq!(
+            non_empty_json(&Some(json!(["a"]))),
+            Some("[\"a\"]".to_string())
+        );
+        assert_eq!(
+            non_empty_json(&Some(json!({ "k": 1 }))),
+            Some("{\"k\":1}".to_string())
+        );
+    }
+}

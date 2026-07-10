@@ -362,3 +362,58 @@ fn stable_item_id_hash(value: &str) -> String {
     }
     format!("{hash:016x}")
 }
+
+#[cfg(test)]
+mod artifact_helper_tests {
+    use super::{floor_char_boundary, sanitized_stem_is_blank, stable_item_id_hash};
+
+    #[test]
+    fn floor_char_boundary_returns_len_when_index_exceeds_len() {
+        let value = "abc";
+        assert_eq!(floor_char_boundary(value, 10), value.len());
+        assert_eq!(floor_char_boundary(value, value.len()), value.len());
+    }
+
+    #[test]
+    fn floor_char_boundary_walks_back_off_multibyte_sequences() {
+        // "é" is two bytes (0xC3 0xA9); "€" is three bytes. Slicing mid-sequence
+        // would panic, so the helper must retreat to the previous boundary.
+        let value = "aé€b";
+        // Byte layout: a=0, é=1..3, €=3..6, b=6..7.
+        assert_eq!(floor_char_boundary(value, 0), 0);
+        assert_eq!(floor_char_boundary(value, 1), 1);
+        // Index 2 is inside "é"; retreat to 1.
+        assert_eq!(floor_char_boundary(value, 2), 1);
+        assert_eq!(floor_char_boundary(value, 3), 3);
+        // Indices 4 and 5 are inside "€"; retreat to 3.
+        assert_eq!(floor_char_boundary(value, 4), 3);
+        assert_eq!(floor_char_boundary(value, 5), 3);
+        assert_eq!(floor_char_boundary(value, 6), 6);
+        // Every returned index must be a valid char boundary and safe to slice.
+        for index in 0..=value.len() {
+            let boundary = floor_char_boundary(value, index);
+            assert!(value.is_char_boundary(boundary));
+            let _ = &value[..boundary];
+        }
+    }
+
+    #[test]
+    fn sanitized_stem_is_blank_detects_empty_and_all_fill() {
+        assert!(sanitized_stem_is_blank(""));
+        assert!(sanitized_stem_is_blank("_"));
+        assert!(sanitized_stem_is_blank("____"));
+        assert!(!sanitized_stem_is_blank("_a_"));
+        assert!(!sanitized_stem_is_blank("abc"));
+    }
+
+    #[test]
+    fn stable_item_id_hash_is_deterministic_and_distinct() {
+        let a = stable_item_id_hash("!!!");
+        let b = stable_item_id_hash("!!!");
+        let c = stable_item_id_hash("###");
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+        assert_eq!(a.len(), 16);
+        assert!(a.chars().all(|ch| ch.is_ascii_hexdigit()));
+    }
+}
