@@ -1,4 +1,32 @@
 use super::*;
+use std::collections::HashMap;
+
+/// Lookup of child rollup entries keyed by child issue number.
+///
+/// Built once per completion-evaluation pass so the per-child helpers below do
+/// not each re-scan `rollup.children`. The previous `.iter().find(..)` /
+/// `.any(..)` scans were invoked once per child from callers that also iterate
+/// every child (for example `evaluate_acceptance_criteria` and
+/// `required_prs_satisfied`), producing avoidable O(N*M) behavior.
+struct ChildRollupIndex<'a> {
+    by_child: HashMap<u64, &'a ChildRollupEntry>,
+}
+
+impl<'a> ChildRollupIndex<'a> {
+    fn new(rollup: &'a ParentOrchestrationRollup) -> Self {
+        let mut by_child = HashMap::with_capacity(rollup.children.len());
+        for entry in &rollup.children {
+            // Preserve the first-match semantics of the previous linear scans if
+            // duplicate child issue numbers ever appear in a rollup.
+            by_child.entry(entry.child_issue_number).or_insert(entry);
+        }
+        Self { by_child }
+    }
+
+    fn get(&self, child_issue_number: u64) -> Option<&'a ChildRollupEntry> {
+        self.by_child.get(&child_issue_number).copied()
+    }
+}
 
 pub fn evaluate_parent_completion(
     context: &mut StepContext,
@@ -69,9 +97,10 @@ pub fn incomplete_child_numbers(
     states: &[ChildIssueState],
     rollup: &ParentOrchestrationRollup,
 ) -> Vec<u64> {
+    let index = ChildRollupIndex::new(rollup);
     states
         .iter()
-        .filter(|child| !child_completion_satisfied(child, rollup))
+        .filter(|child| !child_completion_satisfied_indexed(child, &index))
         .map(|child| child.issue_number)
         .collect()
 }
@@ -91,9 +120,10 @@ pub fn required_prs_satisfied(
     // An empty required-PR state set is vacuously satisfied: a parent with no
     // child issues has no required PRs to evaluate and must not be blocked by
     // this gate (mirrors the `active_children.is_empty()` completion check).
+    let index = ChildRollupIndex::new(rollup);
     states.iter().all(|child| match child.terminal_state {
         ChildIssueStatus::Merged => true,
-        ChildIssueStatus::Closed => child_has_explicit_non_actionable_reason(child, rollup),
+        ChildIssueStatus::Closed => child_has_explicit_non_actionable_reason_indexed(child, &index),
         _ => false,
     }) && !rollup
         .children
@@ -101,28 +131,23 @@ pub fn required_prs_satisfied(
         .any(unresolved_rollup_outcome_requires_pr)
 }
 
-pub fn child_completion_satisfied(
-    child: &ChildIssueState,
-    rollup: &ParentOrchestrationRollup,
-) -> bool {
-    child_is_complete(child) || child_has_explicit_non_actionable_reason(child, rollup)
+fn child_completion_satisfied_indexed(child: &ChildIssueState, index: &ChildRollupIndex) -> bool {
+    child_is_complete(child) || child_has_explicit_non_actionable_reason_indexed(child, index)
 }
 
-pub fn child_has_explicit_non_actionable_reason(
+fn child_has_explicit_non_actionable_reason_indexed(
     child: &ChildIssueState,
-    rollup: &ParentOrchestrationRollup,
+    index: &ChildRollupIndex,
 ) -> bool {
     child.terminal_state == ChildIssueStatus::Closed
-        && rollup.children.iter().any(|entry| {
-            entry.child_issue_number == child.issue_number
-                && matches!(
-                    entry.outcome.as_deref(),
-                    Some("non_actionable_child" | "non_actionable_child_lease")
-                )
-                && entry
-                    .non_actionable_reason
-                    .as_deref()
-                    .is_some_and(|reason| !reason.trim().is_empty())
+        && index.get(child.issue_number).is_some_and(|entry| {
+            matches!(
+                entry.outcome.as_deref(),
+                Some("non_actionable_child" | "non_actionable_child_lease")
+            ) && entry
+                .non_actionable_reason
+                .as_deref()
+                .is_some_and(|reason| !reason.trim().is_empty())
         })
 }
 
@@ -130,18 +155,16 @@ pub fn child_completion_evidence(
     states: &[ChildIssueState],
     rollup: &ParentOrchestrationRollup,
 ) -> Vec<Value> {
+    let index = ChildRollupIndex::new(rollup);
     states
         .iter()
         .map(|child| {
-            let rollup_entry = rollup
-                .children
-                .iter()
-                .find(|entry| entry.child_issue_number == child.issue_number);
+            let rollup_entry = index.get(child.issue_number);
             json!({
                 "child_issue_number": child.issue_number,
                 "terminal_state": child.terminal_state,
                 "pr_number": child.pr_number,
-                "completion_satisfied": child_completion_satisfied(child, rollup),
+                "completion_satisfied": child_completion_satisfied_indexed(child, &index),
                 "non_actionable_reason": rollup_entry.and_then(|entry| entry.non_actionable_reason.clone()),
                 "merge_sha": rollup_entry.and_then(|entry| entry.merge_sha.clone()),
                 "child_artifact_dir": rollup_entry.and_then(|entry| entry.child_artifact_dir.clone())
@@ -176,6 +199,7 @@ pub fn evaluate_acceptance_criteria(
     states: &[ChildIssueState],
     rollup: &ParentOrchestrationRollup,
 ) -> AcceptanceEvaluation {
+    let index = ChildRollupIndex::new(rollup);
     let mut evidence = Vec::new();
     let mut remaining_work = Vec::new();
     evidence.push(format!("{} child issue(s) classified", states.len()));
@@ -202,13 +226,15 @@ pub fn evaluate_acceptance_criteria(
     }
     if states
         .iter()
-        .any(|child| !child_completion_satisfied(child, rollup))
+        .any(|child| !child_completion_satisfied_indexed(child, &index))
     {
         remaining_work.push("one or more child issues are not complete".to_string());
     }
     for child in states {
         match child.terminal_state {
-            ChildIssueStatus::Closed if child_has_explicit_non_actionable_reason(child, rollup) => {
+            ChildIssueStatus::Closed
+                if child_has_explicit_non_actionable_reason_indexed(child, &index) =>
+            {
                 evidence.push(format!(
                     "child issue #{} is closed with explicit non-actionable evidence",
                     child.issue_number
@@ -270,10 +296,14 @@ pub fn count_acceptance_criteria(body: &str) -> usize {
 }
 
 pub fn checklist_marker(trimmed: &str, markers: &[&str]) -> bool {
-    ["-", "*", "+"].into_iter().any(|bullet| {
-        markers
-            .iter()
-            .any(|marker| trimmed.starts_with(&format!("{bullet} {marker}")))
+    // Match a `<bullet> <marker>` prefix without allocating a new String per
+    // marker: strip the bullet and the single separating space, then test the
+    // remaining slice against each marker directly.
+    ['-', '*', '+'].into_iter().any(|bullet| {
+        trimmed
+            .strip_prefix(bullet)
+            .and_then(|rest| rest.strip_prefix(' '))
+            .is_some_and(|rest| markers.iter().any(|marker| rest.starts_with(marker)))
     })
 }
 

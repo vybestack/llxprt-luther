@@ -15,7 +15,7 @@ const P03_TOUCHED_RUST_FILES: [&str; 9] = [
     "src/engine/executors/pr_followup_types.rs",
     "src/engine/executors/github_pr.rs",
     "src/engine/executors/github_feedback/mod.rs",
-    "src/engine/executors/feedback_eval.rs",
+    "src/engine/executors/feedback_eval/mod.rs",
     "src/engine/executors/pr_remediation.rs",
     "tests/github_pr_followup_executor_tests.rs",
 ];
@@ -63,7 +63,7 @@ const P08_TOUCHED_RUST_FILES: [&str; 4] = [
 /// @pseudocode lines 1-23
 const P09_TOUCHED_RUST_FILES: [&str; 4] = [
     "src/engine/executor.rs",
-    "src/engine/executors/feedback_eval.rs",
+    "src/engine/executors/feedback_eval/mod.rs",
     "src/engine/executors/mod.rs",
     "tests/github_pr_followup_executor_tests.rs",
 ];

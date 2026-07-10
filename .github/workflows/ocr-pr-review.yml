@@ -286,8 +286,12 @@ jobs:
           # test/spec files (project policy: tests must be reviewed).
           : > ocr-preview.txt
           : > ocr-preview-stderr.log
+          # Only require review scope for test files that still exist at HEAD.
+          # `--diff-filter=ACMRT` excludes deletions (D): a removed test file
+          # cannot appear in OCR's reviewed set, so including deletions here
+          # would spuriously fail the scope check whenever a test is deleted.
           changed_tests="$(
-            git diff --name-only "${BASE_SHA}..${HEAD_SHA}" \
+            git diff --name-only --diff-filter=ACMRT "${BASE_SHA}..${HEAD_SHA}" \
               | grep -Ei '(^|/)(tests?|specs?|__tests__)/.*(\.(rs|ts|tsx|js|jsx|mjs|cjs|go|py|java|c|cc|cpp|h|hpp|rb|php|kt|kts|swift|scala))$|(^|/)(test_[^/]*\.py|[^/]*_test\.py|[^/]*_test\.go|[^/]*_spec\.(rs|ts|tsx|js|jsx|mjs|cjs|go|py|java|c|cc|cpp|h|hpp|rb|php|kt|kts|swift|scala)|[^/]*(Test|Tests)\.java|[^/]*_test\.(c|cc|cpp|h|hpp))$|(\.test\.|\.spec\.|_tests?\.rs|_spec\.rs)$' \
               || true
           )"
