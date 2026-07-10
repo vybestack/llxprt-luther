@@ -1,10 +1,10 @@
 use super::*;
 
-pub const STABLE_MARKER_THREAD_PREFIX: &str = "thread:";
-pub const GRAPHQL_NODE_ID_PREFIX: &str = "graphql:";
-pub const REVIEW_THREAD_NODE_ID_PREFIX: &str = "PRRT_";
+pub(super) const STABLE_MARKER_THREAD_PREFIX: &str = "thread:";
+pub(super) const GRAPHQL_NODE_ID_PREFIX: &str = "graphql:";
+pub(super) const REVIEW_THREAD_NODE_ID_PREFIX: &str = "PRRT_";
 
-pub fn direct_review_thread_id(value: &Value) -> Option<String> {
+pub(super) fn direct_review_thread_id(value: &Value) -> Option<String> {
     [
         "/thread_id",
         "/evidence/thread_id",
@@ -21,14 +21,16 @@ pub fn direct_review_thread_id(value: &Value) -> Option<String> {
     })
 }
 
-pub fn review_thread_id_from_stable_marker_key(value: &Value) -> Option<String> {
+pub(super) fn review_thread_id_from_stable_marker_key(value: &Value) -> Option<String> {
     value
         .get("stable_marker_key")
         .and_then(Value::as_str)
         .and_then(parse_review_thread_id_from_stable_marker_key)
 }
 
-pub fn parse_review_thread_id_from_stable_marker_key(stable_marker_key: &str) -> Option<String> {
+pub(super) fn parse_review_thread_id_from_stable_marker_key(
+    stable_marker_key: &str,
+) -> Option<String> {
     stable_marker_key
         .trim()
         .strip_prefix(STABLE_MARKER_THREAD_PREFIX)
@@ -39,7 +41,7 @@ pub fn parse_review_thread_id_from_stable_marker_key(stable_marker_key: &str) ->
         .map(ToString::to_string)
 }
 
-pub fn review_thread_id_from_graphql_item_id(value: &Value) -> Option<String> {
+pub(super) fn review_thread_id_from_graphql_item_id(value: &Value) -> Option<String> {
     [
         "/item_id",
         "/source_id",
@@ -54,7 +56,7 @@ pub fn review_thread_id_from_graphql_item_id(value: &Value) -> Option<String> {
     })
 }
 
-pub fn parse_review_thread_id_from_graphql_item_id(item_id: &str) -> Option<String> {
+pub(super) fn parse_review_thread_id_from_graphql_item_id(item_id: &str) -> Option<String> {
     item_id
         .trim()
         .strip_prefix(GRAPHQL_NODE_ID_PREFIX)
@@ -63,7 +65,7 @@ pub fn parse_review_thread_id_from_graphql_item_id(item_id: &str) -> Option<Stri
         .map(ToString::to_string)
 }
 
-pub fn is_review_thread_node_id(thread_id: &str) -> bool {
+pub(super) fn is_review_thread_node_id(thread_id: &str) -> bool {
     thread_id.starts_with(REVIEW_THREAD_NODE_ID_PREFIX)
         && thread_id.len() > REVIEW_THREAD_NODE_ID_PREFIX.len()
 }

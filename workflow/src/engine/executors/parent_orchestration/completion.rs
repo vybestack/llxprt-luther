@@ -88,16 +88,17 @@ pub fn required_prs_satisfied(
     states: &[ChildIssueState],
     rollup: &ParentOrchestrationRollup,
 ) -> bool {
-    !states.is_empty()
-        && states.iter().all(|child| match child.terminal_state {
-            ChildIssueStatus::Merged => true,
-            ChildIssueStatus::Closed => child_has_explicit_non_actionable_reason(child, rollup),
-            _ => false,
-        })
-        && !rollup
-            .children
-            .iter()
-            .any(unresolved_rollup_outcome_requires_pr)
+    // An empty required-PR state set is vacuously satisfied: a parent with no
+    // child issues has no required PRs to evaluate and must not be blocked by
+    // this gate (mirrors the `active_children.is_empty()` completion check).
+    states.iter().all(|child| match child.terminal_state {
+        ChildIssueStatus::Merged => true,
+        ChildIssueStatus::Closed => child_has_explicit_non_actionable_reason(child, rollup),
+        _ => false,
+    }) && !rollup
+        .children
+        .iter()
+        .any(unresolved_rollup_outcome_requires_pr)
 }
 
 pub fn child_completion_satisfied(
@@ -281,11 +282,16 @@ pub fn active_child_leases(
     children: &[ChildIssueState],
 ) -> Result<Vec<Value>, EngineError> {
     let conn = daemon_connection()?;
+    let child_numbers: Vec<u64> = children.iter().map(|child| child.issue_number).collect();
+    // Fetch every child lease in a single batched query rather than issuing one
+    // database round trip per child.
+    let leases = get_leases_for_issues(&conn, &state.repo, &child_numbers).map_err(sql_error)?;
     let mut active = Vec::new();
     for child in children {
-        let lease =
-            get_lease_for_issue(&conn, &state.repo, child.issue_number).map_err(sql_error)?;
-        if let Some(lease) = lease.filter(active_child_lease_blocks_parent) {
+        if let Some(lease) = leases
+            .get(&child.issue_number)
+            .filter(|lease| active_child_lease_blocks_parent(lease))
+        {
             active.push(json!({
                 "issue_number": child.issue_number,
                 "run_id": lease.run_id,

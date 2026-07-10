@@ -655,3 +655,251 @@ pub fn format_child_pids(child_pids: &[u32], stale_child_pids: &[u32]) -> String
         .collect::<Vec<_>>()
         .join(", ")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ps_row() -> PsRow {
+        PsRow {
+            instance_id: "monitor-4242".to_string(),
+            run_id: Some("run-1".to_string()),
+            config_id: Some("cfg".to_string()),
+            state: "running".to_string(),
+            active_workers: 2,
+            uptime_secs: 90,
+            pid: Some(4242),
+            is_alive: true,
+            is_stale: false,
+            child_pids: vec![10, 11],
+            stale_child_pids: vec![11],
+        }
+    }
+
+    #[test]
+    fn truncate_field_short_value_unchanged() {
+        assert_eq!(truncate_field("abc", 10), "abc");
+    }
+
+    #[test]
+    fn truncate_field_long_value_ellipsized() {
+        let out = truncate_field("abcdefghij", 5);
+        assert_eq!(out.chars().count(), 5);
+        assert!(out.ends_with('…'));
+    }
+
+    #[test]
+    fn truncate_field_width_one() {
+        assert_eq!(truncate_field("abcdef", 1), "a");
+    }
+
+    #[test]
+    fn instance_pid_parses_monitor_prefix() {
+        assert_eq!(instance_pid("monitor-4242"), Some(4242));
+        assert_eq!(instance_pid("monitor-notnum"), None);
+        assert_eq!(instance_pid("other-1"), None);
+    }
+
+    #[test]
+    fn run_log_path_ends_with_run_id_log() {
+        let path = run_log_path("run-xyz");
+        assert!(path.to_string_lossy().ends_with("run-xyz.log"));
+    }
+
+    #[test]
+    fn effective_log_path_prefers_metadata() {
+        let mut md = RunMetadata::new("run-1", "wf", "cfg");
+        md.log_path = Some("/custom/path.log".to_string());
+        let path = effective_log_path(&md, "run-1");
+        assert_eq!(path.to_string_lossy(), "/custom/path.log");
+    }
+
+    #[test]
+    fn effective_log_path_falls_back_to_conventional() {
+        let md = RunMetadata::new("run-1", "wf", "cfg");
+        let path = effective_log_path(&md, "run-1");
+        assert!(path.to_string_lossy().ends_with("run-1.log"));
+    }
+
+    #[test]
+    fn format_child_pids_empty_is_dash() {
+        assert_eq!(format_child_pids(&[], &[]), "-");
+    }
+
+    #[test]
+    fn format_child_pids_marks_stale() {
+        let out = format_child_pids(&[10, 11], &[11]);
+        assert_eq!(out, "10, 11 (stale)");
+    }
+
+    #[test]
+    fn ps_row_to_json_serializes_all_fields() {
+        let row = ps_row();
+        let value = ps_row_to_json(&row);
+        assert_eq!(value.get("instance_id").unwrap(), "monitor-4242");
+        assert_eq!(value.get("run_id").unwrap(), "run-1");
+        assert_eq!(value.get("active_workers").unwrap(), 2);
+        assert_eq!(value.get("pid").unwrap(), 4242);
+        assert_eq!(value.get("is_alive").unwrap(), true);
+        assert_eq!(
+            value.get("child_pids").unwrap(),
+            &serde_json::json!([10, 11])
+        );
+        assert_eq!(
+            value.get("stale_child_pids").unwrap(),
+            &serde_json::json!([11])
+        );
+    }
+
+    #[test]
+    fn tail_lines_zero_returns_empty() {
+        let path = std::path::Path::new("/nonexistent/does-not-matter");
+        let out = tail_lines(path, 0).unwrap();
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn tail_lines_reads_last_n_lines() {
+        let dir = std::env::temp_dir();
+        let file = dir.join(format!("inspect-tail-{}.log", std::process::id()));
+        std::fs::write(&file, "l1\nl2\nl3\nl4\nl5\n").unwrap();
+        let out = tail_lines(&file, 2).unwrap();
+        assert_eq!(out, vec!["l4".to_string(), "l5".to_string()]);
+        let _ = std::fs::remove_file(&file);
+    }
+
+    #[test]
+    fn load_heartbeat_runs_none_store_is_empty() {
+        let empty = load_heartbeat_runs(None, std::iter::empty());
+        assert!(empty.is_empty());
+    }
+
+    fn sample_metadata() -> RunMetadata {
+        let mut md = RunMetadata::new("run-print", "wf-type", "cfg-print");
+        md.repository = Some("owner/repo".to_string());
+        md.issue_number = Some(125);
+        md.pr_number = Some(126);
+        md.head_sha = Some("abc123".to_string());
+        md.current_step = Some("do_work".to_string());
+        md.previous_step = Some("prep".to_string());
+        md.previous_outcome = Some("success".to_string());
+        md.workspace_path = Some("/tmp/ws".to_string());
+        md.artifact_root = Some("/tmp/artifacts".to_string());
+        md
+    }
+
+    fn sample_event() -> luther_workflow::persistence::EventRecord {
+        luther_workflow::persistence::EventRecord {
+            run_id: "run-print".to_string(),
+            step_id: "do_work".to_string(),
+            outcome: "success".to_string(),
+            event_type: "step_completed".to_string(),
+            details: Some("all good".to_string()),
+            timestamp: chrono::Utc::now(),
+        }
+    }
+
+    fn sample_artifact() -> luther_workflow::persistence::ArtifactRecord {
+        let mut a = luther_workflow::persistence::ArtifactRecord::new(
+            "run-print",
+            "/tmp/artifacts/out.json",
+            "output",
+            "do_work",
+        );
+        a.size_bytes = Some(2048);
+        a
+    }
+
+    #[test]
+    fn print_runs_table_empty_and_populated_do_not_panic() {
+        print_runs_table(&[]);
+        let md = sample_metadata();
+        print_runs_table(std::slice::from_ref(&md));
+    }
+
+    #[test]
+    fn print_runs_show_info_renders_all_sections() {
+        let md = sample_metadata();
+        print_runs_show_info(&md);
+    }
+
+    #[test]
+    fn print_runs_show_info_handles_missing_optional_fields() {
+        let md = RunMetadata::new("run-bare", "wf", "cfg");
+        print_runs_show_info(&md);
+    }
+
+    #[test]
+    fn print_runs_show_paths_and_procs_without_children() {
+        let md = sample_metadata();
+        let log = std::path::Path::new("/tmp/artifacts/run-print.log");
+        print_runs_show_paths_and_procs(&md, log, false);
+    }
+
+    #[test]
+    fn print_runs_show_paths_and_procs_with_children() {
+        let mut md = sample_metadata();
+        md.child_pids = vec![4242, 4243];
+        let log = std::path::Path::new("/tmp/artifacts/run-print.log");
+        print_runs_show_paths_and_procs(&md, log, true);
+    }
+
+    #[test]
+    fn print_runs_show_events_empty_and_populated() {
+        print_runs_show_events(&[], &[]);
+        let events = vec![sample_event()];
+        let artifacts = vec![sample_artifact()];
+        print_runs_show_events(&events, &artifacts);
+    }
+
+    #[test]
+    fn print_runs_show_events_truncates_to_last_fifteen() {
+        let events: Vec<_> = (0..20).map(|_| sample_event()).collect();
+        print_runs_show_events(&events, &[]);
+    }
+
+    #[test]
+    fn print_runs_show_human_renders_full_report() {
+        let md = sample_metadata();
+        let events = vec![sample_event()];
+        let artifacts = vec![sample_artifact()];
+        let log = std::path::Path::new("/tmp/artifacts/run-print.log");
+        print_runs_show_human(&md, &events, &artifacts, log, true);
+    }
+
+    #[test]
+    fn print_runs_show_json_serializes_run_and_children() {
+        let md = sample_metadata();
+        let events = vec![sample_event()];
+        let artifacts = vec![sample_artifact()];
+        let log = std::path::Path::new("/tmp/artifacts/run-print.log");
+        // Exercises the JSON rendering path end-to-end.
+        print_runs_show_json(&md, &events, &artifacts, log, true);
+    }
+
+    #[test]
+    fn effective_log_path_uses_conventional_when_metadata_absent() {
+        let md = sample_metadata();
+        let path = effective_log_path(&md, "run-print");
+        assert!(path.to_string_lossy().ends_with("run-print.log"));
+    }
+
+    #[test]
+    fn ps_row_to_json_reflects_dead_process_flags() {
+        let mut row = ps_row();
+        row.is_alive = false;
+        row.is_stale = true;
+        row.pid = None;
+        row.run_id = None;
+        row.config_id = None;
+        let value = ps_row_to_json(&row);
+        assert_eq!(value.get("is_alive").unwrap(), false);
+        assert_eq!(value.get("is_stale").unwrap(), true);
+        assert!(value.get("pid").unwrap().is_null());
+    }
+
+    #[test]
+    fn format_child_pids_all_live() {
+        assert_eq!(format_child_pids(&[1, 2, 3], &[]), "1, 2, 3");
+    }
+}

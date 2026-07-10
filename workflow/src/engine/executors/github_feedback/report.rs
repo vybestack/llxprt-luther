@@ -1,13 +1,14 @@
 use super::*;
+use crate::engine::executors::pr_followup_artifacts::ArtifactWriter;
 
-pub struct ResolveAudit<'a> {
+pub(super) struct ResolveAudit<'a> {
     pub resolve_attempted: bool,
     pub resolve_succeeded: bool,
     pub resolve_error: Option<&'a str>,
     pub final_thread_resolved_state: Option<bool>,
 }
 
-pub fn marker_action_audit(
+pub(super) fn marker_action_audit(
     action: &PendingMarkerAction,
     status: &str,
     comment_key: &str,
@@ -42,7 +43,7 @@ pub fn marker_action_audit(
 /// `response_text` for the item.
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P15
 /// @requirement:REQ-PRFU-015,REQ-PRFU-016,REQ-PRFU-017
-pub fn render_default_marker_visible(action: &PendingMarkerAction) -> String {
+pub(super) fn render_default_marker_visible(action: &PendingMarkerAction) -> String {
     match action.action_kind.as_str() {
         "comment_fixed" => format!(
             "Luther follow-up: fixed CodeRabbit feedback `{}`. Evidence: {}.",
@@ -70,7 +71,7 @@ pub fn render_default_marker_visible(action: &PendingMarkerAction) -> String {
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P15
 /// @requirement:REQ-PRFU-015,REQ-PRFU-016,REQ-PRFU-017
 /// @pseudocode lines 43-45
-pub fn render_marker_comment_body(
+pub(super) fn render_marker_comment_body(
     binding: &PrFollowupBinding,
     action: &PendingMarkerAction,
 ) -> String {
@@ -99,7 +100,7 @@ pub fn render_marker_comment_body(
 /// top-level PR comment is ever created (even on reruns).
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P15
 /// @requirement:REQ-PRFU-020
-pub fn skipped_summary_marker_outcome(
+pub(super) fn skipped_summary_marker_outcome(
     action: PendingMarkerAction,
     comment_key: String,
     resolution_key: String,
@@ -164,7 +165,7 @@ pub fn skipped_summary_marker_outcome(
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P15
 /// @requirement:REQ-PRFU-017
 /// @pseudocode lines 45
-pub fn skipped_needs_user_judgment_outcome(
+pub(super) fn skipped_needs_user_judgment_outcome(
     action: PendingMarkerAction,
     comment_key: String,
     resolution_key: String,
@@ -232,7 +233,7 @@ pub fn skipped_needs_user_judgment_outcome(
     }
 }
 
-pub fn validate_marker_action_evidence(
+pub(super) fn validate_marker_action_evidence(
     binding: &PrFollowupBinding,
     store: &PrFollowupArtifactStore,
     action: PendingMarkerAction,
@@ -311,7 +312,7 @@ pub fn validate_marker_action_evidence(
     }))
 }
 
-pub fn marker_action_has_validator_success(
+pub(super) fn marker_action_has_validator_success(
     binding: &PrFollowupBinding,
     action: &PendingMarkerAction,
     result: &Value,
@@ -367,7 +368,7 @@ pub fn marker_action_has_validator_success(
         })
 }
 
-pub fn write_marker_comment_body_file(
+pub(super) fn write_marker_comment_body_file(
     store: &PrFollowupArtifactStore,
     binding: &PrFollowupBinding,
     step_id: &str,
@@ -402,7 +403,7 @@ pub fn write_marker_comment_body_file(
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P15
 /// @requirement:REQ-PRFU-015,REQ-PRFU-026
 /// @pseudocode lines 46-49
-pub fn resolution_policy(action: &PendingMarkerAction, params: &Value) -> &'static str {
+pub(super) fn resolution_policy(action: &PendingMarkerAction, params: &Value) -> &'static str {
     // needs_user_judgment is always left open for a human to decide.
     if action.action_kind == "comment_needs_user_judgment" {
         return "skip";
@@ -431,7 +432,7 @@ pub fn resolution_policy(action: &PendingMarkerAction, params: &Value) -> &'stat
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P15
 /// @requirement:REQ-PRFU-016,REQ-PRFU-026
 /// @pseudocode lines 43-49
-pub fn marker_action_key(
+pub(super) fn marker_action_key(
     binding: &PrFollowupBinding,
     action: &PendingMarkerAction,
     operation: &str,
@@ -454,7 +455,7 @@ pub fn marker_action_key(
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P15
 /// @requirement:REQ-PRFU-016
 /// @pseudocode lines 43-44
-pub fn marker_action_key_from_marker(
+pub(super) fn marker_action_key_from_marker(
     binding: &PrFollowupBinding,
     marker: &RemoteFeedbackMarker,
     operation: &str,
@@ -480,7 +481,7 @@ pub fn marker_action_key_from_marker(
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P15
 /// @requirement:REQ-PRFU-015,REQ-PRFU-016,REQ-PRFU-026
 /// @pseudocode lines 47-49
-pub fn marker_report_payload(
+pub(super) fn marker_report_payload(
     binding: &PrFollowupBinding,
     outcomes: &[MarkerActionOutcome],
     malformed_remote_markers: Vec<Value>,
@@ -542,7 +543,7 @@ pub fn marker_report_payload(
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P15
 /// @requirement:REQ-PRFU-016,REQ-PRFU-026
 /// @pseudocode lines 47-49
-pub fn write_updated_pending_actions(
+pub(super) fn write_updated_pending_actions(
     store: &PrFollowupArtifactStore,
     binding: &PrFollowupBinding,
     step_id: &str,
@@ -592,7 +593,7 @@ pub fn write_updated_pending_actions(
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P15
 /// @requirement:REQ-PRFU-015
 /// @pseudocode lines 45
-pub fn sanitize_visible_text(text: &str) -> String {
+pub(super) fn sanitize_visible_text(text: &str) -> String {
     text.replace('`', "'")
         .replace("<!--", "&lt;!--")
         .replace("-->", "--&gt;")
@@ -601,7 +602,7 @@ pub fn sanitize_visible_text(text: &str) -> String {
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P08
 /// @requirement:REQ-PRFU-008,REQ-PRFU-009
 /// @pseudocode lines 20,26-28
-pub fn write_feedback_artifacts(
+pub(super) fn write_feedback_artifacts(
     store: &PrFollowupArtifactStore,
     binding: &PrFollowupBinding,
     step_id: &str,
@@ -656,7 +657,7 @@ pub fn write_feedback_artifacts(
 /// @requirement:REQ-PRFU-008,REQ-PRFU-009
 /// @pseudocode lines 14,20-23
 #[allow(clippy::too_many_arguments)]
-pub fn feedback_payload(
+pub(super) fn feedback_payload(
     binding: &PrFollowupBinding,
     readiness_state: &str,
     stable_count: u64,
@@ -702,7 +703,7 @@ pub fn feedback_payload(
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P08
 /// @requirement:REQ-PRFU-008
 /// @pseudocode lines 14-19
-pub fn observation_json(
+pub(super) fn observation_json(
     observation: &FeedbackObservation,
     item_hash: &str,
     budget_used: u64,
@@ -735,7 +736,7 @@ pub fn observation_json(
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P08
 /// @requirement:REQ-PRFU-008,REQ-PRFU-009
 /// @pseudocode lines 7-14
-pub fn item_json(item: &FeedbackItem) -> Value {
+pub(super) fn item_json(item: &FeedbackItem) -> Value {
     json!({
         "item_id": item.item_id,
         "stable_marker_key": item.stable_marker_key,
@@ -768,7 +769,7 @@ pub fn item_json(item: &FeedbackItem) -> Value {
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P08
 /// @requirement:REQ-PRFU-009
 /// @pseudocode lines 13,20
-pub fn remote_marker_json(marker: &RemoteFeedbackMarker) -> Value {
+pub(super) fn remote_marker_json(marker: &RemoteFeedbackMarker) -> Value {
     json!({
         "stable_marker_key": marker.stable_marker_key,
         "source_head_sha": marker.source_head_sha,

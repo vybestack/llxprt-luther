@@ -33,9 +33,8 @@ fn src_dir() -> PathBuf {
 }
 
 fn walk(dir: &Path, root: &Path, violations: &mut Vec<(PathBuf, usize, String)>) {
-    let Ok(entries) = fs::read_dir(dir) else {
-        return;
-    };
+    let entries =
+        fs::read_dir(dir).unwrap_or_else(|err| panic!("read dir {}: {err}", dir.display()));
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {

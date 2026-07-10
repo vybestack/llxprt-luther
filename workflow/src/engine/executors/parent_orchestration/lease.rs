@@ -44,12 +44,12 @@ pub fn daemon_connection() -> Result<rusqlite::Connection, EngineError> {
 }
 
 #[derive(Default)]
-pub struct DaemonDatabaseInitState {
-    pub initialized: std::collections::BTreeSet<PathBuf>,
-    pub in_flight: std::collections::BTreeMap<PathBuf, std::sync::Arc<std::sync::Mutex<()>>>,
+struct DaemonDatabaseInitState {
+    initialized: std::collections::BTreeSet<PathBuf>,
+    in_flight: std::collections::BTreeMap<PathBuf, std::sync::Arc<std::sync::Mutex<()>>>,
 }
 
-pub fn ensure_daemon_database_initialized(db_path: &Path) -> Result<(), EngineError> {
+fn ensure_daemon_database_initialized(db_path: &Path) -> Result<(), EngineError> {
     static INITIALIZED_DATABASES: std::sync::OnceLock<std::sync::Mutex<DaemonDatabaseInitState>> =
         std::sync::OnceLock::new();
     let init_state = INITIALIZED_DATABASES.get_or_init(Default::default);
@@ -86,7 +86,7 @@ pub fn ensure_daemon_database_initialized(db_path: &Path) -> Result<(), EngineEr
     }
 }
 
-pub fn lock_daemon_database_init_state(
+fn lock_daemon_database_init_state(
     init_state: &std::sync::Mutex<DaemonDatabaseInitState>,
 ) -> std::sync::MutexGuard<'_, DaemonDatabaseInitState> {
     init_state
@@ -94,7 +94,7 @@ pub fn lock_daemon_database_init_state(
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-pub fn configure_parent_orchestration_connection(
+fn configure_parent_orchestration_connection(
     conn: &rusqlite::Connection,
 ) -> Result<(), EngineError> {
     conn.busy_timeout(std::time::Duration::from_secs(5))

@@ -130,11 +130,14 @@ pub fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T, Engin
 
 pub fn clear_selected_child(artifact_root: &Path) -> Result<(), EngineError> {
     let path = artifact_root.join("selected-child.json");
-    if path.exists() {
-        fs::remove_file(&path)
-            .map_err(|err| parent_error(format!("remove {}: {err}", path.display())))?;
+    // Remove directly and treat a missing file as success. An exists-then-remove
+    // sequence races with concurrent removal and would surface a spurious
+    // NotFound error as an orchestration failure.
+    match fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(parent_error(format!("remove {}: {err}", path.display()))),
     }
-    Ok(())
 }
 
 pub fn read_children(

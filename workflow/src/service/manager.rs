@@ -84,6 +84,24 @@ impl ServiceManagerError {
         }
     }
 
+    /// Build an error describing a failure to resolve the service executable
+    /// path for `operation`.
+    ///
+    /// Surfaced when neither an explicit `--binary` override nor
+    /// `std::env::current_exe()` yields a usable path, so callers receive an
+    /// actionable message instead of silently installing a service that points
+    /// at a bare, unresolved binary name.
+    pub fn executable_resolution_failure(operation: ServiceOperation) -> Self {
+        ServiceManagerError::Operation {
+            platform: current_platform(),
+            operation,
+            message: "unable to determine the luther-workflow executable path: \
+                      std::env::current_exe() failed and no --binary override was provided"
+                .to_string(),
+            log_path: None,
+        }
+    }
+
     /// Platform- and operation-specific remediation guidance.
     ///
     /// Always includes the log path verbatim when known so operators can find

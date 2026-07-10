@@ -888,6 +888,3 @@ impl<R: GithubCommandRunner> SystemGithubIssueQuery<R> {
 
 #[cfg(test)]
 mod tests;
-
-#[cfg(test)]
-use subissues::parse_sub_issue_response;

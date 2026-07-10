@@ -1,4 +1,23 @@
-use super::*;
+use super::run::DaemonWorkflowLauncher;
+use super::runs::open_runs_store;
+use super::service::daemon_config_id;
+use super::status::install_interrupt_handlers;
+use luther_workflow::adapters::github::SystemGithubCommandRunner;
+use luther_workflow::adapters::github_issues::SystemGithubIssueQuery;
+use luther_workflow::daemon::discovery::{discover, DiscoveryResult};
+use luther_workflow::daemon::scheduler::{RunSummary, SchedulerTarget};
+use luther_workflow::daemon::{
+    is_daemon_alive, stop_daemon, DaemonState, DaemonStatus, DaemonStore, StopOutcome,
+};
+use luther_workflow::persistence::leases::{
+    list_all_leases, list_leases_by_config, IssueLease, LeaseStatus,
+};
+use luther_workflow::persistence::{init_database, list_wait_states, RunMetadata, SqliteStore};
+use luther_workflow::workflow::config_loader::{
+    load_daemon_scheduler_config, resolve_discovery_config, resolve_workflow_config,
+};
+use std::process;
+
 /// Dispatch the `daemon` command family.
 /// @plan:PLAN-20260404-INITIAL-RUNTIME.P09
 pub async fn handle_daemon_command(args: &luther_workflow::cli::DaemonArgs) {
@@ -562,3 +581,7 @@ mod lock;
 mod supervisor;
 pub use lock::*;
 pub use supervisor::*;
+
+#[cfg(test)]
+#[path = "mod_tests.rs"]
+mod mod_tests;

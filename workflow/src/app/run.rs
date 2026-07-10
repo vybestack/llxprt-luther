@@ -1,4 +1,24 @@
-use super::*;
+use super::runs::reconstruct_runner;
+use super::status::install_interrupt_handlers;
+use super::wait_state::persist_external_wait_state;
+use luther_workflow::adapters::github::{run_preflight, GithubError, SystemGithubCommandRunner};
+use luther_workflow::adapters::llxprt::{
+    run_preflight as run_llxprt_preflight, LlxprtError, SystemLlxprtCommandRunner,
+};
+use luther_workflow::engine::executor::ExecutorRegistry;
+use luther_workflow::engine::instance::WorkflowInstance;
+use luther_workflow::engine::runner::{EngineRunner, RunOutcome};
+use luther_workflow::persistence::{get_run_with_conn, init_database};
+use luther_workflow::workflow::config_loader::{
+    resolve_workflow, resolve_workflow_config, resolve_workflow_type,
+    validate_artifact_dependencies, validate_workflow_tokens,
+};
+use luther_workflow::workflow::schema::{WorkflowConfig, WorkflowType};
+use luther_workflow::workflow::target_profile::{
+    apply_target_profile_overrides, target_profile_validation_required, validate_target_profile,
+    TargetProfileOverrides,
+};
+use std::process;
 
 /// Report dry-run semantic validation: unresolved interpolation tokens and
 /// missing artifact producers. Returns `true` if any error was reported.
@@ -520,3 +540,7 @@ pub fn run_daemon_runner(
         Err(e) => Err(format!("run error: {e}")),
     }
 }
+
+#[cfg(test)]
+#[path = "run_tests.rs"]
+mod run_tests;

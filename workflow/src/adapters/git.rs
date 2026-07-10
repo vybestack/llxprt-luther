@@ -375,4 +375,196 @@ mod tests {
         let path = resolve_workspace_path(&config, "run-001");
         assert_eq!(path, PathBuf::from("/workspaces/run-001"));
     }
+
+    #[test]
+    fn repository_config_builders_override_defaults() {
+        let config = RepositoryConfig::new("https://example.com/repo.git")
+            .with_workspace("per_run")
+            .with_base_branch("develop")
+            .with_branch_template("feat-{run_id}");
+        assert_eq!(config.source, "https://example.com/repo.git");
+        assert_eq!(config.workspace, "per_run");
+        assert_eq!(config.base_branch.as_deref(), Some("develop"));
+        assert_eq!(config.branch_template, "feat-{run_id}");
+    }
+
+    #[test]
+    fn repository_config_new_has_expected_defaults() {
+        let config = RepositoryConfig::new("src");
+        assert_eq!(config.workspace, "shared");
+        assert_eq!(config.base_branch.as_deref(), Some("main"));
+        assert_eq!(config.branch_template, "luther-{run_id}");
+    }
+
+    #[test]
+    fn resolve_workspace_path_absolute_template_returns_direct() {
+        let config = RepositoryConfig::new("s").with_workspace("/abs/{run_id}/ws");
+        let path = resolve_workspace_path(&config, "r1");
+        assert_eq!(path, PathBuf::from("/abs/r1/ws"));
+    }
+
+    #[test]
+    fn git_error_diagnostics_include_exit_code() {
+        let err = RepoPrepError::GitError {
+            message: "boom".to_string(),
+            exit_code: Some(128),
+        };
+        let diag = err.get_diagnostics();
+        assert_eq!(
+            diag.get("error_type").map(String::as_str),
+            Some("RepoPrepError")
+        );
+        assert_eq!(diag.get("exit_code").map(String::as_str), Some("128"));
+        assert!(diag.contains_key("timestamp"));
+        assert!(diag.get("message").unwrap().contains("boom"));
+    }
+
+    #[test]
+    fn git_error_diagnostics_without_exit_code_omits_field() {
+        let err = RepoPrepError::GitError {
+            message: "no code".to_string(),
+            exit_code: None,
+        };
+        let diag = err.get_diagnostics();
+        assert!(!diag.contains_key("exit_code"));
+    }
+
+    #[test]
+    fn invalid_path_diagnostics_include_path() {
+        let err = RepoPrepError::InvalidPath {
+            path: "/nope".to_string(),
+        };
+        let diag = err.get_diagnostics();
+        assert_eq!(diag.get("path").map(String::as_str), Some("/nope"));
+    }
+
+    #[test]
+    fn branch_and_push_and_workspace_errors_render_messages() {
+        let branch = RepoPrepError::BranchError {
+            message: "b".to_string(),
+        };
+        let push = RepoPrepError::PushError {
+            message: "p".to_string(),
+        };
+        let ws = RepoPrepError::WorkspaceError {
+            message: "w".to_string(),
+        };
+        assert!(branch.to_string().contains("Branch operation failed"));
+        assert!(push.to_string().contains("Push failed"));
+        assert!(ws.to_string().contains("Workspace error"));
+        // Non-git/non-path variants fall through the diagnostics match arm.
+        assert!(!branch.get_diagnostics().contains_key("exit_code"));
+    }
+
+    fn run_git(dir: &Path, args: &[&str]) {
+        let status = Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .expect("run git");
+        assert!(
+            status.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&status.stderr)
+        );
+    }
+
+    fn init_repo_with_commit(dir: &Path) {
+        init_repository(dir).expect("init repo");
+        run_git(dir, &["config", "user.email", "t@example.com"]);
+        run_git(dir, &["config", "user.name", "Test"]);
+        run_git(dir, &["checkout", "-b", "main"]);
+        std::fs::write(dir.join("README.md"), "hello").expect("write file");
+        run_git(dir, &["add", "."]);
+        run_git(dir, &["commit", "-m", "init"]);
+    }
+
+    #[test]
+    fn init_repository_creates_git_dir() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo = temp.path().join("newrepo");
+        init_repository(&repo).expect("init");
+        assert!(repo.join(".git").exists());
+    }
+
+    #[test]
+    fn prepare_branch_creates_then_checks_out_existing() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        init_repo_with_commit(&repo);
+
+        // First call creates the branch from base.
+        let name = prepare_branch(&repo, "main", "fix-{run_id}", "r7").expect("prepare");
+        assert_eq!(name, "fix-r7");
+
+        // Switch back to main so the second call must find the existing branch.
+        run_git(&repo, &["checkout", "main"]);
+        let again = prepare_branch(&repo, "main", "fix-{run_id}", "r7").expect("prepare again");
+        assert_eq!(again, "fix-r7");
+    }
+
+    #[test]
+    fn prepare_branch_missing_workspace_is_invalid_path() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let missing = temp.path().join("does-not-exist");
+        let err = prepare_branch(&missing, "main", "b-{run_id}", "r1").unwrap_err();
+        assert!(matches!(err, RepoPrepError::InvalidPath { .. }));
+    }
+
+    #[test]
+    fn prepare_branch_unknown_base_returns_error() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        init_repo_with_commit(&repo);
+        let err = prepare_branch(&repo, "nonexistent-base", "b-{run_id}", "r1").unwrap_err();
+        assert!(matches!(err, RepoPrepError::GitError { .. }));
+    }
+
+    #[test]
+    fn push_branch_missing_workspace_is_invalid_path() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let missing = temp.path().join("nope");
+        let err = push_branch(&missing, "origin", "main").unwrap_err();
+        assert!(matches!(err, RepoPrepError::InvalidPath { .. }));
+    }
+
+    #[test]
+    fn push_branch_to_local_remote_succeeds_and_bad_remote_fails() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        init_repo_with_commit(&repo);
+
+        // Create a bare remote and push to it.
+        let remote = temp.path().join("remote.git");
+        run_git(temp.path(), &["init", "--bare", remote.to_str().unwrap()]);
+        run_git(
+            &repo,
+            &["remote", "add", "origin", remote.to_str().unwrap()],
+        );
+        push_branch(&repo, "origin", "main").expect("push to local remote");
+
+        // Pushing to an undefined remote fails.
+        let err = push_branch(&repo, "no-such-remote", "main").unwrap_err();
+        assert!(matches!(err, RepoPrepError::PushError { .. }));
+    }
+
+    #[test]
+    fn clone_repository_copies_local_source() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        init_repo_with_commit(&repo);
+
+        let dest = temp.path().join("clone");
+        clone_repository(repo.to_str().unwrap(), &dest).expect("clone");
+        assert!(dest.join("README.md").exists());
+    }
+
+    #[test]
+    fn clone_repository_invalid_source_errors() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let dest = temp.path().join("clone");
+        let err = clone_repository(temp.path().join("missing-source").to_str().unwrap(), &dest)
+            .unwrap_err();
+        assert!(matches!(err, RepoPrepError::GitError { .. }));
+    }
 }

@@ -97,11 +97,13 @@ pub fn child_result_from_run_outcome(
     match outcome {
         RunOutcome::Success => Ok(ChildWorkflowRunResult::CompletedSuccess),
         RunOutcome::WaitingExternal { step_id, reason } => {
-            persist_child_external_wait_state(request, config, db_path, &step_id, &reason)?;
+            persist_child_external_wait_state(request, config, db_path, &step_id, &reason)
+                .map_err(|err| err.to_string())?;
             Ok(ChildWorkflowRunResult::WaitingExternal)
         }
         RunOutcome::Interrupted { step_id } => {
-            persist_child_interrupted_state(request, config, db_path, &step_id)?;
+            persist_child_interrupted_state(request, config, db_path, &step_id)
+                .map_err(|err| err.to_string())?;
             Ok(ChildWorkflowRunResult::WaitingExternal)
         }
         RunOutcome::Failure { .. } | RunOutcome::Abandoned { .. } => {

@@ -1,5 +1,9 @@
 use super::*;
 
+#[cfg(test)]
+#[path = "supervisor_tests.rs"]
+mod supervisor_tests;
+
 /// Run a foreground daemon for the given config with clean Ctrl-C handling.
 ///
 /// When the resolved `[discovery]` config is enabled, the daemon drives the

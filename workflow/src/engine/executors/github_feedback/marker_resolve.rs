@@ -1,6 +1,6 @@
 use super::*;
 
-pub fn current_evaluation_marker_action(
+pub(super) fn current_evaluation_marker_action(
     binding: &PrFollowupBinding,
     evaluation: &Value,
     feedback_item: Option<&Value>,
@@ -17,7 +17,10 @@ pub fn current_evaluation_marker_action(
     Some(current_evaluation_marker_json(context, evaluation, clock))
 }
 
-pub fn current_evaluation_action_kind(decision: &str, params: &Value) -> Option<&'static str> {
+pub(super) fn current_evaluation_action_kind(
+    decision: &str,
+    params: &Value,
+) -> Option<&'static str> {
     match decision {
         "invalid" => Some("comment_invalid"),
         "out_of_scope" => Some("comment_out_of_scope"),
@@ -31,7 +34,7 @@ pub fn current_evaluation_action_kind(decision: &str, params: &Value) -> Option<
     }
 }
 
-pub struct CurrentEvaluationMarkerContext<'a> {
+pub(super) struct CurrentEvaluationMarkerContext<'a> {
     pub binding: &'a PrFollowupBinding,
     pub action_kind: &'a str,
     pub item_id: String,
@@ -94,7 +97,7 @@ impl<'a> CurrentEvaluationMarkerContext<'a> {
     }
 }
 
-pub fn current_evaluation_marker_json(
+pub(super) fn current_evaluation_marker_json(
     context: CurrentEvaluationMarkerContext<'_>,
     evaluation: &Value,
     clock: &dyn ClockSleeper,
@@ -135,7 +138,9 @@ pub fn current_evaluation_marker_json(
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P15
 /// @requirement:REQ-PRFU-015,REQ-PRFU-016,REQ-PRFU-026
 /// @pseudocode lines 41-49
-pub fn pending_marker_action_from_value(value: Value) -> Result<PendingMarkerAction, EngineError> {
+pub(super) fn pending_marker_action_from_value(
+    value: Value,
+) -> Result<PendingMarkerAction, EngineError> {
     let action_kind = string_field(&value, "action_kind");
     let resolution_required = pending_action_resolution_required(&action_kind, &value);
     Ok(PendingMarkerAction {
@@ -155,7 +160,7 @@ pub fn pending_marker_action_from_value(value: Value) -> Result<PendingMarkerAct
     })
 }
 
-pub fn pending_action_remediation_output_head(value: &Value) -> String {
+pub(super) fn pending_action_remediation_output_head(value: &Value) -> String {
     value
         .get("remediation_output_head")
         .and_then(Value::as_str)
@@ -169,7 +174,7 @@ pub fn pending_action_remediation_output_head(value: &Value) -> String {
         .unwrap_or_else(|| "none".to_string())
 }
 
-pub fn pending_action_reason(value: &Value) -> String {
+pub(super) fn pending_action_reason(value: &Value) -> String {
     value
         .get("reason")
         .and_then(Value::as_str)
@@ -177,7 +182,7 @@ pub fn pending_action_reason(value: &Value) -> String {
         .to_string()
 }
 
-pub fn pending_action_response_text(value: &Value) -> Option<String> {
+pub(super) fn pending_action_response_text(value: &Value) -> Option<String> {
     value
         .get("response_text")
         .and_then(Value::as_str)
@@ -185,13 +190,13 @@ pub fn pending_action_response_text(value: &Value) -> Option<String> {
         .map(ToString::to_string)
 }
 
-pub fn pending_action_thread_id(value: &Value) -> Option<String> {
+pub(super) fn pending_action_thread_id(value: &Value) -> Option<String> {
     direct_review_thread_id(value)
         .or_else(|| review_thread_id_from_stable_marker_key(value))
         .or_else(|| review_thread_id_from_graphql_item_id(value))
 }
 
-pub fn pending_action_comment_database_id(value: &Value) -> Option<i64> {
+pub(super) fn pending_action_comment_database_id(value: &Value) -> Option<i64> {
     value
         .pointer("/comment_database_id")
         .and_then(Value::as_i64)
@@ -207,7 +212,7 @@ pub fn pending_action_comment_database_id(value: &Value) -> Option<i64> {
         })
 }
 
-pub fn pending_action_status(value: &Value) -> String {
+pub(super) fn pending_action_status(value: &Value) -> String {
     value
         .get("status")
         .and_then(Value::as_str)
@@ -215,7 +220,7 @@ pub fn pending_action_status(value: &Value) -> String {
         .to_string()
 }
 
-pub fn pending_action_resolution_required(action_kind: &str, value: &Value) -> bool {
+pub(super) fn pending_action_resolution_required(action_kind: &str, value: &Value) -> bool {
     value
         .get("resolution_required")
         .and_then(Value::as_bool)
@@ -226,7 +231,7 @@ pub fn pending_action_resolution_required(action_kind: &str, value: &Value) -> b
 /// per-item status implied by the marker action and its remediation result.
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P15
 /// @requirement:REQ-PRFU-015,REQ-PRFU-026
-pub fn unified_status_requires_resolution(action_kind: &str, value: &Value) -> bool {
+pub(super) fn unified_status_requires_resolution(action_kind: &str, value: &Value) -> bool {
     let remediation_status = value
         .get("remediation_result_status")
         .and_then(Value::as_str)
@@ -243,7 +248,7 @@ pub fn unified_status_requires_resolution(action_kind: &str, value: &Value) -> b
 /// when no review-thread identity exists.
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P15
 /// @requirement:REQ-PRFU-015,REQ-PRFU-016
-pub fn post_marker_reply(
+pub(super) fn post_marker_reply(
     binding: &PrFollowupBinding,
     runner: &dyn GithubPrCommandRunner,
     action: &PendingMarkerAction,
@@ -281,7 +286,7 @@ pub fn post_marker_reply(
     post_marker_reply_via_issue_comment(binding, runner, action, comment_key, body, body_path)
 }
 
-pub fn marker_action_claims_review_thread_identity(action: &PendingMarkerAction) -> bool {
+pub(super) fn marker_action_claims_review_thread_identity(action: &PendingMarkerAction) -> bool {
     raw_thread_id_declares_review_thread_identity(&action.value)
         || raw_stable_marker_declares_review_thread_identity(&action.stable_marker_key)
         || raw_graphql_item_declares_review_thread_identity(&action.item_id)
@@ -297,7 +302,7 @@ pub fn marker_action_claims_review_thread_identity(action: &PendingMarkerAction)
             .is_some_and(raw_graphql_item_declares_review_thread_identity)
 }
 
-pub fn raw_thread_id_declares_review_thread_identity(value: &Value) -> bool {
+pub(super) fn raw_thread_id_declares_review_thread_identity(value: &Value) -> bool {
     [
         "/thread_id",
         "/evidence/thread_id",
@@ -308,20 +313,20 @@ pub fn raw_thread_id_declares_review_thread_identity(value: &Value) -> bool {
     .any(|thread_id| thread_id.trim().starts_with(REVIEW_THREAD_NODE_ID_PREFIX))
 }
 
-pub fn raw_stable_marker_declares_review_thread_identity(stable_marker_key: &str) -> bool {
+pub(super) fn raw_stable_marker_declares_review_thread_identity(stable_marker_key: &str) -> bool {
     stable_marker_key
         .trim()
         .starts_with(STABLE_MARKER_THREAD_PREFIX)
 }
 
-pub fn raw_graphql_item_declares_review_thread_identity(item_id: &str) -> bool {
+pub(super) fn raw_graphql_item_declares_review_thread_identity(item_id: &str) -> bool {
     item_id
         .trim()
         .strip_prefix(GRAPHQL_NODE_ID_PREFIX)
         .is_some_and(|suffix| suffix.starts_with(REVIEW_THREAD_NODE_ID_PREFIX))
 }
 
-pub fn post_marker_reply_via_rest_review_comment(
+pub(super) fn post_marker_reply_via_rest_review_comment(
     binding: &PrFollowupBinding,
     runner: &dyn GithubPrCommandRunner,
     action: &PendingMarkerAction,
@@ -352,7 +357,7 @@ pub fn post_marker_reply_via_rest_review_comment(
     }))
 }
 
-pub fn post_marker_reply_via_issue_comment(
+pub(super) fn post_marker_reply_via_issue_comment(
     binding: &PrFollowupBinding,
     runner: &dyn GithubPrCommandRunner,
     action: &PendingMarkerAction,
@@ -382,7 +387,7 @@ pub fn post_marker_reply_via_issue_comment(
     }))
 }
 
-pub fn post_marker_reply_via_graphql_thread(
+pub(super) fn post_marker_reply_via_graphql_thread(
     runner: &dyn GithubPrCommandRunner,
     action: &PendingMarkerAction,
     comment_key: &str,
@@ -453,7 +458,7 @@ pub fn post_marker_reply_via_graphql_thread(
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P15
 /// @requirement:REQ-PRFU-016,REQ-PRFU-026
 /// @pseudocode lines 42-44,47-49
-pub fn read_local_marker_completions(
+pub(super) fn read_local_marker_completions(
     store: &PrFollowupArtifactStore,
     binding: &PrFollowupBinding,
 ) -> BTreeSet<String> {
@@ -483,7 +488,7 @@ pub fn read_local_marker_completions(
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P15
 /// @requirement:REQ-PRFU-016,REQ-PRFU-017
 /// @pseudocode lines 42-45
-pub fn discover_marker_remote_comments(
+pub(super) fn discover_marker_remote_comments(
     runner: &dyn GithubPrCommandRunner,
     binding: &PrFollowupBinding,
 ) -> Result<Vec<Value>, EngineError> {
@@ -501,7 +506,7 @@ pub fn discover_marker_remote_comments(
 
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P15
 /// @requirement:REQ-PRFU-016,REQ-PRFU-017
-pub fn query_pull_review_comments(
+pub(super) fn query_pull_review_comments(
     runner: &dyn GithubPrCommandRunner,
     binding: &PrFollowupBinding,
 ) -> Result<Vec<Value>, EngineError> {
@@ -520,7 +525,7 @@ pub fn query_pull_review_comments(
 /// actions are safe to execute.
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P15
 /// @requirement:REQ-PRFU-015,REQ-PRFU-016,REQ-PRFU-026
-pub fn validate_marker_actions_before_mutation(
+pub(super) fn validate_marker_actions_before_mutation(
     actions: &[PendingMarkerAction],
 ) -> Option<Vec<Value>> {
     let mut violations = Vec::new();
@@ -586,7 +591,7 @@ pub fn validate_marker_actions_before_mutation(
 }
 
 // Pre-existing marker action workflow; split in a dedicated refactor stage.
-pub fn process_marker_action(
+pub(super) fn process_marker_action(
     processor: &MarkerActionProcessor<'_>,
     action: PendingMarkerAction,
 ) -> Result<MarkerActionOutcome, EngineError> {
@@ -615,7 +620,7 @@ pub fn process_marker_action(
     ))
 }
 
-pub fn marker_action_early_outcome(
+pub(super) fn marker_action_early_outcome(
     processor: &MarkerActionProcessor<'_>,
     action: PendingMarkerAction,
     comment_key: String,
@@ -647,7 +652,7 @@ pub fn marker_action_early_outcome(
     )
 }
 
-pub fn handle_marker_comment(
+pub(super) fn handle_marker_comment(
     processor: &MarkerActionProcessor<'_>,
     action: &PendingMarkerAction,
     comment_key: &str,
@@ -680,7 +685,7 @@ pub fn handle_marker_comment(
     Ok(())
 }
 
-pub fn marker_comment_already_done(
+pub(super) fn marker_comment_already_done(
     processor: &MarkerActionProcessor<'_>,
     action: &PendingMarkerAction,
     comment_key: &str,
@@ -690,7 +695,7 @@ pub fn marker_comment_already_done(
         || action.status == "completed"
 }
 
-pub fn marker_comment_skip_record(
+pub(super) fn marker_comment_skip_record(
     processor: &MarkerActionProcessor<'_>,
     action: &PendingMarkerAction,
     comment_key: &str,
@@ -703,7 +708,7 @@ pub fn marker_comment_skip_record(
     })
 }
 
-pub fn handle_marker_resolution(
+pub(super) fn handle_marker_resolution(
     processor: &MarkerActionProcessor<'_>,
     action: &PendingMarkerAction,
     resolution_key: &str,
@@ -727,13 +732,13 @@ pub fn handle_marker_resolution(
     }
 }
 
-pub enum MarkerResolutionPlan {
+pub(super) enum MarkerResolutionPlan {
     Skip(&'static str),
     PartialUnavailable,
     Resolve(String),
 }
 
-pub fn marker_resolution_plan(
+pub(super) fn marker_resolution_plan(
     processor: &MarkerActionProcessor<'_>,
     action: &PendingMarkerAction,
     resolution_key: &str,
@@ -758,7 +763,7 @@ pub fn marker_resolution_plan(
     }
 }
 
-pub fn marker_resolution_skip_record(
+pub(super) fn marker_resolution_skip_record(
     action: &PendingMarkerAction,
     resolution_key: &str,
     reason: &str,
@@ -771,7 +776,7 @@ pub fn marker_resolution_skip_record(
     })
 }
 
-pub fn set_resolution_unavailable_partial(
+pub(super) fn set_resolution_unavailable_partial(
     action: &PendingMarkerAction,
     resolution_key: &str,
     partial: &mut Option<Value>,
@@ -786,7 +791,7 @@ pub fn set_resolution_unavailable_partial(
     *retryable = partial.clone();
 }
 
-pub fn apply_marker_resolution(
+pub(super) fn apply_marker_resolution(
     processor: &MarkerActionProcessor<'_>,
     action: &PendingMarkerAction,
     resolution_key: &str,
@@ -818,7 +823,7 @@ pub fn apply_marker_resolution(
     }
 }
 
-pub fn apply_marker_resolution_response(
+pub(super) fn apply_marker_resolution_response(
     action: &PendingMarkerAction,
     resolution_key: &str,
     thread_id: String,
@@ -853,7 +858,7 @@ pub fn apply_marker_resolution_response(
     }
 }
 
-pub fn set_resolution_failed_partial(
+pub(super) fn set_resolution_failed_partial(
     action: &PendingMarkerAction,
     resolution_key: &str,
     reason: &str,
@@ -876,7 +881,7 @@ pub fn set_resolution_failed_partial(
     state.retryable = state.partial.clone();
 }
 
-pub fn apply_needs_user_judgment_partial(
+pub(super) fn apply_needs_user_judgment_partial(
     action: &PendingMarkerAction,
     comment_key: &str,
     state: &mut MarkerActionMutationState,
@@ -893,7 +898,7 @@ pub fn apply_needs_user_judgment_partial(
     }
 }
 
-pub fn apply_unhandled_marker_failure(
+pub(super) fn apply_unhandled_marker_failure(
     action: &PendingMarkerAction,
     comment_key: &str,
     state: &mut MarkerActionMutationState,
@@ -912,7 +917,7 @@ pub fn apply_unhandled_marker_failure(
     }
 }
 
-pub fn build_marker_action_outcome(
+pub(super) fn build_marker_action_outcome(
     action: PendingMarkerAction,
     comment_key: String,
     resolution_key: String,
@@ -954,7 +959,7 @@ pub fn build_marker_action_outcome(
     }
 }
 
-pub fn marker_updated_action(
+pub(super) fn marker_updated_action(
     action: &PendingMarkerAction,
     status: &str,
     comment_key: &str,
@@ -974,7 +979,7 @@ pub fn marker_updated_action(
     updated_action
 }
 
-pub fn marker_action_id(action: &PendingMarkerAction) -> Value {
+pub(super) fn marker_action_id(action: &PendingMarkerAction) -> Value {
     action
         .value
         .get("action_id")
@@ -982,7 +987,7 @@ pub fn marker_action_id(action: &PendingMarkerAction) -> Value {
         .unwrap_or(Value::Null)
 }
 
-pub fn marker_action_id_for_display(action: &PendingMarkerAction) -> &str {
+pub(super) fn marker_action_id_for_display(action: &PendingMarkerAction) -> &str {
     action
         .value
         .get("action_id")

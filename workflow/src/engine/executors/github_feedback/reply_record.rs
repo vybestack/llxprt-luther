@@ -1,24 +1,25 @@
 use super::*;
 
-pub const WARN_REST_REPLY_NOT_JSON: &str = "rest_reply_response_not_json";
-pub const WARN_NO_REVIEW_THREAD_IDENTITY_TOP_LEVEL: &str =
+pub(super) const WARN_REST_REPLY_NOT_JSON: &str = "rest_reply_response_not_json";
+pub(super) const WARN_NO_REVIEW_THREAD_IDENTITY_TOP_LEVEL: &str =
     "no_review_thread_identity_posted_top_level_comment";
-pub const WARN_REST_REPLY_ERROR_MESSAGE: &str = "rest_reply_response_error_message";
-pub const WARN_MISSING_ID_REST_REPLY: &str = "missing_id_in_rest_reply_response";
-pub const WARN_MISSING_URL_REST_REPLY: &str = "missing_url_in_rest_reply_response";
-pub const WARN_POSTED_REVIEW_THREAD_REPLY_GRAPHQL: &str = "posted_review_thread_reply_via_graphql";
-pub const WARN_PARTIAL_SUCCESS_GRAPHQL_ERRORS_PRESENT: &str =
+pub(super) const WARN_REST_REPLY_ERROR_MESSAGE: &str = "rest_reply_response_error_message";
+pub(super) const WARN_MISSING_ID_REST_REPLY: &str = "missing_id_in_rest_reply_response";
+pub(super) const WARN_MISSING_URL_REST_REPLY: &str = "missing_url_in_rest_reply_response";
+pub(super) const WARN_POSTED_REVIEW_THREAD_REPLY_GRAPHQL: &str =
+    "posted_review_thread_reply_via_graphql";
+pub(super) const WARN_PARTIAL_SUCCESS_GRAPHQL_ERRORS_PRESENT: &str =
     "partial_success_graphql_errors_present";
-pub const WARN_MISSING_COMMENT_GRAPHQL_THREAD_REPLY: &str =
+pub(super) const WARN_MISSING_COMMENT_GRAPHQL_THREAD_REPLY: &str =
     "missing_comment_in_graphql_thread_reply_response";
-pub const WARN_NON_IDEMPOTENT_GRAPHQL_REPLY_UNKNOWN: &str =
+pub(super) const WARN_NON_IDEMPOTENT_GRAPHQL_REPLY_UNKNOWN: &str =
     "non_idempotent_graphql_reply_result_unknown";
-pub const WARN_MISSING_DATABASE_ID_GRAPHQL_THREAD_REPLY: &str =
+pub(super) const WARN_MISSING_DATABASE_ID_GRAPHQL_THREAD_REPLY: &str =
     "missing_database_id_in_graphql_thread_reply_response";
-pub const WARN_MISSING_URL_GRAPHQL_THREAD_REPLY: &str =
+pub(super) const WARN_MISSING_URL_GRAPHQL_THREAD_REPLY: &str =
     "missing_url_in_graphql_thread_reply_response";
 
-pub const UNKNOWN_DELIVERY_WARNINGS: &[&str] = &[
+pub(super) const UNKNOWN_DELIVERY_WARNINGS: &[&str] = &[
     WARN_REST_REPLY_NOT_JSON,
     WARN_REST_REPLY_ERROR_MESSAGE,
     WARN_MISSING_ID_REST_REPLY,
@@ -30,7 +31,7 @@ pub const UNKNOWN_DELIVERY_WARNINGS: &[&str] = &[
 ];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum DeliveryStatus {
+pub(super) enum DeliveryStatus {
     Confirmed,
     Unknown,
 }
@@ -55,7 +56,7 @@ impl DeliveryStatus {
     }
 }
 
-pub fn post_marker_reply_rest(
+pub(super) fn post_marker_reply_rest(
     runner: &dyn GithubPrCommandRunner,
     endpoint: String,
     body_path: &Path,
@@ -80,7 +81,7 @@ pub fn post_marker_reply_rest(
     })
 }
 
-pub fn rest_parse_error_record(response: &str, parse_error: String) -> Value {
+pub(super) fn rest_parse_error_record(response: &str, parse_error: String) -> Value {
     json!({
         "parse_error": parse_error,
         "raw_response_hash": stable_hash(response),
@@ -89,7 +90,7 @@ pub fn rest_parse_error_record(response: &str, parse_error: String) -> Value {
     })
 }
 
-pub fn json_value_kind(value: &Value) -> &'static str {
+pub(super) fn json_value_kind(value: &Value) -> &'static str {
     match value {
         Value::Null => "null",
         Value::Bool(_) => "boolean",
@@ -100,7 +101,7 @@ pub fn json_value_kind(value: &Value) -> &'static str {
     }
 }
 
-pub fn rest_reply_warnings(parsed: &Value, fallback_warning: Option<&str>) -> Value {
+pub(super) fn rest_reply_warnings(parsed: &Value, fallback_warning: Option<&str>) -> Value {
     let mut warnings = Vec::new();
     if let Some(warning) = fallback_warning {
         warnings.push(warning);
@@ -127,7 +128,7 @@ pub fn rest_reply_warnings(parsed: &Value, fallback_warning: Option<&str>) -> Va
     json!(warnings)
 }
 
-pub struct MarkerReplyRecordInput<'a> {
+pub(super) struct MarkerReplyRecordInput<'a> {
     pub action: &'a PendingMarkerAction,
     pub comment_key: &'a str,
     pub body: &'a str,
@@ -141,7 +142,7 @@ pub struct MarkerReplyRecordInput<'a> {
     pub github_response_preview: Option<&'a str>,
 }
 
-pub fn marker_reply_record(input: MarkerReplyRecordInput<'_>) -> Value {
+pub(super) fn marker_reply_record(input: MarkerReplyRecordInput<'_>) -> Value {
     let delivery_status = marker_reply_delivery_status(&input);
     let mut record = json!({
         "idempotency_key": input.comment_key,
@@ -166,7 +167,7 @@ pub fn marker_reply_record(input: MarkerReplyRecordInput<'_>) -> Value {
     record
 }
 
-pub fn marker_reply_delivery_status(input: &MarkerReplyRecordInput<'_>) -> DeliveryStatus {
+pub(super) fn marker_reply_delivery_status(input: &MarkerReplyRecordInput<'_>) -> DeliveryStatus {
     if input.comment_id.is_null()
         || input.comment_url.is_null()
         || marker_reply_warnings_include_unknown_delivery(&input.warnings)
@@ -177,7 +178,7 @@ pub fn marker_reply_delivery_status(input: &MarkerReplyRecordInput<'_>) -> Deliv
     }
 }
 
-pub fn marker_reply_warnings_include_unknown_delivery(warnings: &Value) -> bool {
+pub(super) fn marker_reply_warnings_include_unknown_delivery(warnings: &Value) -> bool {
     let Some(warnings) = warnings.as_array() else {
         tracing::warn!("warnings should be a JSON array, got: {warnings}");
         return true;
@@ -188,7 +189,7 @@ pub fn marker_reply_warnings_include_unknown_delivery(warnings: &Value) -> bool 
         .any(|warning| UNKNOWN_DELIVERY_WARNINGS.contains(&warning))
 }
 
-pub fn marker_reply_record_for_missing_graphql_comment(
+pub(super) fn marker_reply_record_for_missing_graphql_comment(
     action: &PendingMarkerAction,
     comment_key: &str,
     body: &str,
@@ -222,7 +223,7 @@ pub fn marker_reply_record_for_missing_graphql_comment(
     }))
 }
 
-pub fn graphql_error_summary(parsed: &Value) -> String {
+pub(super) fn graphql_error_summary(parsed: &Value) -> String {
     parsed
         .get("errors")
         .and_then(Value::as_array)
@@ -232,7 +233,7 @@ pub fn graphql_error_summary(parsed: &Value) -> String {
         .unwrap_or_else(|| "no GraphQL error message returned".to_string())
 }
 
-pub fn graphql_error_messages(errors: &[Value]) -> String {
+pub(super) fn graphql_error_messages(errors: &[Value]) -> String {
     const MAX_GRAPHQL_ERROR_SUMMARY_CHARS: usize = 500;
     const GRAPHQL_ERROR_SEPARATOR: &str = "; ";
     let separator_len = GRAPHQL_ERROR_SEPARATOR.chars().count();
@@ -264,7 +265,7 @@ pub fn graphql_error_messages(errors: &[Value]) -> String {
     summary
 }
 
-pub fn append_truncated(
+pub(super) fn append_truncated(
     target: &mut String,
     value: &str,
     current_chars: usize,
@@ -280,7 +281,7 @@ pub fn append_truncated(
     truncated.chars().count()
 }
 
-pub fn graphql_parse_error_summary(parsed: &Value) -> Option<String> {
+pub(super) fn graphql_parse_error_summary(parsed: &Value) -> Option<String> {
     let parse_error = parsed.get("parse_error").and_then(Value::as_str)?;
     let raw_response = parsed
         .get("raw_response")
@@ -293,14 +294,14 @@ pub fn graphql_parse_error_summary(parsed: &Value) -> Option<String> {
     ))
 }
 
-pub fn rest_response_preview(parsed: &Value) -> Option<&str> {
+pub(super) fn rest_response_preview(parsed: &Value) -> Option<&str> {
     parsed
         .get("parse_error")
         .and_then(|_| parsed.get("raw_response_preview"))
         .and_then(Value::as_str)
 }
 
-pub fn rest_response_summary(parsed: &Value) -> Option<String> {
+pub(super) fn rest_response_summary(parsed: &Value) -> Option<String> {
     parsed
         .get("parse_error")
         .and_then(Value::as_str)
@@ -321,14 +322,14 @@ pub fn rest_response_summary(parsed: &Value) -> Option<String> {
         .or_else(|| rest_reply_error_message(parsed).map(ToString::to_string))
 }
 
-pub fn rest_reply_error_message(parsed: &Value) -> Option<&str> {
+pub(super) fn rest_reply_error_message(parsed: &Value) -> Option<&str> {
     parsed
         .get("message")
         .and_then(Value::as_str)
         .filter(|_| is_rest_error_response(parsed))
 }
 
-pub fn truncated_raw_response_preview(response: &str) -> String {
+pub(super) fn truncated_raw_response_preview(response: &str) -> String {
     const MAX_RAW_RESPONSE_PREVIEW_CHARS: usize = 500;
     let Some((end, _)) = response.char_indices().nth(MAX_RAW_RESPONSE_PREVIEW_CHARS) else {
         return response.to_string();
@@ -338,7 +339,7 @@ pub fn truncated_raw_response_preview(response: &str) -> String {
     preview
 }
 
-pub fn is_rest_error_response(parsed: &Value) -> bool {
+pub(super) fn is_rest_error_response(parsed: &Value) -> bool {
     parsed.get("documentation_url").is_some()
         || parsed
             .get("errors")

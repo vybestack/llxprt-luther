@@ -925,3 +925,478 @@ fn pr_with_checks(
         status_check_rollup: status_check_rollup.map(str::to_string),
     }
 }
+
+fn child_state(number: u64, status: ChildIssueStatus) -> ChildIssueState {
+    ChildIssueState {
+        issue_number: number,
+        terminal_state: status,
+        pr_number: None,
+    }
+}
+
+fn merged_pr(number: u64) -> GithubIssuePrState {
+    GithubIssuePrState {
+        number,
+        state: "closed".to_string(),
+        merged: true,
+        merge_commit_sha: Some("abc123".to_string()),
+        review_decision: Some("approved".to_string()),
+        status_check_rollup: Some("passed".to_string()),
+    }
+}
+
+#[test]
+fn classify_child_pr_wait_covers_all_states() {
+    assert!(matches!(
+        classify_child_pr_wait(None),
+        ChildPrWait::MissingPr
+    ));
+    assert!(matches!(
+        classify_child_pr_wait(Some(&merged_pr(1))),
+        ChildPrWait::Merged
+    ));
+    let mut superseded = pr_with_checks(2, Some("passed"), Some("approved"));
+    superseded.state = "SUPERSEDED".to_string();
+    assert!(matches!(
+        classify_child_pr_wait(Some(&superseded)),
+        ChildPrWait::Superseded
+    ));
+    let mut closed = pr_with_checks(3, Some("passed"), Some("approved"));
+    closed.state = "CLOSED".to_string();
+    assert!(matches!(
+        classify_child_pr_wait(Some(&closed)),
+        ChildPrWait::ClosedUnmerged
+    ));
+    assert!(matches!(
+        classify_child_pr_wait(Some(&ready_pr(4))),
+        ChildPrWait::ReadyForHumanMerge
+    ));
+}
+
+#[test]
+fn auto_merge_block_reason_flags_unpassed_checks_and_reviews() {
+    assert_eq!(
+        auto_merge_block_reason(&pr_with_checks(1, Some("pending"), Some("approved"))),
+        Some("checks_not_passed")
+    );
+    assert_eq!(
+        auto_merge_block_reason(&pr_with_checks(
+            1,
+            Some("passed"),
+            Some("changes_requested")
+        )),
+        Some("changes_requested")
+    );
+    assert_eq!(
+        auto_merge_block_reason(&pr_with_checks(1, Some("passed"), Some("review_required"))),
+        Some("review_required")
+    );
+    assert_eq!(
+        auto_merge_block_reason(&pr_with_checks(1, Some("passed"), Some("approved"))),
+        None
+    );
+}
+
+#[test]
+fn classify_child_run_result_maps_run_status() {
+    assert_eq!(
+        classify_child_run_result(
+            &ChildWorkflowRunResult::CompletedSuccess,
+            Some(&RunStatus::Running)
+        ),
+        ChildWorkflowRunResult::WaitingExternal
+    );
+    assert_eq!(
+        classify_child_run_result(
+            &ChildWorkflowRunResult::WaitingExternal,
+            Some(&RunStatus::Completed)
+        ),
+        ChildWorkflowRunResult::CompletedSuccess
+    );
+    assert_eq!(
+        classify_child_run_result(
+            &ChildWorkflowRunResult::CompletedSuccess,
+            Some(&RunStatus::Failed)
+        ),
+        ChildWorkflowRunResult::CompletedFailure
+    );
+    assert_eq!(
+        classify_child_run_result(
+            &ChildWorkflowRunResult::CompletedFailure,
+            Some(&RunStatus::Merged)
+        ),
+        ChildWorkflowRunResult::CompletedSuccess
+    );
+    // With no run status, the process result passes through unchanged.
+    assert_eq!(
+        classify_child_run_result(&ChildWorkflowRunResult::WaitingExternal, None),
+        ChildWorkflowRunResult::WaitingExternal
+    );
+}
+
+#[test]
+fn non_actionable_reason_for_outcome_maps_known_outcomes() {
+    assert!(non_actionable_reason_for_outcome("non_actionable_child").is_some());
+    assert!(non_actionable_reason_for_outcome("non_actionable_child_lease").is_some());
+    assert!(non_actionable_reason_for_outcome("merged").is_none());
+}
+
+#[test]
+fn child_is_complete_and_blocked_predicates() {
+    assert!(child_is_complete(&child_state(1, ChildIssueStatus::Merged)));
+    assert!(!child_is_complete(&child_state(
+        1,
+        ChildIssueStatus::Blocked
+    )));
+    assert!(child_is_blocked(&child_state(1, ChildIssueStatus::Blocked)));
+    assert!(child_is_blocked(&child_state(
+        1,
+        ChildIssueStatus::Superseded
+    )));
+    assert!(child_is_blocked(&child_state(
+        1,
+        ChildIssueStatus::ClosedUnmerged
+    )));
+    assert!(child_is_blocked(&child_state(
+        1,
+        ChildIssueStatus::MergedIssueOpen
+    )));
+    assert!(!child_is_blocked(&child_state(1, ChildIssueStatus::Merged)));
+}
+
+#[test]
+fn parent_summary_comment_reflects_completion() {
+    let evaluation = json!({"complete": true});
+    let complete = parent_summary_comment(true, &evaluation);
+    assert!(complete.contains("complete"));
+    let incomplete = parent_summary_comment(false, &evaluation);
+    assert!(incomplete.contains("incomplete") || incomplete.contains("blocked"));
+}
+
+#[test]
+fn child_artifact_dir_layout() {
+    let dir = child_artifact_dir(Path::new("/base"), 12, "run-xyz");
+    assert_eq!(dir, Path::new("/base/issue-12/run-xyz"));
+}
+
+#[test]
+fn required_prs_satisfied_empty_states_is_vacuously_true() {
+    let rollup = ParentOrchestrationRollup::default();
+    assert!(required_prs_satisfied(&[], &rollup));
+}
+
+#[test]
+fn required_prs_satisfied_rejects_pending_child() {
+    let states = vec![child_state(1, ChildIssueStatus::Open)];
+    let rollup = ParentOrchestrationRollup::default();
+    assert!(!required_prs_satisfied(&states, &rollup));
+}
+
+#[test]
+fn required_prs_satisfied_accepts_all_merged() {
+    let states = vec![
+        child_state(1, ChildIssueStatus::Merged),
+        child_state(2, ChildIssueStatus::Merged),
+    ];
+    let rollup = ParentOrchestrationRollup::default();
+    assert!(required_prs_satisfied(&states, &rollup));
+}
+
+#[test]
+fn incomplete_and_blocked_child_number_collection() {
+    let states = vec![
+        child_state(1, ChildIssueStatus::Merged),
+        child_state(2, ChildIssueStatus::Blocked),
+        child_state(3, ChildIssueStatus::Open),
+    ];
+    let rollup = ParentOrchestrationRollup::default();
+    let incomplete = incomplete_child_numbers(&states, &rollup);
+    assert!(incomplete.contains(&2));
+    assert!(incomplete.contains(&3));
+    assert!(!incomplete.contains(&1));
+    let blocked = blocked_child_numbers(&states);
+    assert_eq!(blocked, vec![2]);
+}
+
+#[test]
+fn unresolved_rollup_outcome_requires_pr_detects_pending_outcomes() {
+    let mut entry = ChildRollupEntry {
+        child_issue_number: 1,
+        child_run_id: None,
+        child_artifact_dir: None,
+        pr_number: None,
+        pr_state: None,
+        merge_sha: None,
+        outcome: Some("missing_child_pr".to_string()),
+        non_actionable_reason: None,
+    };
+    assert!(unresolved_rollup_outcome_requires_pr(&entry));
+    entry.outcome = Some("merged".to_string());
+    assert!(!unresolved_rollup_outcome_requires_pr(&entry));
+}
+
+#[test]
+fn count_acceptance_criteria_counts_checklist_items() {
+    let body = "- [x] done\n- [ ] todo\n* [X] also done\nplain line";
+    assert_eq!(count_acceptance_criteria(body), 3);
+    assert_eq!(count_unchecked_acceptance_criteria(body), 1);
+}
+
+#[test]
+fn checklist_marker_recognizes_bullets() {
+    assert!(checklist_marker("- [ ] item", &["[ ]"]));
+    assert!(checklist_marker("* [x] item", &["[x]"]));
+    assert!(checklist_marker("+ [X] item", &["[X]"]));
+    assert!(!checklist_marker("no marker", &["[ ]"]));
+}
+
+#[test]
+fn active_child_lease_blocks_parent_for_active_statuses() {
+    use crate::persistence::leases::{IssueLease, LeaseStatus};
+    fn lease(status: LeaseStatus) -> IssueLease {
+        IssueLease {
+            lease_id: "l".to_string(),
+            issue_repo: "o/r".to_string(),
+            issue_number: 1,
+            config_id: "cfg".to_string(),
+            run_id: Some("run".to_string()),
+            status,
+            claimed_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            heartbeat_at: chrono::Utc::now(),
+        }
+    }
+    assert!(active_child_lease_blocks_parent(&lease(
+        LeaseStatus::Running
+    )));
+    assert!(active_child_lease_blocks_parent(&lease(
+        LeaseStatus::Claimed
+    )));
+    assert!(active_child_lease_blocks_parent(&lease(
+        LeaseStatus::WaitingExternal
+    )));
+    assert!(active_child_lease_blocks_parent(&lease(
+        LeaseStatus::ReadyToResume
+    )));
+    assert!(!active_child_lease_blocks_parent(&lease(
+        LeaseStatus::Completed
+    )));
+    assert!(!active_child_lease_blocks_parent(&lease(
+        LeaseStatus::Failed
+    )));
+}
+
+fn rollup_state(artifact_root: PathBuf, artifact_dir: Option<PathBuf>) -> OrchestrationState {
+    OrchestrationState {
+        current_step: "step".to_string(),
+        artifact_root,
+        repo: "o/r".to_string(),
+        parent_issue_number: 100,
+        luther_label: "Luther working".to_string(),
+        child_workflow_type_id: "wf".to_string(),
+        child_config_id: "cfg".to_string(),
+        merge_poll_interval_seconds: 300,
+        max_child_merge_wait_seconds: None,
+        auto_merge_children: false,
+        wait_for_human_merge: true,
+        work_dir: None,
+        artifact_dir,
+        config_root: PathBuf::from("/config"),
+    }
+}
+
+#[test]
+fn read_rollup_defaults_when_missing() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let rollup = read_rollup(temp.path()).expect("read rollup");
+    assert_eq!(rollup.parent_issue_number, 0);
+    assert!(rollup.children.is_empty());
+}
+
+#[test]
+fn update_rollup_persists_and_replaces_child_entries() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let artifact_dir = temp.path().join("children");
+    let state = rollup_state(temp.path().to_path_buf(), Some(artifact_dir));
+
+    let pr = merged_pr(7);
+    update_rollup(&state, 5, Some("run-5"), "merged", Some(&pr)).expect("update rollup");
+
+    let rollup = read_rollup(temp.path()).expect("read rollup");
+    assert_eq!(rollup.parent_issue_number, 100);
+    assert_eq!(rollup.children.len(), 1);
+    let entry = &rollup.children[0];
+    assert_eq!(entry.child_issue_number, 5);
+    assert_eq!(entry.child_run_id.as_deref(), Some("run-5"));
+    assert_eq!(entry.pr_number, Some(7));
+    assert_eq!(entry.outcome.as_deref(), Some("merged"));
+    assert!(entry.child_artifact_dir.is_some());
+
+    // Re-updating the same child replaces (does not duplicate) its entry.
+    update_rollup(&state, 5, Some("run-5b"), "non_actionable_child", None).expect("second update");
+    let rollup = read_rollup(temp.path()).expect("read rollup again");
+    assert_eq!(rollup.children.len(), 1);
+    assert_eq!(rollup.children[0].child_run_id.as_deref(), Some("run-5b"));
+    assert_eq!(
+        rollup.children[0].non_actionable_reason.as_deref(),
+        Some("child issue is explicitly non-actionable")
+    );
+}
+
+#[test]
+fn rollup_has_outcome_matches_recorded_outcome() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let state = rollup_state(temp.path().to_path_buf(), None);
+    update_rollup(&state, 9, None, "blocked", None).expect("update rollup");
+
+    assert!(rollup_has_outcome(&state, 9, "blocked").expect("has outcome"));
+    assert!(!rollup_has_outcome(&state, 9, "merged").expect("no outcome"));
+    assert!(!rollup_has_outcome(&state, 10, "blocked").expect("other child"));
+}
+
+#[test]
+fn write_launch_artifact_writes_child_run_launch_json() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let state = rollup_state(temp.path().to_path_buf(), None);
+    write_launch_artifact(&state, serde_json::json!({"launched": true}))
+        .expect("write launch artifact");
+    let path = temp.path().join("child-run-launch.json");
+    assert!(path.exists());
+    let contents = std::fs::read_to_string(&path).expect("read artifact");
+    assert!(contents.contains("launched"));
+}
+
+#[test]
+fn classify_child_run_result_prefers_run_status_over_process_result() {
+    use crate::persistence::RunStatus;
+    assert!(matches!(
+        classify_child_run_result(
+            &ChildWorkflowRunResult::CompletedSuccess,
+            Some(&RunStatus::Running)
+        ),
+        ChildWorkflowRunResult::WaitingExternal
+    ));
+    assert!(matches!(
+        classify_child_run_result(
+            &ChildWorkflowRunResult::WaitingExternal,
+            Some(&RunStatus::Completed)
+        ),
+        ChildWorkflowRunResult::CompletedSuccess
+    ));
+    assert!(matches!(
+        classify_child_run_result(
+            &ChildWorkflowRunResult::WaitingExternal,
+            Some(&RunStatus::Failed)
+        ),
+        ChildWorkflowRunResult::CompletedFailure
+    ));
+    // With no run status, the process result is passed through unchanged.
+    assert!(matches!(
+        classify_child_run_result(&ChildWorkflowRunResult::CompletedFailure, None),
+        ChildWorkflowRunResult::CompletedFailure
+    ));
+}
+
+#[test]
+fn record_blocked_child_writes_artifact_and_rollup() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let state = rollup_state(temp.path().to_path_buf(), None);
+    let query = MockQuery {
+        issue: None,
+        children: Vec::new(),
+        pr: None,
+    };
+    let pr = ready_pr(11);
+    let outcome =
+        record_blocked_child(&state, &query, 11, Some(&pr), "blocked_reason").expect("blocked");
+    assert!(matches!(outcome, StepOutcome::Fixable));
+
+    // The blocking wait artifact is written.
+    let wait_path = temp.path().join("child-merge-wait.json");
+    assert!(wait_path.exists());
+    let contents = std::fs::read_to_string(&wait_path).expect("read wait");
+    assert!(contents.contains("blocked_reason"));
+
+    // And the rollup records the block outcome for the child.
+    assert!(rollup_has_outcome(&state, 11, "blocked_reason").expect("rollup outcome"));
+}
+
+#[test]
+fn record_superseded_child_comments_and_blocks() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let state = rollup_state(temp.path().to_path_buf(), None);
+    let query = MockQuery {
+        issue: None,
+        children: Vec::new(),
+        pr: None,
+    };
+    let pr = ready_pr(12);
+    let outcome = record_superseded_child(&state, &query, 12, Some(&pr)).expect("superseded");
+    assert!(matches!(outcome, StepOutcome::Fixable));
+    assert!(rollup_has_outcome(&state, 12, "superseded_child_pr").expect("rollup outcome"));
+}
+
+#[test]
+fn attempt_auto_merge_disabled_returns_disabled_reason() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut state = rollup_state(temp.path().to_path_buf(), None);
+    state.auto_merge_children = false;
+    let query = MockQuery {
+        issue: None,
+        children: Vec::new(),
+        pr: None,
+    };
+    let result = attempt_auto_merge_if_enabled(&state, &query, Some(&ready_pr(1)));
+    assert_eq!(result["attempted"], serde_json::json!(false));
+    assert_eq!(result["reason"], serde_json::json!("disabled"));
+}
+
+#[test]
+fn attempt_auto_merge_enabled_without_pr_reports_missing() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut state = rollup_state(temp.path().to_path_buf(), None);
+    state.auto_merge_children = true;
+    let query = MockQuery {
+        issue: None,
+        children: Vec::new(),
+        pr: None,
+    };
+    let result = attempt_auto_merge_if_enabled(&state, &query, None);
+    assert_eq!(result["reason"], serde_json::json!("missing_pr"));
+}
+
+#[test]
+fn attempt_auto_merge_blocked_by_failing_checks() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut state = rollup_state(temp.path().to_path_buf(), None);
+    state.auto_merge_children = true;
+    let query = MockQuery {
+        issue: None,
+        children: Vec::new(),
+        pr: None,
+    };
+    let pr = pr_with_checks(2, Some("pending"), Some("approved"));
+    let result = attempt_auto_merge_if_enabled(&state, &query, Some(&pr));
+    assert_eq!(result["attempted"], serde_json::json!(false));
+    assert_eq!(result["reason"], serde_json::json!("checks_not_passed"));
+    assert_eq!(
+        result["fallback"],
+        serde_json::json!("wait_for_human_merge")
+    );
+}
+
+#[test]
+fn attempt_auto_merge_enabled_succeeds_when_ready() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut state = rollup_state(temp.path().to_path_buf(), None);
+    state.auto_merge_children = true;
+    let query = MockQuery {
+        issue: None,
+        children: Vec::new(),
+        pr: None,
+    };
+    let result = attempt_auto_merge_if_enabled(&state, &query, Some(&ready_pr(3)));
+    assert_eq!(result["attempted"], serde_json::json!(true));
+    assert_eq!(result["enabled"], serde_json::json!(true));
+    assert_eq!(result["pr_number"], serde_json::json!(3));
+}

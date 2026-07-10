@@ -1,6 +1,7 @@
 use super::*;
+use crate::engine::executors::pr_followup_artifacts::ArtifactWriter;
 
-pub fn read_pending_marker_artifact(
+pub(super) fn read_pending_marker_artifact(
     store: &PrFollowupArtifactStore,
     binding: &PrFollowupBinding,
 ) -> Result<Value, EngineError> {
@@ -11,7 +12,7 @@ pub fn read_pending_marker_artifact(
     store.read_current_json(binding, PENDING_MARKER_ACTIONS_FAMILY)
 }
 
-pub fn empty_pending_marker_artifact() -> Value {
+pub(super) fn empty_pending_marker_artifact() -> Value {
     json!({
         "pending_actions": [],
         "carry_forward_from_artifact_sequence": null,
@@ -20,7 +21,7 @@ pub fn empty_pending_marker_artifact() -> Value {
     })
 }
 
-pub fn refresh_pending_marker_actions_from_current_artifacts(
+pub(super) fn refresh_pending_marker_actions_from_current_artifacts(
     store: &PrFollowupArtifactStore,
     binding: &PrFollowupBinding,
     pending_artifact: &mut Value,
@@ -75,7 +76,7 @@ pub fn refresh_pending_marker_actions_from_current_artifacts(
     pending_artifact["refresh_incomplete_reason"] = json!(null);
 }
 
-pub fn read_optional_current_json(
+pub(super) fn read_optional_current_json(
     store: &PrFollowupArtifactStore,
     binding: &PrFollowupBinding,
     artifact_family: &str,
@@ -93,7 +94,7 @@ pub fn read_optional_current_json(
     }
 }
 
-pub fn feedback_items_by_identity(feedback: &Value) -> BTreeMap<String, Value> {
+pub(super) fn feedback_items_by_identity(feedback: &Value) -> BTreeMap<String, Value> {
     feedback
         .get("items")
         .and_then(Value::as_array)
@@ -108,7 +109,7 @@ pub fn feedback_items_by_identity(feedback: &Value) -> BTreeMap<String, Value> {
 /// collisions when several comments share the same GraphQL review thread marker.
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P15
 /// @requirement:REQ-PRFU-015,REQ-PRFU-016
-pub fn collect_thread_identifiers_by_action_key(
+pub(super) fn collect_thread_identifiers_by_action_key(
     store: &PrFollowupArtifactStore,
     binding: &PrFollowupBinding,
 ) -> BTreeMap<String, (Option<String>, Option<i64>)> {
@@ -150,7 +151,7 @@ pub fn collect_thread_identifiers_by_action_key(
 /// from the collected review-thread index, without overwriting present values.
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P15
 /// @requirement:REQ-PRFU-015,REQ-PRFU-016
-pub fn backfill_thread_identifiers(
+pub(super) fn backfill_thread_identifiers(
     mut value: Value,
     identifiers: &BTreeMap<String, (Option<String>, Option<i64>)>,
 ) -> Value {
@@ -183,7 +184,7 @@ pub fn backfill_thread_identifiers(
     value
 }
 
-pub fn thread_identifier_action_key(
+pub(super) fn thread_identifier_action_key(
     item: &Value,
     stable_marker_key_counts: &BTreeMap<String, usize>,
 ) -> String {
@@ -207,7 +208,7 @@ pub fn thread_identifier_action_key(
     String::new()
 }
 
-pub fn pending_action_thread_identifier_key(value: &Value) -> String {
+pub(super) fn pending_action_thread_identifier_key(value: &Value) -> String {
     let item_id = string_field(value, "item_id");
     if !item_id.is_empty() {
         return format!("item_id:{item_id}");
@@ -225,7 +226,7 @@ pub fn pending_action_thread_identifier_key(value: &Value) -> String {
     String::new()
 }
 
-pub fn evaluation_identity_key(value: &Value) -> String {
+pub(super) fn evaluation_identity_key(value: &Value) -> String {
     format!(
         "{}:{}:{}",
         string_field(value, "item_id"),
@@ -234,7 +235,7 @@ pub fn evaluation_identity_key(value: &Value) -> String {
     )
 }
 
-pub fn pending_action_collision_key(action: &Value) -> String {
+pub(super) fn pending_action_collision_key(action: &Value) -> String {
     action
         .get("idempotency_key")
         .and_then(Value::as_str)

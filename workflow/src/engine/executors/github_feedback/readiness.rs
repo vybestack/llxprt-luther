@@ -1,6 +1,6 @@
 use super::*;
 
-pub fn is_coderabbit_summary_feedback_item(item: &FeedbackItem) -> bool {
+pub(super) fn is_coderabbit_summary_feedback_item(item: &FeedbackItem) -> bool {
     if item.source != "issue_comment" || item.stale {
         return false;
     }
@@ -13,7 +13,7 @@ pub fn is_coderabbit_summary_feedback_item(item: &FeedbackItem) -> bool {
 /// rate-limit / out-of-credits "review limit reached" warning. Any of these
 /// confirms CodeRabbit has reported on the current head, so readiness can be
 /// satisfied without an actual review thread.
-pub fn coderabbit_body_is_non_actionable_notice(body: &str) -> bool {
+pub(super) fn coderabbit_body_is_non_actionable_notice(body: &str) -> bool {
     let body = body.to_ascii_lowercase();
     body.contains("summary by coderabbit")
         || body.contains("summarize by coderabbit")
@@ -27,7 +27,7 @@ pub fn coderabbit_body_is_non_actionable_notice(body: &str) -> bool {
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P08
 /// @requirement:REQ-PRFU-008,REQ-PRFU-009
 /// @pseudocode lines 7-14
-pub fn push_current_or_stale(item: FeedbackItem, observation: &mut FeedbackObservation) {
+pub(super) fn push_current_or_stale(item: FeedbackItem, observation: &mut FeedbackObservation) {
     if item.stale {
         observation.stale_items.push(item_json(&item));
     } else {
@@ -38,7 +38,7 @@ pub fn push_current_or_stale(item: FeedbackItem, observation: &mut FeedbackObser
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P08
 /// @requirement:REQ-PRFU-008,REQ-PRFU-009,REQ-PRFU-017
 /// @pseudocode lines 4-6
-pub const GRAPHQL_REVIEW_THREADS_QUERY: &str = r#"
+pub(super) const GRAPHQL_REVIEW_THREADS_QUERY: &str = r#"
 query($owner: String!, $name: String!, $number: Int!, $page: String) {
   repository(owner: $owner, name: $name) {
     pullRequest(number: $number) {
@@ -76,7 +76,7 @@ query($owner: String!, $name: String!, $number: Int!, $page: String) {
 }
 "#;
 
-pub fn query_review_threads(
+pub(super) fn query_review_threads(
     runner: &dyn GithubPrCommandRunner,
     binding: &PrFollowupBinding,
 ) -> Result<Value, EngineError> {
@@ -105,7 +105,7 @@ pub fn query_review_threads(
     }))
 }
 
-pub fn query_review_thread_page(
+pub(super) fn query_review_thread_page(
     runner: &dyn GithubPrCommandRunner,
     binding: &PrFollowupBinding,
     cursor: Option<&str>,
@@ -115,7 +115,10 @@ pub fn query_review_thread_page(
         .map_err(|err| github_feedback_error(format!("parse review threads response: {err}")))
 }
 
-pub fn review_thread_page_argv(binding: &PrFollowupBinding, cursor: Option<&str>) -> Vec<String> {
+pub(super) fn review_thread_page_argv(
+    binding: &PrFollowupBinding,
+    cursor: Option<&str>,
+) -> Vec<String> {
     let mut argv = vec![
         "gh".to_string(),
         "api".to_string(),
@@ -136,14 +139,14 @@ pub fn review_thread_page_argv(binding: &PrFollowupBinding, cursor: Option<&str>
     argv
 }
 
-pub fn review_thread_page_value(value: &Value) -> Value {
+pub(super) fn review_thread_page_value(value: &Value) -> Value {
     value
         .pointer("/data/repository/pullRequest/reviewThreads")
         .cloned()
         .unwrap_or_else(|| json!({}))
 }
 
-pub fn review_thread_page_nodes(thread_value: &Value) -> Vec<Value> {
+pub(super) fn review_thread_page_nodes(thread_value: &Value) -> Vec<Value> {
     thread_value
         .get("nodes")
         .and_then(Value::as_array)
@@ -151,7 +154,7 @@ pub fn review_thread_page_nodes(thread_value: &Value) -> Vec<Value> {
         .unwrap_or_default()
 }
 
-pub fn review_thread_page_has_next(thread_value: &Value, page_count: u64) -> bool {
+pub(super) fn review_thread_page_has_next(thread_value: &Value, page_count: u64) -> bool {
     let has_next = thread_value
         .pointer("/pageInfo/hasNextPage")
         .and_then(Value::as_bool)
@@ -163,7 +166,7 @@ pub fn review_thread_page_has_next(thread_value: &Value, page_count: u64) -> boo
     has_next
 }
 
-pub fn review_thread_page_cursor(thread_value: &Value) -> Option<String> {
+pub(super) fn review_thread_page_cursor(thread_value: &Value) -> Option<String> {
     thread_value
         .pointer("/pageInfo/endCursor")
         .and_then(Value::as_str)
@@ -173,7 +176,7 @@ pub fn review_thread_page_cursor(thread_value: &Value) -> Option<String> {
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P08
 /// @requirement:REQ-PRFU-008,REQ-PRFU-009,REQ-PRFU-017
 /// @pseudocode lines 5,8-9
-pub fn query_rest_review_comments(
+pub(super) fn query_rest_review_comments(
     runner: &dyn GithubPrCommandRunner,
     binding: &PrFollowupBinding,
 ) -> Result<Vec<Value>, EngineError> {
@@ -189,7 +192,7 @@ pub fn query_rest_review_comments(
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P08
 /// @requirement:REQ-PRFU-008,REQ-PRFU-009,REQ-PRFU-017
 /// @pseudocode lines 5,9
-pub fn query_issue_comments(
+pub(super) fn query_issue_comments(
     runner: &dyn GithubPrCommandRunner,
     binding: &PrFollowupBinding,
 ) -> Result<Vec<Value>, EngineError> {
@@ -205,7 +208,7 @@ pub fn query_issue_comments(
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P08
 /// @requirement:REQ-PRFU-008,REQ-PRFU-017
 /// @pseudocode lines 6,15-17
-pub fn query_readiness_signals(
+pub(super) fn query_readiness_signals(
     runner: &dyn GithubPrCommandRunner,
     binding: &PrFollowupBinding,
 ) -> Result<Vec<Value>, EngineError> {
@@ -223,7 +226,7 @@ pub fn query_readiness_signals(
         .collect())
 }
 
-pub fn query_paginated_check_runs(
+pub(super) fn query_paginated_check_runs(
     runner: &dyn GithubPrCommandRunner,
     binding: &PrFollowupBinding,
 ) -> Result<Vec<Value>, EngineError> {
@@ -261,7 +264,7 @@ pub fn query_paginated_check_runs(
     Ok(checks)
 }
 
-pub fn readiness_signal_head_sha(check: &Value, binding: &PrFollowupBinding) -> String {
+pub(super) fn readiness_signal_head_sha(check: &Value, binding: &PrFollowupBinding) -> String {
     check
         .get("head_sha")
         .and_then(Value::as_str)
@@ -294,7 +297,7 @@ pub fn readiness_signal_head_sha(check: &Value, binding: &PrFollowupBinding) -> 
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P08
 /// @requirement:REQ-PRFU-008,REQ-PRFU-009,REQ-PRFU-017
 /// @pseudocode lines 5
-pub fn query_paginated_array(
+pub(super) fn query_paginated_array(
     runner: &dyn GithubPrCommandRunner,
     endpoint_prefix: &str,
 ) -> Result<Vec<Value>, EngineError> {
@@ -329,7 +332,7 @@ pub fn query_paginated_array(
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P08
 /// @requirement:REQ-PRFU-009,REQ-PRFU-016
 /// @pseudocode lines 4-5,13,20,26
-pub fn record_remote_marker_parse(
+pub(super) fn record_remote_marker_parse(
     body: &str,
     source: &str,
     comment_id: Value,
@@ -351,7 +354,10 @@ pub fn record_remote_marker_parse(
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P08
 /// @requirement:REQ-PRFU-009,REQ-PRFU-016
 /// @pseudocode lines 13,20,26-28
-pub fn resolve_remote_markers(binding: &PrFollowupBinding, observation: &mut FeedbackObservation) {
+pub(super) fn resolve_remote_markers(
+    binding: &PrFollowupBinding,
+    observation: &mut FeedbackObservation,
+) {
     let grouped = group_remote_markers(&observation.remote_markers);
     let mut accepted = Vec::new();
     for (identity, markers) in grouped {
@@ -367,7 +373,7 @@ pub fn resolve_remote_markers(binding: &PrFollowupBinding, observation: &mut Fee
     ignore_feedback_completed_remotely(binding, observation);
 }
 
-pub fn group_remote_markers(
+pub(super) fn group_remote_markers(
     markers: &[RemoteFeedbackMarker],
 ) -> BTreeMap<String, Vec<RemoteFeedbackMarker>> {
     let mut by_identity: BTreeMap<String, Vec<RemoteFeedbackMarker>> = BTreeMap::new();
@@ -380,7 +386,7 @@ pub fn group_remote_markers(
     by_identity
 }
 
-pub fn resolve_remote_marker_group(
+pub(super) fn resolve_remote_marker_group(
     identity: &str,
     markers: &[RemoteFeedbackMarker],
     observation: &mut FeedbackObservation,
@@ -401,14 +407,17 @@ pub fn resolve_remote_marker_group(
     Some(first)
 }
 
-pub fn has_conflicting_remote_marker_duplicates(
+pub(super) fn has_conflicting_remote_marker_duplicates(
     first: &RemoteFeedbackMarker,
     markers: &[RemoteFeedbackMarker],
 ) -> bool {
     !markers.iter().all(|marker| marker == first)
 }
 
-pub fn remote_marker_conflict_json(identity: &str, markers: &[RemoteFeedbackMarker]) -> Value {
+pub(super) fn remote_marker_conflict_json(
+    identity: &str,
+    markers: &[RemoteFeedbackMarker],
+) -> Value {
     json!({
         "class": "conflicting_remote_marker_duplicates",
         "identity": identity,
@@ -416,7 +425,7 @@ pub fn remote_marker_conflict_json(identity: &str, markers: &[RemoteFeedbackMark
     })
 }
 
-pub fn audit_current_head_remote_marker(
+pub(super) fn audit_current_head_remote_marker(
     identity: &str,
     marker: &RemoteFeedbackMarker,
     binding: &PrFollowupBinding,
@@ -431,7 +440,7 @@ pub fn audit_current_head_remote_marker(
     }
 }
 
-pub fn ignore_feedback_completed_remotely(
+pub(super) fn ignore_feedback_completed_remotely(
     binding: &PrFollowupBinding,
     observation: &mut FeedbackObservation,
 ) {
@@ -443,7 +452,7 @@ pub fn ignore_feedback_completed_remotely(
     retain_uncompleted_stale_feedback_items(binding, observation, &completed_keys);
 }
 
-pub fn current_head_completed_remote_keys(
+pub(super) fn current_head_completed_remote_keys(
     binding: &PrFollowupBinding,
     observation: &FeedbackObservation,
 ) -> BTreeSet<(String, String)> {
@@ -455,7 +464,7 @@ pub fn current_head_completed_remote_keys(
         .collect()
 }
 
-pub fn retain_uncompleted_feedback_items(
+pub(super) fn retain_uncompleted_feedback_items(
     binding: &PrFollowupBinding,
     observation: &mut FeedbackObservation,
     completed_keys: &BTreeSet<(String, String)>,
@@ -475,7 +484,7 @@ pub fn retain_uncompleted_feedback_items(
     });
 }
 
-pub fn retain_uncompleted_stale_feedback_items(
+pub(super) fn retain_uncompleted_stale_feedback_items(
     binding: &PrFollowupBinding,
     observation: &mut FeedbackObservation,
     completed_keys: &BTreeSet<(String, String)>,
@@ -499,7 +508,7 @@ pub fn retain_uncompleted_stale_feedback_items(
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P08
 /// @requirement:REQ-PRFU-009,REQ-PRFU-016
 /// @pseudocode lines 13,20,26
-pub fn remote_marker_identity(marker: &RemoteFeedbackMarker) -> String {
+pub(super) fn remote_marker_identity(marker: &RemoteFeedbackMarker) -> String {
     format!(
         "{}|{}|{}|{}",
         marker.stable_marker_key, marker.source_head_sha, marker.run_id, marker.action_kind
@@ -510,7 +519,7 @@ pub fn remote_marker_identity(marker: &RemoteFeedbackMarker) -> String {
 /// @requirement:REQ-PRFU-015,REQ-PRFU-016,REQ-PRFU-017,REQ-PRFU-026
 /// @pseudocode lines 41-49
 // Pre-existing marker orchestration flow; split in a dedicated refactor stage.
-pub fn mark_coderabbit_feedback(
+pub(super) fn mark_coderabbit_feedback(
     context: &mut StepContext,
     params: &Value,
     runner: &dyn GithubPrCommandRunner,
@@ -575,7 +584,7 @@ pub fn mark_coderabbit_feedback(
     )
 }
 
-pub fn pending_marker_actions_from_artifact(
+pub(super) fn pending_marker_actions_from_artifact(
     store: &PrFollowupArtifactStore,
     binding: &PrFollowupBinding,
     pending_artifact: &Value,
@@ -592,7 +601,7 @@ pub fn pending_marker_actions_from_artifact(
         .collect()
 }
 
-pub fn write_marker_validation_failure(
+pub(super) fn write_marker_validation_failure(
     store: &PrFollowupArtifactStore,
     binding: &PrFollowupBinding,
     step_id: &str,
@@ -627,12 +636,12 @@ pub fn write_marker_validation_failure(
     Ok(true)
 }
 
-pub struct RemoteMarkerScan {
+pub(super) struct RemoteMarkerScan {
     pub completed: BTreeSet<String>,
     pub malformed: Vec<Value>,
 }
 
-pub fn scan_remote_marker_completions(
+pub(super) fn scan_remote_marker_completions(
     runner: &dyn GithubPrCommandRunner,
     binding: &PrFollowupBinding,
 ) -> Result<RemoteMarkerScan, EngineError> {
@@ -648,7 +657,7 @@ pub fn scan_remote_marker_completions(
     Ok(scan)
 }
 
-pub fn scan_remote_marker_comment(
+pub(super) fn scan_remote_marker_comment(
     binding: &PrFollowupBinding,
     comment: Value,
     scan: &mut RemoteMarkerScan,
@@ -667,7 +676,7 @@ pub fn scan_remote_marker_comment(
     }
 }
 
-pub fn record_completed_remote_marker(
+pub(super) fn record_completed_remote_marker(
     binding: &PrFollowupBinding,
     marker: &RemoteFeedbackMarker,
     completed: &mut BTreeSet<String>,
@@ -678,7 +687,7 @@ pub fn record_completed_remote_marker(
     }
 }
 
-pub fn process_pending_marker_actions(
+pub(super) fn process_pending_marker_actions(
     processor: &MarkerActionProcessor<'_>,
     pending_actions: Vec<PendingMarkerAction>,
 ) -> Result<Vec<MarkerActionOutcome>, EngineError> {
@@ -688,7 +697,7 @@ pub fn process_pending_marker_actions(
         .collect()
 }
 
-pub fn write_marker_report(
+pub(super) fn write_marker_report(
     store: &PrFollowupArtifactStore,
     binding: &PrFollowupBinding,
     step_id: &str,
@@ -722,7 +731,7 @@ pub fn write_marker_report(
     })
 }
 
-pub fn marker_report_state(report: &Value) -> &'static str {
+pub(super) fn marker_report_state(report: &Value) -> &'static str {
     let has_failure = report
         .get("failed_actions")
         .and_then(Value::as_array)
@@ -738,7 +747,7 @@ pub fn marker_report_state(report: &Value) -> &'static str {
     }
 }
 
-pub fn marker_report_failure<'a>(
+pub(super) fn marker_report_failure<'a>(
     state: &'a str,
     report: &Value,
 ) -> Option<(&'a str, &'static str, Value)> {

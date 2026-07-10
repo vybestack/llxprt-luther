@@ -1,25 +1,25 @@
 use super::*;
 
-pub const DEFAULT_MAX_OBSERVATIONS: u64 = 6;
-pub const DEFAULT_REQUIRED_STABLE_OBSERVATIONS: u64 = 2;
-pub const DEFAULT_OBSERVATION_INTERVAL_SECONDS: u64 = 300;
-pub const MARKER_NAMESPACE: &str = "luther-pr-followup";
-pub const MARKER_ARTIFACT_FAMILY: &str = "pr-feedback-marker-report";
-pub const PENDING_MARKER_ACTIONS_FAMILY: &str = "pending-feedback-marker-actions";
+pub(super) const DEFAULT_MAX_OBSERVATIONS: u64 = 6;
+pub(super) const DEFAULT_REQUIRED_STABLE_OBSERVATIONS: u64 = 2;
+pub(super) const DEFAULT_OBSERVATION_INTERVAL_SECONDS: u64 = 300;
+pub(super) const MARKER_NAMESPACE: &str = "luther-pr-followup";
+pub(super) const MARKER_ARTIFACT_FAMILY: &str = "pr-feedback-marker-report";
+pub(super) const PENDING_MARKER_ACTIONS_FAMILY: &str = "pending-feedback-marker-actions";
 /// Sentinel identity that, when present in the configured identity set, makes
 /// the feedback collector accept review threads from any reviewer (not only
 /// CodeRabbit). Selected via the `include_all_reviewers` step param.
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P15
 /// @requirement:REQ-PRFU-024
-pub const ALL_REVIEWERS_SENTINEL: &str = "*";
+pub(super) const ALL_REVIEWERS_SENTINEL: &str = "*";
 /// Real GraphQL mutation used to resolve a PR review thread.
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P15
 /// @requirement:REQ-PRFU-016
-pub const RESOLVE_REVIEW_THREAD_MUTATION: &str = "mutation resolveReviewThread($threadId:ID!){ resolveReviewThread(input:{threadId:$threadId}) { thread { id isResolved } } }";
+pub(super) const RESOLVE_REVIEW_THREAD_MUTATION: &str = "mutation resolveReviewThread($threadId:ID!){ resolveReviewThread(input:{threadId:$threadId}) { thread { id isResolved } } }";
 /// Real GraphQL mutation used to post a reply on a PR review thread.
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P15
 /// @requirement:REQ-PRFU-016
-pub const ADD_REVIEW_THREAD_REPLY_MUTATION: &str = "mutation addPullRequestReviewThreadReply($threadId:ID!,$body:String!){ addPullRequestReviewThreadReply(input:{pullRequestReviewThreadId:$threadId,body:$body}) { comment { id databaseId url } } }";
+pub(super) const ADD_REVIEW_THREAD_REPLY_MUTATION: &str = "mutation addPullRequestReviewThreadReply($threadId:ID!,$body:String!){ addPullRequestReviewThreadReply(input:{pullRequestReviewThreadId:$threadId,body:$body}) { comment { id databaseId url } } }";
 
 /// Remote marker discovery record for feedback marker idempotency.
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P08
@@ -178,31 +178,31 @@ impl ClockSleeper for SystemFeedbackClock {
 /// @pseudocode lines 7-14,26-29
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[allow(clippy::struct_excessive_bools)]
-pub struct FeedbackItem {
-    pub item_id: String,
-    pub stable_marker_key: String,
-    pub thread_id: Option<String>,
-    pub comment_id: Option<String>,
-    pub comment_database_id: Option<i64>,
-    pub review_id: Option<String>,
-    pub author_login: String,
-    pub author_kind: Option<String>,
-    pub path: Option<String>,
-    pub line: Option<u64>,
-    pub side: Option<String>,
-    pub body: String,
-    pub body_hash: String,
-    pub url: Option<String>,
-    pub created_at: Option<String>,
-    pub updated_at: Option<String>,
-    pub resolved: bool,
+pub(super) struct FeedbackItem {
+    pub(super) item_id: String,
+    pub(super) stable_marker_key: String,
+    pub(super) thread_id: Option<String>,
+    pub(super) comment_id: Option<String>,
+    pub(super) comment_database_id: Option<i64>,
+    pub(super) review_id: Option<String>,
+    pub(super) author_login: String,
+    pub(super) author_kind: Option<String>,
+    pub(super) path: Option<String>,
+    pub(super) line: Option<u64>,
+    pub(super) side: Option<String>,
+    pub(super) body: String,
+    pub(super) body_hash: String,
+    pub(super) url: Option<String>,
+    pub(super) created_at: Option<String>,
+    pub(super) updated_at: Option<String>,
+    pub(super) resolved: bool,
 
-    pub outdated: bool,
-    pub resolution_state_available: bool,
-    pub source: String,
-    pub raw_node_id: Option<String>,
-    pub commit_sha: Option<String>,
-    pub stale: bool,
+    pub(super) outdated: bool,
+    pub(super) resolution_state_available: bool,
+    pub(super) source: String,
+    pub(super) raw_node_id: Option<String>,
+    pub(super) commit_sha: Option<String>,
+    pub(super) stale: bool,
 }
 
 /// Single collector observation after querying documented GitHub feedback surfaces.
@@ -210,19 +210,19 @@ pub struct FeedbackItem {
 /// @requirement:REQ-PRFU-008,REQ-PRFU-009,REQ-PRFU-017
 /// @pseudocode lines 4-19
 #[derive(Clone, Debug, Default)]
-pub struct FeedbackObservation {
-    pub items: Vec<FeedbackItem>,
-    pub stale_items: Vec<Value>,
-    pub noise: Vec<Value>,
-    pub remote_markers: Vec<RemoteFeedbackMarker>,
-    pub malformed_remote_markers: Vec<Value>,
-    pub remote_marker_audit: Vec<Value>,
-    pub ready_signal: bool,
-    pub in_progress_signal: bool,
-    pub readiness_signals: Vec<Value>,
-    pub stale_signals: Vec<Value>,
-    pub matched_identities: BTreeSet<String>,
-    pub fatal: Option<Value>,
+pub(super) struct FeedbackObservation {
+    pub(super) items: Vec<FeedbackItem>,
+    pub(super) stale_items: Vec<Value>,
+    pub(super) noise: Vec<Value>,
+    pub(super) remote_markers: Vec<RemoteFeedbackMarker>,
+    pub(super) malformed_remote_markers: Vec<Value>,
+    pub(super) remote_marker_audit: Vec<Value>,
+    pub(super) ready_signal: bool,
+    pub(super) in_progress_signal: bool,
+    pub(super) readiness_signals: Vec<Value>,
+    pub(super) stale_signals: Vec<Value>,
+    pub(super) matched_identities: BTreeSet<String>,
+    pub(super) fatal: Option<Value>,
 }
 
 /// One pending feedback marker action consumed by `github_feedback_marker`.
@@ -230,20 +230,20 @@ pub struct FeedbackObservation {
 /// @requirement:REQ-PRFU-015,REQ-PRFU-016,REQ-PRFU-026
 /// @pseudocode lines 41-49
 #[derive(Clone, Debug)]
-pub struct PendingMarkerAction {
-    pub value: Value,
-    pub action_kind: String,
-    pub item_id: String,
-    pub stable_marker_key: String,
-    pub source_head_sha: String,
-    pub remediation_output_head: String,
-    pub body_hash: String,
-    pub reason: String,
-    pub response_text: Option<String>,
-    pub thread_id: Option<String>,
-    pub comment_database_id: Option<i64>,
-    pub resolution_required: bool,
-    pub status: String,
+pub(super) struct PendingMarkerAction {
+    pub(super) value: Value,
+    pub(super) action_kind: String,
+    pub(super) item_id: String,
+    pub(super) stable_marker_key: String,
+    pub(super) source_head_sha: String,
+    pub(super) remediation_output_head: String,
+    pub(super) body_hash: String,
+    pub(super) reason: String,
+    pub(super) response_text: Option<String>,
+    pub(super) thread_id: Option<String>,
+    pub(super) comment_database_id: Option<i64>,
+    pub(super) resolution_required: bool,
+    pub(super) status: String,
 }
 
 /// Result classification for one marker action attempt.
@@ -251,7 +251,7 @@ pub struct PendingMarkerAction {
 /// @requirement:REQ-PRFU-015,REQ-PRFU-016,REQ-PRFU-026
 /// @pseudocode lines 43-49
 #[derive(Clone, Debug)]
-pub struct MarkerActionOutcome {
+pub(super) struct MarkerActionOutcome {
     pub action: PendingMarkerAction,
     pub status: String,
     pub comment_key: String,
@@ -266,56 +266,56 @@ pub struct MarkerActionOutcome {
     pub updated_action: Value,
 }
 
-pub struct MarkerActionProcessor<'a> {
-    pub binding: &'a PrFollowupBinding,
-    pub store: &'a PrFollowupArtifactStore,
-    pub step_id: &'a str,
-    pub step_order: u64,
-    pub runner: &'a dyn GithubPrCommandRunner,
-    pub clock: &'a dyn ClockSleeper,
-    pub local_completed: &'a BTreeSet<String>,
-    pub remote_completed: &'a BTreeSet<String>,
-    pub params: &'a Value,
+pub(super) struct MarkerActionProcessor<'a> {
+    pub(super) binding: &'a PrFollowupBinding,
+    pub(super) store: &'a PrFollowupArtifactStore,
+    pub(super) step_id: &'a str,
+    pub(super) step_order: u64,
+    pub(super) runner: &'a dyn GithubPrCommandRunner,
+    pub(super) clock: &'a dyn ClockSleeper,
+    pub(super) local_completed: &'a BTreeSet<String>,
+    pub(super) remote_completed: &'a BTreeSet<String>,
+    pub(super) params: &'a Value,
 }
 
 #[derive(Default)]
-pub struct MarkerActionMutationState {
-    pub posted_comment: Option<Value>,
-    pub resolved_thread: Option<Value>,
-    pub skipped: Vec<Value>,
-    pub partial: Option<Value>,
-    pub retryable: Option<Value>,
-    pub failed: Option<Value>,
-    pub resolve_attempted: bool,
-    pub resolve_succeeded: bool,
-    pub resolve_error: Option<String>,
-    pub final_thread_resolved_state: Option<bool>,
+pub(super) struct MarkerActionMutationState {
+    pub(super) posted_comment: Option<Value>,
+    pub(super) resolved_thread: Option<Value>,
+    pub(super) skipped: Vec<Value>,
+    pub(super) partial: Option<Value>,
+    pub(super) retryable: Option<Value>,
+    pub(super) failed: Option<Value>,
+    pub(super) resolve_attempted: bool,
+    pub(super) resolve_succeeded: bool,
+    pub(super) resolve_error: Option<String>,
+    pub(super) final_thread_resolved_state: Option<bool>,
 }
 
-pub struct FeedbackCollectionConfig<'a> {
-    pub store: &'a PrFollowupArtifactStore,
-    pub binding: &'a PrFollowupBinding,
-    pub step_id: String,
-    pub step_order: u64,
-    pub max_observations: u64,
-    pub required_stable: u64,
-    pub interval_seconds: u64,
-    pub identities: BTreeSet<String>,
-    pub clock: &'a dyn ClockSleeper,
+pub(super) struct FeedbackCollectionConfig<'a> {
+    pub(super) store: &'a PrFollowupArtifactStore,
+    pub(super) binding: &'a PrFollowupBinding,
+    pub(super) step_id: String,
+    pub(super) step_order: u64,
+    pub(super) max_observations: u64,
+    pub(super) required_stable: u64,
+    pub(super) interval_seconds: u64,
+    pub(super) identities: BTreeSet<String>,
+    pub(super) clock: &'a dyn ClockSleeper,
 }
 
 #[derive(Default)]
-pub struct FeedbackReadinessState {
-    pub observations: Vec<Value>,
-    pub previous_ready_hash: Option<String>,
-    pub stable_count: u64,
-    pub final_observation: FeedbackObservation,
+pub(super) struct FeedbackReadinessState {
+    pub(super) observations: Vec<Value>,
+    pub(super) previous_ready_hash: Option<String>,
+    pub(super) stable_count: u64,
+    pub(super) final_observation: FeedbackObservation,
 }
 
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P08
 /// @requirement:REQ-PRFU-008,REQ-PRFU-009,REQ-PRFU-017,REQ-PRFU-024,REQ-PRFU-034
 /// @pseudocode lines 1-29
-pub fn collect_coderabbit_feedback(
+pub(super) fn collect_coderabbit_feedback(
     context: &mut StepContext,
     params: &Value,
     runner: &dyn GithubPrCommandRunner,
@@ -346,7 +346,7 @@ pub fn collect_coderabbit_feedback(
     observe_until_coderabbit_ready(&config, runner)
 }
 
-pub fn observe_until_coderabbit_ready(
+pub(super) fn observe_until_coderabbit_ready(
     config: &FeedbackCollectionConfig<'_>,
     runner: &dyn GithubPrCommandRunner,
 ) -> Result<StepOutcome, EngineError> {
@@ -378,7 +378,7 @@ pub fn observe_until_coderabbit_ready(
     Ok(StepOutcome::Wait)
 }
 
-pub fn write_fatal_feedback_artifacts(
+pub(super) fn write_fatal_feedback_artifacts(
     config: &FeedbackCollectionConfig<'_>,
     state: &FeedbackReadinessState,
     observation: &FeedbackObservation,
@@ -411,7 +411,7 @@ pub fn write_fatal_feedback_artifacts(
     )
 }
 
-pub fn record_feedback_observation(
+pub(super) fn record_feedback_observation(
     config: &FeedbackCollectionConfig<'_>,
     state: &mut FeedbackReadinessState,
     observation: FeedbackObservation,
@@ -444,7 +444,7 @@ pub fn record_feedback_observation(
     Ok(state.stable_count >= config.required_stable)
 }
 
-pub fn next_stable_count(
+pub(super) fn next_stable_count(
     previous_ready_hash: Option<&str>,
     readiness_hash: &str,
     materially_ready: bool,
@@ -459,7 +459,7 @@ pub fn next_stable_count(
     }
 }
 
-pub fn feedback_outcome_reason(
+pub(super) fn feedback_outcome_reason(
     stable_count: u64,
     required_stable: u64,
     observation: &FeedbackObservation,
@@ -479,7 +479,7 @@ pub fn feedback_outcome_reason(
     }
 }
 
-pub fn write_ready_feedback_artifacts(
+pub(super) fn write_ready_feedback_artifacts(
     config: &FeedbackCollectionConfig<'_>,
     state: &FeedbackReadinessState,
     attempt: u64,
@@ -516,7 +516,7 @@ pub fn write_ready_feedback_artifacts(
     )
 }
 
-pub fn write_feedback_timeout_artifacts(
+pub(super) fn write_feedback_timeout_artifacts(
     config: &FeedbackCollectionConfig<'_>,
     state: &FeedbackReadinessState,
 ) -> Result<(), EngineError> {
@@ -552,7 +552,7 @@ pub fn write_feedback_timeout_artifacts(
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P08
 /// @requirement:REQ-PRFU-008,REQ-PRFU-009,REQ-PRFU-017
 /// @pseudocode lines 4-17
-pub fn observe_coderabbit_feedback(
+pub(super) fn observe_coderabbit_feedback(
     runner: &dyn GithubPrCommandRunner,
     binding: &PrFollowupBinding,
     identities: &BTreeSet<String>,
@@ -606,7 +606,7 @@ pub fn observe_coderabbit_feedback(
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P08
 /// @requirement:REQ-PRFU-008,REQ-PRFU-017
 /// @pseudocode lines 4,7,11-13
-pub fn normalize_graphql_threads(
+pub(super) fn normalize_graphql_threads(
     value: &Value,
     binding: &PrFollowupBinding,
     identities: &BTreeSet<String>,
@@ -617,7 +617,7 @@ pub fn normalize_graphql_threads(
     }
 }
 
-pub fn graphql_thread_nodes(value: &Value) -> Vec<Value> {
+pub(super) fn graphql_thread_nodes(value: &Value) -> Vec<Value> {
     value
         .pointer("/data/repository/pullRequest/reviewThreads/nodes")
         .and_then(Value::as_array)
@@ -625,7 +625,7 @@ pub fn graphql_thread_nodes(value: &Value) -> Vec<Value> {
         .unwrap_or_default()
 }
 
-pub fn normalize_graphql_thread(
+pub(super) fn normalize_graphql_thread(
     thread: &Value,
     binding: &PrFollowupBinding,
     identities: &BTreeSet<String>,
@@ -658,12 +658,12 @@ pub fn normalize_graphql_thread(
 }
 
 #[derive(Clone, Copy)]
-pub struct GraphqlThreadState {
-    pub resolved: bool,
-    pub outdated: bool,
+pub(super) struct GraphqlThreadState {
+    pub(super) resolved: bool,
+    pub(super) outdated: bool,
 }
 
-pub fn normalize_graphql_thread_comment(
+pub(super) fn normalize_graphql_thread_comment(
     thread: &Value,
     comment: &Value,
     thread_state: GraphqlThreadState,
@@ -698,7 +698,7 @@ pub fn normalize_graphql_thread_comment(
     );
 }
 
-pub fn graphql_feedback_item(
+pub(super) fn graphql_feedback_item(
     thread: &Value,
     comment: &Value,
     thread_state: GraphqlThreadState,
@@ -751,7 +751,7 @@ pub fn graphql_feedback_item(
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P08
 /// @requirement:REQ-PRFU-008,REQ-PRFU-009,REQ-PRFU-017
 /// @pseudocode lines 5,8,12-14
-pub fn scan_rest_review_comment_marker(
+pub(super) fn scan_rest_review_comment_marker(
     comment: &Value,
     identities: &BTreeSet<String>,
     observation: &mut FeedbackObservation,
@@ -779,7 +779,7 @@ pub fn scan_rest_review_comment_marker(
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P08
 /// @requirement:REQ-PRFU-008,REQ-PRFU-009,REQ-PRFU-017
 /// @pseudocode lines 5,9-13
-pub fn normalize_issue_comment(
+pub(super) fn normalize_issue_comment(
     comment: &Value,
     binding: &PrFollowupBinding,
     identities: &BTreeSet<String>,
@@ -852,7 +852,7 @@ pub fn normalize_issue_comment(
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P08
 /// @requirement:REQ-PRFU-008
 /// @pseudocode lines 6,15-19
-pub fn normalize_readiness_signal(
+pub(super) fn normalize_readiness_signal(
     signal: &Value,
     binding: &PrFollowupBinding,
     identities: &BTreeSet<String>,

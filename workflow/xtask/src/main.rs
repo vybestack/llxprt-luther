@@ -1089,10 +1089,9 @@ fn is_split_component_name(name: &str) -> bool {
 }
 
 fn is_split_source_file_name(name: &str) -> bool {
+    // Callers only invoke this for files that already end in `.rs`, so stripping
+    // the suffix always yields a distinct stem.
     let stem = name.strip_suffix(".rs").unwrap_or(name);
-    if stem == name {
-        return false;
-    }
     is_part_numbered_name(stem) || is_core_numbered_name(stem) || stem.ends_with("_tail")
 }
 
@@ -1135,11 +1134,46 @@ fn is_core_numbered_name(stem: &str) -> bool {
 }
 
 fn line_contains_include_rs(line: &str) -> bool {
-    let Some(idx) = line.find("include!") else {
+    // Only flag actual `include!( ... ".rs" ... )` macro invocations. Ignore
+    // comments and mentions inside string literals so guidance text or doc
+    // comments that merely reference the macro name do not trip the lint.
+    let code = strip_line_comment(line);
+    let Some(idx) = code.find("include!") else {
         return false;
     };
-    let after = &line[idx..];
+    let after = code[idx + "include!".len()..].trim_start();
+    // A real macro invocation places an opening delimiter after the name.
+    if !after.starts_with('(') && !after.starts_with('[') && !after.starts_with('{') {
+        return false;
+    }
     after.contains(".rs\"")
+}
+
+/// Remove a trailing `//` line comment, ignoring `//` sequences that appear
+/// inside a double-quoted string literal.
+fn strip_line_comment(line: &str) -> &str {
+    let bytes = line.as_bytes();
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut idx = 0;
+    while idx < bytes.len() {
+        let byte = bytes[idx];
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                in_string = false;
+            }
+        } else if byte == b'"' {
+            in_string = true;
+        } else if byte == b'/' && idx + 1 < bytes.len() && bytes[idx + 1] == b'/' {
+            return &line[..idx];
+        }
+        idx += 1;
+    }
+    line
 }
 
 fn coverage_ignore_regex() -> String {

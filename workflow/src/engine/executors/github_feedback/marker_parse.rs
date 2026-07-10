@@ -1,13 +1,13 @@
 use super::*;
 
-pub struct MarkerParseError {
+pub(super) struct MarkerParseError {
     pub diagnostic: String,
 }
 
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P08
 /// @requirement:REQ-PRFU-009
 /// @pseudocode lines 13,20
-pub fn parse_marker_from_comment_body(
+pub(super) fn parse_marker_from_comment_body(
     body: &str,
 ) -> Result<RemoteFeedbackMarker, MarkerParseError> {
     let start = body
@@ -20,7 +20,7 @@ pub fn parse_marker_from_comment_body(
     parse_hidden_marker(&rest[..end + 3])
 }
 
-pub fn parse_hidden_marker(body: &str) -> Result<RemoteFeedbackMarker, MarkerParseError> {
+pub(super) fn parse_hidden_marker(body: &str) -> Result<RemoteFeedbackMarker, MarkerParseError> {
     let marker = extract_exact_marker_body(body)?;
     let fields = marker
         .strip_prefix(MARKER_NAMESPACE)
@@ -59,7 +59,7 @@ pub fn parse_hidden_marker(body: &str) -> Result<RemoteFeedbackMarker, MarkerPar
     })
 }
 
-pub fn extract_exact_marker_body(body: &str) -> Result<&str, MarkerParseError> {
+pub(super) fn extract_exact_marker_body(body: &str) -> Result<&str, MarkerParseError> {
     let trimmed = body.trim();
     if !trimmed.starts_with("<!--") || !trimmed.ends_with("-->") {
         return Err(marker_parse_error(
@@ -77,7 +77,7 @@ pub fn extract_exact_marker_body(body: &str) -> Result<&str, MarkerParseError> {
     Ok(marker)
 }
 
-pub fn required_marker_field<'a>(
+pub(super) fn required_marker_field<'a>(
     map: &'a BTreeMap<&str, &str>,
     field: &str,
 ) -> Result<&'a str, MarkerParseError> {
@@ -87,7 +87,7 @@ pub fn required_marker_field<'a>(
         .ok_or_else(|| marker_parse_error(format!("missing field {field}")))
 }
 
-pub fn marker_parse_error(diagnostic: impl Into<String>) -> MarkerParseError {
+pub(super) fn marker_parse_error(diagnostic: impl Into<String>) -> MarkerParseError {
     MarkerParseError {
         diagnostic: diagnostic.into(),
     }
@@ -96,7 +96,7 @@ pub fn marker_parse_error(diagnostic: impl Into<String>) -> MarkerParseError {
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P08
 /// @requirement:REQ-PRFU-008
 /// @pseudocode lines 2
-pub fn configured_identities(params: &Value) -> BTreeSet<String> {
+pub(super) fn configured_identities(params: &Value) -> BTreeSet<String> {
     let mut identities = [
         "coderabbitai",
         "coderabbitai[bot]",
@@ -131,14 +131,14 @@ pub fn configured_identities(params: &Value) -> BTreeSet<String> {
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P08
 /// @requirement:REQ-PRFU-008,REQ-PRFU-024
 /// @pseudocode lines 10
-pub fn is_coderabbit(author: &str, identities: &BTreeSet<String>) -> bool {
+pub(super) fn is_coderabbit(author: &str, identities: &BTreeSet<String>) -> bool {
     if author.is_empty() {
         return false;
     }
     identities.contains(ALL_REVIEWERS_SENTINEL) || is_explicit_reviewer_identity(author, identities)
 }
 
-pub fn is_explicit_reviewer_identity(author: &str, identities: &BTreeSet<String>) -> bool {
+pub(super) fn is_explicit_reviewer_identity(author: &str, identities: &BTreeSet<String>) -> bool {
     if author.is_empty() {
         return false;
     }
@@ -148,7 +148,7 @@ pub fn is_explicit_reviewer_identity(author: &str, identities: &BTreeSet<String>
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P08
 /// @requirement:REQ-PRFU-008,REQ-PRFU-009
 /// @pseudocode lines 13-14
-pub fn item_set_hash(items: &[FeedbackItem]) -> String {
+pub(super) fn item_set_hash(items: &[FeedbackItem]) -> String {
     let mut material = items
         .iter()
         .map(|item| {
@@ -168,7 +168,7 @@ pub fn item_set_hash(items: &[FeedbackItem]) -> String {
 /// @requirement:REQ-PRFU-008,REQ-PRFU-009
 /// @pseudocode lines 13-14
 /// FNV-1a is used here only for deterministic artifact deduplication, not security.
-pub fn stable_hash(text: &str) -> String {
+pub(super) fn stable_hash(text: &str) -> String {
     let mut hash: u64 = 0xcbf29ce484222325;
     for byte in text.as_bytes() {
         hash ^= u64::from(*byte);
@@ -179,7 +179,7 @@ pub fn stable_hash(text: &str) -> String {
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P08
 /// @requirement:REQ-PRFU-008
 /// @pseudocode lines 14-19
-pub fn readiness_stability_hash(observation: &FeedbackObservation) -> String {
+pub(super) fn readiness_stability_hash(observation: &FeedbackObservation) -> String {
     let material = json!({
         "feedback_item_set_hash": item_set_hash(&observation.items),
         "ready_signal": observation.ready_signal,
@@ -212,7 +212,7 @@ pub fn readiness_stability_hash(observation: &FeedbackObservation) -> String {
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P08
 /// @requirement:REQ-PRFU-008
 /// @pseudocode lines 1
-pub fn read_or_build_binding(
+pub(super) fn read_or_build_binding(
     context: &StepContext,
     params: &Value,
     store: &PrFollowupArtifactStore,
@@ -224,7 +224,7 @@ pub fn read_or_build_binding(
     require_binding_identity(context, params)
 }
 
-pub fn fallback_binding(
+pub(super) fn fallback_binding(
     context: &StepContext,
     params: &Value,
 ) -> Result<PrFollowupBinding, EngineError> {
@@ -250,7 +250,7 @@ pub fn fallback_binding(
     })
 }
 
-pub fn require_binding_identity(
+pub(super) fn require_binding_identity(
     context: &StepContext,
     params: &Value,
 ) -> Result<PrFollowupBinding, EngineError> {
@@ -274,7 +274,7 @@ pub fn require_binding_identity(
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P08
 /// @requirement:REQ-PRFU-008
 /// @pseudocode lines 22
-pub fn is_permission_or_schema_error(value: &Value) -> bool {
+pub(super) fn is_permission_or_schema_error(value: &Value) -> bool {
     value
         .get("errors")
         .and_then(Value::as_array)
@@ -284,7 +284,7 @@ pub fn is_permission_or_schema_error(value: &Value) -> bool {
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P08
 /// @requirement:REQ-PRFU-008
 /// @pseudocode lines 1
-pub fn binding_from_value(value: &Value) -> Result<PrFollowupBinding, EngineError> {
+pub(super) fn binding_from_value(value: &Value) -> Result<PrFollowupBinding, EngineError> {
     Ok(PrFollowupBinding {
         schema_version: u32::try_from(require_u64(value, "schema_version")?)
             .map_err(|err| github_feedback_error(format!("schema_version out of range: {err}")))?,
@@ -305,7 +305,7 @@ pub fn binding_from_value(value: &Value) -> Result<PrFollowupBinding, EngineErro
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P08
 /// @requirement:REQ-PRFU-008
 /// @pseudocode lines 1
-pub fn require_string(value: &Value, field: &str) -> Result<String, EngineError> {
+pub(super) fn require_string(value: &Value, field: &str) -> Result<String, EngineError> {
     value
         .get(field)
         .and_then(Value::as_str)
@@ -317,7 +317,7 @@ pub fn require_string(value: &Value, field: &str) -> Result<String, EngineError>
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P08
 /// @requirement:REQ-PRFU-008
 /// @pseudocode lines 1
-pub fn require_u64(value: &Value, field: &str) -> Result<u64, EngineError> {
+pub(super) fn require_u64(value: &Value, field: &str) -> Result<u64, EngineError> {
     value
         .get(field)
         .and_then(Value::as_u64)
@@ -327,7 +327,12 @@ pub fn require_u64(value: &Value, field: &str) -> Result<u64, EngineError> {
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P08
 /// @requirement:REQ-PRFU-008
 /// @pseudocode lines 1
-pub fn string_param(context: &StepContext, params: &Value, key: &str, default: &str) -> String {
+pub(super) fn string_param(
+    context: &StepContext,
+    params: &Value,
+    key: &str,
+    default: &str,
+) -> String {
     params
         .get(key)
         .and_then(Value::as_str)
@@ -338,7 +343,7 @@ pub fn string_param(context: &StepContext, params: &Value, key: &str, default: &
         .unwrap_or_else(|| default.to_string())
 }
 
-pub fn required_string_param(
+pub(super) fn required_string_param(
     context: &StepContext,
     params: &Value,
     key: &str,
@@ -351,7 +356,7 @@ pub fn required_string_param(
     }
 }
 
-pub fn has_unresolved_token(value: &str) -> bool {
+pub(super) fn has_unresolved_token(value: &str) -> bool {
     let bytes = value.as_bytes();
     let mut index = 0;
     while index < bytes.len() {
@@ -375,7 +380,7 @@ pub fn has_unresolved_token(value: &str) -> bool {
     false
 }
 
-pub fn artifact_root(context: &StepContext, params: &Value) -> Result<PathBuf, EngineError> {
+pub(super) fn artifact_root(context: &StepContext, params: &Value) -> Result<PathBuf, EngineError> {
     let raw = params
         .get("artifact_root")
         .and_then(Value::as_str)
@@ -398,14 +403,14 @@ pub fn artifact_root(context: &StepContext, params: &Value) -> Result<PathBuf, E
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P08
 /// @requirement:REQ-PRFU-008
 /// @pseudocode lines 3
-pub fn u64_param(params: &Value, key: &str, default: u64) -> u64 {
+pub(super) fn u64_param(params: &Value, key: &str, default: u64) -> u64 {
     params.get(key).and_then(Value::as_u64).unwrap_or(default)
 }
 
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P08
 /// @requirement:REQ-PRFU-008
 /// @pseudocode lines 7
-pub fn string_field(value: &Value, field: &str) -> String {
+pub(super) fn string_field(value: &Value, field: &str) -> String {
     value
         .get(field)
         .and_then(Value::as_str)
@@ -416,7 +421,7 @@ pub fn string_field(value: &Value, field: &str) -> String {
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P08
 /// @requirement:REQ-PRFU-008
 /// @pseudocode lines 7
-pub fn opt_string(value: &Value, field: &str) -> Option<String> {
+pub(super) fn opt_string(value: &Value, field: &str) -> Option<String> {
     value
         .get(field)
         .and_then(Value::as_str)
@@ -426,7 +431,7 @@ pub fn opt_string(value: &Value, field: &str) -> Option<String> {
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P08
 /// @requirement:REQ-PRFU-008
 /// @pseudocode lines 1,20
-pub fn current_step_id(context: &StepContext, fallback: &str) -> String {
+pub(super) fn current_step_id(context: &StepContext, fallback: &str) -> String {
     context
         .get("current_step_id")
         .cloned()
@@ -436,7 +441,7 @@ pub fn current_step_id(context: &StepContext, fallback: &str) -> String {
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P08
 /// @requirement:REQ-PRFU-008
 /// @pseudocode lines 22
-pub fn github_feedback_error(message: impl Into<String>) -> EngineError {
+pub(super) fn github_feedback_error(message: impl Into<String>) -> EngineError {
     EngineError::StepExecutionError {
         step_id: "github_coderabbit_feedback".to_string(),
         message: message.into(),

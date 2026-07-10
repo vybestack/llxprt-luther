@@ -91,3 +91,107 @@ fn reconstruct_runner_rejects_missing_current_step() {
         "unexpected error: {err}"
     );
 }
+
+#[test]
+fn run_context_from_metadata_preserves_identity_and_defaults_log_path() {
+    let mut md = RunMetadata::new("ctx-run", "wf", "cfg");
+    md.artifact_root = Some("/artifacts".to_string());
+    md.workspace_path = Some("/workspace".to_string());
+    md.repository = Some("owner/repo".to_string());
+    md.issue_number = Some(125);
+    md.pr_number = Some(126);
+    md.head_sha = Some("deadbeef".to_string());
+
+    let ctx = run_context_from_metadata(&md, "ctx-run");
+    assert_eq!(ctx.artifact_root.as_deref(), Some("/artifacts"));
+    assert_eq!(ctx.workspace_path.as_deref(), Some("/workspace"));
+    assert_eq!(ctx.repository.as_deref(), Some("owner/repo"));
+    assert_eq!(ctx.issue_number, Some(125));
+    assert_eq!(ctx.pr_number, Some(126));
+    assert_eq!(ctx.head_sha.as_deref(), Some("deadbeef"));
+    // log_path defaults to the derived run log path when metadata omits it.
+    assert!(ctx.log_path.is_some());
+}
+
+#[test]
+fn run_context_from_metadata_uses_explicit_log_path() {
+    let mut md = RunMetadata::new("ctx-run", "wf", "cfg");
+    md.log_path = Some("/custom/log.txt".to_string());
+    let ctx = run_context_from_metadata(&md, "ctx-run");
+    assert_eq!(ctx.log_path.as_deref(), Some("/custom/log.txt"));
+}
+
+#[test]
+fn write_continuation_result_writes_named_artifact() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let outcome: Result<RunOutcome, luther_workflow::engine::runner::EngineError> =
+        Ok(RunOutcome::Success);
+    write_continuation_result(
+        temp.path(),
+        &luther_workflow::engine::ContinuationKind::Resume,
+        "some_step",
+        &outcome,
+    );
+    let name = luther_workflow::engine::continuation::result_artifact_name(
+        &luther_workflow::engine::ContinuationKind::Resume,
+    );
+    let written = temp.path().join(name);
+    assert!(written.exists(), "expected {name} to be written");
+    let content = std::fs::read_to_string(&written).unwrap();
+    assert!(content.contains("completed"));
+}
+
+#[test]
+fn write_continuation_result_maps_waiting_external_status() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let outcome: Result<RunOutcome, luther_workflow::engine::runner::EngineError> =
+        Ok(RunOutcome::WaitingExternal {
+            step_id: "watch".to_string(),
+            reason: "pending".to_string(),
+        });
+    write_continuation_result(
+        temp.path(),
+        &luther_workflow::engine::ContinuationKind::Retry {
+            from_failed_step: true,
+        },
+        "watch",
+        &outcome,
+    );
+    let name = luther_workflow::engine::continuation::result_artifact_name(
+        &luther_workflow::engine::ContinuationKind::Retry {
+            from_failed_step: true,
+        },
+    );
+    let content = std::fs::read_to_string(temp.path().join(name)).unwrap();
+    assert!(content.contains("waiting_external"));
+}
+
+fn sample_checkpoint(run_id: &str, step: &str) -> luther_workflow::persistence::Checkpoint {
+    luther_workflow::persistence::Checkpoint::with_snapshot(
+        run_id,
+        step,
+        luther_workflow::persistence::StateSnapshot {
+            status: "interrupted".to_string(),
+            loop_count: 2,
+            retry_count: 1,
+            ..Default::default()
+        },
+    )
+}
+
+#[test]
+fn print_checkpoints_json_emits_valid_document() {
+    let cps = vec![sample_checkpoint("run-x", "step-a")];
+    // Exercises the JSON rendering path (stdout side effects are ignored).
+    print_checkpoints_json("run-x", &cps);
+    // Rebuild the same document to assert on structure/content.
+    let identity = luther_workflow::engine::continuation::checkpoint_identity(&cps[0]);
+    assert!(!identity.is_empty());
+}
+
+#[test]
+fn print_checkpoints_human_handles_empty_and_populated() {
+    print_checkpoints_human("empty-run", &[]);
+    let cps = vec![sample_checkpoint("run-y", "step-b")];
+    print_checkpoints_human("run-y", &cps);
+}

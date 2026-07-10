@@ -5,18 +5,17 @@ pub fn persist_child_interrupted_state(
     config: &WorkflowConfig,
     db_path: &Path,
     step_id: &str,
-) -> Result<(), String> {
-    let conn = open_parent_orchestration_connection(db_path)?;
+) -> Result<(), EngineError> {
+    let conn = open_parent_orchestration_connection(db_path).map_err(parent_error)?;
     let checkpoint = load_checkpoint_with_conn(&conn, &request.run_id)
-        .map_err(|err| err.to_string())?
+        .map_err(|err| parent_error(format!("load child interrupted checkpoint: {err}")))?
         .ok_or_else(|| {
-            format!(
+            parent_error(format!(
                 "missing child interrupted checkpoint for {}",
                 request.run_id
-            )
+            ))
         })?;
-    let previous = crate::persistence::get_wait_state(&conn, &request.run_id)
-        .map_err(|err| err.to_string())?;
+    let previous = crate::persistence::get_wait_state(&conn, &request.run_id).map_err(sql_error)?;
     let mut record =
         previous.unwrap_or_else(|| WaitStateRecord::new(&request.run_id, &config.config_id));
     record.lease_id = child_lease_id(&conn, request)?;
@@ -41,10 +40,10 @@ pub fn persist_child_interrupted_state(
     record.next_poll_at = crate::polling::next_poll_time(record.poll_interval_seconds);
     record.resume_step = checkpoint.step_id.clone();
     record.checkpoint_id = crate::engine::continuation::checkpoint_identity(&checkpoint);
-    upsert_wait_state(&conn, &record).map_err(|err| err.to_string())?;
+    upsert_wait_state(&conn, &record).map_err(sql_error)?;
     write_wait_state_artifact(&request.run_id, &record)
         .map(|_| ())
-        .map_err(|err| err.to_string())
+        .map_err(|err| parent_error(format!("write child wait-state artifact: {err}")))
 }
 
 pub fn persist_child_external_wait_state(
@@ -53,16 +52,20 @@ pub fn persist_child_external_wait_state(
     db_path: &Path,
     step_id: &str,
     reason: &str,
-) -> Result<(), String> {
-    let conn = open_parent_orchestration_connection(db_path)?;
+) -> Result<(), EngineError> {
+    let conn = open_parent_orchestration_connection(db_path).map_err(parent_error)?;
     let checkpoint = load_checkpoint_with_conn(&conn, &request.run_id)
-        .map_err(|err| err.to_string())?
-        .ok_or_else(|| format!("missing child waiting checkpoint for {}", request.run_id))?;
-    let metadata = get_run_with_conn(&conn, &request.run_id).map_err(|err| err.to_string())?;
+        .map_err(|err| parent_error(format!("load child waiting checkpoint: {err}")))?
+        .ok_or_else(|| {
+            parent_error(format!(
+                "missing child waiting checkpoint for {}",
+                request.run_id
+            ))
+        })?;
+    let metadata = get_run_with_conn(&conn, &request.run_id).map_err(sql_error)?;
     let wait_kind = child_wait_kind_for_step(step_id);
-    let identity = child_wait_poll_identity(metadata.as_ref(), wait_kind)?;
-    let previous = crate::persistence::get_wait_state(&conn, &request.run_id)
-        .map_err(|err| err.to_string())?;
+    let identity = child_wait_poll_identity(metadata.as_ref(), wait_kind).map_err(parent_error)?;
+    let previous = crate::persistence::get_wait_state(&conn, &request.run_id).map_err(sql_error)?;
     let mut record =
         previous.unwrap_or_else(|| WaitStateRecord::new(&request.run_id, &config.config_id));
     record.lease_id = child_lease_id(&conn, request)?;
@@ -89,10 +92,10 @@ pub fn persist_child_external_wait_state(
     record.next_poll_at = crate::polling::next_poll_time(record.poll_interval_seconds);
     record.resume_step = checkpoint.step_id.clone();
     record.checkpoint_id = crate::engine::continuation::checkpoint_identity(&checkpoint);
-    upsert_wait_state(&conn, &record).map_err(|err| err.to_string())?;
+    upsert_wait_state(&conn, &record).map_err(sql_error)?;
     write_wait_state_artifact(&request.run_id, &record)
         .map(|_| ())
-        .map_err(|err| err.to_string())
+        .map_err(|err| parent_error(format!("write child wait-state artifact: {err}")))
 }
 
 pub fn child_wait_kind_for_step(step_id: &str) -> WaitKind {
@@ -129,9 +132,9 @@ pub fn child_wait_poll_identity(
         WaitKind::PrChecks if identity.pr_number.is_none() || identity.head_sha.is_none() => {
             Err("missing child PR number or head SHA for PR checks wait state".to_string())
         }
-        WaitKind::DependencyChildWorkflow if identity.head_sha.is_none() => Err(
-            "missing head_sha child run id for dependency child workflow wait state".to_string(),
-        ),
+        WaitKind::DependencyChildWorkflow if identity.head_sha.is_none() => {
+            Err("missing head SHA for dependency child workflow wait state".to_string())
+        }
         WaitKind::CoderabbitReview
         | WaitKind::HumanReview
         | WaitKind::PrMerge
@@ -169,10 +172,10 @@ pub fn child_wait_max_wait_seconds(config: &WorkflowConfig, wait_kind: WaitKind)
 pub fn child_lease_id(
     conn: &rusqlite::Connection,
     request: &ChildWorkflowLaunchRequest,
-) -> Result<Option<String>, String> {
+) -> Result<Option<String>, EngineError> {
     get_lease_for_issue(conn, &request.repo, request.issue_number)
         .map(|lease| lease.map(|lease| lease.lease_id))
-        .map_err(|err| err.to_string())
+        .map_err(sql_error)
 }
 
 pub fn sql_error(err: rusqlite::Error) -> EngineError {

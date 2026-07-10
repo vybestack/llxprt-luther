@@ -1,3 +1,4 @@
+use super::subissues::parse_sub_issue_response;
 use super::*;
 use std::cell::RefCell;
 
@@ -583,4 +584,131 @@ fn multi_state_uses_all() {
     let argv = build_issue_list_argv("o/r", &[], &["open".into(), "closed".into()]);
     let idx = argv.iter().position(|a| a == "--state").unwrap();
     assert_eq!(argv[idx + 1], "all");
+}
+
+#[test]
+fn default_merge_method_flag_maps_known_methods() {
+    assert_eq!(default_merge_method_flag("MERGE"), Some("--merge"));
+    assert_eq!(default_merge_method_flag("merge"), Some("--merge"));
+    assert_eq!(default_merge_method_flag("REBASE"), Some("--rebase"));
+    assert_eq!(default_merge_method_flag("squash"), Some("--squash"));
+    assert_eq!(default_merge_method_flag("unknown"), None);
+}
+
+#[test]
+fn merge_method_allowed_reads_repository_flags() {
+    let value = serde_json::json!({
+        "mergeCommitAllowed": true,
+        "rebaseMergeAllowed": false,
+        "squashMergeAllowed": true,
+    });
+    assert!(merge_method_allowed(&value, "--merge"));
+    assert!(!merge_method_allowed(&value, "--rebase"));
+    assert!(merge_method_allowed(&value, "--squash"));
+    assert!(!merge_method_allowed(&value, "--bogus"));
+    // Missing key defaults to false.
+    assert!(!merge_method_allowed(&serde_json::json!({}), "--merge"));
+}
+
+#[test]
+fn issue_not_found_stderr_recognizes_known_messages() {
+    assert!(issue_not_found_stderr(
+        "GraphQL: Could not resolve to an Issue with the number of 5"
+    ));
+    assert!(issue_not_found_stderr(
+        "  could not resolve to issue or pull request 9  "
+    ));
+    assert!(issue_not_found_stderr("no issue found for 12"));
+    assert!(!issue_not_found_stderr("some other error"));
+}
+
+#[test]
+fn normalize_state_lowercases() {
+    assert_eq!(normalize_state("OPEN"), "open");
+    assert_eq!(normalize_state("Closed"), "closed");
+}
+
+#[test]
+fn parse_body_issue_references_extracts_checklist_children() {
+    let body = "\
+Intro paragraph mentioning #999 that should be ignored.
+- [ ] #101 first child
+- [x] #102 done child
+* [ ] #103 another
+- [ ] #104 and #105 too many refs ignored
+sub-issue: #106
+random line #700";
+    let refs = parse_body_issue_references(body);
+    assert_eq!(refs, vec![101, 102, 103, 106]);
+}
+
+#[test]
+fn parse_body_issue_references_dedupes() {
+    let body = "sub-issue: #55\nchild: #55\n- [ ] #55";
+    assert_eq!(parse_body_issue_references(body), vec![55]);
+}
+
+#[test]
+fn is_subissue_reference_line_detects_prefixes_and_single_ref_checklist() {
+    assert!(is_subissue_reference_line("- [ ] #10 title"));
+    assert!(!is_subissue_reference_line("- [ ] #10 and #11"));
+    assert!(is_subissue_reference_line("sub-issue: #10"));
+    assert!(is_subissue_reference_line("Child Issue #10"));
+    assert!(is_subissue_reference_line("children: #10"));
+    assert!(!is_subissue_reference_line("just some text"));
+}
+
+#[test]
+fn checklist_item_strips_supported_markers() {
+    assert_eq!(checklist_item("- [ ] #10"), Some("#10"));
+    assert_eq!(checklist_item("* [X] done"), Some("done"));
+    assert_eq!(checklist_item("- plain"), None);
+}
+
+#[test]
+fn issue_reference_tokens_counts_hash_tokens() {
+    assert_eq!(issue_reference_tokens("#10 title"), 1);
+    assert_eq!(issue_reference_tokens("#10 and #11"), 2);
+    assert_eq!(issue_reference_tokens("no refs here"), 0);
+}
+
+#[test]
+fn parse_issue_list_maps_state_and_labels() {
+    let json = r#"[
+        {"number":7,"title":"T","state":"OPEN","labels":[{"name":"bug"}],
+         "assignees":[{"login":"me"}],"milestone":{"title":"m1"}}
+    ]"#;
+    let issues = parse_issue_list(json).unwrap();
+    assert_eq!(issues.len(), 1);
+    assert_eq!(issues[0].state, "open");
+    assert_eq!(issues[0].labels, vec!["bug".to_string()]);
+    assert_eq!(issues[0].assignee.as_deref(), Some("me"));
+    assert_eq!(issues[0].milestone.as_deref(), Some("m1"));
+}
+
+#[test]
+fn parse_issue_list_rejects_malformed_json() {
+    let err = parse_issue_list("not json").unwrap_err();
+    match err {
+        GithubError::CommandFailed { stderr, .. } => {
+            assert!(stderr.contains("failed to parse gh issue list JSON"));
+        }
+        other => panic!("unexpected error: {other:?}"),
+    }
+}
+
+#[test]
+fn build_issue_list_argv_single_open_state_uses_open() {
+    let argv = build_issue_list_argv("o/r", &[], &["open".into()]);
+    let idx = argv.iter().position(|a| a == "--state").unwrap();
+    assert_eq!(argv[idx + 1], "open");
+    assert!(argv.contains(&"--repo".to_string()));
+    assert!(argv.contains(&"o/r".to_string()));
+}
+
+#[test]
+fn build_issue_list_argv_includes_label_filters() {
+    let argv = build_issue_list_argv("o/r", &["ready".into()], &["open".into()]);
+    let idx = argv.iter().position(|a| a == "--label").unwrap();
+    assert_eq!(argv[idx + 1], "ready");
 }
