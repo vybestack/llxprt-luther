@@ -183,10 +183,8 @@ fn include_group_scan(tokens: &[Tok], open_idx: usize, open: char) -> Option<(bo
                     return Some((found, idx));
                 }
             }
-            Tok::Str(value) => {
-                if depth >= 1 && value.ends_with(".rs") {
-                    found = true;
-                }
+            Tok::Str(value) if depth >= 1 && value.ends_with(".rs") => {
+                found = true;
             }
             _ => {}
         }
