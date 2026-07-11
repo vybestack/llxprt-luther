@@ -36,6 +36,85 @@ fn failed_child_lease_relaunches_fresh_workflow() {
 }
 
 #[test]
+fn terminal_lease_relaunch_is_atomic_across_two_connections() {
+    // Two independent database connections both observe the *same* terminal
+    // (Failed) child lease and simultaneously try to relaunch it. The atomic
+    // compare-and-swap must guarantee exactly one connection wins Launch and
+    // the other observes the contention and waits, so no duplicate child
+    // workflow is spawned.
+    let temp = tempfile::tempdir().unwrap();
+    let mut context = context(temp.path());
+    context.set("current_step_id", "launch_or_resume_child_workflow");
+    let state = OrchestrationState::from_context(&context, &json!({})).unwrap();
+    let db_path = temp.path().join("checkpoints.db");
+    crate::persistence::init_database(&db_path).unwrap();
+
+    let child = unique_child_issue_number();
+    let setup_conn = open_parent_orchestration_connection(&db_path).unwrap();
+    let lease = try_claim(&setup_conn, &state.repo, child, &state.child_config_id)
+        .unwrap()
+        .unwrap();
+    update_lease_status(
+        &setup_conn,
+        &lease.lease_id,
+        LeaseStatus::Failed,
+        Some("old-child-run"),
+    )
+    .unwrap();
+    drop(setup_conn);
+
+    // Both connections read the identical terminal lease snapshot before
+    // either mutates it, mirroring two orchestrator passes racing on the same
+    // row.
+    let mut conn_a = open_parent_orchestration_connection(&db_path).unwrap();
+    let mut conn_b = open_parent_orchestration_connection(&db_path).unwrap();
+    let observed_a = get_lease_for_issue(&conn_a, &state.repo, child)
+        .unwrap()
+        .unwrap();
+    let observed_b = get_lease_for_issue(&conn_b, &state.repo, child)
+        .unwrap()
+        .unwrap();
+    assert_eq!(observed_a.status, LeaseStatus::Failed);
+    assert_eq!(observed_b.status, LeaseStatus::Failed);
+
+    let action_a = prepare_relaunchable_child(&mut conn_a, &observed_a).unwrap();
+    let action_b = prepare_relaunchable_child(&mut conn_b, &observed_b).unwrap();
+
+    let launches = [&action_a, &action_b]
+        .iter()
+        .filter(|action| matches!(action, ChildLeaseAction::Launch(_)))
+        .count();
+    let contended_waits = [&action_a, &action_b]
+        .iter()
+        .filter(|action| {
+            matches!(
+                action,
+                ChildLeaseAction::Wait { reason, .. }
+                    if reason == "child_lease_relaunch_contended"
+            )
+        })
+        .count();
+
+    assert_eq!(
+        launches, 1,
+        "exactly one connection must win the relaunch claim"
+    );
+    assert_eq!(
+        contended_waits, 1,
+        "the losing connection must wait on contention, not relaunch"
+    );
+
+    // The lease ends in a single fresh Claimed state with no run id, proving the
+    // winner's compare-and-swap took effect and the loser did not overwrite it.
+    let verify_conn = open_parent_orchestration_connection(&db_path).unwrap();
+    let final_lease = get_lease_for_issue(&verify_conn, &state.repo, child)
+        .unwrap()
+        .unwrap();
+    assert_eq!(final_lease.status, LeaseStatus::Claimed);
+    assert_eq!(final_lease.run_id, None);
+}
+
+#[test]
 fn child_lease_claim_contention_waits_without_error() {
     let temp = tempfile::tempdir().unwrap();
     let mut context = context(temp.path());

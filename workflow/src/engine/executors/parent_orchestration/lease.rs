@@ -190,7 +190,16 @@ pub fn prepare_relaunchable_child(
     lease: &crate::persistence::leases::IssueLease,
 ) -> Result<ChildLeaseAction, EngineError> {
     let tx = conn.transaction().map_err(sql_error)?;
-    clear_child_lease_for_relaunch(&tx, lease)?;
+    if !clear_child_lease_for_relaunch(&tx, lease)? {
+        // Another connection won the compare-and-swap and already flipped this
+        // terminal lease into a fresh Claimed state, so we must not relaunch a
+        // duplicate child workflow. Roll back and let the caller wait.
+        tx.rollback().map_err(sql_error)?;
+        return Ok(ChildLeaseAction::Wait {
+            lease: None,
+            reason: "child_lease_relaunch_contended".to_string(),
+        });
+    }
     let relaunchable = get_lease_for_issue(&tx, &lease.issue_repo, lease.issue_number)
         .map_err(sql_error)?
         .ok_or_else(|| {
@@ -200,27 +209,33 @@ pub fn prepare_relaunchable_child(
     Ok(ChildLeaseAction::Launch(relaunchable))
 }
 
+/// Atomically claim a terminal child lease for relaunch.
+///
+/// This is a compare-and-swap keyed on the *observed* terminal `status` and
+/// `run_id`: it only flips the lease to `Claimed` (clearing `run_id`) when the
+/// row still matches the terminal identity the caller read. If another
+/// connection already claimed the same terminal lease, the row no longer
+/// matches, zero rows are affected, and this returns `Ok(false)` so the caller
+/// can wait instead of launching a duplicate child workflow.
 pub fn clear_child_lease_for_relaunch(
     conn: &rusqlite::Connection,
     lease: &crate::persistence::leases::IssueLease,
-) -> Result<(), EngineError> {
+) -> Result<bool, EngineError> {
     let updated = conn
         .execute(
-            "UPDATE issue_leases SET status = ?1, run_id = NULL, updated_at = ?2 WHERE lease_id = ?3",
+            "UPDATE issue_leases
+             SET status = ?1, run_id = NULL, updated_at = ?2
+             WHERE lease_id = ?3 AND status = ?4 AND run_id IS ?5",
             rusqlite::params![
                 LeaseStatus::Claimed.to_string(),
                 Utc::now().to_rfc3339(),
-                lease.lease_id
+                lease.lease_id,
+                lease.status.to_string(),
+                lease.run_id,
             ],
         )
         .map_err(sql_error)?;
-    if updated == 0 {
-        return Err(parent_error(format!(
-            "child lease {} was not updated while preparing relaunch",
-            lease.lease_id
-        )));
-    }
-    Ok(())
+    Ok(updated == 1)
 }
 
 pub enum ChildPrWait {
