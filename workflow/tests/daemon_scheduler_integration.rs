@@ -161,7 +161,7 @@ fn run_once_launches_up_to_concurrency_limit() {
 }
 
 #[test]
-fn second_pass_does_not_duplicate_completed_work() {
+fn second_pass_reclaims_completed_work() {
     let query = MockQuery {
         issues: vec![issue(1)],
         parent_issue_numbers: vec![],
@@ -172,13 +172,13 @@ fn second_pass_does_not_duplicate_completed_work() {
     run_once_for_test(&cfg(1), &query, &conn, &launcher, "cfg-a").expect("pass 1");
     assert_eq!(launcher.launched.lock().unwrap().len(), 1);
 
-    // The lease is Completed; a second discovery pass must not relaunch it
-    // because the issue already has a (terminal) lease record.
+    // Completed leases no longer block discovery, so a later pass can retry
+    // the issue and atomically replace the terminal lease.
     run_once_for_test(&cfg(1), &query, &conn, &launcher, "cfg-a").expect("pass 2");
     assert_eq!(
         launcher.launched.lock().unwrap().len(),
-        1,
-        "completed issue is not relaunched"
+        2,
+        "completed issue is reclaimed and relaunched"
     );
 }
 
