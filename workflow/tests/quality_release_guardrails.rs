@@ -777,8 +777,12 @@ fn test_ocr_pr_review_permissions_are_minimal() {
         .collect();
     let mut sorted_permission_lines = permission_lines;
     sorted_permission_lines.sort_unstable();
-    let mut expected_permission_lines =
-        vec!["contents: read", "pull-requests: write", "issues: write"];
+    let mut expected_permission_lines = vec![
+        "contents: read",
+        "pull-requests: write",
+        "issues: write",
+        "actions: read",
+    ];
     expected_permission_lines.sort_unstable();
     assert_eq!(
         sorted_permission_lines, expected_permission_lines,
@@ -837,6 +841,233 @@ fn test_ocr_pr_review_uses_timeout_30_and_merge_base() {
         content.contains("merge-base"),
         "Workflow must review the merge-base..head diff, not origin/main..head"
     );
+    assert!(
+        content.contains("--concurrency 2"),
+        "Workflow must cap OCR provider contention with an explicit --concurrency value"
+    );
+}
+
+/// Test: CI reviews are deterministic — OCR self-update checks are disabled.
+#[test]
+fn test_ocr_pr_review_sets_ocr_no_update_env() {
+    let content = ocr_pr_review_workflow_content();
+    assert!(
+        content.contains(r#"OCR_NO_UPDATE: "1""#) || content.contains("OCR_NO_UPDATE: '1'"),
+        "Workflow must set OCR_NO_UPDATE to keep CI reviews deterministic"
+    );
+}
+
+/// Test: OCR installs to an isolated local prefix, exposes it on PATH, and
+/// exports OCR_BIN for later steps.
+#[test]
+fn test_ocr_pr_review_installs_locally_pinned_version() {
+    let content = ocr_pr_review_workflow_content();
+    assert!(
+        content
+            .contains(r#"OCR_PREFIX="${RUNNER_TEMP}/ocr-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}""#),
+        "Install must scope the prefix per run and attempt so concurrent runners cannot collide"
+    );
+    assert!(
+        content.contains(r#"npm install --prefix "$OCR_PREFIX" --ignore-scripts @alibaba-group/open-code-review@1.7.7"#),
+        "Install must target the isolated local prefix with the pinned 1.7.7 version"
+    );
+    assert!(
+        content.contains(r#"echo "${OCR_PREFIX}/node_modules/.bin" >> "$GITHUB_PATH""#),
+        "Install must append the local prefix bin dir to GITHUB_PATH"
+    );
+    assert!(
+        content.contains("OCR_BIN=${OCR_BIN}") && content.contains(r#""$OCR_BIN" version"#),
+        "Install must export OCR_BIN and invoke it directly in later steps"
+    );
+    assert!(
+        !content.contains("npm install -g"),
+        "Install must never fall back to a global npm install"
+    );
+}
+
+/// Test: every action reference is a pinned SHA with a ratchet comment.
+#[test]
+fn test_ocr_pr_review_pins_action_shas_with_ratchet() {
+    let content = ocr_pr_review_workflow_content();
+    let uses_lines: Vec<&str> = content
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.starts_with("uses:"))
+        .collect();
+    assert!(
+        !uses_lines.is_empty(),
+        "Workflow must reference at least one pinned action"
+    );
+    for line in &uses_lines {
+        let reference = line
+            .trim_start_matches("uses:")
+            .trim()
+            .split_once('#')
+            .map(|(reference, _)| reference.trim())
+            .unwrap_or("");
+        let sha = reference
+            .split_once('@')
+            .map(|(_, sha)| sha)
+            .unwrap_or_default();
+        assert!(
+            sha.len() == 40 && sha.chars().all(|ch| ch.is_ascii_hexdigit()),
+            "Action reference must be pinned to a 40-hex commit SHA: {line}"
+        );
+        assert!(
+            line.contains("# ratchet:actions/"),
+            "Pinned action must carry a ratchet comment naming the tracked version: {line}"
+        );
+    }
+    assert!(
+        !content.contains("uses: actions/checkout@v")
+            && !content.contains("uses: actions/github-script@v")
+            && !content.contains("uses: actions/upload-artifact@v")
+            && !content.contains("uses: actions/download-artifact@v"),
+        "Workflow must not reference actions by a bare @vN tag"
+    );
+}
+
+/// Test: phase tracking and infrastructure-vs-policy classification are wired.
+#[test]
+fn test_ocr_pr_review_tracks_phase_and_classifies_failures() {
+    let content = ocr_pr_review_workflow_content();
+    for phase_write in [
+        r#"echo "install" > ocr-phase.txt"#,
+        r#"echo "validate" > ocr-phase.txt"#,
+        r#"echo "llm-preflight" > ocr-phase.txt"#,
+        r#"echo "preview" > ocr-phase.txt"#,
+        r#"echo "review" > ocr-phase.txt"#,
+    ] {
+        assert!(
+            content.contains(phase_write),
+            "Each OCR step must record its phase: missing {phase_write}"
+        );
+    }
+    assert!(
+        content.contains("ocr-infrastructure-failure.txt")
+            && content.contains("ocr-policy-failure.txt"),
+        "Workflow must record infrastructure and policy failure markers"
+    );
+    assert!(
+        content.contains("id: ocr-classification")
+            && content.contains("policy_failure=true")
+            && content.contains("infrastructure_failure=true"),
+        "Workflow must resolve a classification step that emits policy/infrastructure outputs"
+    );
+    assert!(
+        content.contains(
+            "infrastructure_failure: ${{ steps.ocr-classification.outputs.infrastructure_failure }}"
+        ) && content
+            .contains("policy_failure: ${{ steps.ocr-classification.outputs.policy_failure }}"),
+        "code-review job must expose classification outputs for the notification job"
+    );
+    assert!(
+        content.contains("[ -s ocr-exit-code.txt ]"),
+        "Setup/validate/preview/review steps must short-circuit gracefully once an earlier failure is recorded"
+    );
+}
+
+/// Test: secrets are redacted in both the posting step and the artifact
+/// redaction step, and redaction runs via github-script (never a node/perl
+/// interpreter in a run step).
+#[test]
+fn test_ocr_pr_review_redacts_secrets_in_artifacts_and_comments() {
+    let content = ocr_pr_review_workflow_content();
+    assert!(
+        content.contains("function redactSecretDiagnostics(value)"),
+        "Redaction helper must exist"
+    );
+    let redaction_helper_count = content.matches("function redactSecretDiagnostics").count();
+    assert!(
+        redaction_helper_count >= 2,
+        "Redaction must be applied in both the posting step and the artifact redaction step"
+    );
+    for pattern in [
+        r"Authorization\s*:",
+        r"x-api-key\s*:",
+        r"api[_-]?key\s*[=:]",
+        r"access[_-]?token\s*[=:]",
+    ] {
+        assert!(
+            content.contains(pattern),
+            "Redaction must cover common secret patterns: missing {pattern}"
+        );
+    }
+    assert!(
+        content.contains("name: Redact OCR diagnostic artifacts")
+            && content.contains("fs.writeFileSync(fileName, redactSecretDiagnostics(fs.readFileSync(fileName, 'utf8')))"),
+        "Artifact redaction must read/write each diagnostic file via github-script fs, not a node/perl heredoc"
+    );
+    // Lock in the architectural decision: redaction/notify must not reintroduce
+    // an inline node/perl interpreter or a sourced helper script.
+    let scanned_commands = scanned_ocr_pr_review_run_commands();
+    for forbidden in ["node", "perl", "npx"] {
+        assert!(
+            !shell_command_segments(&scanned_commands)
+                .any(|token| token_invokes_forbidden_command(token, forbidden)),
+            "Redaction/notify logic must not invoke {forbidden} from a run step"
+        );
+    }
+    assert!(
+        !content.contains("ocr-workflow-helpers.sh"),
+        "Cross-step markers must use plain redirection, not a sourced helper script"
+    );
+}
+
+/// Test: an infrastructure-failure notification job exists and is gated.
+#[test]
+fn test_ocr_pr_review_has_infrastructure_notification_job() {
+    let content = ocr_pr_review_workflow_content();
+    assert!(
+        content.contains("notify-ocr-infrastructure-failure:"),
+        "Workflow must define the infrastructure-failure notification job"
+    );
+    assert!(
+        content.contains("needs: code-review"),
+        "Notification job must depend on the code-review job"
+    );
+    assert!(
+        content.contains("!cancelled()")
+            && content.contains("needs.code-review.result == 'success'")
+            && content.contains("needs.code-review.result == 'failure'"),
+        "Notification job must run for completed (non-cancelled) code-review outcomes"
+    );
+    assert!(
+        content.contains("actions/download-artifact"),
+        "Notification job must download the OCR artifacts"
+    );
+    assert!(
+        content.contains("const ISSUE_TITLE = 'OCR review infrastructure failure'")
+            && content.contains("github.rest.search.issuesAndPullRequests")
+            && content.contains("github.rest.issues.create(")
+            && content.contains("github.rest.issues.createComment("),
+        "Notification job must find-or-create a single tracking issue via github-script"
+    );
+    assert!(
+        content.contains("skipping infrastructure issue notification"),
+        "Notification job must skip when a policy failure was recorded"
+    );
+}
+
+/// Test: rate-limit responses are classified distinctly from auth/config
+/// failures so a shared provider quota is not misreported.
+#[test]
+fn test_ocr_pr_review_run_uses_concurrency_and_classifies_rate_limit() {
+    let content = ocr_pr_review_workflow_content();
+    assert!(
+        content.contains("--concurrency 2"),
+        "OCR review must cap provider contention with --concurrency 2"
+    );
+    assert!(
+        content.contains("http 429|concurrency reached|rate limit")
+            && content.contains("reason=rate-limited"),
+        "OCR review must map HTTP 429 / concurrency-reached stderr to a distinct rate-limit reason"
+    );
+    assert!(
+        content.contains(r"all [0-9]+ file review(\(s\)|s)? failed")
+            && content.contains("provider/config/auth failure"),
+        "OCR review must still classify wholesale per-file review failures as a provider/config/auth issue"
+    );
 }
 
 fn secret_reference_names(content: &str) -> Vec<String> {
@@ -880,7 +1111,7 @@ fn test_ocr_pr_review_test_scope_guard_fails_closed() {
         "Changed-test detection must include common language-specific test filenames outside test directories"
     );
     assert!(
-        content.contains("if ! \"$OCR_BIN\" review --preview --from \"$BASE_SHA\" --to \"$HEAD_SHA\"")
+        content.contains("\"$OCR_BIN\" review --preview --from \"$BASE_SHA\" --to \"$HEAD_SHA\"")
             && content.contains("Could not verify OCR preview scope for changed test files")
             && content.contains("OCR preview did not list changed test files in the reviewed set")
             && content.contains("/^Will review[[:space:]]*\\(/ { in_section = 1; next }")
@@ -891,6 +1122,15 @@ fn test_ocr_pr_review_test_scope_guard_fails_closed() {
             && content.contains("candidate = fields[1]")
             && content.contains("if (candidate == target) found = 1"),
         "Changed-test scope validation must fail closed when OCR preview cannot be generated or parsed"
+    );
+    // A genuine policy breach (changed test missing from / excluded by OCR's
+    // reviewed set) must record a policy failure and block the PR check with a
+    // non-zero exit, while infrastructure problems remain non-blocking.
+    assert!(
+        content.contains("echo \"changed test files were missing from OCR reviewed set\" > ocr-policy-failure.txt")
+            && content.contains("echo \"changed test files were excluded from OCR reviewed set\" > ocr-policy-failure.txt")
+            && content.contains("phase=preview; reason=OCR preview command failed"),
+        "Changed-test scope guard must record a blocking policy failure on a genuine breach and an infrastructure failure when the preview command itself fails"
     );
 }
 
@@ -955,16 +1195,26 @@ fn test_ocr_pr_review_has_sticky_marker_and_artifacts() {
         content.contains("ocr-result.json")
             && content.contains("ocr-stdout.raw")
             && content.contains("ocr-stderr.log")
-            && content.contains("if-no-files-found: error"),
-        "Workflow must upload OCR artifacts and fail if no output files are present"
+            && content.contains("if-no-files-found: warn"),
+        "Workflow must upload OCR artifacts; placeholders guarantee presence so a missing file is a non-blocking warning"
     );
     assert!(
         content.contains("ocr-exit-code.txt")
             && content.contains(": > ocr-result.json")
             && content.contains(": > ocr-preview-stderr.log")
-            && content
-                .contains("core.setFailed(`OpenCodeReview failed or produced unparsable output"),
-        "Workflow must preserve OCR exit status and fail the posting step on OCR failure"
+            && content.contains(": > ocr-phase.txt")
+            && content.contains(": > ocr-infrastructure-failure.txt")
+            && content.contains(": > ocr-policy-failure.txt"),
+        "Workflow must seed the exit-code, phase, and failure-classification artifacts up front"
+    );
+    // Policy failures block the PR check; infrastructure/unparsable output is
+    // surfaced as a non-blocking warning rather than failing the job.
+    assert!(
+        content.contains("core.setFailed(`OCR policy failure:")
+            && content.contains(
+                "core.warning(`OpenCodeReview failed or produced unparsable output"
+            ),
+        "Posting step must fail only on policy failures and warn (not fail) on infrastructure/unparsable output"
     );
     assert!(
         content.contains("github.paginate(github.rest.issues.listComments"),
@@ -1043,7 +1293,7 @@ fn test_ocr_pr_review_inline_payload_is_github_compatible() {
             && content.contains("const MAX_INLINE_FALLBACK = 50")
             && content.contains("for (const [index, c] of inline.entries())")
             && content.contains("if (index >= MAX_INLINE_FALLBACK)")
-            && content.contains("core.warning(`Failed to post inline comment on ${c.path}:${c.line}:")
+            && content.contains("Failed to post inline comment on ${c.path}:${c.line}:")
             && content.contains("const lineRange = c.start_line && c.start_line !== c.line")
             && content.contains("const overflowBody = `${unrenderFindingText(c.body)} (line ${lineRange})`")
             && content.contains("const fallbackBody = `${unrenderFindingText(c.body)} (line ${lineRange})`")
@@ -1484,22 +1734,31 @@ fn test_ocr_pr_review_uses_only_pinned_ocr_install() {
         .collect();
     assert_eq!(
         ocr_installs,
-        vec!["npm install -g --ignore-scripts @alibaba-group/open-code-review@1.6.1"],
-        "Workflow may only globally install the reviewed pinned OCR version"
+        vec![
+            r#"npm install --prefix "$OCR_PREFIX" --ignore-scripts @alibaba-group/open-code-review@1.7.7 2>> ocr-stderr.log"#
+        ],
+        "Workflow may only install the reviewed pinned OCR version to an isolated local prefix"
     );
     for install in &ocr_installs {
         assert!(
-            install.ends_with("@1.6.1")
+            install.contains("@1.7.7")
                 && install.contains(" --ignore-scripts ")
+                && install.contains(r#"--prefix "$OCR_PREFIX""#)
+                && !install.contains("install -g")
                 && !install.contains("@file:")
                 && !install.contains("@link:")
                 && !install.contains("@./")
                 && !install.contains("@../"),
-            "OCR install must use an explicit registry version, not a local or linked package"
+            "OCR install must use an explicit registry version to an isolated local prefix, not a global, local, or linked package"
         );
-        let version = install
-            .strip_prefix("npm install -g --ignore-scripts @alibaba-group/open-code-review@")
+        let after_version = install
+            .split("@alibaba-group/open-code-review@")
+            .nth(1)
             .expect("install command must include the OCR package prefix");
+        let version = after_version
+            .split_whitespace()
+            .next()
+            .expect("install command must include a version token");
         let core = version.split(['-', '+']).next().unwrap_or(version);
         let semver_parts: Vec<&str> = core.split('.').collect();
         assert!(
