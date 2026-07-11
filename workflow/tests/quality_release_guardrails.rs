@@ -423,6 +423,23 @@ fn ocr_pr_review_workflow_content() -> String {
         .unwrap_or_else(|e| panic!("Failed to read ocr-pr-review.yml at {workflow_path:?}: {e}"))
 }
 
+/// Path to the single shared OCR secret-redaction module. Every github-script
+/// step loads this file via require() so the redaction patterns live in exactly
+/// one place instead of being duplicated inline per step.
+fn ocr_redaction_module_path() -> PathBuf {
+    repository_root()
+        .join(".github")
+        .join("scripts")
+        .join("ocr-redaction.js")
+}
+
+/// Helper to read the shared OCR secret-redaction module for guardrail tests.
+fn ocr_redaction_module_content() -> String {
+    let module_path = ocr_redaction_module_path();
+    fs::read_to_string(&module_path)
+        .unwrap_or_else(|e| panic!("Failed to read ocr-redaction.js at {module_path:?}: {e}"))
+}
+
 fn yaml_block_after(content: &str, header: &str) -> String {
     let header_key = header.trim();
     let mut header_indent = 0;
@@ -973,14 +990,18 @@ fn test_ocr_pr_review_tracks_phase_and_classifies_failures() {
 #[test]
 fn test_ocr_pr_review_redacts_secrets_in_artifacts_and_comments() {
     let content = ocr_pr_review_workflow_content();
+    let module = ocr_redaction_module_content();
+
+    // The redaction implementation must be defined exactly once, in the shared
+    // module, and must cover the common secret patterns there.
     assert!(
-        content.contains("function redactSecretDiagnostics(value)"),
-        "Redaction helper must exist"
+        module.contains("function redactSecretDiagnostics(value"),
+        "Shared module must define the redaction helper"
     );
-    let redaction_helper_count = content.matches("function redactSecretDiagnostics").count();
-    assert!(
-        redaction_helper_count >= 2,
-        "Redaction must be applied in both the posting step and the artifact redaction step"
+    assert_eq!(
+        module.matches("function redactSecretDiagnostics").count(),
+        1,
+        "The shared module is the single source of truth: redactSecretDiagnostics must be defined exactly once"
     );
     for pattern in [
         r"Authorization\s*:",
@@ -989,10 +1010,45 @@ fn test_ocr_pr_review_redacts_secrets_in_artifacts_and_comments() {
         r"access[_-]?token\s*[=:]",
     ] {
         assert!(
-            content.contains(pattern),
-            "Redaction must cover common secret patterns: missing {pattern}"
+            module.contains(pattern),
+            "Shared redaction module must cover common secret patterns: missing {pattern}"
         );
     }
+    assert!(
+        module.contains("module.exports") && module.contains("redactSecretDiagnostics"),
+        "Shared module must export redactSecretDiagnostics for reuse across steps"
+    );
+
+    // The workflow must not reintroduce an inline copy of the redaction
+    // *logic* in any step; the secret patterns live only in the shared module.
+    // Thin per-step wrappers that merely bind step-specific secrets and delegate
+    // to the shared implementation are allowed, but the regex patterns
+    // themselves must not be duplicated inline.
+    for inlined_pattern in [
+        r"Authorization\s*:\s*(?:(?:Bearer|Basic|token|ApiKey)",
+        r"x-api-key\s*:\s*)([^\s,;]+)",
+        r"access[_-]?token\s*[=:]",
+    ] {
+        assert!(
+            !content.contains(inlined_pattern),
+            "Redaction patterns must not be duplicated inline in the workflow: found {inlined_pattern}"
+        );
+    }
+    let require_count = content.matches(".github/scripts/ocr-redaction.js").count();
+    assert!(
+        require_count >= 3,
+        "All three OCR steps (posting, artifact redaction, notification) must load the shared redaction module: found {require_count} require(s)"
+    );
+    // Each require must resolve the module through the trusted workspace root so
+    // the shared implementation is loaded from the checked-out base branch.
+    assert_eq!(
+        content
+            .matches("${process.env.GITHUB_WORKSPACE}/.github/scripts/ocr-redaction.js")
+            .count(),
+        require_count,
+        "Every shared-redaction require must resolve via the trusted GITHUB_WORKSPACE root"
+    );
+
     assert!(
         content.contains("name: Redact OCR diagnostic artifacts")
             && content.contains("fs.writeFileSync(fileName, redactSecretDiagnostics(fs.readFileSync(fileName, 'utf8')))"),

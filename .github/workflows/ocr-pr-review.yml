@@ -574,7 +574,6 @@ jobs:
             const INLINE_MARKER = '<!-- luther-ocr-inline -->';
             const INFRA_FAILURE_FILE = 'ocr-infrastructure-failure.txt';
             const POLICY_FAILURE_FILE = 'ocr-policy-failure.txt';
-            const REDACTION = '[REDACTED]';
             const ocrTokenForRedaction = process.env.OCR_LLM_TOKEN;
             const ocrUrlForRedaction = process.env.OCR_LLM_URL;
             delete process.env.OCR_LLM_TOKEN;
@@ -601,32 +600,14 @@ jobs:
               }
             }
 
-            function escapeRegExp(value) {
-              return String(value).replace(/[\\^$.*+?()[\]{}|]/g, '\\$&');
-            }
-
+            // Load the single shared redaction implementation from the trusted
+            // base-branch checkout (never PR-supplied code) so the secret
+            // patterns are defined exactly once for every OCR step.
+            const { redactSecretDiagnostics: redactDiagnosticsWithSecrets } = require(
+              `${process.env.GITHUB_WORKSPACE}/.github/scripts/ocr-redaction.js`
+            );
             function redactSecretDiagnostics(value) {
-              let sanitized = String(value ?? '');
-              const exactSecrets = [ocrTokenForRedaction, ocrUrlForRedaction]
-                .filter((secret) => typeof secret === 'string' && secret.length > 0);
-              for (const secret of exactSecrets) {
-                try {
-                  sanitized = sanitized.replace(new RegExp(escapeRegExp(secret), 'g'), REDACTION);
-                } catch (_) {
-                  sanitized = sanitized.split(secret).join(REDACTION);
-                }
-              }
-              sanitized = sanitized
-                .replace(/\b(Authorization\s*:\s*(?:(?:Bearer|Basic|token|ApiKey)\s+)?)([^\s,;]+)/gi, '$1[REDACTED]')
-                .replace(/\b(x-api-key\s*:\s*)([^\s,;]+)/gi, '$1[REDACTED]')
-                .replace(/\b(api[_-]?key\s*[=:]\s*)([^\s,;&]+)/gi, '$1[REDACTED]')
-                .replace(/([?&](?:key|api[_-]?key|token)=)([^\s,;&]+)/gi, '$1[REDACTED]')
-                .replace(/\b(access[_-]?token\s*[=:]\s*)([^\s,;&]+)/gi, '$1[REDACTED]')
-                .replace(/\b(refresh[_-]?token\s*[=:]\s*)([^\s,;&]+)/gi, '$1[REDACTED]')
-                .replace(/\b(id[_-]?token\s*[=:]\s*)([^\s,;&]+)/gi, '$1[REDACTED]')
-                .replace(/\b(token\s*[=:]\s*)([A-Za-z0-9_./+=:@-]{16,})/gi, '$1[REDACTED]')
-                .replace(/\b(secret\s*[=:]\s*)([A-Za-z0-9_./+=:@-]{16,})/gi, '$1[REDACTED]');
-              return sanitized;
+              return redactDiagnosticsWithSecrets(value, [ocrTokenForRedaction, ocrUrlForRedaction]);
             }
 
             function sanitizeExcerpt(value) {
@@ -978,35 +959,18 @@ jobs:
         with:
           script: |
             const fs = require('fs');
-            const REDACTION = '[REDACTED]';
             const ocrToken = process.env.OCR_LLM_TOKEN;
             const ocrUrl = process.env.OCR_LLM_URL;
             delete process.env.OCR_LLM_TOKEN;
             delete process.env.OCR_LLM_URL;
-            function escapeRegExp(value) {
-              return String(value).replace(/[\\^$.*+?()[\]{}|]/g, '\\$&');
-            }
+            // Load the single shared redaction implementation from the trusted
+            // base-branch checkout (never PR-supplied code) so the secret
+            // patterns are defined exactly once for every OCR step.
+            const { redactSecretDiagnostics: redactDiagnosticsWithSecrets } = require(
+              `${process.env.GITHUB_WORKSPACE}/.github/scripts/ocr-redaction.js`
+            );
             function redactSecretDiagnostics(value) {
-              let sanitized = String(value ?? '');
-              for (const secret of [ocrToken, ocrUrl]) {
-                if (typeof secret === 'string' && secret.length > 0) {
-                  try {
-                    sanitized = sanitized.replace(new RegExp(escapeRegExp(secret), 'g'), REDACTION);
-                  } catch (_) {
-                    sanitized = sanitized.split(secret).join(REDACTION);
-                  }
-                }
-              }
-              return sanitized
-                .replace(/\b(Authorization\s*:\s*(?:(?:Bearer|Basic|token|ApiKey)\s+)?)([^\s,;]+)/gi, '$1[REDACTED]')
-                .replace(/\b(x-api-key\s*:\s*)([^\s,;]+)/gi, '$1[REDACTED]')
-                .replace(/\b(api[_-]?key\s*[=:]\s*)([^\s,;&]+)/gi, '$1[REDACTED]')
-                .replace(/([?&](?:key|api[_-]?key|token)=)([^\s,;&]+)/gi, '$1[REDACTED]')
-                .replace(/\b(access[_-]?token\s*[=:]\s*)([^\s,;&]+)/gi, '$1[REDACTED]')
-                .replace(/\b(refresh[_-]?token\s*[=:]\s*)([^\s,;&]+)/gi, '$1[REDACTED]')
-                .replace(/\b(id[_-]?token\s*[=:]\s*)([^\s,;&]+)/gi, '$1[REDACTED]')
-                .replace(/\b(token\s*[=:]\s*)([A-Za-z0-9_./+=:@-]{16,})/gi, '$1[REDACTED]')
-                .replace(/\b(secret\s*[=:]\s*)([A-Za-z0-9_./+=:@-]{16,})/gi, '$1[REDACTED]');
+              return redactDiagnosticsWithSecrets(value, [ocrToken, ocrUrl]);
             }
             const diagnosticArtifacts = [
               'ocr-result.json',
@@ -1108,6 +1072,16 @@ jobs:
       group: ocr-review-infrastructure-issue
       cancel-in-progress: false
     steps:
+      - name: Checkout trusted base for shared scripts
+        # Fork-safety: pull_request_target runs the base-branch workflow, so the
+        # default ref here is the trusted base commit (never the PR head). This
+        # only provides the checked-in shared redaction script; no PR-supplied
+        # code is fetched or executed. Runs before the artifact download so the
+        # checkout's clean step cannot remove the downloaded diagnostics.
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # ratchet:actions/checkout@v5
+        with:
+          persist-credentials: false
+
       - name: Download OCR artifacts
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # ratchet:actions/download-artifact@v4
         continue-on-error: true
@@ -1131,7 +1105,6 @@ jobs:
           script: |
             const fs = require('fs');
             const path = require('path');
-            const REDACTION = '[REDACTED]';
             const ISSUE_TITLE = 'OCR review infrastructure failure';
             const ARTIFACT_DIR = 'ocr-review-output';
             const ocrToken = process.env.OCR_LLM_TOKEN;
@@ -1145,30 +1118,14 @@ jobs:
             const policyFailureOutput = process.env.CODE_REVIEW_POLICY_FAILURE === 'true';
             const infrastructureFailureOutput = process.env.CODE_REVIEW_INFRASTRUCTURE_FAILURE === 'true';
 
-            function escapeRegExp(value) {
-              return String(value).replace(/[\\^$.*+?()[\]{}|]/g, '\\$&');
-            }
+            // Load the single shared redaction implementation from the trusted
+            // base-branch checkout (never PR-supplied code) so the secret
+            // patterns are defined exactly once for every OCR step.
+            const { redactSecretDiagnostics: redactDiagnosticsWithSecrets } = require(
+              `${process.env.GITHUB_WORKSPACE}/.github/scripts/ocr-redaction.js`
+            );
             function redactSecretDiagnostics(value) {
-              let sanitized = String(value ?? '');
-              for (const secret of [ocrToken, ocrUrl]) {
-                if (typeof secret === 'string' && secret.length > 0) {
-                  try {
-                    sanitized = sanitized.replace(new RegExp(escapeRegExp(secret), 'g'), REDACTION);
-                  } catch (_) {
-                    sanitized = sanitized.split(secret).join(REDACTION);
-                  }
-                }
-              }
-              return sanitized
-                .replace(/\b(Authorization\s*:\s*(?:(?:Bearer|Basic|token|ApiKey)\s+)?)([^\s,;]+)/gi, '$1[REDACTED]')
-                .replace(/\b(x-api-key\s*:\s*)([^\s,;]+)/gi, '$1[REDACTED]')
-                .replace(/\b(api[_-]?key\s*[=:]\s*)([^\s,;&]+)/gi, '$1[REDACTED]')
-                .replace(/([?&](?:key|api[_-]?key|token)=)([^\s,;&]+)/gi, '$1[REDACTED]')
-                .replace(/\b(access[_-]?token\s*[=:]\s*)([^\s,;&]+)/gi, '$1[REDACTED]')
-                .replace(/\b(refresh[_-]?token\s*[=:]\s*)([^\s,;&]+)/gi, '$1[REDACTED]')
-                .replace(/\b(id[_-]?token\s*[=:]\s*)([^\s,;&]+)/gi, '$1[REDACTED]')
-                .replace(/\b(token\s*[=:]\s*)([A-Za-z0-9_./+=:@-]{16,})/gi, '$1[REDACTED]')
-                .replace(/\b(secret\s*[=:]\s*)([A-Za-z0-9_./+=:@-]{16,})/gi, '$1[REDACTED]');
+              return redactDiagnosticsWithSecrets(value, [ocrToken, ocrUrl]);
             }
             function readArtifact(fileName) {
               try {
