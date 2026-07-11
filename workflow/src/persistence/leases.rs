@@ -60,6 +60,23 @@ impl std::str::FromStr for LeaseStatus {
 }
 
 impl LeaseStatus {
+    /// Terminal states whose lease no longer protects an issue from re-work and
+    /// may therefore be superseded by a fresh claim.
+    ///
+    /// This is the single source of truth shared by [`blocks_duplicate_work`]
+    /// (the discovery-side eligibility check) and [`try_claim`]'s conflict
+    /// guard, so the "is this eligible?" and "can I actually re-claim it?"
+    /// decisions can never disagree.
+    ///
+    /// [`blocks_duplicate_work`]: LeaseStatus::blocks_duplicate_work
+    /// [`try_claim`]: crate::persistence::leases::try_claim
+    pub const RECLAIMABLE: [LeaseStatus; 4] = [
+        LeaseStatus::Completed,
+        LeaseStatus::Failed,
+        LeaseStatus::Abandoned,
+        LeaseStatus::Stale,
+    ];
+
     /// Whether this lease occupies a concurrency slot (Claimed or Running).
     #[must_use]
     pub fn is_active(self) -> bool {
@@ -69,13 +86,7 @@ impl LeaseStatus {
     /// Whether this lease retains duplicate-work protection for an issue.
     #[must_use]
     pub fn blocks_duplicate_work(self) -> bool {
-        !matches!(
-            self,
-            LeaseStatus::Completed
-                | LeaseStatus::Failed
-                | LeaseStatus::Abandoned
-                | LeaseStatus::Stale
-        )
+        !Self::RECLAIMABLE.contains(&self)
     }
 }
 
@@ -176,9 +187,20 @@ pub fn create_lease(conn: &Connection, lease: &IssueLease) -> SqliteResult<()> {
 
 /// Atomically claim an issue, returning the new lease when the claim is won.
 ///
-/// Uses `INSERT ... ON CONFLICT(issue_repo, issue_number) DO NOTHING` so a
-/// second concurrent claim of the same issue gets `Ok(None)`. This is the core
-/// primitive that prevents two daemons (or restarts) launching the same issue.
+/// Uses `INSERT ... ON CONFLICT(issue_repo, issue_number) DO UPDATE` guarded by
+/// a status predicate: a fresh claim wins when either no lease exists yet, or
+/// the existing lease is in a terminal [`LeaseStatus::RECLAIMABLE`] state
+/// (Completed/Failed/Abandoned/Stale). A lease that is still active
+/// (Claimed/Running) or otherwise blocking is left untouched and the caller
+/// gets `Ok(None)`. This keeps the concurrency guarantee — two live daemons (or
+/// restarts) can never both launch the same issue — while allowing a finished
+/// or abandoned issue to be picked up again on a later pass, matching
+/// [`LeaseStatus::blocks_duplicate_work`].
+///
+/// The `RETURNING lease_id` clause distinguishes "this claim won the row" from
+/// "the conflicting row was left in place": SQLite only emits a returned row
+/// for the INSERT or for a DO UPDATE whose `WHERE` matched, so a suppressed
+/// upsert yields no row and maps to `Ok(None)`.
 /// @plan:PLAN-20260415-DAEMON-DISCOVERY.P02
 /// @requirement:REQ-DAEMON-DISCOVERY-002,REQ-DAEMON-DISCOVERY-005
 pub fn try_claim(
@@ -202,29 +224,56 @@ pub fn try_claim(
         updated_at: now,
         heartbeat_at: now,
     };
-    let inserted = conn.execute(
-        "INSERT INTO issue_leases
-            (lease_id, issue_repo, issue_number, config_id, run_id, status,
-             claimed_at, updated_at, heartbeat_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
-         ON CONFLICT(issue_repo, issue_number) DO NOTHING",
-        params![
-            lease.lease_id,
-            lease.issue_repo,
-            lease.issue_number as i64,
-            lease.config_id,
-            lease.run_id,
-            lease.status.to_string(),
-            lease.claimed_at.to_rfc3339(),
-            lease.updated_at.to_rfc3339(),
-            lease.heartbeat_at.to_rfc3339(),
-        ],
-    )?;
-    if inserted == 0 {
-        Ok(None)
-    } else {
-        Ok(Some(lease))
+    let reclaimable = reclaimable_status_sql_list();
+    let claimed_lease_id: Option<String> = conn
+        .query_row(
+            &format!(
+                "INSERT INTO issue_leases
+                    (lease_id, issue_repo, issue_number, config_id, run_id, status,
+                     claimed_at, updated_at, heartbeat_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                 ON CONFLICT(issue_repo, issue_number) DO UPDATE SET
+                    lease_id = excluded.lease_id,
+                    config_id = excluded.config_id,
+                    run_id = excluded.run_id,
+                    status = excluded.status,
+                    claimed_at = excluded.claimed_at,
+                    updated_at = excluded.updated_at,
+                    heartbeat_at = excluded.heartbeat_at
+                 WHERE issue_leases.status IN ({reclaimable})
+                 RETURNING lease_id"
+            ),
+            params![
+                lease.lease_id,
+                lease.issue_repo,
+                lease.issue_number as i64,
+                lease.config_id,
+                lease.run_id,
+                lease.status.to_string(),
+                lease.claimed_at.to_rfc3339(),
+                lease.updated_at.to_rfc3339(),
+                lease.heartbeat_at.to_rfc3339(),
+            ],
+            |row| row.get(0),
+        )
+        .optional()?;
+
+    match claimed_lease_id {
+        Some(lease_id) if lease_id == lease.lease_id => Ok(Some(lease)),
+        _ => Ok(None),
     }
+}
+
+/// Render the reclaimable lease statuses as a quoted, comma-separated SQL list
+/// for use in an `IN (...)` predicate. Sourced from
+/// [`LeaseStatus::RECLAIMABLE`] so the claim guard and
+/// [`LeaseStatus::blocks_duplicate_work`] stay in lockstep.
+fn reclaimable_status_sql_list() -> String {
+    LeaseStatus::RECLAIMABLE
+        .iter()
+        .map(|status| format!("'{status}'"))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// Fetch the lease (if any) covering a specific issue.
@@ -405,6 +454,9 @@ pub fn mark_stale_ready_to_resume_leases(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Barrier};
+    use std::thread;
+    use std::time::Duration;
 
     fn conn() -> Connection {
         let c = Connection::open_in_memory().unwrap();
@@ -448,6 +500,105 @@ mod tests {
         let second = try_claim(&c, "o/r", 1, "cfg-b").unwrap();
         assert!(first.is_some());
         assert!(second.is_none(), "duplicate claim must be rejected");
+    }
+
+    #[test]
+    fn try_claim_reclaims_terminal_lease() {
+        // A finished/abandoned issue must be pickable again on a later pass,
+        // matching blocks_duplicate_work(); otherwise the daemon can never
+        // re-work an issue whose prior run failed or was abandoned.
+        for terminal in LeaseStatus::RECLAIMABLE {
+            let c = conn();
+            let first = try_claim(&c, "o/r", 1, "cfg-a").unwrap().unwrap();
+            update_lease_status(&c, &first.lease_id, terminal, Some("run-old")).unwrap();
+
+            let reclaim = try_claim(&c, "o/r", 1, "cfg-b").unwrap();
+            assert!(
+                reclaim.is_some(),
+                "terminal lease ({terminal}) must be reclaimable"
+            );
+            let reclaim = reclaim.unwrap();
+            assert_ne!(
+                reclaim.lease_id, first.lease_id,
+                "reclaim must mint a fresh lease id"
+            );
+
+            let fetched = get_lease_for_issue(&c, "o/r", 1).unwrap().unwrap();
+            assert_eq!(fetched.lease_id, reclaim.lease_id);
+            assert_eq!(fetched.status, LeaseStatus::Claimed);
+            assert_eq!(fetched.config_id, "cfg-b");
+            assert_eq!(
+                fetched.run_id, None,
+                "a fresh claim must clear the prior run id"
+            );
+            // Exactly one lease row per issue is preserved.
+            assert_eq!(list_all_leases(&c).unwrap().len(), 1);
+        }
+    }
+
+    #[test]
+    fn try_claim_does_not_reclaim_active_lease() {
+        // Claimed and Running leases still hold the issue: a concurrent claim
+        // must lose and must not disturb the in-flight lease.
+        for active in [LeaseStatus::Claimed, LeaseStatus::Running] {
+            let c = conn();
+            let first = try_claim(&c, "o/r", 2, "cfg-a").unwrap().unwrap();
+            update_lease_status(&c, &first.lease_id, active, Some("run-live")).unwrap();
+
+            let second = try_claim(&c, "o/r", 2, "cfg-b").unwrap();
+            assert!(
+                second.is_none(),
+                "active lease ({active}) must not be reclaimable"
+            );
+
+            let fetched = get_lease_for_issue(&c, "o/r", 2).unwrap().unwrap();
+            assert_eq!(
+                fetched.lease_id, first.lease_id,
+                "in-flight lease preserved"
+            );
+            assert_eq!(fetched.status, active);
+            assert_eq!(fetched.config_id, "cfg-a");
+            assert_eq!(fetched.run_id.as_deref(), Some("run-live"));
+        }
+    }
+
+    #[test]
+    fn concurrent_terminal_reclaim_has_one_winner() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("leases.db");
+        let seed = Connection::open(&path).unwrap();
+        init_leases_table(&seed).unwrap();
+        let previous = try_claim(&seed, "o/r", 3, "cfg-old").unwrap().unwrap();
+        update_lease_status(
+            &seed,
+            &previous.lease_id,
+            LeaseStatus::Failed,
+            Some("run-old"),
+        )
+        .unwrap();
+        drop(seed);
+
+        let barrier = Arc::new(Barrier::new(2));
+        let claims = ["cfg-a", "cfg-b"].map(|config_id| {
+            let path = path.clone();
+            let barrier = Arc::clone(&barrier);
+            thread::spawn(move || {
+                let connection = Connection::open(path).unwrap();
+                connection.busy_timeout(Duration::from_secs(5)).unwrap();
+                barrier.wait();
+                try_claim(&connection, "o/r", 3, config_id).unwrap()
+            })
+        });
+        let results = claims.map(|claim| claim.join().unwrap());
+        let winner = results.into_iter().flatten().collect::<Vec<_>>();
+        assert_eq!(winner.len(), 1, "exactly one reclaim must win");
+
+        let connection = Connection::open(path).unwrap();
+        let fetched = get_lease_for_issue(&connection, "o/r", 3).unwrap().unwrap();
+        assert_eq!(fetched.lease_id, winner[0].lease_id);
+        assert_eq!(fetched.status, LeaseStatus::Claimed);
+        assert_eq!(fetched.run_id, None);
+        assert_eq!(list_all_leases(&connection).unwrap().len(), 1);
     }
 
     #[test]
