@@ -14,8 +14,8 @@ const P03_TOUCHED_RUST_FILES: [&str; 9] = [
     "src/engine/executors/pr_followup_artifacts.rs",
     "src/engine/executors/pr_followup_types.rs",
     "src/engine/executors/github_pr.rs",
-    "src/engine/executors/github_feedback.rs",
-    "src/engine/executors/feedback_eval.rs",
+    "src/engine/executors/github_feedback/mod.rs",
+    "src/engine/executors/feedback_eval/mod.rs",
     "src/engine/executors/pr_remediation.rs",
     "tests/github_pr_followup_executor_tests.rs",
 ];
@@ -52,7 +52,7 @@ const P07_TOUCHED_RUST_FILES: [&str; 3] = [
 /// @requirement:REQ-PRFU-008,REQ-PRFU-009,REQ-PRFU-017,REQ-PRFU-024,REQ-PRFU-034
 /// @pseudocode lines 1-29
 const P08_TOUCHED_RUST_FILES: [&str; 4] = [
-    "src/engine/executors/github_feedback.rs",
+    "src/engine/executors/github_feedback/mod.rs",
     "src/engine/executors/mod.rs",
     "tests/github_pr_followup_executor_tests.rs",
     "tests/pr_followup_marker_audit_tests.rs",
@@ -63,7 +63,7 @@ const P08_TOUCHED_RUST_FILES: [&str; 4] = [
 /// @pseudocode lines 1-23
 const P09_TOUCHED_RUST_FILES: [&str; 4] = [
     "src/engine/executor.rs",
-    "src/engine/executors/feedback_eval.rs",
+    "src/engine/executors/feedback_eval/mod.rs",
     "src/engine/executors/mod.rs",
     "tests/github_pr_followup_executor_tests.rs",
 ];
@@ -119,7 +119,7 @@ const P14_TOUCHED_RUST_FILES: [&str; 3] = [
 /// @requirement:REQ-PRFU-015,REQ-PRFU-016,REQ-PRFU-017,REQ-PRFU-026
 /// @pseudocode lines 41-49
 const P15_TOUCHED_RUST_FILES: [&str; 4] = [
-    "src/engine/executors/github_feedback.rs",
+    "src/engine/executors/github_feedback/mod.rs",
     "src/engine/executors/mod.rs",
     "tests/github_pr_followup_executor_tests.rs",
     "tests/pr_followup_marker_audit_tests.rs",

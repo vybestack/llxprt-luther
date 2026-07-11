@@ -96,12 +96,12 @@ expectations = ["verify workflow auth before editing .github/workflows"]
 [target_profile.prompt_guidance]
 ecosystem_name = "Rust"
 planning = "Use Luther's Rust workflow subcrate conventions and include fixture parity when changing config schema."
-implementation = "Respect strict clippy limits, avoid lint suppressions, and keep workflow shell commands statically allowlisted."
+implementation = "Respect strict clippy limits, avoid lint suppressions, and keep workflow shell commands statically allowlisted. Decompose by responsibility into cohesive mod submodules with narrow visibility (private, pub(crate), or pub(super)) when hitting file-size/complexity/structural guardrails; never use include!() to assemble Rust modules."
 review = "Run Open Code Review through the configured cargo xtask wrapper when review gates are requested."
 verification = "Use targeted workflow crate commands only when needed; the workflow runs configured cargo gates."
-style = "Keep Rust functions under strict clippy size and complexity limits."
+style = "Keep Rust functions under strict clippy size and complexity limits. Name modules after their responsibility; never split by line count."
 fixture_parity = "Maintain TOML/JSON fixture parity for valid workflow and workflow-config fixtures."
-forbidden_actions = "Do not loosen lint rules, add suppressions, or edit generated/unrelated files."
+forbidden_actions = "Do not loosen lint rules, add suppressions, or edit generated/unrelated files. Do not use include!() for Rust source module assembly, do not create part_N/core_N/tail/misc/utils/support buckets to satisfy file-size limits, and do not increase complexity/size thresholds."
 remediation_scope = "Fix only current-branch diff issues and required evaluator feedback."
 command_manifest_summary = "Local gates run cargo fmt, check, clippy, test, fixture parity, and shell safety checks."
 

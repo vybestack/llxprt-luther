@@ -98,6 +98,8 @@ fn guard() -> Result<()> {
         ensure_no_pattern_in_tree(&src_dir, pattern)?;
     }
 
+    enforce_no_include_stitching(&src_dir)?;
+
     Ok(())
 }
 
@@ -211,6 +213,7 @@ fn complexity(args: &[String]) -> Result<()> {
             let base = changed_base(args)?;
             run_changed_lizard(&workspace_root, &venv_python, base, &paths)?;
             enforce_changed_file_line_limits(&workspace_root, base, &paths)?;
+            enforce_no_include_stitching_for_paths(&paths, &workspace_root)?;
         }
         None => {
             run_lizard(&venv_python, [workspace_root.join("src")].iter())?;
@@ -220,6 +223,8 @@ fn complexity(args: &[String]) -> Result<()> {
             if tests_dir.is_dir() {
                 enforce_file_line_limits(&tests_dir)?;
             }
+
+            enforce_no_include_stitching(&workspace_root.join("src"))?;
         }
     }
 
@@ -1013,6 +1018,446 @@ fn collect_pattern_violations(
     Ok(())
 }
 
+const INCLUDE_STITCHING_GUIDANCE: &str = "Source stitching with include!(\"*.rs\") is not allowed for Rust module assembly. Split this code into semantic mod submodules with cohesive responsibilities and narrow visibility. Do not use numbered part files, tail files, or generic support buckets to satisfy file-size limits.";
+
+fn enforce_no_include_stitching(src_dir: &Path) -> Result<()> {
+    let violations = collect_include_stitching_violations(src_dir, src_dir)?;
+    report_include_stitching_violations(violations)
+}
+
+fn enforce_no_include_stitching_for_paths(paths: &[PathBuf], root: &Path) -> Result<()> {
+    let mut violations = Vec::new();
+    for path in paths {
+        check_file_include_stitching(path, root, &mut violations)?;
+    }
+    report_include_stitching_violations(violations)
+}
+
+fn report_include_stitching_violations(
+    mut violations: Vec<(PathBuf, usize, String)>,
+) -> Result<()> {
+    if violations.is_empty() {
+        return Ok(());
+    }
+
+    violations.sort();
+    violations.dedup();
+    let details = violations
+        .into_iter()
+        .map(|(path, line, content)| format!("{}:{}: {}", path.display(), line, content.trim()))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    bail!(
+        "forbidden include!()/split-file source stitching detected in src/:\n{details}\n\n{INCLUDE_STITCHING_GUIDANCE}"
+    )
+}
+
+fn collect_include_stitching_violations(
+    dir: &Path,
+    root: &Path,
+) -> Result<Vec<(PathBuf, usize, String)>> {
+    let mut violations = Vec::new();
+    for entry in fs::read_dir(dir).with_context(|| format!("read dir {}", dir.display()))? {
+        let entry = entry.with_context(|| format!("read dir entry under {}", dir.display()))?;
+        let path = entry.path();
+
+        if path.is_dir() {
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if is_split_component_name(name) {
+                violations.push((relative_path(&path, root), 1, format!("dir {name}")));
+            }
+            violations.extend(collect_include_stitching_violations(&path, root)?);
+            continue;
+        }
+
+        if path.extension().and_then(|ext| ext.to_str()) != Some("rs") {
+            continue;
+        }
+
+        check_file_include_stitching(&path, root, &mut violations)?;
+    }
+
+    Ok(violations)
+}
+
+fn check_file_include_stitching(
+    path: &Path,
+    root: &Path,
+    violations: &mut Vec<(PathBuf, usize, String)>,
+) -> Result<()> {
+    let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    if is_split_source_file_name(file_name) {
+        violations.push((relative_path(path, root), 1, format!("file {file_name}")));
+    }
+
+    let content =
+        fs::read_to_string(path).with_context(|| format!("read source file {}", path.display()))?;
+    for (line_no, snippet) in scan_include_rs_violations(&content) {
+        violations.push((relative_path(path, root), line_no, snippet));
+    }
+
+    Ok(())
+}
+
+fn relative_path(path: &Path, root: &Path) -> PathBuf {
+    path.strip_prefix(root)
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn is_split_component_name(name: &str) -> bool {
+    is_part_numbered_name(name) || is_core_numbered_name(name)
+}
+
+fn is_split_source_file_name(name: &str) -> bool {
+    // Callers only invoke this for files that already end in `.rs`, so stripping
+    // the suffix always yields a distinct stem.
+    let stem = name.strip_suffix(".rs").unwrap_or(name);
+    is_part_numbered_name(stem) || is_core_numbered_name(stem) || stem.ends_with("_tail")
+}
+
+fn is_part_numbered_name(stem: &str) -> bool {
+    let Some(rest) = stem.strip_prefix("part_") else {
+        return false;
+    };
+    let mut digits = rest.chars();
+    let Some(first) = digits.next() else {
+        return false;
+    };
+    if !first.is_ascii_digit() {
+        return false;
+    }
+    let mut seen_alpha = false;
+    for ch in digits {
+        if ch.is_ascii_digit() {
+            if seen_alpha {
+                return false;
+            }
+            continue;
+        }
+        if ch.is_ascii_lowercase() {
+            if seen_alpha {
+                return false;
+            }
+            seen_alpha = true;
+            continue;
+        }
+        return false;
+    }
+    true
+}
+
+fn is_core_numbered_name(stem: &str) -> bool {
+    let Some(rest) = stem.strip_prefix("core_") else {
+        return false;
+    };
+    !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit())
+}
+
+/// A minimal lexical token stream for the include-stitching scanner. Trivia
+/// (whitespace, line/block comments) is dropped entirely so that "adjacent"
+/// tokens in the stream correspond to the next meaningful source token even
+/// across newlines. String literals retain their raw content so the scanner can
+/// test for a `.rs` suffix without being fooled by `.rs` mentions inside
+/// comments.
+#[derive(Debug)]
+enum Tok {
+    Ident(String, usize),
+    Bang,
+    Open(char),
+    Close,
+    Str(String),
+    Other,
+}
+
+/// Scan an entire Rust source file for `include!(...".rs"...)` macro
+/// invocations. Returns `(line_number, snippet)` for each violation.
+///
+/// The scan is lexical rather than physical-line based: it ignores `//` line
+/// comments, nesting `/* */` block comments, and any `include`/`.rs` mentions
+/// inside normal or raw string literals, while still detecting invocations that
+/// span multiple lines or use `()`, `[]`, or `{}` delimiters. `include_str!`
+/// and `include_bytes!` are intentionally not matched because their identifier
+/// tokens differ from `include`.
+fn scan_include_rs_violations(content: &str) -> Vec<(usize, String)> {
+    let tokens = lex_rust(content);
+    let lines: Vec<&str> = content.lines().collect();
+    let mut violations = Vec::new();
+    let mut idx = 0;
+    while idx < tokens.len() {
+        let include_line = match &tokens[idx] {
+            Tok::Ident(name, line) if name == "include" => Some(*line),
+            _ => None,
+        };
+        if let Some(line) = include_line {
+            if matches!(tokens.get(idx + 1), Some(Tok::Bang)) {
+                if let Some(Tok::Open(open)) = tokens.get(idx + 2) {
+                    if let Some((has_rs, end_idx)) = include_group_scan(&tokens, idx + 2, *open) {
+                        if has_rs {
+                            let snippet = lines
+                                .get(line.saturating_sub(1))
+                                .map(|source_line| source_line.trim().to_string())
+                                .filter(|source_line| !source_line.is_empty())
+                                .unwrap_or_else(|| "include!(...)".to_string());
+                            violations.push((line, snippet));
+                        }
+                        idx = end_idx + 1;
+                        continue;
+                    }
+                }
+            }
+        }
+        idx += 1;
+    }
+    violations
+}
+
+/// Walk from the opening delimiter of an `include!` invocation to its matching
+/// close, reporting whether any string literal argument ends with `.rs`.
+/// Returns `(found_rs_literal, close_token_index)`.
+fn include_group_scan(tokens: &[Tok], open_idx: usize, open: char) -> Option<(bool, usize)> {
+    if !matches!(open, '(' | '[' | '{') {
+        return None;
+    }
+    let mut depth = 0usize;
+    let mut found = false;
+    let mut idx = open_idx;
+    while idx < tokens.len() {
+        match &tokens[idx] {
+            Tok::Open(_) => depth += 1,
+            Tok::Close => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some((found, idx));
+                }
+            }
+            Tok::Str(value) if depth >= 1 && value.ends_with(".rs") => {
+                found = true;
+            }
+            _ => {}
+        }
+        idx += 1;
+    }
+    None
+}
+
+fn lex_rust(content: &str) -> Vec<Tok> {
+    let bytes = content.as_bytes();
+    let mut tokens = Vec::new();
+    let mut idx = 0;
+    let mut line = 1usize;
+    while idx < bytes.len() {
+        let byte = bytes[idx];
+        match byte {
+            b'\n' => {
+                line += 1;
+                idx += 1;
+            }
+            b' ' | b'\t' | b'\r' => idx += 1,
+            b'/' if bytes.get(idx + 1) == Some(&b'/') => {
+                idx += 2;
+                while idx < bytes.len() && bytes[idx] != b'\n' {
+                    idx += 1;
+                }
+            }
+            b'/' if bytes.get(idx + 1) == Some(&b'*') => {
+                idx += 2;
+                let mut depth = 1usize;
+                while idx < bytes.len() && depth > 0 {
+                    match bytes[idx] {
+                        b'\n' => {
+                            line += 1;
+                            idx += 1;
+                        }
+                        b'/' if bytes.get(idx + 1) == Some(&b'*') => {
+                            depth += 1;
+                            idx += 2;
+                        }
+                        b'*' if bytes.get(idx + 1) == Some(&b'/') => {
+                            depth -= 1;
+                            idx += 2;
+                        }
+                        _ => idx += 1,
+                    }
+                }
+            }
+            b'r' if is_raw_string_start(bytes, idx) => {
+                let (value, next, next_line) = lex_raw_string(bytes, idx, line);
+                tokens.push(Tok::Str(value));
+                idx = next;
+                line = next_line;
+            }
+            b'b' if bytes.get(idx + 1) == Some(&b'r') && is_raw_string_start(bytes, idx + 1) => {
+                let (value, next, next_line) = lex_raw_string(bytes, idx + 1, line);
+                tokens.push(Tok::Str(value));
+                idx = next;
+                line = next_line;
+            }
+            b'b' if bytes.get(idx + 1) == Some(&b'"') => {
+                let (value, next, next_line) = lex_normal_string(bytes, idx + 1, line);
+                tokens.push(Tok::Str(value));
+                idx = next;
+                line = next_line;
+            }
+            b'"' => {
+                let (value, next, next_line) = lex_normal_string(bytes, idx, line);
+                tokens.push(Tok::Str(value));
+                idx = next;
+                line = next_line;
+            }
+            b'\'' => {
+                let (next, next_line) = lex_char_or_lifetime(bytes, idx, line);
+                tokens.push(Tok::Other);
+                idx = next;
+                line = next_line;
+            }
+            b'!' => {
+                tokens.push(Tok::Bang);
+                idx += 1;
+            }
+            b'(' | b'[' | b'{' => {
+                tokens.push(Tok::Open(byte as char));
+                idx += 1;
+            }
+            b')' | b']' | b'}' => {
+                tokens.push(Tok::Close);
+                idx += 1;
+            }
+            _ if is_ident_start(byte) => {
+                let start = idx;
+                idx += 1;
+                while idx < bytes.len() && is_ident_continue(bytes[idx]) {
+                    idx += 1;
+                }
+                let text = String::from_utf8_lossy(&bytes[start..idx]).into_owned();
+                tokens.push(Tok::Ident(text, line));
+            }
+            _ => {
+                tokens.push(Tok::Other);
+                idx += 1;
+            }
+        }
+    }
+    tokens
+}
+
+fn is_ident_start(byte: u8) -> bool {
+    byte == b'_' || byte.is_ascii_alphabetic() || byte >= 0x80
+}
+
+fn is_ident_continue(byte: u8) -> bool {
+    byte == b'_' || byte.is_ascii_alphanumeric() || byte >= 0x80
+}
+
+fn is_raw_string_start(bytes: &[u8], idx: usize) -> bool {
+    if bytes.get(idx) != Some(&b'r') {
+        return false;
+    }
+    let mut cursor = idx + 1;
+    while bytes.get(cursor) == Some(&b'#') {
+        cursor += 1;
+    }
+    bytes.get(cursor) == Some(&b'"')
+}
+
+/// Lex a raw string literal starting at `bytes[idx] == b'r'`. Returns the raw
+/// content, the index just past the closing delimiter, and the updated line.
+fn lex_raw_string(bytes: &[u8], idx: usize, line: usize) -> (String, usize, usize) {
+    let mut cursor = idx + 1;
+    let mut hashes = 0usize;
+    while bytes.get(cursor) == Some(&b'#') {
+        hashes += 1;
+        cursor += 1;
+    }
+    cursor += 1; // opening quote
+    let start = cursor;
+    let mut current_line = line;
+    while cursor < bytes.len() {
+        match bytes[cursor] {
+            b'"' => {
+                let mut ahead = cursor + 1;
+                let mut count = 0usize;
+                while count < hashes && bytes.get(ahead) == Some(&b'#') {
+                    count += 1;
+                    ahead += 1;
+                }
+                if count == hashes {
+                    let value = String::from_utf8_lossy(&bytes[start..cursor]).into_owned();
+                    return (value, ahead, current_line);
+                }
+                cursor += 1;
+            }
+            b'\n' => {
+                current_line += 1;
+                cursor += 1;
+            }
+            _ => cursor += 1,
+        }
+    }
+    let value = String::from_utf8_lossy(&bytes[start..cursor]).into_owned();
+    (value, cursor, current_line)
+}
+
+/// Lex a normal (or byte) string literal starting at `bytes[idx] == b'"'`.
+fn lex_normal_string(bytes: &[u8], idx: usize, line: usize) -> (String, usize, usize) {
+    let mut cursor = idx + 1;
+    let start = cursor;
+    let mut current_line = line;
+    let mut escaped = false;
+    while cursor < bytes.len() {
+        let byte = bytes[cursor];
+        if escaped {
+            escaped = false;
+            if byte == b'\n' {
+                current_line += 1;
+            }
+            cursor += 1;
+        } else if byte == b'\\' {
+            escaped = true;
+            cursor += 1;
+        } else if byte == b'"' {
+            let value = String::from_utf8_lossy(&bytes[start..cursor]).into_owned();
+            return (value, cursor + 1, current_line);
+        } else {
+            if byte == b'\n' {
+                current_line += 1;
+            }
+            cursor += 1;
+        }
+    }
+    let value = String::from_utf8_lossy(&bytes[start..cursor]).into_owned();
+    (value, cursor, current_line)
+}
+
+/// Consume a char literal or a lifetime/label starting at `bytes[idx] == b'\''`.
+/// Char literals are fully consumed so that a `"` inside (for example `'"'`)
+/// never toggles string state; lifetimes consume only the leading quote.
+fn lex_char_or_lifetime(bytes: &[u8], idx: usize, line: usize) -> (usize, usize) {
+    let mut current_line = line;
+    let cursor = idx + 1;
+    if bytes.get(cursor) == Some(&b'\\') {
+        let mut scan = cursor + 2;
+        while scan < bytes.len() && bytes[scan] != b'\'' {
+            if bytes[scan] == b'\n' {
+                current_line += 1;
+            }
+            scan += 1;
+        }
+        if scan < bytes.len() {
+            scan += 1;
+        }
+        return (scan, current_line);
+    }
+    if bytes.get(cursor + 1) == Some(&b'\'') {
+        if bytes.get(cursor) == Some(&b'\n') {
+            current_line += 1;
+        }
+        return (cursor + 2, current_line);
+    }
+    (idx + 1, current_line)
+}
+
 fn coverage_ignore_regex() -> String {
     [
         // Ignore binaries and generated/build content.
@@ -1250,5 +1695,92 @@ mod tests {
             length,
             line: String::new(),
         }
+    }
+
+    fn scan_lines(content: &str) -> Vec<usize> {
+        scan_include_rs_violations(content)
+            .into_iter()
+            .map(|(line, _)| line)
+            .collect()
+    }
+
+    #[test]
+    fn detects_single_line_include_rs() {
+        assert_eq!(scan_lines(r#"include!("part_1.rs");"#), vec![1]);
+    }
+
+    #[test]
+    fn detects_multiline_include_rs_across_whitespace() {
+        let source = r#"include!
+(
+    "generated/tail.rs"
+);"#;
+        assert_eq!(scan_lines(source), vec![1]);
+    }
+
+    #[test]
+    fn detects_include_rs_with_bracket_and_brace_delimiters() {
+        assert_eq!(scan_lines(r#"include!["a.rs"];"#), vec![1]);
+        assert_eq!(scan_lines(r#"include!{"b.rs"}"#), vec![1]);
+    }
+
+    #[test]
+    fn detects_include_rs_in_raw_string_target() {
+        assert_eq!(scan_lines(r##"include!(r#"weird/name.rs"#);"##), vec![1]);
+    }
+
+    #[test]
+    fn ignores_include_str_and_include_bytes() {
+        assert!(scan_lines(r#"include_str!("template.rs");"#).is_empty());
+        assert!(scan_lines(r#"include_bytes!("blob.rs");"#).is_empty());
+    }
+
+    #[test]
+    fn ignores_non_rs_include_targets() {
+        assert!(scan_lines(r#"include!("data.txt");"#).is_empty());
+        assert!(scan_lines(r#"include!(concat!(env!("OUT_DIR"), "/gen.md"));"#).is_empty());
+    }
+
+    #[test]
+    fn ignores_include_rs_mentions_in_line_comments() {
+        assert!(scan_lines(r#"// include!("part_1.rs")"#).is_empty());
+    }
+
+    #[test]
+    fn ignores_include_rs_mentions_in_block_comments() {
+        let source = r#"/*
+ include!(
+ "part_1.rs"
+ );
+*/"#;
+        assert!(scan_lines(source).is_empty());
+    }
+
+    #[test]
+    fn ignores_include_rs_mentions_inside_string_literals() {
+        let source = r#"let s = "include!(\"part_1.rs\")";"#;
+        assert!(scan_lines(source).is_empty());
+    }
+
+    #[test]
+    fn ignores_include_rs_mentions_inside_raw_string_literals() {
+        let source = r##"let s = r#"include!("part_1.rs")"#;"##;
+        assert!(scan_lines(source).is_empty());
+    }
+
+    #[test]
+    fn char_literal_quote_does_not_break_scanning() {
+        let source = r#"let q = '"'; include!("part_1.rs");"#;
+        assert_eq!(scan_lines(source), vec![1]);
+    }
+
+    #[test]
+    fn reports_line_of_include_keyword_for_multiline() {
+        let source = r#"fn main() {}
+
+include!(
+    "x.rs"
+);"#;
+        assert_eq!(scan_lines(source), vec![3]);
     }
 }

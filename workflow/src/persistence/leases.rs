@@ -244,6 +244,43 @@ pub fn get_lease_for_issue(
     .optional()
 }
 
+/// Fetch all leases covering `issue_numbers` within `repo` in a single query.
+///
+/// Returns a map keyed by issue number so callers can look up each child's
+/// lease without issuing one database round trip per child (avoids the N-query
+/// pattern for parents with many children). Issues without a lease are simply
+/// absent from the map.
+/// @plan:PLAN-20260415-DAEMON-DISCOVERY.P02
+pub fn get_leases_for_issues(
+    conn: &Connection,
+    repo: &str,
+    issue_numbers: &[u64],
+) -> SqliteResult<std::collections::BTreeMap<u64, IssueLease>> {
+    let mut leases = std::collections::BTreeMap::new();
+    if issue_numbers.is_empty() {
+        return Ok(leases);
+    }
+    let placeholders = (0..issue_numbers.len())
+        .map(|idx| format!("?{}", idx + 2))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql = format!(
+        "{SELECT_COLUMNS} WHERE issue_repo = ?1 AND issue_number IN ({placeholders}) \
+         ORDER BY issue_number"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let mut args: Vec<Box<dyn rusqlite::ToSql>> = Vec::with_capacity(issue_numbers.len() + 1);
+    args.push(Box::new(repo.to_string()));
+    for number in issue_numbers {
+        args.push(Box::new(*number as i64));
+    }
+    let arg_refs: Vec<&dyn rusqlite::ToSql> = args.iter().map(AsRef::as_ref).collect();
+    for lease in collect_leases(&mut stmt, &arg_refs)? {
+        leases.insert(lease.issue_number, lease);
+    }
+    Ok(leases)
+}
+
 /// Update a lease's status (and optionally associate a run id).
 /// @plan:PLAN-20260415-DAEMON-DISCOVERY.P02
 pub fn update_lease_status(

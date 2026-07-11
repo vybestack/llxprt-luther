@@ -18,7 +18,12 @@ use crate::persistence::{
 use crate::workflow::schema::{StepDef, TransitionDef};
 
 mod target_path_context;
-use target_path_context::seed_target_paths;
+
+mod support;
+use support::{
+    build_step_context, load_checkpoint_state, open_initialized_connection, preview_for_log,
+    run_outcome_without_transition,
+};
 
 /// Contextual metadata for a run: paths and GitHub references.
 /// Used to populate the persistent run registry beyond the core identifiers.
@@ -909,8 +914,6 @@ impl EngineRunner {
         Ok(())
     }
 }
-
-include!("runner_tail.rs");
 
 #[cfg(test)]
 mod runner_tests;

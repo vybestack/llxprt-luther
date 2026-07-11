@@ -2010,6 +2010,78 @@ fn dogfood_evaluate_plan_requires_real_llxprt_review() {
     );
 }
 
+/// @plan:issue-125
+/// Dogfood prompts must steer toward semantic module decomposition and forbid
+/// the include!()/split-file gate-evasion pattern that issue #125 removed.
+#[test]
+fn dogfood_prompts_require_semantic_decomposition() {
+    let workflow_type = resolve_workflow_type(
+        "llxprt-luther-dogfood-v1",
+        &std::path::PathBuf::from("config"),
+    )
+    .expect("production dogfood workflow type should load");
+
+    let create_plan_prompt = workflow_prompt(&workflow_type, "create_plan");
+    assert!(
+        create_plan_prompt.contains("semantic decomposition by responsibility"),
+        "create_plan prompt should require semantic decomposition: {create_plan_prompt}"
+    );
+    assert!(
+        create_plan_prompt.contains("Do not propose textual source stitching"),
+        "create_plan prompt should forbid textual stitching: {create_plan_prompt}"
+    );
+
+    let implement_prompt = workflow_prompt(&workflow_type, "implement");
+    assert!(
+        implement_prompt.contains("Do not use include!() to reassemble Rust source modules"),
+        "implement prompt should forbid include!() module assembly: {implement_prompt}"
+    );
+    assert!(
+        implement_prompt.contains("semantic mod submodules"),
+        "implement prompt should require cohesive submodules: {implement_prompt}"
+    );
+
+    let evaluate_plan_prompt = workflow_prompt(&workflow_type, "evaluate_plan");
+    assert!(
+        evaluate_plan_prompt.contains("include!() for Rust source module assembly"),
+        "evaluate_plan prompt should reject include!() stitching: {evaluate_plan_prompt}"
+    );
+    assert!(
+        evaluate_plan_prompt.contains("part_N, core_N"),
+        "evaluate_plan prompt should reject numbered split files: {evaluate_plan_prompt}"
+    );
+
+    let remediate_prompt = workflow_prompt(&workflow_type, "remediate");
+    assert!(
+        remediate_prompt.contains("Do not use include!() to reassemble Rust modules"),
+        "remediate prompt should forbid include!() assembly: {remediate_prompt}"
+    );
+    assert!(
+        remediate_prompt.contains("honestly modular"),
+        "remediate prompt should require honest modularity: {remediate_prompt}"
+    );
+}
+
+fn workflow_prompt(
+    workflow_type: &luther_workflow::workflow::schema::WorkflowType,
+    step_id: &str,
+) -> String {
+    let step = workflow_type
+        .steps
+        .iter()
+        .find(|step| step.step_id == step_id)
+        .unwrap_or_else(|| panic!("{step_id} step exists"));
+    let params = step
+        .parameters
+        .as_ref()
+        .unwrap_or_else(|| panic!("{step_id} parameters exist"));
+    params
+        .get("prompt")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_else(|| panic!("{step_id} prompt exists"))
+        .to_string()
+}
+
 /// @plan:PLAN-20260408-LLXPRT-FIRST.P17
 /// @requirement:REQ-LF-PLAN-002
 #[test]

@@ -1,3 +1,4 @@
+use super::support::preview_for_log;
 use super::*;
 
 #[test]

@@ -286,11 +286,36 @@ jobs:
           # test/spec files (project policy: tests must be reviewed).
           : > ocr-preview.txt
           : > ocr-preview-stderr.log
-          changed_tests="$(
-            git diff --name-only "${BASE_SHA}..${HEAD_SHA}" \
+          # Only require review scope for test files that still exist at HEAD.
+          # `--diff-filter=ACMRT` excludes deletions (D): a removed test file
+          # cannot appear in OCR's reviewed set, so including deletions here
+          # would spuriously fail the scope check whenever a test is deleted.
+          #
+          # `--diff-filter` alone is not sufficient: whether a removed file is
+          # reported as a deletion (D) versus surfaced through a rename pairing
+          # (R) depends on git's heuristic rename detection, which varies with
+          # rename limits and the number of changed files across environments.
+          # A large decomposition can therefore surface a path that no longer
+          # exists at HEAD, which OCR can never place in its reviewed set. To
+          # make the stated "still exist at HEAD" intent mechanical and immune
+          # to that variance, post-filter the candidate list to paths that are
+          # actually present in the HEAD tree.
+          candidate_tests="$(
+            git diff --name-only --diff-filter=ACMRT "${BASE_SHA}..${HEAD_SHA}" \
               | grep -Ei '(^|/)(tests?|specs?|__tests__)/.*(\.(rs|ts|tsx|js|jsx|mjs|cjs|go|py|java|c|cc|cpp|h|hpp|rb|php|kt|kts|swift|scala))$|(^|/)(test_[^/]*\.py|[^/]*_test\.py|[^/]*_test\.go|[^/]*_spec\.(rs|ts|tsx|js|jsx|mjs|cjs|go|py|java|c|cc|cpp|h|hpp|rb|php|kt|kts|swift|scala)|[^/]*(Test|Tests)\.java|[^/]*_test\.(c|cc|cpp|h|hpp))$|(\.test\.|\.spec\.|_tests?\.rs|_spec\.rs)$' \
               || true
           )"
+          changed_tests=""
+          while IFS= read -r candidate; do
+            [ -z "$candidate" ] && continue
+            # Keep only paths that resolve to a blob at HEAD. A path missing
+            # here was removed by this PR (or only surfaced via rename
+            # detection) and cannot be part of OCR's reviewed set.
+            if git cat-file -e "${HEAD_SHA}:${candidate}" 2>/dev/null; then
+              changed_tests="${changed_tests}${candidate}"$'\n'
+            fi
+          done <<< "$candidate_tests"
+          changed_tests="$(printf '%s' "$changed_tests" | sed '/^$/d')"
           if [ -n "$changed_tests" ]; then
             echo "Changed test/spec files detected that must be reviewed:"
             echo "$changed_tests"

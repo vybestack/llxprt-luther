@@ -20,7 +20,7 @@ use crate::engine::runner::EngineError;
 use crate::engine::transition::StepOutcome;
 use crate::engine::{EngineRunner, RunContext, RunOutcome};
 use crate::persistence::leases::{
-    get_lease_for_issue, try_claim, update_lease_status, LeaseStatus,
+    get_lease_for_issue, get_leases_for_issues, try_claim, update_lease_status, LeaseStatus,
 };
 use crate::persistence::{
     get_run_with_conn, load_checkpoint_with_conn, upsert_wait_state, write_wait_state_artifact,
@@ -273,9 +273,19 @@ impl OrchestrationState {
     }
 }
 
-include!("core_1.rs");
-include!("core_2.rs");
-include!("core_3.rs");
+mod child_run;
+mod child_wait;
+mod completion;
+mod context;
+mod discovery;
+mod lease;
+
+use child_run::*;
+use child_wait::*;
+use completion::*;
+use context::*;
+use discovery::*;
+use lease::*;
 
 #[cfg(test)]
 mod tests;

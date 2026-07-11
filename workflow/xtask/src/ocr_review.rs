@@ -235,6 +235,7 @@ fn resolve_range_scope(from: &str, to: &str) -> Result<ResolvedScope> {
     let changed_files = git_lines([
         "diff",
         "--name-only",
+        "--diff-filter=d",
         &format!("{resolved_from}..{resolved_to}"),
     ])?;
     Ok(ResolvedScope {
@@ -275,7 +276,12 @@ fn resolve_pr_scope(number: &str) -> Result<ResolvedScope> {
     let merge_base =
         command_stdout(Command::new("git").args(["merge-base", &base_tracking, &local_head]))?;
     let merge_base = merge_base.trim().to_string();
-    let changed_files = git_lines(["diff", "--name-only", &format!("{merge_base}..{head}")])?;
+    let changed_files = git_lines([
+        "diff",
+        "--name-only",
+        "--diff-filter=d",
+        &format!("{merge_base}..{head}"),
+    ])?;
     Ok(ResolvedScope {
         mode_summary: format!("PR {number} range {merge_base}..{head}"),
         from: Some(merge_base),
@@ -290,8 +296,18 @@ fn verify_ref(reference: &str) -> Result<String> {
 }
 
 fn current_changed_files() -> Result<Vec<String>> {
-    let mut files = git_lines(["diff", "--name-only", "HEAD", "--"])?;
-    files.extend(git_lines(["ls-files", "--others", "--exclude-standard"])?);
+    // Exclude deletions (--diff-filter=d): a removed file has no content to
+    // review, so OCR lists it under "Excluded (deleted)" and it must not be
+    // demanded in the reviewed set. Use --full-name on the untracked listing so
+    // paths are repo-root-relative (matching diff/OCR output) even when xtask is
+    // invoked from the workflow/ subdirectory.
+    let mut files = git_lines(["diff", "--name-only", "--diff-filter=d", "HEAD", "--"])?;
+    files.extend(git_lines([
+        "ls-files",
+        "--others",
+        "--exclude-standard",
+        "--full-name",
+    ])?);
     files.sort();
     files.dedup();
     Ok(files)
@@ -581,6 +597,18 @@ mod tests {
         enforce_test_inclusion(&changed, preview, false).unwrap();
         let excluded = b"Will review\nExcluded\n- tests/foo.rs\n";
         assert!(enforce_test_inclusion(&changed, excluded, false).is_err());
+    }
+
+    #[test]
+    fn enforcement_only_considers_repo_root_relative_changed_paths() {
+        // The changed-file set is normalized to repo-root-relative paths (via
+        // --full-name on untracked listings), matching OCR's reviewed output
+        // even when xtask runs from a subdirectory. A path that only differs by
+        // a missing prefix must not be reported as omitted.
+        let changed = vec!["workflow/tests/no_include_stitching_tests.rs".to_string()];
+        let preview =
+            b"Will review\n  [A]  workflow/tests/no_include_stitching_tests.rs  +1\nExcluded\n";
+        enforce_test_inclusion(&changed, preview, false).unwrap();
     }
 
     #[test]
