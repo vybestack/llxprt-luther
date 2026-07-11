@@ -10711,6 +10711,66 @@ fn feedback_evaluator_process_runner_times_out_hung_llxprt_command() {
     );
 }
 
+/// A timed-out evaluator whose descendant inherits our stdout/stderr pipes must
+/// return promptly and leave no surviving process. Before the process-group
+/// cleanup fix, the inherited pipe kept the reader threads blocked on
+/// `read_to_end` even after the immediate child was signalled, wedging the call.
+///
+/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P09
+/// @requirement:REQ-PRFU-011,REQ-PRFU-012,REQ-PRFU-017
+#[cfg(unix)]
+#[test]
+fn feedback_evaluator_process_runner_terminates_descendants_on_timeout() {
+    use std::time::Instant;
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let pid_path = temp.path().join("descendant.pid");
+    let pid_path_str = pid_path.to_str().expect("utf-8 pid path").to_string();
+
+    // The immediate child (sh) stays alive past the timeout while a background
+    // descendant inherits sh's — and therefore our — stdout/stderr pipes. The
+    // descendant records its PID so the test can assert it was reaped by the
+    // whole-process-group termination.
+    let script = format!("sleep 30 & echo $! > {pid_path_str}; sleep 30");
+    let runner = ProcessFeedbackEvaluatorCommandRunner::with_timeout(Duration::from_secs(1));
+
+    let started = Instant::now();
+    let result =
+        runner.run_feedback_evaluator_command(&["sh".to_string(), "-c".to_string(), script], "{}");
+    let elapsed = started.elapsed();
+
+    assert!(
+        result
+            .expect_err("timed-out evaluator with inherited pipes should error")
+            .to_string()
+            .contains("timed out"),
+        "descendant-holding evaluator commands must still surface a timeout"
+    );
+    assert!(
+        elapsed < Duration::from_secs(10),
+        "timed-out evaluator must return promptly even with a pipe-holding \
+         descendant, took {elapsed:?}"
+    );
+
+    let pid_text = std::fs::read_to_string(&pid_path).expect("descendant pid file");
+    let descendant_pid: u32 = pid_text.trim().parse().expect("descendant pid value");
+
+    // The group kill reparents and reaps the descendant; poll briefly to avoid
+    // racing the OS teardown.
+    let mut surviving = true;
+    for _ in 0..50 {
+        if !luther_workflow::monitor::process::is_process_alive(descendant_pid) {
+            surviving = false;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(
+        !surviving,
+        "descendant process {descendant_pid} must not survive timeout cleanup"
+    );
+}
+
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P04
 /// @requirement:REQ-PRFU-017
 /// @pseudocode lines 12-17
