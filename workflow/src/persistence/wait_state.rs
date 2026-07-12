@@ -1,6 +1,71 @@
 use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection, OptionalExtension, Result as SqliteResult};
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
+
+use crate::persistence::checkpoint::{
+    set_resume_point, PersistenceError as CheckpointPersistenceError,
+};
+use crate::persistence::leases::{update_lease_status_conditional, LeaseStatus};
+use crate::persistence::run_metadata::RunStatus;
+use crate::persistence::sqlite::{
+    persist_run_status_conditional_outcome_in_transaction, ConditionalStatusOutcome,
+};
+
+/// Typed failure from validating or writing a wait-state record.
+#[derive(Debug, Error)]
+pub enum WaitStateWriteError {
+    /// A wait-state without a suspension generation cannot participate in
+    /// guarded polling and must never be persisted.
+    #[error("wait state for run {run_id} has an empty suspension_id")]
+    EmptySuspensionId { run_id: String },
+    /// Underlying SQLite error from writing the wait-state.
+    #[error(transparent)]
+    Sqlite(#[from] rusqlite::Error),
+}
+
+/// Domain error for the external-wait persistence lifecycle.
+///
+/// Replaces the earlier practice of overloading `rusqlite::Error` variants
+/// (e.g. `ToSqlConversionFailure`, `QueryReturnedNoRows`) for domain-level
+/// conditions that are not SQL parameter-conversion or row-count failures.
+/// Each variant preserves the original error source so callers can downcast,
+/// pattern-match, or log the underlying cause without information loss.
+#[derive(Debug, Error)]
+pub enum ExternalWaitError {
+    /// The run metadata record backing the external-wait transition is
+    /// missing — an integrity failure. The wait-state exists without a
+    /// backing run.
+    #[error("run metadata for run {0} is missing — integrity failure")]
+    RunMissing(String),
+    /// The run is already in a terminal state and must not be resurrected
+    /// back to `WaitingExternal`. The current status is preserved in the
+    /// error so callers can decide how to compensate.
+    #[error(
+        "run {run_id} is already terminal ({current}); refusing to resurrect to WaitingExternal"
+    )]
+    RunAlreadyTerminal { run_id: String, current: RunStatus },
+    /// The conditional lease update matched zero rows because the lease
+    /// advanced to an unexpected state (or was concurrently reclaimed by a
+    /// new run). The transaction is rolled back by the caller.
+    #[error("lease transition rejected for run {run_id}: the lease is no longer in the expected state or is owned by another run")]
+    LeaseTransitionRejected { run_id: String },
+    /// The canonical wait record is missing identity required by the atomic
+    /// run/checkpoint/lease transition.
+    #[error("external wait for run {run_id} has incomplete identity: {field}")]
+    IdentityIncomplete { run_id: String, field: &'static str },
+    /// Wait-state validation or persistence failure.
+    #[error(transparent)]
+    WaitState(#[from] WaitStateWriteError),
+    /// Checkpoint-layer persistence error (serialization, I/O, or database
+    /// failure from the checkpoint subsystem). The original error is
+    /// preserved for source-chain inspection.
+    #[error(transparent)]
+    Checkpoint(#[from] CheckpointPersistenceError),
+    /// Underlying SQLite error from the transaction.
+    #[error(transparent)]
+    Sqlite(#[from] rusqlite::Error),
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -49,6 +114,8 @@ impl std::str::FromStr for WaitKind {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WaitStateRecord {
     pub run_id: String,
+    #[serde(default = "new_suspension_id")]
+    pub suspension_id: String,
     pub lease_id: Option<String>,
     pub workflow_type: String,
     pub config_id: String,
@@ -69,12 +136,17 @@ pub struct WaitStateRecord {
     pub updated_at: DateTime<Utc>,
 }
 
+fn new_suspension_id() -> String {
+    uuid::Uuid::new_v4().to_string()
+}
+
 impl WaitStateRecord {
     #[must_use]
     pub fn new(run_id: impl Into<String>, config_id: impl Into<String>) -> Self {
         let now = Utc::now();
         Self {
             run_id: run_id.into(),
+            suspension_id: new_suspension_id(),
             lease_id: None,
             workflow_type: String::new(),
             config_id: config_id.into(),
@@ -101,6 +173,7 @@ pub fn init_wait_states_table(conn: &Connection) -> SqliteResult<()> {
     conn.execute(
         "CREATE TABLE IF NOT EXISTS wait_states (
             run_id TEXT PRIMARY KEY,
+            suspension_id TEXT NOT NULL DEFAULT '',
             lease_id TEXT,
             workflow_type TEXT NOT NULL,
             config_id TEXT NOT NULL,
@@ -122,6 +195,32 @@ pub fn init_wait_states_table(conn: &Connection) -> SqliteResult<()> {
         )",
         [],
     )?;
+    if !wait_states_has_suspension_id(conn)? {
+        match conn.execute(
+            "ALTER TABLE wait_states ADD COLUMN suspension_id TEXT NOT NULL DEFAULT ''",
+            [],
+        ) {
+            Ok(_) => {}
+            Err(error) if is_duplicate_suspension_id_column(&error) => {
+                // Another initializer may have completed the same migration
+                // while this connection waited on SQLite's schema lock. Only
+                // accept that exact idempotent outcome after verifying schema.
+                if !wait_states_has_suspension_id(conn)? {
+                    return Err(error);
+                }
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    // Legacy rows receive a stable token once during migration. The default
+    // keeps older database writers compatible, while initialized databases
+    // never expose an empty generation to pollers.
+    conn.execute(
+        "UPDATE wait_states
+         SET suspension_id = lower(hex(randomblob(16)))
+         WHERE suspension_id = ''",
+        [],
+    )?;
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_wait_states_pollable
             ON wait_states (next_poll_at, config_id, repository)",
@@ -130,17 +229,43 @@ pub fn init_wait_states_table(conn: &Connection) -> SqliteResult<()> {
     Ok(())
 }
 
-pub fn upsert_wait_state(conn: &Connection, record: &WaitStateRecord) -> SqliteResult<()> {
+fn wait_states_has_suspension_id(conn: &Connection) -> SqliteResult<bool> {
+    let mut stmt = conn.prepare("PRAGMA table_info(wait_states)")?;
+    let columns = stmt.query_map([], |row| row.get::<_, String>(1))?;
+    Ok(columns
+        .collect::<SqliteResult<Vec<_>>>()?
+        .iter()
+        .any(|column| column == "suspension_id"))
+}
+
+fn is_duplicate_suspension_id_column(error: &rusqlite::Error) -> bool {
+    matches!(
+        error,
+        rusqlite::Error::SqliteFailure(_, Some(message))
+            if message.eq_ignore_ascii_case("duplicate column name: suspension_id")
+    )
+}
+
+pub fn upsert_wait_state(
+    conn: &Connection,
+    record: &WaitStateRecord,
+) -> Result<(), WaitStateWriteError> {
+    if record.suspension_id.is_empty() {
+        return Err(WaitStateWriteError::EmptySuspensionId {
+            run_id: record.run_id.clone(),
+        });
+    }
     conn.execute(
         "INSERT INTO wait_states
-            (run_id, lease_id, workflow_type, config_id, repository, issue_number,
+            (run_id, suspension_id, lease_id, workflow_type, config_id, repository, issue_number,
              pr_number, head_sha, wait_kind, wait_condition_json,
              last_observed_state_json, next_poll_at, poll_interval_seconds,
              max_wait_seconds, resume_step, checkpoint_id, poll_count, created_at,
              updated_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
-                 ?15, ?16, ?17, ?18, ?19)
+                 ?15, ?16, ?17, ?18, ?19, ?20)
          ON CONFLICT(run_id) DO UPDATE SET
+             suspension_id = excluded.suspension_id,
              lease_id = excluded.lease_id,
              workflow_type = excluded.workflow_type,
              config_id = excluded.config_id,
@@ -163,6 +288,99 @@ pub fn upsert_wait_state(conn: &Connection, record: &WaitStateRecord) -> SqliteR
     Ok(())
 }
 
+/// Atomically establish a complete external-wait state from one canonical record.
+///
+/// The record supplies the run, lease, resume, and suspension identities used
+/// by every write. Required identities are validated before the transaction,
+/// preventing divergent run/lease/checkpoint state.
+pub fn persist_external_wait(
+    conn: &Connection,
+    record: &WaitStateRecord,
+) -> Result<(), ExternalWaitError> {
+    let lease_id = record
+        .lease_id
+        .as_deref()
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| ExternalWaitError::IdentityIncomplete {
+            run_id: record.run_id.clone(),
+            field: "lease_id",
+        })?;
+    if record.run_id.is_empty() {
+        return Err(ExternalWaitError::IdentityIncomplete {
+            run_id: record.run_id.clone(),
+            field: "run_id",
+        });
+    }
+    if record.resume_step.is_empty() {
+        return Err(ExternalWaitError::IdentityIncomplete {
+            run_id: record.run_id.clone(),
+            field: "resume_step",
+        });
+    }
+    if record.suspension_id.is_empty() {
+        return Err(ExternalWaitError::IdentityIncomplete {
+            run_id: record.run_id.clone(),
+            field: "suspension_id",
+        });
+    }
+
+    let tx = conn.unchecked_transaction()?;
+    set_resume_point(&tx, &record.run_id, &record.resume_step)?;
+    mark_run_waiting_external(&tx, &record.run_id, &record.resume_step)?;
+    upsert_wait_state(&tx, record)?;
+
+    let applied = update_lease_status_conditional(
+        &tx,
+        lease_id,
+        LeaseStatus::WaitingExternal,
+        &[LeaseStatus::Running, LeaseStatus::WaitingExternal],
+        None,
+        Some(&record.run_id),
+    )?;
+    if !applied {
+        return Err(ExternalWaitError::LeaseTransitionRejected {
+            run_id: record.run_id.clone(),
+        });
+    }
+
+    tx.commit()?;
+    Ok(())
+}
+
+/// Whether a complete, pollable external wait exists for `run_id`.
+///
+/// "Complete" means: the run status is `WaitingExternal`, a wait-states row
+/// exists with a non-empty `lease_id` and `resume_step`, and that lease is in
+/// `WaitingExternal` status. This is the single check the launcher uses to
+/// decide whether to keep a lease waiting after an error.
+///
+pub fn has_pollable_external_wait(conn: &Connection, run_id: &str) -> SqliteResult<bool> {
+    let exists = conn.query_row(
+        "SELECT EXISTS (
+             SELECT 1
+             FROM runs
+             JOIN wait_states ON wait_states.run_id = runs.run_id
+             JOIN issue_leases
+               ON issue_leases.lease_id = wait_states.lease_id
+              AND issue_leases.run_id = wait_states.run_id
+             WHERE runs.run_id = ?1
+               AND runs.status = ?2
+               AND wait_states.lease_id IS NOT NULL
+               AND wait_states.lease_id <> ''
+               AND wait_states.resume_step <> ''
+               AND wait_states.suspension_id <> ''
+               AND issue_leases.status = ?3
+         )",
+        params![
+            run_id,
+            RunStatus::WaitingExternal.to_string(),
+            LeaseStatus::WaitingExternal.as_str(),
+        ],
+        |row| row.get(0),
+    )?;
+    Ok(exists)
+}
+
 pub fn get_wait_state(conn: &Connection, run_id: &str) -> SqliteResult<Option<WaitStateRecord>> {
     conn.query_row(
         &format!("{SELECT_COLUMNS} WHERE run_id = ?1"),
@@ -179,31 +397,57 @@ pub fn list_wait_states(conn: &Connection) -> SqliteResult<Vec<WaitStateRecord>>
     collect_wait_states(&mut stmt, [])
 }
 
+/// List wait-state records whose external wait is due for polling.
+///
+/// A record is pollable only when **all** of the following hold:
+///
+/// - `next_poll_at` is at or before `now`.
+/// - The associated issue-lease is in `waiting_external` status. This is the
+///   single status the poller owns; `ready_to_resume` is handled by the resume
+///   path and `claimed`/`running` are in-flight launches that have not yet
+///   suspended.
+/// - The lease's `run_id` matches the wait-state's `run_id`. Without this, a
+///   reclaimed lease (whose run was superseded) could be polled by the wrong
+///   run, corrupting another run's wait-state.
+///
+/// Restricting the source to `WaitingExternal` prevents the poller from
+/// re-reading records whose decision was already applied (e.g. a
+/// `ready_to_resume` record concurrently transitioned by the resume path) and
+/// from interfering with runs that are still launching.
 pub fn list_pollable_wait_states(
     conn: &Connection,
     now: DateTime<Utc>,
 ) -> SqliteResult<Vec<WaitStateRecord>> {
+    let waiting_status = LeaseStatus::WaitingExternal.as_str();
     let mut stmt = conn.prepare(&format!(
         "{SELECT_COLUMNS}
          WHERE next_poll_at <= ?1
+           AND suspension_id <> ''
            AND EXISTS (
                SELECT 1 FROM issue_leases
                WHERE issue_leases.lease_id = wait_states.lease_id
-                 AND issue_leases.status IN (
-                     -- Keep in sync with LeaseStatus::blocks_duplicate_work().
-                     'waiting_external', 'ready_to_resume', 'claimed', 'running'
-                 )
+                 AND issue_leases.status = ?2
+                 AND issue_leases.run_id = wait_states.run_id
            )
          ORDER BY next_poll_at, repository, issue_number"
     ))?;
-    collect_wait_states(&mut stmt, params![now.to_rfc3339()])
+    collect_wait_states(&mut stmt, params![now.to_rfc3339(), waiting_status])
 }
 
+/// Refresh a wait-state row after a poll, guarded by the immutable
+/// suspension generation and an optimistic poll-count version.
+///
+/// `expected_suspension_id` identifies the suspension read by the poller and
+/// prevents an ABA match when a resumed run creates a replacement row whose
+/// poll count resets. `expected_poll_count` prevents two pollers for the same
+/// suspension from overwriting each other. A mismatch returns `Ok(false)`.
 pub fn update_wait_state_after_poll(
     conn: &Connection,
     run_id: &str,
     last_observed_state: &serde_json::Value,
     next_poll_at: DateTime<Utc>,
+    expected_poll_count: u64,
+    expected_suspension_id: &str,
 ) -> SqliteResult<bool> {
     let rows = conn.execute(
         "UPDATE wait_states
@@ -211,12 +455,14 @@ pub fn update_wait_state_after_poll(
              next_poll_at = ?2,
              poll_count = poll_count + 1,
              updated_at = ?3
-         WHERE run_id = ?4",
+         WHERE run_id = ?4 AND poll_count = ?5 AND suspension_id = ?6",
         params![
             last_observed_state.to_string(),
             next_poll_at.to_rfc3339(),
             Utc::now().to_rfc3339(),
             run_id,
+            to_sql_i64(expected_poll_count)?,
+            expected_suspension_id,
         ],
     )?;
     Ok(rows > 0)
@@ -227,15 +473,28 @@ pub fn delete_wait_state(conn: &Connection, run_id: &str) -> SqliteResult<bool> 
     Ok(deleted > 0)
 }
 
+pub fn delete_wait_state_for_suspension(
+    conn: &Connection,
+    run_id: &str,
+    suspension_id: &str,
+) -> SqliteResult<bool> {
+    let deleted = conn.execute(
+        "DELETE FROM wait_states WHERE run_id = ?1 AND suspension_id = ?2",
+        params![run_id, suspension_id],
+    )?;
+    Ok(deleted > 0)
+}
+
 const SELECT_COLUMNS: &str =
-    "SELECT run_id, lease_id, workflow_type, config_id, repository, issue_number, \
+    "SELECT run_id, suspension_id, lease_id, workflow_type, config_id, repository, issue_number, \
      pr_number, head_sha, wait_kind, wait_condition_json, last_observed_state_json, \
      next_poll_at, poll_interval_seconds, max_wait_seconds, resume_step, \
      checkpoint_id, poll_count, created_at, updated_at FROM wait_states";
 
-fn record_params(record: &WaitStateRecord) -> SqliteResult<[Box<dyn rusqlite::ToSql>; 19]> {
+fn record_params(record: &WaitStateRecord) -> SqliteResult<[Box<dyn rusqlite::ToSql>; 20]> {
     Ok([
         Box::new(record.run_id.clone()),
+        Box::new(record.suspension_id.clone()),
         Box::new(record.lease_id.clone()),
         Box::new(record.workflow_type.clone()),
         Box::new(record.config_id.clone()),
@@ -279,24 +538,25 @@ where
 fn row_to_wait_state(row: &rusqlite::Row<'_>) -> SqliteResult<WaitStateRecord> {
     Ok(WaitStateRecord {
         run_id: row.get(0)?,
-        lease_id: row.get(1)?,
-        workflow_type: row.get(2)?,
-        config_id: row.get(3)?,
-        repository: row.get(4)?,
-        issue_number: row_u64(row, 5)?,
-        pr_number: optional_row_u64(row, 6)?,
-        head_sha: row.get(7)?,
-        wait_kind: row_wait_kind(row, 8)?,
-        wait_condition: row_json(row, 9)?,
-        last_observed_state: row_json(row, 10)?,
-        next_poll_at: row_ts(row, 11)?,
-        poll_interval_seconds: row_u64(row, 12)?,
-        max_wait_seconds: optional_row_u64(row, 13)?,
-        resume_step: row.get(14)?,
-        checkpoint_id: row.get(15)?,
-        poll_count: row_u64(row, 16)?,
-        created_at: row_ts(row, 17)?,
-        updated_at: row_ts(row, 18)?,
+        suspension_id: row.get(1)?,
+        lease_id: row.get(2)?,
+        workflow_type: row.get(3)?,
+        config_id: row.get(4)?,
+        repository: row.get(5)?,
+        issue_number: row_u64(row, 6)?,
+        pr_number: optional_row_u64(row, 7)?,
+        head_sha: row.get(8)?,
+        wait_kind: row_wait_kind(row, 9)?,
+        wait_condition: row_json(row, 10)?,
+        last_observed_state: row_json(row, 11)?,
+        next_poll_at: row_ts(row, 12)?,
+        poll_interval_seconds: row_u64(row, 13)?,
+        max_wait_seconds: optional_row_u64(row, 14)?,
+        resume_step: row.get(15)?,
+        checkpoint_id: row.get(16)?,
+        poll_count: row_u64(row, 17)?,
+        created_at: row_ts(row, 18)?,
+        updated_at: row_ts(row, 19)?,
     })
 }
 
@@ -358,129 +618,46 @@ fn conversion_error(
     rusqlite::Error::FromSqlConversionFailure(col, col_type, error)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use chrono::Duration;
-    use serde_json::json;
-
-    fn conn() -> Connection {
-        let c = Connection::open_in_memory().unwrap();
-        crate::persistence::leases::init_leases_table(&c).unwrap();
-        init_wait_states_table(&c).unwrap();
-        c
-    }
-
-    fn record(run_id: &str, next_poll_at: DateTime<Utc>) -> WaitStateRecord {
-        let mut record = WaitStateRecord::new(run_id, "cfg");
-        record.lease_id = Some(run_id.to_string());
-        record.workflow_type = "issue-fix".to_string();
-        record.repository = "o/r".to_string();
-        record.issue_number = 62;
-        record.pr_number = Some(7);
-        record.wait_condition = json!({ "checks": "pending" });
-        record.next_poll_at = next_poll_at;
-        record.resume_step = "collect_ci_failures".to_string();
-        record.checkpoint_id = "cp-1".to_string();
-        record
-    }
-
-    fn insert_lease(c: &Connection, run_id: &str, status: &str) {
-        let issue_number = run_id
-            .bytes()
-            .fold(0_i64, |acc, byte| acc + i64::from(byte));
-        c.execute(
-            "INSERT INTO issue_leases
-                (lease_id, issue_repo, issue_number, config_id, run_id, status,
-                 claimed_at, updated_at, heartbeat_at)
-             VALUES (?1,'o/r',?2,'cfg',?1,?3,?4,?4,?4)",
-            params![run_id, issue_number, status, Utc::now().to_rfc3339()],
-        )
-        .unwrap();
-    }
-
-    #[test]
-    fn wait_kind_roundtrips() {
-        for kind in [
-            WaitKind::PrChecks,
-            WaitKind::CoderabbitReview,
-            WaitKind::HumanReview,
-            WaitKind::PrMerge,
-            WaitKind::RateLimitBackoff,
-            WaitKind::DependencyChildWorkflow,
-            WaitKind::DependencyChildMerge,
-        ] {
-            assert_eq!(kind.to_string().parse::<WaitKind>().unwrap(), kind);
+/// Mark a run's status as `WaitingExternal` with the given current step,
+/// using the shared atomic conditional update
+/// [`persist_run_status_conditional_outcome_in_transaction`] to eliminate the
+/// check-then-act TOCTOU window.
+///
+/// Returns [`ExternalWaitError::RunMissing`] when the run metadata record is
+/// absent (an integrity failure) and [`ExternalWaitError::RunAlreadyTerminal`]
+/// when the run is `Completed`, `Failed`, `Abandoned`, `Merged`, or
+/// `Cancelled` — a concurrent path already classified this run, and we must
+/// not resurrect it back to `WaitingExternal` within the same transaction.
+///
+/// By delegating to the shared typed-outcome function, the terminal-status
+/// placeholder SQL and its bound parameters are constructed compile-time-safely
+/// via [`RunStatus::TERMINAL_SQL`] in exactly one place
+/// ([`persist_run_status_conditional_with_conn`]), keeping the SQL shape and
+/// parameter count synchronized without a parallel hardcoded construction.
+fn mark_run_waiting_external(
+    conn: &rusqlite::Transaction<'_>,
+    run_id: &str,
+    step_id: &str,
+) -> Result<(), ExternalWaitError> {
+    match persist_run_status_conditional_outcome_in_transaction(
+        conn,
+        run_id,
+        &RunStatus::WaitingExternal,
+        Some(step_id),
+    )? {
+        ConditionalStatusOutcome::Updated => Ok(()),
+        ConditionalStatusOutcome::RunMissing => {
+            Err(ExternalWaitError::RunMissing(run_id.to_string()))
+        }
+        ConditionalStatusOutcome::AlreadyTerminal(current) => {
+            Err(ExternalWaitError::RunAlreadyTerminal {
+                run_id: run_id.to_string(),
+                current,
+            })
         }
     }
-
-    #[test]
-    fn upsert_get_and_delete_roundtrip() {
-        let c = conn();
-        let now = Utc::now();
-        upsert_wait_state(&c, &record("run-1", now)).unwrap();
-        let fetched = get_wait_state(&c, "run-1").unwrap().unwrap();
-        assert_eq!(fetched.repository, "o/r");
-        assert_eq!(fetched.wait_kind, WaitKind::PrChecks);
-        assert!(delete_wait_state(&c, "run-1").unwrap());
-        assert!(get_wait_state(&c, "run-1").unwrap().is_none());
-    }
-
-    #[test]
-    fn list_pollable_orders_due_records_only() {
-        let c = conn();
-        let now = Utc::now();
-        insert_lease(&c, "run-later", "waiting_external");
-        insert_lease(&c, "run-now", "waiting_external");
-        insert_lease(&c, "run-earlier", "waiting_external");
-        upsert_wait_state(&c, &record("run-later", now + Duration::minutes(5))).unwrap();
-        upsert_wait_state(&c, &record("run-now", now)).unwrap();
-        upsert_wait_state(&c, &record("run-earlier", now - Duration::minutes(5))).unwrap();
-        let due = list_pollable_wait_states(&c, now).unwrap();
-        let run_ids: Vec<&str> = due.iter().map(|r| r.run_id.as_str()).collect();
-        assert_eq!(run_ids, vec!["run-earlier", "run-now"]);
-    }
-
-    #[test]
-    fn list_pollable_excludes_waits_without_protective_lease() {
-        let c = conn();
-        let now = Utc::now();
-        insert_lease(&c, "run-active", "waiting_external");
-        insert_lease(&c, "run-done", "completed");
-        upsert_wait_state(&c, &record("run-active", now)).unwrap();
-        upsert_wait_state(&c, &record("run-done", now)).unwrap();
-        upsert_wait_state(&c, &record("run-orphan", now)).unwrap();
-
-        let due = list_pollable_wait_states(&c, now).unwrap();
-
-        let run_ids: Vec<&str> = due.iter().map(|r| r.run_id.as_str()).collect();
-        assert_eq!(run_ids, vec!["run-active"]);
-    }
-
-    #[test]
-    fn list_pollable_includes_ready_to_resume_and_active_protective_leases() {
-        let c = conn();
-        let now = Utc::now();
-        insert_lease(&c, "run-ready", "ready_to_resume");
-        insert_lease(&c, "run-running", "running");
-        upsert_wait_state(&c, &record("run-ready", now)).unwrap();
-        upsert_wait_state(&c, &record("run-running", now)).unwrap();
-
-        let due = list_pollable_wait_states(&c, now).unwrap();
-
-        let run_ids: Vec<&str> = due.iter().map(|r| r.run_id.as_str()).collect();
-        assert_eq!(run_ids, vec!["run-ready", "run-running"]);
-    }
-
-    #[test]
-    fn update_after_poll_records_backoff_and_count() {
-        let c = conn();
-        let next = Utc::now() + Duration::minutes(10);
-        upsert_wait_state(&c, &record("run-1", Utc::now())).unwrap();
-        update_wait_state_after_poll(&c, "run-1", &json!({ "state": "pending" }), next).unwrap();
-        let fetched = get_wait_state(&c, "run-1").unwrap().unwrap();
-        assert_eq!(fetched.poll_count, 1);
-        assert_eq!(fetched.last_observed_state, json!({ "state": "pending" }));
-        assert_eq!(fetched.next_poll_at, next);
-    }
 }
+
+#[cfg(test)]
+#[path = "wait_state_tests.rs"]
+mod tests;

@@ -329,10 +329,103 @@ pub fn stop_daemon(store: &DaemonStore, config_id: &str) -> StopOutcome {
     StopOutcome::Stopped
 }
 
+/// Shared test-only utilities for serializing process-global env mutation.
+///
+/// Tests that set `LUTHER_ARTIFACTS_ROOT` must hold the global lock for the
+/// duration of the mutation so concurrent tests (Rust runs tests in threads by
+/// default) do not observe each other's env changes. The [`ArtifactEnvGuard`]
+/// RAII guard restores the original value on drop — even if the test body
+/// panics — so a leaked value cannot affect subsequent tests.
+#[cfg(test)]
+pub(crate) mod test_env {
+    use std::sync::{Mutex, MutexGuard};
+
+    /// Process-global lock serializing `LUTHER_ARTIFACTS_ROOT` mutation across
+    /// all test modules. Every test that touches the env var must acquire this
+    /// lock first.
+    pub static ARTIFACT_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    /// RAII guard that holds the env lock and restores the original
+    /// `LUTHER_ARTIFACTS_ROOT` on drop.
+    ///
+    /// Acquire via [`ArtifactEnvGuard::lock_and_set`], which both takes the
+    /// global lock and sets the env var, returning a guard whose `Drop`
+    /// restores the original value and releases the lock.
+    pub struct ArtifactEnvGuard {
+        old_root: Option<std::ffi::OsString>,
+        _lock: MutexGuard<'static, ()>,
+    }
+
+    impl ArtifactEnvGuard {
+        /// Take the global env lock, set `LUTHER_ARTIFACTS_ROOT` to
+        /// `new_root`, and return an RAII guard. The lock is held until the
+        /// guard is dropped; the original env value is restored on drop.
+        #[must_use]
+        pub fn lock_and_set(new_root: impl AsRef<std::path::Path>) -> Self {
+            let new_root = new_root.as_ref();
+            assert!(
+                !new_root.as_os_str().as_encoded_bytes().contains(&0),
+                "LUTHER_ARTIFACTS_ROOT must not contain a NUL byte"
+            );
+
+            // env::set_var is process-global, so we serialize access via the
+            // static lock. The MutexGuard borrows the static mutex, so its
+            // lifetime is 'static and we can store it directly in the guard.
+            let lock = ARTIFACT_ENV_LOCK
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let old_root = std::env::var_os("LUTHER_ARTIFACTS_ROOT");
+            std::env::set_var("LUTHER_ARTIFACTS_ROOT", new_root);
+            Self {
+                old_root,
+                _lock: lock,
+            }
+        }
+    }
+
+    impl Drop for ArtifactEnvGuard {
+        fn drop(&mut self) {
+            match self.old_root.take() {
+                Some(value) => std::env::set_var("LUTHER_ARTIFACTS_ROOT", value),
+                None => std::env::remove_var("LUTHER_ARTIFACTS_ROOT"),
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[cfg(unix)]
+    #[test]
+    fn artifact_env_guard_rejects_invalid_paths_without_poisoning_lock() {
+        use super::test_env::{ArtifactEnvGuard, ARTIFACT_ENV_LOCK};
+        use std::os::unix::ffi::OsStrExt;
+
+        let lock = ARTIFACT_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let original_root = std::env::var_os("LUTHER_ARTIFACTS_ROOT");
+        let invalid = std::ffi::OsStr::from_bytes(b"invalid\0root");
+        let result = std::panic::catch_unwind(|| ArtifactEnvGuard::lock_and_set(invalid));
+        assert!(result.is_err());
+        assert_eq!(
+            std::env::var_os("LUTHER_ARTIFACTS_ROOT"),
+            original_root,
+            "a rejected path must not mutate the artifact root"
+        );
+        drop(lock);
+
+        let valid = tempfile::tempdir().expect("create valid artifact root");
+        let guard = ArtifactEnvGuard::lock_and_set(valid.path());
+        assert_eq!(
+            std::env::var_os("LUTHER_ARTIFACTS_ROOT").as_deref(),
+            Some(valid.path().as_os_str())
+        );
+        drop(guard);
+    }
 
     #[test]
     fn daemon_state_roundtrips_json() {

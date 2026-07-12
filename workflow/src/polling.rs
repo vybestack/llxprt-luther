@@ -3,8 +3,12 @@ use chrono::{DateTime, Duration, Utc};
 const MAX_POLL_INTERVAL_SECONDS: i64 = 86_400;
 
 pub fn next_poll_time(poll_interval_seconds: u64) -> DateTime<Utc> {
+    next_poll_time_at(poll_interval_seconds, Utc::now())
+}
+
+pub(crate) fn next_poll_time_at(poll_interval_seconds: u64, now: DateTime<Utc>) -> DateTime<Utc> {
     let seconds = bounded_poll_interval_seconds(poll_interval_seconds);
-    Utc::now() + Duration::seconds(seconds)
+    now + Duration::seconds(seconds)
 }
 
 fn bounded_poll_interval_seconds(poll_interval_seconds: u64) -> i64 {

@@ -1,4 +1,5 @@
 use super::*;
+use luther_workflow::daemon::scheduler::SchedulerError;
 
 #[cfg(test)]
 #[path = "supervisor_tests.rs"]
@@ -241,10 +242,138 @@ pub fn recover_stale_daemon_leases(
     Ok(())
 }
 
+const MAX_SCHEDULER_DETAIL_LOGS_PER_KIND: usize = 10;
+
+#[derive(Debug, PartialEq, Eq)]
+struct SchedulerDiagnosticPlan {
+    summary: String,
+    preserved_details_to_log: usize,
+    preserved_details_dropped: usize,
+    skipped_details_to_log: usize,
+    skipped_details_dropped: usize,
+    artifact_warnings_to_log: usize,
+    artifact_warnings_dropped: usize,
+}
+
+fn scheduler_diagnostic_plan(summary: &RunSummary) -> SchedulerDiagnosticPlan {
+    let preserved_details_to_log = summary
+        .lease_state_preserved_details
+        .len()
+        .min(MAX_SCHEDULER_DETAIL_LOGS_PER_KIND);
+    let preserved_details_dropped = summary
+        .lease_state_preserved_details_dropped
+        .saturating_add(summary.lease_state_preserved_details.len() - preserved_details_to_log);
+    let skipped_details_to_log = summary
+        .skipped_poll_details
+        .len()
+        .min(MAX_SCHEDULER_DETAIL_LOGS_PER_KIND);
+    let skipped_details_dropped = summary
+        .skipped_poll_details_dropped
+        .saturating_add(summary.skipped_poll_details.len() - skipped_details_to_log);
+    let artifact_warnings_to_log = summary
+        .artifact_warnings
+        .len()
+        .min(MAX_SCHEDULER_DETAIL_LOGS_PER_KIND);
+    let artifact_warnings_dropped = summary
+        .artifact_warnings_dropped
+        .saturating_add(summary.artifact_warnings.len() - artifact_warnings_to_log);
+    let summary_message = format!(
+        concat!(
+            "scheduler pass: {launched} launched, {resumed} resumed, ",
+            "{suspended} suspended, {failed} failed, ",
+            "{preserved} lease states preserved, ",
+            "{preserved_dropped} preserved details dropped, {skipped} skipped, ",
+            "{pollable} pollable waits, {applied} polls applied, ",
+            "{polls_skipped} polls skipped, {skip_dropped} skip details dropped, ",
+            "{warnings} artifact warnings, {warning_dropped} warning details dropped"
+        ),
+        launched = summary.launched,
+        resumed = summary.resumed,
+        suspended = summary.suspended,
+        failed = summary.failed,
+        preserved = summary.lease_states_preserved,
+        preserved_dropped = preserved_details_dropped,
+        skipped = summary.skipped,
+        pollable = summary.pollable_waits,
+        applied = summary.polls_applied,
+        polls_skipped = summary.skipped_polls,
+        skip_dropped = skipped_details_dropped,
+        warnings = summary.artifact_warning_count(),
+        warning_dropped = artifact_warnings_dropped,
+    );
+    SchedulerDiagnosticPlan {
+        summary: summary_message,
+        preserved_details_to_log,
+        preserved_details_dropped,
+        skipped_details_to_log,
+        skipped_details_dropped,
+        artifact_warnings_to_log,
+        artifact_warnings_dropped,
+    }
+}
+
+fn report_scheduler_summary(summary: &RunSummary) {
+    let plan = scheduler_diagnostic_plan(summary);
+    tracing::info!(
+        launched = summary.launched,
+        resumed = summary.resumed,
+        suspended = summary.suspended,
+        failed = summary.failed,
+        lease_states_preserved = summary.lease_states_preserved,
+        lease_state_preserved_details_dropped = plan.preserved_details_dropped,
+        skipped = summary.skipped,
+        pollable_waits = summary.pollable_waits,
+        polls_applied = summary.polls_applied,
+        polls_skipped = summary.skipped_polls,
+        skipped_details_dropped = plan.skipped_details_dropped,
+        artifact_warnings = summary.artifact_warning_count(),
+        artifact_warnings_dropped = plan.artifact_warnings_dropped,
+        message = %plan.summary,
+        "scheduler pass completed"
+    );
+    for detail in summary
+        .lease_state_preserved_details
+        .iter()
+        .take(plan.preserved_details_to_log)
+    {
+        tracing::warn!(
+            run_id = %detail.run_id,
+            current_status = ?detail.current_status,
+            current_run_id = detail.current_run_id.as_deref().unwrap_or("none"),
+            "scheduler preserved newer lease state"
+        );
+    }
+    for detail in summary
+        .skipped_poll_details
+        .iter()
+        .take(plan.skipped_details_to_log)
+    {
+        tracing::debug!(
+            run_id = %detail.run_id,
+            lease_id = detail.lease_id.as_deref().unwrap_or("none"),
+            reason = ?detail.reason,
+            lease_transition_reason = detail.lease_transition_reason.unwrap_or("none"),
+            "scheduler poll skipped"
+        );
+    }
+    for warning in summary
+        .artifact_warnings
+        .iter()
+        .take(plan.artifact_warnings_to_log)
+    {
+        tracing::warn!(
+            run_id = %warning.run_id,
+            phase = ?warning.phase,
+            error = %warning.error,
+            "scheduler artifact persistence failed after commit"
+        );
+    }
+}
+
 pub fn run_supervisor_scheduler_pass(
     targets: &[SchedulerTarget],
     conn: &rusqlite::Connection,
-) -> Result<RunSummary, luther_workflow::persistence::PersistenceError> {
+) -> Result<RunSummary, SchedulerError> {
     let queries = targets
         .iter()
         .map(|_| SystemGithubIssueQuery::new(SystemGithubCommandRunner))
@@ -255,7 +384,6 @@ pub fn run_supervisor_scheduler_pass(
         .collect::<Vec<_>>();
     let launcher = DaemonWorkflowLauncher::new("supervisor".to_string());
     luther_workflow::daemon::scheduler::run_multi_target_once(targets, &query_refs, conn, &launcher)
-        .map_err(luther_workflow::persistence::PersistenceError::from)
 }
 
 pub async fn run_supervisor_scheduler_pass_blocking(
@@ -276,7 +404,7 @@ pub async fn run_supervisor_scheduler_pass_blocking(
 pub fn run_discovery_scheduler_pass(
     target: &SchedulerTarget,
     conn: &rusqlite::Connection,
-) -> Result<RunSummary, luther_workflow::persistence::PersistenceError> {
+) -> Result<RunSummary, SchedulerError> {
     let query = SystemGithubIssueQuery::new(SystemGithubCommandRunner);
     let launcher = DaemonWorkflowLauncher::new(target.config_id.clone());
     luther_workflow::daemon::scheduler::run_multi_target_once(
@@ -285,7 +413,6 @@ pub fn run_discovery_scheduler_pass(
         conn,
         &launcher,
     )
-    .map_err(luther_workflow::persistence::PersistenceError::from)
 }
 
 pub async fn run_discovery_scheduler_pass_blocking(
@@ -370,23 +497,20 @@ pub async fn run_daemon_supervisor_loop(
     let mut scheduler_failures = 0;
     while !shutdown.load(Ordering::SeqCst) {
         match run_supervisor_scheduler_pass_blocking(&targets).await {
-            Ok(summary)
+            Ok(summary) => {
+                reset_scheduler_failures(&mut scheduler_failures);
                 if summary.launched > 0
                     || summary.resumed > 0
                     || summary.suspended > 0
-                    || summary.failed > 0 =>
-            {
-                reset_scheduler_failures(&mut scheduler_failures);
-                println!(
-                    "scheduler pass: {} launched, {} resumed, {} suspended, {} failed, {} skipped",
-                    summary.launched,
-                    summary.resumed,
-                    summary.suspended,
-                    summary.failed,
-                    summary.skipped
-                );
+                    || summary.failed > 0
+                    || summary.lease_states_preserved > 0
+                    || summary.skipped_polls > 0
+                    || !summary.skipped_poll_details.is_empty()
+                    || !summary.artifact_warnings.is_empty()
+                {
+                    report_scheduler_summary(&summary);
+                }
             }
-            Ok(_) => reset_scheduler_failures(&mut scheduler_failures),
             Err(e) => {
                 eprintln!("scheduler error: {e}");
                 backoff_after_scheduler_failure(&mut scheduler_failures, shutdown).await;
@@ -445,23 +569,20 @@ pub async fn run_daemon_discovery_loop(
             break;
         }
         match run_discovery_scheduler_pass_blocking(&target).await {
-            Ok(summary)
+            Ok(summary) => {
+                reset_scheduler_failures(&mut scheduler_failures);
                 if summary.launched > 0
                     || summary.resumed > 0
                     || summary.suspended > 0
-                    || summary.failed > 0 =>
-            {
-                reset_scheduler_failures(&mut scheduler_failures);
-                println!(
-                    "scheduler pass: {} launched, {} resumed, {} suspended, {} failed, {} skipped",
-                    summary.launched,
-                    summary.resumed,
-                    summary.suspended,
-                    summary.failed,
-                    summary.skipped
-                );
+                    || summary.failed > 0
+                    || summary.lease_states_preserved > 0
+                    || summary.skipped_polls > 0
+                    || !summary.skipped_poll_details.is_empty()
+                    || !summary.artifact_warnings.is_empty()
+                {
+                    report_scheduler_summary(&summary);
+                }
             }
-            Ok(_) => reset_scheduler_failures(&mut scheduler_failures),
             Err(e) => {
                 eprintln!("scheduler error: {e}");
                 backoff_after_scheduler_failure(&mut scheduler_failures, shutdown).await;

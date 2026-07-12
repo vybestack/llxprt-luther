@@ -23,9 +23,29 @@ pub enum LeaseStatus {
     Stale,
 }
 
-impl std::fmt::Display for LeaseStatus {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let s = match self {
+/// Result of a conditional lease transition together with the durable state
+/// observed when the transition did not apply.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConditionalLeaseStatusOutcome {
+    Applied,
+    Rejected {
+        current_status: LeaseStatus,
+        current_run_id: Option<String>,
+    },
+    Missing,
+}
+
+impl LeaseStatus {
+    /// Canonical lowercase string representation used for database
+    /// persistence and all SQL parameter binding.
+    ///
+    /// Centralising the mapping here (and having both [`std::fmt::Display`]
+    /// and the reclaimable bind values derive from it) prevents the kind of
+    /// silent drift where hardcoded literals diverge from the actual enum
+    /// strings.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
             LeaseStatus::Pending => "pending",
             LeaseStatus::Claimed => "claimed",
             LeaseStatus::Running => "running",
@@ -35,8 +55,19 @@ impl std::fmt::Display for LeaseStatus {
             LeaseStatus::Failed => "failed",
             LeaseStatus::Abandoned => "abandoned",
             LeaseStatus::Stale => "stale",
-        };
-        write!(f, "{s}")
+        }
+    }
+}
+
+impl std::fmt::Display for LeaseStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl rusqlite::ToSql for LeaseStatus {
+    fn to_sql(&self) -> SqliteResult<rusqlite::types::ToSqlOutput<'_>> {
+        self.as_str().to_sql()
     }
 }
 
@@ -165,6 +196,7 @@ fn parse_ts(s: &str) -> DateTime<Utc> {
 /// Insert a new lease record.
 /// @plan:PLAN-20260415-DAEMON-DISCOVERY.P02
 pub fn create_lease(conn: &Connection, lease: &IssueLease) -> SqliteResult<()> {
+    let issue_number = issue_number_to_sql_i64(lease.issue_number)?;
     conn.execute(
         "INSERT INTO issue_leases
             (lease_id, issue_repo, issue_number, config_id, run_id, status,
@@ -173,7 +205,7 @@ pub fn create_lease(conn: &Connection, lease: &IssueLease) -> SqliteResult<()> {
         params![
             lease.lease_id,
             lease.issue_repo,
-            lease.issue_number as i64,
+            issue_number,
             lease.config_id,
             lease.run_id,
             lease.status.to_string(),
@@ -224,14 +256,36 @@ pub fn try_claim(
         updated_at: now,
         heartbeat_at: now,
     };
-    let reclaimable = reclaimable_status_sql_list();
+    let status_str = lease.status.as_str();
+    let claimed_at = lease.claimed_at.to_rfc3339();
+    let updated_at = lease.updated_at.to_rfc3339();
+    let heartbeat_at = lease.heartbeat_at.to_rfc3339();
+    // Bind canonical borrowed status strings directly; no status String or
+    // intermediate reclaimable collection is allocated on the claim path.
+    let issue_number_i64 = issue_number_to_sql_i64(lease.issue_number)?;
+    let mut claim_params: Vec<&dyn rusqlite::ToSql> =
+        Vec::with_capacity(9 + LeaseStatus::RECLAIMABLE.len());
+    claim_params.push(&lease.lease_id);
+    claim_params.push(&lease.issue_repo);
+    claim_params.push(&issue_number_i64);
+    claim_params.push(&lease.config_id);
+    claim_params.push(&lease.run_id);
+    claim_params.push(&status_str);
+    claim_params.push(&claimed_at);
+    claim_params.push(&updated_at);
+    claim_params.push(&heartbeat_at);
+    let insert_placeholders = sql_placeholders(claim_params.len());
+    let reclaimable = sql_placeholders(LeaseStatus::RECLAIMABLE.len());
+    for reclaimable_status in &LeaseStatus::RECLAIMABLE {
+        claim_params.push(reclaimable_status);
+    }
     let claimed_lease_id: Option<String> = conn
         .query_row(
             &format!(
                 "INSERT INTO issue_leases
                     (lease_id, issue_repo, issue_number, config_id, run_id, status,
                      claimed_at, updated_at, heartbeat_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                 VALUES ({insert_placeholders})
                  ON CONFLICT(issue_repo, issue_number) DO UPDATE SET
                     lease_id = excluded.lease_id,
                     config_id = excluded.config_id,
@@ -243,17 +297,7 @@ pub fn try_claim(
                  WHERE issue_leases.status IN ({reclaimable})
                  RETURNING lease_id"
             ),
-            params![
-                lease.lease_id,
-                lease.issue_repo,
-                lease.issue_number as i64,
-                lease.config_id,
-                lease.run_id,
-                lease.status.to_string(),
-                lease.claimed_at.to_rfc3339(),
-                lease.updated_at.to_rfc3339(),
-                lease.heartbeat_at.to_rfc3339(),
-            ],
+            claim_params.as_slice(),
             |row| row.get(0),
         )
         .optional()?;
@@ -264,14 +308,35 @@ pub fn try_claim(
     }
 }
 
-/// Render the reclaimable lease statuses as a quoted, comma-separated SQL list
-/// for use in an `IN (...)` predicate. Sourced from
-/// [`LeaseStatus::RECLAIMABLE`] so the claim guard and
-/// [`LeaseStatus::blocks_duplicate_work`] stay in lockstep.
-fn reclaimable_status_sql_list() -> String {
-    LeaseStatus::RECLAIMABLE
-        .iter()
-        .map(|status| format!("'{status}'"))
+#[derive(Debug, thiserror::Error)]
+#[error("issue number {issue_number} overflows i64 for SQLite binding")]
+struct IssueNumberConversionError {
+    issue_number: u64,
+    #[source]
+    source: std::num::TryFromIntError,
+}
+
+fn issue_number_to_sql_i64(issue_number: u64) -> SqliteResult<i64> {
+    i64::try_from(issue_number).map_err(|source| {
+        rusqlite::Error::ToSqlConversionFailure(Box::new(IssueNumberConversionError {
+            issue_number,
+            source,
+        }))
+    })
+}
+
+const _: () = assert!(
+    !LeaseStatus::RECLAIMABLE.is_empty(),
+    "LeaseStatus::RECLAIMABLE must not be empty"
+);
+
+/// Render anonymous SQL placeholders for an ordered parameter group.
+///
+/// Callers derive each group length from the same values they append to the
+/// bind list, so adding or removing values cannot shift a manually numbered
+/// placeholder range.
+fn sql_placeholders(count: usize) -> String {
+    std::iter::repeat_n("?", count)
         .collect::<Vec<_>>()
         .join(", ")
 }
@@ -283,11 +348,12 @@ pub fn get_lease_for_issue(
     repo: &str,
     issue_number: u64,
 ) -> SqliteResult<Option<IssueLease>> {
+    let issue_number = issue_number_to_sql_i64(issue_number)?;
     conn.query_row(
         "SELECT lease_id, issue_repo, issue_number, config_id, run_id, status,
                 claimed_at, updated_at, heartbeat_at
          FROM issue_leases WHERE issue_repo = ?1 AND issue_number = ?2",
-        params![repo, issue_number as i64],
+        params![repo, issue_number],
         row_to_lease,
     )
     .optional()
@@ -309,22 +375,23 @@ pub fn get_leases_for_issues(
     if issue_numbers.is_empty() {
         return Ok(leases);
     }
-    let placeholders = (0..issue_numbers.len())
-        .map(|idx| format!("?{}", idx + 2))
-        .collect::<Vec<_>>()
-        .join(", ");
+    let placeholders = sql_placeholders(issue_numbers.len());
     let sql = format!(
-        "{SELECT_COLUMNS} WHERE issue_repo = ?1 AND issue_number IN ({placeholders}) \
+        "{SELECT_COLUMNS} WHERE issue_repo = ? AND issue_number IN ({placeholders}) \
          ORDER BY issue_number"
     );
     let mut stmt = conn.prepare(&sql)?;
-    let mut args: Vec<Box<dyn rusqlite::ToSql>> = Vec::with_capacity(issue_numbers.len() + 1);
-    args.push(Box::new(repo.to_string()));
-    for number in issue_numbers {
-        args.push(Box::new(*number as i64));
+    let numbers: Vec<i64> = issue_numbers
+        .iter()
+        .copied()
+        .map(issue_number_to_sql_i64)
+        .collect::<SqliteResult<_>>()?;
+    let mut args: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(issue_numbers.len() + 1);
+    args.push(&repo);
+    for number in &numbers {
+        args.push(number);
     }
-    let arg_refs: Vec<&dyn rusqlite::ToSql> = args.iter().map(AsRef::as_ref).collect();
-    for lease in collect_leases(&mut stmt, &arg_refs)? {
+    for lease in collect_leases(&mut stmt, &args)? {
         leases.insert(lease.issue_number, lease);
     }
     Ok(leases)
@@ -352,6 +419,132 @@ pub fn update_lease_status(
     };
     let _ = changed;
     Ok(())
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("new run id must not be empty")]
+pub(super) struct InvalidRunIdError;
+
+/// Conditionally update a lease's status only when its current status is in
+/// `expected_statuses` **and** (when `expected_run_id` is `Some`) the lease's
+/// `run_id` already matches the expected owner, returning whether the
+/// transition was applied.
+///
+/// This prevents a stale writer (e.g. a launcher returning from a long engine
+/// call) from overwriting a newer terminal or ready transition made by the
+/// poller while it was running. The `expected_run_id` guard additionally
+/// prevents a concurrently reclaimed lease (whose `run_id` was superseded by a
+/// new run) from being mutated by the old run's stale decision. When
+/// `new_run_id` is a non-empty `Some`, the column is updated to the new value;
+/// an empty value is rejected before executing SQL. When `None`, the existing
+/// `run_id` is preserved (the column is never nulled out by a conditional
+/// transition).
+///
+/// The `expected_statuses` list is bound as parameterised placeholders so the
+/// status values are never interpolated into the SQL string.
+///
+pub fn update_lease_status_conditional(
+    conn: &Connection,
+    lease_id: &str,
+    status: LeaseStatus,
+    expected_statuses: &[LeaseStatus],
+    new_run_id: Option<&str>,
+    expected_run_id: Option<&str>,
+) -> SqliteResult<bool> {
+    if new_run_id.is_some_and(str::is_empty) {
+        return Err(rusqlite::Error::ToSqlConversionFailure(Box::new(
+            InvalidRunIdError,
+        )));
+    }
+    if expected_statuses.is_empty() {
+        return Ok(false);
+    }
+    let now = Utc::now().to_rfc3339();
+    let status_str = status.as_str();
+    let mut params: Vec<&dyn rusqlite::ToSql> =
+        Vec::with_capacity(4 + expected_statuses.len() + usize::from(expected_run_id.is_some()));
+    params.push(&status_str);
+    params.push(&new_run_id);
+    params.push(&now);
+    params.push(&lease_id);
+    let expected_placeholders = sql_placeholders(expected_statuses.len());
+    for expected in expected_statuses {
+        params.push(expected);
+    }
+    let ownership_guard = if let Some(run_id) = &expected_run_id {
+        params.push(run_id);
+        " AND run_id = ?"
+    } else {
+        ""
+    };
+    let sql = format!(
+        "UPDATE issue_leases
+         SET status = ?,
+             run_id = COALESCE(?, run_id),
+             updated_at = ?
+         WHERE lease_id = ? AND status IN ({expected_placeholders}){ownership_guard}"
+    );
+    let changed = conn.execute(&sql, params.as_slice())?;
+    Ok(changed > 0)
+}
+
+/// Conditionally update a lease and atomically classify a rejected transition.
+///
+/// An immediate transaction acquires SQLite writer exclusion before a rejected
+/// state is read, so another writer cannot supersede the state between the
+/// conditional update and its classification.
+///
+/// `conn` must not already have an active transaction. Rusqlite's
+/// `new_unchecked` is a safe Rust API that checks this at runtime and returns a
+/// SQLite error for a nested transaction; "unchecked" only means the
+/// `&mut Connection` compile-time exclusion is unavailable through this API.
+pub fn update_lease_status_conditional_outcome(
+    conn: &Connection,
+    lease_id: &str,
+    status: LeaseStatus,
+    expected_statuses: &[LeaseStatus],
+    new_run_id: Option<&str>,
+    expected_run_id: Option<&str>,
+) -> SqliteResult<ConditionalLeaseStatusOutcome> {
+    let tx = rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?;
+    let applied = update_lease_status_conditional(
+        &tx,
+        lease_id,
+        status,
+        expected_statuses,
+        new_run_id,
+        expected_run_id,
+    )?;
+    let outcome = if applied {
+        ConditionalLeaseStatusOutcome::Applied
+    } else {
+        let current = tx
+            .query_row(
+                "SELECT status, run_id FROM issue_leases WHERE lease_id = ?1",
+                params![lease_id],
+                |row| {
+                    let status_string = row.get::<_, String>(0)?;
+                    let status = status_string.parse::<LeaseStatus>().map_err(|error| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            0,
+                            rusqlite::types::Type::Text,
+                            Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, error)),
+                        )
+                    })?;
+                    Ok((status, row.get::<_, Option<String>>(1)?))
+                },
+            )
+            .optional()?;
+        match current {
+            Some((current_status, current_run_id)) => ConditionalLeaseStatusOutcome::Rejected {
+                current_status,
+                current_run_id,
+            },
+            None => ConditionalLeaseStatusOutcome::Missing,
+        }
+    };
+    tx.commit()?;
+    Ok(outcome)
 }
 
 /// Refresh a lease's heartbeat timestamp to keep it from going stale.
@@ -489,306 +682,5 @@ pub fn mark_stale_ready_to_resume_leases(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::sync::{Arc, Barrier};
-    use std::thread;
-    use std::time::Duration;
-
-    fn conn() -> Connection {
-        let c = Connection::open_in_memory().unwrap();
-        init_leases_table(&c).unwrap();
-        c
-    }
-
-    #[test]
-    fn status_display_fromstr_round_trip() {
-        for status in [
-            LeaseStatus::Pending,
-            LeaseStatus::Claimed,
-            LeaseStatus::Running,
-            LeaseStatus::WaitingExternal,
-            LeaseStatus::ReadyToResume,
-            LeaseStatus::Completed,
-            LeaseStatus::Failed,
-            LeaseStatus::Abandoned,
-            LeaseStatus::Stale,
-        ] {
-            let s = status.to_string();
-            assert_eq!(s.parse::<LeaseStatus>().unwrap(), status);
-        }
-    }
-
-    #[test]
-    fn create_then_get_round_trip() {
-        let c = conn();
-        let claimed = try_claim(&c, "o/r", 7, "cfg").unwrap().unwrap();
-        let fetched = get_lease_for_issue(&c, "o/r", 7).unwrap().unwrap();
-        assert_eq!(fetched.issue_number, 7);
-        assert_eq!(fetched.config_id, "cfg");
-        assert_eq!(fetched.lease_id, claimed.lease_id);
-        assert_eq!(fetched.status, LeaseStatus::Claimed);
-    }
-
-    #[test]
-    fn try_claim_second_attempt_loses() {
-        let c = conn();
-        let first = try_claim(&c, "o/r", 1, "cfg-a").unwrap();
-        let second = try_claim(&c, "o/r", 1, "cfg-b").unwrap();
-        assert!(first.is_some());
-        assert!(second.is_none(), "duplicate claim must be rejected");
-    }
-
-    #[test]
-    fn try_claim_reclaims_terminal_lease() {
-        // A finished/abandoned issue must be pickable again on a later pass,
-        // matching blocks_duplicate_work(); otherwise the daemon can never
-        // re-work an issue whose prior run failed or was abandoned.
-        for terminal in LeaseStatus::RECLAIMABLE {
-            let c = conn();
-            let first = try_claim(&c, "o/r", 1, "cfg-a").unwrap().unwrap();
-            update_lease_status(&c, &first.lease_id, terminal, Some("run-old")).unwrap();
-
-            let reclaim = try_claim(&c, "o/r", 1, "cfg-b").unwrap();
-            assert!(
-                reclaim.is_some(),
-                "terminal lease ({terminal}) must be reclaimable"
-            );
-            let reclaim = reclaim.unwrap();
-            assert_ne!(
-                reclaim.lease_id, first.lease_id,
-                "reclaim must mint a fresh lease id"
-            );
-
-            let fetched = get_lease_for_issue(&c, "o/r", 1).unwrap().unwrap();
-            assert_eq!(fetched.lease_id, reclaim.lease_id);
-            assert_eq!(fetched.status, LeaseStatus::Claimed);
-            assert_eq!(fetched.config_id, "cfg-b");
-            assert_eq!(
-                fetched.run_id, None,
-                "a fresh claim must clear the prior run id"
-            );
-            // Exactly one lease row per issue is preserved.
-            assert_eq!(list_all_leases(&c).unwrap().len(), 1);
-        }
-    }
-
-    #[test]
-    fn try_claim_does_not_reclaim_active_lease() {
-        // Claimed and Running leases still hold the issue: a concurrent claim
-        // must lose and must not disturb the in-flight lease.
-        for active in [LeaseStatus::Claimed, LeaseStatus::Running] {
-            let c = conn();
-            let first = try_claim(&c, "o/r", 2, "cfg-a").unwrap().unwrap();
-            update_lease_status(&c, &first.lease_id, active, Some("run-live")).unwrap();
-
-            let second = try_claim(&c, "o/r", 2, "cfg-b").unwrap();
-            assert!(
-                second.is_none(),
-                "active lease ({active}) must not be reclaimable"
-            );
-
-            let fetched = get_lease_for_issue(&c, "o/r", 2).unwrap().unwrap();
-            assert_eq!(
-                fetched.lease_id, first.lease_id,
-                "in-flight lease preserved"
-            );
-            assert_eq!(fetched.status, active);
-            assert_eq!(fetched.config_id, "cfg-a");
-            assert_eq!(fetched.run_id.as_deref(), Some("run-live"));
-        }
-    }
-
-    #[test]
-    fn concurrent_terminal_reclaim_has_one_winner() {
-        let temp = tempfile::tempdir().unwrap();
-        let path = temp.path().join("leases.db");
-        let seed = Connection::open(&path).unwrap();
-        init_leases_table(&seed).unwrap();
-        let previous = try_claim(&seed, "o/r", 3, "cfg-old").unwrap().unwrap();
-        update_lease_status(
-            &seed,
-            &previous.lease_id,
-            LeaseStatus::Failed,
-            Some("run-old"),
-        )
-        .unwrap();
-        drop(seed);
-
-        let barrier = Arc::new(Barrier::new(2));
-        let claims = ["cfg-a", "cfg-b"].map(|config_id| {
-            let path = path.clone();
-            let barrier = Arc::clone(&barrier);
-            thread::spawn(move || {
-                let connection = Connection::open(path).unwrap();
-                connection.busy_timeout(Duration::from_secs(5)).unwrap();
-                barrier.wait();
-                try_claim(&connection, "o/r", 3, config_id).unwrap()
-            })
-        });
-        let results = claims.map(|claim| claim.join().unwrap());
-        let winner = results.into_iter().flatten().collect::<Vec<_>>();
-        assert_eq!(winner.len(), 1, "exactly one reclaim must win");
-
-        let connection = Connection::open(path).unwrap();
-        let fetched = get_lease_for_issue(&connection, "o/r", 3).unwrap().unwrap();
-        assert_eq!(fetched.lease_id, winner[0].lease_id);
-        assert_eq!(fetched.status, LeaseStatus::Claimed);
-        assert_eq!(fetched.run_id, None);
-        assert_eq!(list_all_leases(&connection).unwrap().len(), 1);
-    }
-
-    #[test]
-    fn update_status_transitions() {
-        let c = conn();
-        let lease = try_claim(&c, "o/r", 2, "cfg").unwrap().unwrap();
-        update_lease_status(&c, &lease.lease_id, LeaseStatus::Running, Some("run-9")).unwrap();
-        let fetched = get_lease_for_issue(&c, "o/r", 2).unwrap().unwrap();
-        assert_eq!(fetched.status, LeaseStatus::Running);
-        assert_eq!(fetched.run_id.as_deref(), Some("run-9"));
-    }
-
-    #[test]
-    fn count_active_only_counts_claimed_and_running() {
-        let c = conn();
-        let l1 = try_claim(&c, "o/r", 10, "cfg").unwrap().unwrap();
-        let l2 = try_claim(&c, "o/r", 11, "cfg").unwrap().unwrap();
-        let l3 = try_claim(&c, "o/r", 12, "cfg").unwrap().unwrap();
-        update_lease_status(&c, &l2.lease_id, LeaseStatus::Running, None).unwrap();
-        update_lease_status(&c, &l3.lease_id, LeaseStatus::Completed, None).unwrap();
-        // l1 Claimed + l2 Running = 2 active; l3 Completed excluded.
-        assert_eq!(count_active_leases_for_config(&c, "cfg").unwrap(), 2);
-        let _ = l1;
-    }
-
-    #[test]
-    fn waiting_external_blocks_duplicates_but_not_active_capacity() {
-        let c = conn();
-        let lease = try_claim(&c, "o/r", 13, "cfg").unwrap().unwrap();
-        update_lease_status(
-            &c,
-            &lease.lease_id,
-            LeaseStatus::WaitingExternal,
-            Some("run-13"),
-        )
-        .unwrap();
-        let duplicate = try_claim(&c, "o/r", 13, "cfg").unwrap();
-        assert!(duplicate.is_none());
-        assert_eq!(count_active_leases_for_config(&c, "cfg").unwrap(), 0);
-        let fetched = get_lease_for_issue(&c, "o/r", 13).unwrap().unwrap();
-        assert!(fetched.status.blocks_duplicate_work());
-    }
-
-    #[test]
-    fn stale_sweep_ignores_deliberately_waiting_leases() {
-        let c = conn();
-        let old = (Utc::now() - chrono::Duration::seconds(10_000)).to_rfc3339();
-        c.execute(
-            "INSERT INTO issue_leases
-                (lease_id, issue_repo, issue_number, config_id, run_id, status,
-                 claimed_at, updated_at, heartbeat_at)
-             VALUES ('waiting-1','o/r',32,'cfg','run-32','waiting_external',?1,?1,?1)",
-            params![old],
-        )
-        .unwrap();
-        assert_eq!(mark_stale_leases(&c, 300).unwrap(), 0);
-        let lease = get_lease_for_issue(&c, "o/r", 32).unwrap().unwrap();
-        assert_eq!(lease.status, LeaseStatus::WaitingExternal);
-    }
-
-    #[test]
-    fn stale_sweep_recovers_overdue_ready_to_resume_leases() {
-        let c = conn();
-        let old = (Utc::now() - chrono::Duration::seconds(10_000)).to_rfc3339();
-        c.execute(
-            "INSERT INTO issue_leases
-                (lease_id, issue_repo, issue_number, config_id, run_id, status,
-                 claimed_at, updated_at, heartbeat_at)
-             VALUES ('ready-1','o/r',33,'cfg','run-33','ready_to_resume',?1,?1,?1)",
-            params![old],
-        )
-        .unwrap();
-        assert_eq!(mark_stale_ready_to_resume_leases(&c, 300).unwrap(), 1);
-        let lease = get_lease_for_issue(&c, "o/r", 33).unwrap().unwrap();
-        assert_eq!(lease.status, LeaseStatus::Stale);
-    }
-
-    #[test]
-    fn list_by_status_filters() {
-        let c = conn();
-        let l1 = try_claim(&c, "o/r", 20, "cfg").unwrap().unwrap();
-        let _l2 = try_claim(&c, "o/r", 21, "cfg").unwrap().unwrap();
-        update_lease_status(&c, &l1.lease_id, LeaseStatus::Completed, None).unwrap();
-        let completed = list_leases_by_status(&c, LeaseStatus::Completed).unwrap();
-        assert_eq!(completed.len(), 1);
-        assert_eq!(completed[0].issue_number, 20);
-        let claimed = list_leases_by_status(&c, LeaseStatus::Claimed).unwrap();
-        assert_eq!(claimed.len(), 1);
-        assert_eq!(claimed[0].issue_number, 21);
-    }
-
-    #[test]
-    fn mark_stale_flips_overdue_only() {
-        let c = conn();
-        // Fresh claim — should not go stale.
-        let fresh = try_claim(&c, "o/r", 30, "cfg").unwrap().unwrap();
-        // Insert an overdue lease directly with an old heartbeat.
-        let old = (Utc::now() - chrono::Duration::seconds(10_000)).to_rfc3339();
-        c.execute(
-            "INSERT INTO issue_leases
-                (lease_id, issue_repo, issue_number, config_id, run_id, status,
-                 claimed_at, updated_at, heartbeat_at)
-             VALUES ('stale-1','o/r',31,'cfg',NULL,'running',?1,?1,?1)",
-            params![old],
-        )
-        .unwrap();
-        let recovered = mark_stale_leases(&c, 300).unwrap();
-        assert_eq!(recovered, 1);
-        let fresh_now = get_lease_for_issue(&c, "o/r", 30).unwrap().unwrap();
-        assert_eq!(fresh_now.status, LeaseStatus::Claimed);
-        let stale_now = get_lease_for_issue(&c, "o/r", 31).unwrap().unwrap();
-        assert_eq!(stale_now.status, LeaseStatus::Stale);
-        let _ = fresh;
-    }
-
-    #[test]
-    fn list_by_config_and_all() {
-        let c = conn();
-        try_claim(&c, "o/r", 40, "cfg-a").unwrap();
-        try_claim(&c, "o/r", 41, "cfg-b").unwrap();
-        assert_eq!(list_leases_by_config(&c, "cfg-a").unwrap().len(), 1);
-        assert_eq!(list_all_leases(&c).unwrap().len(), 2);
-    }
-
-    #[test]
-    fn touch_heartbeat_updates_timestamp() {
-        let c = conn();
-        let lease = try_claim(&c, "o/r", 50, "cfg").unwrap().unwrap();
-        let before = get_lease_for_issue(&c, "o/r", 50).unwrap().unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(5));
-        touch_lease_heartbeat(&c, &lease.lease_id).unwrap();
-        let after = get_lease_for_issue(&c, "o/r", 50).unwrap().unwrap();
-        assert!(after.heartbeat_at >= before.heartbeat_at);
-    }
-
-    #[test]
-    fn create_lease_explicit_record() {
-        let c = conn();
-        let now = Utc::now();
-        let lease = IssueLease {
-            lease_id: "explicit-1".to_string(),
-            issue_repo: "o/r".to_string(),
-            issue_number: 60,
-            config_id: "cfg".to_string(),
-            run_id: Some("run-1".to_string()),
-            status: LeaseStatus::Pending,
-            claimed_at: now,
-            updated_at: now,
-            heartbeat_at: now,
-        };
-        create_lease(&c, &lease).unwrap();
-        let fetched = get_lease_for_issue(&c, "o/r", 60).unwrap().unwrap();
-        assert_eq!(fetched.lease_id, "explicit-1");
-        assert_eq!(fetched.status, LeaseStatus::Pending);
-    }
-}
+#[path = "leases_tests.rs"]
+mod tests;

@@ -3,9 +3,9 @@
 //! `claim_and_launch` is the authoritative duplicate-prevention path: it atomically
 //! claims an issue via the lease table, re-checks the per-config concurrency
 //! ceiling, then delegates the actual workflow execution to a [`WorkflowLauncher`]
-//! seam (the binary wires the real engine runner; tests inject a mock). Lease
-//! status is advanced to `Running` before launch and to a terminal
-//! `Completed`/`Failed` afterward.
+//! seam (the binary wires the real engine runner; tests inject a mock). Lease status is
+//! advanced to `Running` before launch, then to a terminal `Completed`/`Failed` state or to
+//! non-terminal `WaitingExternal` when the engine suspends.
 //!
 //! @plan:PLAN-20260415-DAEMON-DISCOVERY.P06
 //! @requirement:REQ-DAEMON-DISCOVERY-005,REQ-DAEMON-DISCOVERY-006
@@ -17,7 +17,9 @@ use rusqlite::Connection;
 use crate::adapters::github_issues::GithubIssue;
 use crate::daemon::discovery::SkipReason;
 use crate::persistence::leases::{
-    count_active_leases_for_config, try_claim, update_lease_status, IssueLease, LeaseStatus,
+    count_active_leases_for_config, try_claim, update_lease_status,
+    update_lease_status_conditional_outcome, ConditionalLeaseStatusOutcome, IssueLease,
+    LeaseStatus,
 };
 use crate::workflow::schema::DiscoveryConfig;
 
@@ -29,6 +31,13 @@ pub enum LaunchOutcome {
     Launched { run_id: String, success: bool },
     /// The run checkpointed at an external wait and released active capacity.
     WaitingExternal { run_id: String },
+    /// A concurrent writer advanced or reassigned the lease before a stale
+    /// engine result could be applied. The durable lease state was preserved.
+    LeaseStatePreserved {
+        run_id: String,
+        current_status: Option<LeaseStatus>,
+        current_run_id: Option<String>,
+    },
     /// The launch was skipped before any run started.
     Skipped(SkipReason),
 }
@@ -203,32 +212,118 @@ pub fn finish_lease_after_result(
     match result {
         Ok(WorkflowLaunchResult::CompletedSuccess) => {
             update_lease_status(conn, lease_id, LeaseStatus::Completed, Some(run_id))?;
-            Ok(LaunchOutcome::Launched {
-                run_id: run_id.to_string(),
-                success: true,
-            })
+            Ok(launched(run_id, true))
         }
         Ok(WorkflowLaunchResult::CompletedFailure) => {
             update_lease_status(conn, lease_id, LeaseStatus::Failed, Some(run_id))?;
-            Ok(LaunchOutcome::Launched {
-                run_id: run_id.to_string(),
-                success: false,
-            })
+            Ok(launched(run_id, false))
         }
         Ok(WorkflowLaunchResult::SuspendedExternalWait) => {
-            update_lease_status(conn, lease_id, LeaseStatus::WaitingExternal, Some(run_id))?;
-            Ok(LaunchOutcome::WaitingExternal {
-                run_id: run_id.to_string(),
-            })
+            match update_lease_status_conditional_outcome(
+                conn,
+                lease_id,
+                LeaseStatus::WaitingExternal,
+                &[LeaseStatus::Running, LeaseStatus::WaitingExternal],
+                None,
+                Some(run_id),
+            )? {
+                ConditionalLeaseStatusOutcome::Applied => Ok(LaunchOutcome::WaitingExternal {
+                    run_id: run_id.to_string(),
+                }),
+                ConditionalLeaseStatusOutcome::Rejected {
+                    current_status,
+                    current_run_id,
+                } => Ok(LaunchOutcome::LeaseStatePreserved {
+                    run_id: run_id.to_string(),
+                    current_status: Some(current_status),
+                    current_run_id,
+                }),
+                ConditionalLeaseStatusOutcome::Missing => Ok(LaunchOutcome::LeaseStatePreserved {
+                    run_id: run_id.to_string(),
+                    current_status: None,
+                    current_run_id: None,
+                }),
+            }
         }
-        Err(error) => {
-            eprintln!("workflow launch failed for run {run_id}: {error}");
-            update_lease_status(conn, lease_id, LeaseStatus::Failed, Some(run_id))?;
-            Ok(LaunchOutcome::Launched {
+        Err(error) => compensate_lease_after_launch_error(conn, lease_id, run_id, &error),
+    }
+}
+
+/// Build the success-flagged [`LaunchOutcome::Launched`] variant for a run.
+fn launched(run_id: &str, success: bool) -> LaunchOutcome {
+    LaunchOutcome::Launched {
+        run_id: run_id.to_string(),
+        success,
+    }
+}
+
+/// Resolve the lease outcome after a launch error.
+///
+/// The engine may have committed `WaitingExternal` before the error (e.g. it
+/// persisted the wait state, then the launch wrapper hit a downstream
+/// failure). We must neither strand capacity by leaving a `Running` lease nor
+/// mark a genuinely waiting run `Failed`. The complete invariant check
+/// (`has_pollable_external_wait`) verifies that run status, wait row, and
+/// lease are all consistently `WaitingExternal`. If the check itself fails
+/// (DB or decode error), compensate to `Failed` rather than propagating — a
+/// `Running` lease is never an acceptable terminal state. The invariant-check
+/// error itself is logged as a diagnostic but does not propagate; the
+/// authoritative compensation write that follows propagates via `?`.
+///
+/// Every branch uses a conditional lease update so the poller's concurrent
+/// terminal or ready classification cannot be overwritten by this stale
+/// launcher write. When the conditional update is rejected (the lease has
+/// already advanced past the expected states), the existing state is left
+/// intact — no TOCTOU window remains. Database errors from the compensation
+/// write itself propagate to the caller via `?` rather than being swallowed,
+/// so a failed compensation is never silently masked.
+fn compensate_lease_after_launch_error(
+    conn: &Connection,
+    lease_id: &str,
+    run_id: &str,
+    error: &str,
+) -> Result<LaunchOutcome, rusqlite::Error> {
+    eprintln!("workflow launch failed for run {run_id}: {error}");
+    let (target_status, applied_outcome) = match crate::persistence::has_pollable_external_wait(
+        conn, run_id,
+    ) {
+        Ok(true) => (
+            LeaseStatus::WaitingExternal,
+            LaunchOutcome::WaitingExternal {
                 run_id: run_id.to_string(),
-                success: false,
-            })
+            },
+        ),
+        Ok(false) => (LeaseStatus::Failed, launched(run_id, false)),
+        Err(check_error) => {
+            eprintln!(
+                "external-wait invariant check failed for run {run_id}, compensating lease to Failed: {check_error}"
+            );
+            (LeaseStatus::Failed, launched(run_id, false))
         }
+    };
+
+    match update_lease_status_conditional_outcome(
+        conn,
+        lease_id,
+        target_status,
+        &[LeaseStatus::Running, LeaseStatus::WaitingExternal],
+        None,
+        Some(run_id),
+    )? {
+        ConditionalLeaseStatusOutcome::Applied => Ok(applied_outcome),
+        ConditionalLeaseStatusOutcome::Rejected {
+            current_status,
+            current_run_id,
+        } => Ok(LaunchOutcome::LeaseStatePreserved {
+            run_id: run_id.to_string(),
+            current_status: Some(current_status),
+            current_run_id,
+        }),
+        ConditionalLeaseStatusOutcome::Missing => Ok(LaunchOutcome::LeaseStatePreserved {
+            run_id: run_id.to_string(),
+            current_status: None,
+            current_run_id: None,
+        }),
     }
 }
 
@@ -356,7 +451,37 @@ mod tests {
     fn conn() -> Connection {
         let c = Connection::open_in_memory().unwrap();
         init_leases_table(&c).unwrap();
+        crate::persistence::sqlite::init_runs_schema(&c).unwrap();
+        crate::persistence::wait_state::init_wait_states_table(&c).unwrap();
         c
+    }
+
+    /// Seed a complete, pollable external wait using the production-path
+    /// `persist_external_wait` function, establishing the full invariant:
+    /// run status, checkpoint, wait_states row, and waiting lease.
+    fn seed_complete_external_wait(
+        c: &Connection,
+        issue_number: u64,
+        run_id: &str,
+        resume_step: &str,
+    ) -> String {
+        let lease = try_claim(c, "o/r", issue_number, "cfg").unwrap().unwrap();
+        update_lease_status(c, &lease.lease_id, LeaseStatus::Running, Some(run_id)).unwrap();
+        // Seed run metadata + checkpoint (required by persist_external_wait).
+        let metadata = crate::persistence::RunMetadata::new(run_id, "wf", "cfg");
+        crate::persistence::persist_run_with_conn(c, &metadata).unwrap();
+        crate::persistence::checkpoint::save_checkpoint_with_conn(
+            c,
+            &crate::persistence::checkpoint::Checkpoint::new(run_id, resume_step),
+        )
+        .unwrap();
+        let mut record = crate::persistence::wait_state::WaitStateRecord::new(run_id, "cfg");
+        record.lease_id = Some(lease.lease_id.clone());
+        record.repository = "o/r".to_string();
+        record.issue_number = issue_number;
+        record.resume_step = resume_step.to_string();
+        crate::persistence::persist_external_wait(c, &record).unwrap();
+        lease.lease_id
     }
 
     /// Records launch requests and returns a preset success flag.
@@ -475,6 +600,175 @@ mod tests {
         assert_eq!(lease.status, LeaseStatus::WaitingExternal);
         assert_eq!(lease.run_id.as_deref(), Some(run_id.as_str()));
         assert_eq!(count_active_leases_for_config(&c, "cfg").unwrap(), 0);
+    }
+
+    #[test]
+    fn error_after_complete_external_wait_keeps_lease_resumable() {
+        // Issue 131 invariant: when the launcher returns an error after a
+        // complete pollable external wait has been persisted via the
+        // production path (`persist_external_wait`), the lease must stay
+        // WaitingExternal so the daemon poller can resume it.
+        let c = conn();
+        let run_id = "run-complete-wait";
+        let lease_id = seed_complete_external_wait(&c, 6, run_id, "watch_pr_checks");
+
+        let outcome = finish_lease_after_result(
+            &c,
+            &lease_id,
+            run_id,
+            Err("downstream wrapper error after persist".to_string()),
+        )
+        .unwrap();
+
+        assert_eq!(
+            outcome,
+            LaunchOutcome::WaitingExternal {
+                run_id: run_id.to_string(),
+            },
+            "an error after a complete external wait must not mark the lease Failed"
+        );
+        let lease = get_lease_for_issue(&c, "o/r", 6).unwrap().unwrap();
+        assert_eq!(lease.status, LeaseStatus::WaitingExternal);
+    }
+
+    #[test]
+    fn error_with_incomplete_wait_marks_lease_failed() {
+        // Issue 131 invariant: when only the run status is WaitingExternal
+        // but no pollable wait_states row exists (incomplete invariant), the
+        // lease must go Failed — never strand capacity on an un-pollable run.
+        let c = conn();
+        let claimed = claim_for_launch(&issue(7), &cfg(2), &c, "cfg", &DaemonPathBases::default())
+            .unwrap()
+            .unwrap();
+        // Seed run status only — no wait_states row (incomplete invariant).
+        let mut metadata =
+            crate::persistence::RunMetadata::new(&claimed.request.run_id, "wf", "cfg");
+        metadata.status = crate::persistence::RunStatus::WaitingExternal;
+        crate::persistence::persist_run_with_conn(&c, &metadata).unwrap();
+
+        let outcome = finish_lease_after_result(
+            &c,
+            &claimed.lease_id,
+            &claimed.request.run_id,
+            Err("persist wait state: missing checkpoint".to_string()),
+        )
+        .unwrap();
+
+        match outcome {
+            LaunchOutcome::Launched { success, .. } => assert!(!success),
+            other => panic!("unexpected: {other:?}"),
+        }
+        let lease = get_lease_for_issue(&c, "o/r", 7).unwrap().unwrap();
+        assert_eq!(lease.status, LeaseStatus::Failed);
+    }
+
+    #[test]
+    fn error_when_invariant_check_fails_compensates_lease_to_failed() {
+        // Issue 131 invariant: when `has_pollable_external_wait` itself
+        // returns an error (e.g. a corrupt wait_states row causing a decode
+        // failure), the launcher must compensate the lease to Failed rather
+        // than propagating the error and leaving a Running lease stranded.
+        let c = conn();
+        let run_id = "run-decode-err";
+        let lease_id = seed_complete_external_wait(&c, 9, run_id, "watch_pr_checks");
+        c.execute("DROP TABLE runs", []).unwrap();
+
+        let outcome = finish_lease_after_result(
+            &c,
+            &lease_id,
+            run_id,
+            Err("downstream wrapper error after persist".to_string()),
+        )
+        .unwrap();
+
+        match outcome {
+            LaunchOutcome::Launched { success, .. } => assert!(!success),
+            other => panic!("unexpected: {other:?}"),
+        }
+        let lease = get_lease_for_issue(&c, "o/r", 9).unwrap().unwrap();
+        assert_eq!(
+            lease.status,
+            LeaseStatus::Failed,
+            "an invariant-query failure must compensate to Failed, not strand the lease"
+        );
+    }
+
+    #[test]
+    fn suspended_external_wait_does_not_overwrite_terminal_lease() {
+        // Issue 131 invariant: a SuspendedExternalWait result must not
+        // overwrite a lease that has already transitioned to a terminal
+        // state (e.g. the poller classified it while the engine was still
+        // running). The conditional lease update leaves the terminal lease
+        // intact.
+        let c = conn();
+        let claimed = claim_for_launch(&issue(8), &cfg(2), &c, "cfg", &DaemonPathBases::default())
+            .unwrap()
+            .unwrap();
+        // Simulate the poller marking the lease terminal while the engine ran.
+        update_lease_status(
+            &c,
+            &claimed.lease_id,
+            LeaseStatus::Failed,
+            Some(&claimed.request.run_id),
+        )
+        .unwrap();
+
+        let outcome = finish_lease_after_result(
+            &c,
+            &claimed.lease_id,
+            &claimed.request.run_id,
+            Ok(WorkflowLaunchResult::SuspendedExternalWait),
+        )
+        .unwrap();
+        assert_eq!(
+            outcome,
+            LaunchOutcome::LeaseStatePreserved {
+                run_id: claimed.request.run_id.clone(),
+                current_status: Some(LeaseStatus::Failed),
+                current_run_id: Some(claimed.request.run_id.clone()),
+            },
+            "a rejected stale suspend must report the durable lease state"
+        );
+        let lease = get_lease_for_issue(&c, "o/r", 8).unwrap().unwrap();
+        assert_eq!(
+            lease.status,
+            LeaseStatus::Failed,
+            "a terminal lease must not be overwritten by a stale suspend"
+        );
+    }
+
+    #[test]
+    fn suspended_external_wait_reports_and_preserves_ready_to_resume_lease() {
+        let c = conn();
+        let claimed = claim_for_launch(&issue(81), &cfg(2), &c, "cfg", &DaemonPathBases::default())
+            .unwrap()
+            .unwrap();
+        update_lease_status(
+            &c,
+            &claimed.lease_id,
+            LeaseStatus::ReadyToResume,
+            Some(&claimed.request.run_id),
+        )
+        .unwrap();
+
+        let outcome = finish_lease_after_result(
+            &c,
+            &claimed.lease_id,
+            &claimed.request.run_id,
+            Ok(WorkflowLaunchResult::SuspendedExternalWait),
+        )
+        .unwrap();
+
+        assert_eq!(
+            outcome,
+            LaunchOutcome::LeaseStatePreserved {
+                run_id: claimed.request.run_id.clone(),
+                current_status: Some(LeaseStatus::ReadyToResume),
+                current_run_id: Some(claimed.request.run_id.clone()),
+            }
+        );
+        let lease = get_lease_for_issue(&c, "o/r", 81).unwrap().unwrap();
+        assert_eq!(lease.status, LeaseStatus::ReadyToResume);
     }
 
     #[test]
@@ -604,5 +898,103 @@ mod tests {
         // And contains the issue segment.
         assert!(work.to_str().unwrap().contains("issue-7"));
         assert!(artifact.to_str().unwrap().contains("issue-7"));
+    }
+
+    #[test]
+    fn compensate_error_does_not_overwrite_terminal_lease() {
+        let c = conn();
+        let claimed = claim_for_launch(&issue(10), &cfg(2), &c, "cfg", &DaemonPathBases::default())
+            .unwrap()
+            .unwrap();
+        update_lease_status(
+            &c,
+            &claimed.lease_id,
+            LeaseStatus::Completed,
+            Some(&claimed.request.run_id),
+        )
+        .unwrap();
+
+        let outcome = finish_lease_after_result(
+            &c,
+            &claimed.lease_id,
+            &claimed.request.run_id,
+            Err("stale error after concurrent completion".to_string()),
+        )
+        .unwrap();
+
+        assert_eq!(
+            outcome,
+            LaunchOutcome::LeaseStatePreserved {
+                run_id: claimed.request.run_id.clone(),
+                current_status: Some(LeaseStatus::Completed),
+                current_run_id: Some(claimed.request.run_id.clone()),
+            }
+        );
+        let lease = get_lease_for_issue(&c, "o/r", 10).unwrap().unwrap();
+        assert_eq!(
+            lease.status,
+            LeaseStatus::Completed,
+            "a Completed lease must not be overwritten by a stale error compensation"
+        );
+    }
+
+    #[test]
+    fn compensate_error_with_pollable_wait_does_not_overwrite_ready_lease() {
+        // Race regression: when the launcher hits an error and the lease has
+        // already been advanced to ReadyToResume by the poller, the invariant
+        // check (has_pollable_external_wait) returns false (a ReadyToResume
+        // lease is not "pollable"), so the launcher tries to fail it. The
+        // conditional fail transition must reject because ReadyToResume is not
+        // in the expected set [Running, WaitingExternal], preserving the
+        // poller's classification.
+        let c = conn();
+        let run_id = "run-race-ready";
+        let lease_id = seed_complete_external_wait(&c, 11, run_id, "watch_pr_checks");
+        // Simulate the poller advancing to ReadyToResume while the engine ran.
+        update_lease_status(&c, &lease_id, LeaseStatus::ReadyToResume, Some(run_id)).unwrap();
+
+        let outcome = finish_lease_after_result(
+            &c,
+            &lease_id,
+            run_id,
+            Err("stale error after ready classification".to_string()),
+        )
+        .unwrap();
+
+        assert_eq!(
+            outcome,
+            LaunchOutcome::LeaseStatePreserved {
+                run_id: run_id.to_string(),
+                current_status: Some(LeaseStatus::ReadyToResume),
+                current_run_id: Some(run_id.to_string()),
+            }
+        );
+        let lease = get_lease_for_issue(&c, "o/r", 11).unwrap().unwrap();
+        assert_eq!(
+            lease.status,
+            LeaseStatus::ReadyToResume,
+            "a ReadyToResume lease must not be overwritten by a stale error compensation"
+        );
+    }
+
+    #[test]
+    fn compensate_error_reports_missing_lease_as_preserved() {
+        let c = conn();
+        let outcome = finish_lease_after_result(
+            &c,
+            "missing-lease",
+            "missing-run",
+            Err("launch failed after lease deletion".to_string()),
+        )
+        .unwrap();
+
+        assert_eq!(
+            outcome,
+            LaunchOutcome::LeaseStatePreserved {
+                run_id: "missing-run".to_string(),
+                current_status: None,
+                current_run_id: None,
+            }
+        );
     }
 }

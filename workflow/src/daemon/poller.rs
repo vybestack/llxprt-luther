@@ -1,7 +1,6 @@
 use std::cell::RefCell;
 
 use chrono::{DateTime, Utc};
-use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
@@ -12,17 +11,16 @@ use crate::engine::executors::pr_check_wait::{
 };
 use crate::engine::executors::pr_followup_artifacts::{ClockSleeper, PrFollowupArtifactStore};
 use crate::engine::executors::pr_followup_types::{PrFollowupBinding, PR_FOLLOWUP_SCHEMA_VERSION};
-use crate::persistence::checkpoint::{set_resume_point, PersistenceError};
-use crate::persistence::leases::{update_lease_status, LeaseStatus};
 use crate::persistence::run_metadata::RunStatus;
-use crate::persistence::sqlite::{get_run_with_conn, persist_run_with_conn};
-use crate::persistence::wait_state::{
-    delete_wait_state, update_wait_state_after_poll, WaitKind, WaitStateRecord,
-};
-use crate::persistence::{
-    write_poll_result_artifact, write_resume_decision_artifact, write_wait_state_artifact,
-};
+use crate::persistence::sqlite::get_run_with_conn;
+use crate::persistence::wait_state::{WaitKind, WaitStateRecord};
 use crate::workflow::schema::DEFAULT_MAX_CHILD_MERGE_WAIT_SECONDS;
+
+mod apply;
+pub use apply::{
+    apply_poll_decision, ArtifactPhase, ArtifactWarning, NonEmptyArtifactWarnings, PollApplyError,
+    PollApplyOutcome,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -160,7 +158,7 @@ impl PollDecision {
         Self {
             run_id: record.run_id.clone(),
             classification: PollClassification::StillWaiting,
-            next_poll_at: Some(next_poll_time(record)),
+            next_poll_at: Some(next_poll_time(record, Utc::now())),
             observed_state,
         }
     }
@@ -180,7 +178,7 @@ impl PollDecision {
         Self {
             run_id: record.run_id.clone(),
             classification: PollClassification::TransientFailure,
-            next_poll_at: Some(next_poll_time(record)),
+            next_poll_at: Some(next_poll_time(record, Utc::now())),
             observed_state,
         }
     }
@@ -809,128 +807,8 @@ fn contains_any(text: &str, needles: &[&str]) -> bool {
     needles.iter().any(|needle| text.contains(needle))
 }
 
-pub fn apply_poll_decision(
-    conn: &Connection,
-    record: &WaitStateRecord,
-    decision: &PollDecision,
-) -> rusqlite::Result<()> {
-    let tx = conn.unchecked_transaction()?;
-    match decision.classification {
-        PollClassification::ReadyToResume => {
-            set_resume_point(&tx, &record.run_id, &record.resume_step)
-                .map_err(persistence_to_sqlite)?;
-            mark_run_status(
-                &tx,
-                &record.run_id,
-                RunStatus::ReadyToResume,
-                &record.resume_step,
-            )?;
-            if let Some(lease_id) = record.lease_id.as_deref() {
-                update_lease_status(
-                    &tx,
-                    lease_id,
-                    LeaseStatus::ReadyToResume,
-                    Some(&record.run_id),
-                )?;
-            }
-            delete_wait_state(&tx, &record.run_id)?;
-        }
-        PollClassification::TerminalFailure | PollClassification::TimedOut => {
-            mark_run_status(&tx, &record.run_id, RunStatus::Failed, &record.resume_step)?;
-            if let Some(lease_id) = record.lease_id.as_deref() {
-                update_lease_status(&tx, lease_id, LeaseStatus::Failed, Some(&record.run_id))?;
-            }
-            delete_wait_state(&tx, &record.run_id)?;
-        }
-        PollClassification::StillWaiting | PollClassification::TransientFailure => {
-            mark_run_status(
-                &tx,
-                &record.run_id,
-                RunStatus::WaitingExternal,
-                &record.resume_step,
-            )?;
-            let next_poll_at = decision
-                .next_poll_at
-                .unwrap_or_else(|| next_poll_time(record));
-            if !update_wait_state_after_poll(
-                &tx,
-                &record.run_id,
-                &decision.observed_state,
-                next_poll_at,
-            )? {
-                return Err(rusqlite::Error::QueryReturnedNoRows);
-            }
-            if let Some(lease_id) = record.lease_id.as_deref() {
-                update_lease_status(
-                    &tx,
-                    lease_id,
-                    LeaseStatus::WaitingExternal,
-                    Some(&record.run_id),
-                )?;
-            }
-        }
-    }
-    tx.commit()?;
-    let mut decision = decision.clone();
-    if let Err(err) = write_committed_pr_check_snapshot(record, &decision.observed_state) {
-        decision.observed_state["artifact_error"] = json!(err.to_string());
-    }
-    if let Err(e) = persist_poll_artifacts(record, &decision) {
-        eprintln!(
-            "Warning: failed to persist poll artifact for run {}: {e}",
-            record.run_id
-        );
-    }
-    Ok(())
-}
-
-fn persist_poll_artifacts(
-    record: &WaitStateRecord,
-    decision: &PollDecision,
-) -> rusqlite::Result<()> {
-    write_poll_result_artifact(&record.run_id, &json!(decision)).map_err(persistence_to_sqlite)?;
-    if decision.classification == PollClassification::ReadyToResume {
-        write_wait_state_artifact(&record.run_id, record).map_err(persistence_to_sqlite)?;
-        write_resume_decision_artifact(&record.run_id, decision).map_err(persistence_to_sqlite)?;
-    }
-    Ok(())
-}
-
-fn write_committed_pr_check_snapshot(
-    record: &WaitStateRecord,
-    observed_state: &Value,
-) -> Result<(), crate::engine::runner::EngineError> {
-    if record.wait_kind != WaitKind::PrChecks {
-        return Ok(());
-    }
-    write_pr_check_status_snapshot(record, observed_state)
-}
-
-fn persistence_to_sqlite(error: PersistenceError) -> rusqlite::Error {
-    sqlite_other_error(error)
-}
-
-fn sqlite_other_error(error: impl std::fmt::Display) -> rusqlite::Error {
-    rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::other(error.to_string())))
-}
-
-fn mark_run_status(
-    conn: &Connection,
-    run_id: &str,
-    status: RunStatus,
-    step_id: &str,
-) -> rusqlite::Result<()> {
-    let Some(mut metadata) = get_run_with_conn(conn, run_id)? else {
-        return Err(rusqlite::Error::QueryReturnedNoRows);
-    };
-    metadata.status = status;
-    metadata.set_current_step(step_id.to_string());
-    persist_run_with_conn(conn, &metadata)?;
-    Ok(())
-}
-
-fn next_poll_time(record: &WaitStateRecord) -> DateTime<Utc> {
-    crate::polling::next_poll_time(record.poll_interval_seconds)
+fn next_poll_time(record: &WaitStateRecord, now: DateTime<Utc>) -> DateTime<Utc> {
+    crate::polling::next_poll_time_at(record.poll_interval_seconds, now)
 }
 
 #[cfg(test)]
