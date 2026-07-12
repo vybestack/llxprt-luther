@@ -48,8 +48,13 @@ impl std::fmt::Display for RunStatus {
     }
 }
 
+/// Error returned when persisted text is not a recognized [`RunStatus`].
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("Unknown run status: {0}")]
+pub struct RunStatusParseError(String);
+
 impl std::str::FromStr for RunStatus {
-    type Err = String;
+    type Err = RunStatusParseError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
@@ -68,12 +73,18 @@ impl std::str::FromStr for RunStatus {
             "abandoned" => Ok(RunStatus::Abandoned),
             "merged" => Ok(RunStatus::Merged),
             "cancelled" => Ok(RunStatus::Cancelled),
-            _ => Err(format!("Unknown run status: {}", s)),
+            _ => Err(RunStatusParseError(s.to_string())),
         }
     }
 }
 
 impl RunStatus {
+    /// SQL string values for all terminal statuses, sourced from the same
+    /// set as [`RunStatus::is_terminal`]. Used in conditional `UPDATE … WHERE
+    /// status NOT IN (…)` clauses so the SQL guard and the Rust method can
+    /// never disagree about which statuses are terminal.
+    pub const TERMINAL_SQL: [&str; 5] = ["completed", "failed", "abandoned", "merged", "cancelled"];
+
     /// Returns true when the status represents a terminal run state.
     /// @plan:PLAN-20260404-INITIAL-RUNTIME.P05
     pub fn is_terminal(&self) -> bool {

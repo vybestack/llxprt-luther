@@ -184,3 +184,142 @@ fn discovery_scheduler_target_carries_config_id_and_path_bases() {
     );
     let _: DaemonPathBases = target.path_bases;
 }
+
+/// Seed a pollable wait-state on the given connection whose backing run
+/// metadata is deliberately missing, so the next scheduler pass
+/// deterministically hits `PollApplyError::RunMissing`.
+/// Uses `RateLimitBackoff` so the poller does not invoke `gh`.
+fn seed_orphaned_pollable_wait(conn: &rusqlite::Connection) {
+    use luther_workflow::persistence::leases::{
+        init_leases_table, try_claim, update_lease_status, LeaseStatus,
+    };
+    use luther_workflow::persistence::sqlite::init_runs_schema;
+    use luther_workflow::persistence::wait_state::{
+        init_wait_states_table, upsert_wait_state, WaitKind, WaitStateRecord,
+    };
+
+    init_runs_schema(conn).expect("init runs schema for orphaned-wait fixture");
+    init_leases_table(conn).expect("init leases table for orphaned-wait fixture");
+    init_wait_states_table(conn).expect("init wait-states table for orphaned-wait fixture");
+
+    let lease = try_claim(conn, "o/r", 42, "test-cfg")
+        .expect("claim lease for orphaned-wait fixture")
+        .expect("claim must succeed for a fresh issue");
+    update_lease_status(
+        conn,
+        &lease.lease_id,
+        LeaseStatus::WaitingExternal,
+        Some("run-orphan"),
+    )
+    .expect("transition lease to WaitingExternal for orphaned-wait fixture");
+
+    let mut record = WaitStateRecord::new("run-orphan", "test-cfg");
+    record.lease_id = Some(lease.lease_id);
+    record.repository = "o/r".to_string();
+    record.issue_number = 42;
+    record.wait_kind = WaitKind::RateLimitBackoff;
+    record.poll_interval_seconds = 1;
+    record.resume_step = "wait_step".to_string();
+    upsert_wait_state(conn, &record).expect("upsert wait-state for orphaned-wait fixture");
+
+    luther_workflow::persistence::checkpoint::save_checkpoint_with_conn(
+        conn,
+        &luther_workflow::persistence::checkpoint::Checkpoint::new(
+            &record.run_id,
+            &record.resume_step,
+        ),
+    )
+    .expect("save checkpoint for orphaned-wait fixture");
+}
+
+#[test]
+fn scheduler_diagnostic_plan_formats_summary_and_bounds_details() {
+    use luther_workflow::daemon::poller::ArtifactPhase;
+    use luther_workflow::daemon::scheduler::{
+        ArtifactWarningDetail, LeaseStatePreservedDetail, RunSummary, SkippedPollDetail,
+        SkippedPollReason,
+    };
+
+    let skipped_poll_details = (0..12)
+        .map(|index| SkippedPollDetail {
+            run_id: format!("run-skipped-{index}"),
+            lease_id: Some(format!("lease-skipped-{index}")),
+            step_id: "watch_pr_checks".to_string(),
+            reason: SkippedPollReason::LeaseTransitionRejected,
+            lease_transition_reason: Some("lease owner changed"),
+        })
+        .collect();
+    let artifact_warnings = (0..12)
+        .map(|index| ArtifactWarningDetail {
+            run_id: format!("run-warning-{index}"),
+            phase: ArtifactPhase::PollResult,
+            error: "disk full".to_string(),
+        })
+        .collect();
+    let lease_state_preserved_details = (0..12)
+        .map(|index| LeaseStatePreservedDetail {
+            run_id: format!("run-preserved-{index}"),
+            current_status: Some(luther_workflow::persistence::leases::LeaseStatus::Completed),
+            current_run_id: Some(format!("run-current-{index}")),
+        })
+        .collect();
+    let summary = RunSummary {
+        lease_states_preserved: 15,
+        lease_state_preserved_details,
+        lease_state_preserved_details_dropped: 3,
+        skipped_polls: 15,
+        skipped_poll_details,
+        skipped_poll_details_dropped: 3,
+        artifact_warnings,
+        artifact_warnings_dropped: 3,
+        ..RunSummary::default()
+    };
+
+    let plan = scheduler_diagnostic_plan(&summary);
+    assert_eq!(plan.preserved_details_to_log, 10);
+    assert_eq!(plan.preserved_details_dropped, 5);
+    assert_eq!(plan.skipped_details_to_log, 10);
+    assert_eq!(plan.skipped_details_dropped, 5);
+    assert_eq!(plan.artifact_warnings_to_log, 10);
+    assert_eq!(plan.artifact_warnings_dropped, 5);
+    assert!(plan
+        .summary
+        .contains("15 lease states preserved, 5 preserved details dropped"));
+    assert!(plan
+        .summary
+        .contains("15 polls skipped, 5 skip details dropped"));
+    assert!(plan
+        .summary
+        .contains("15 artifact warnings, 5 warning details dropped"));
+}
+
+#[test]
+fn supervisor_scheduler_pass_reports_orphaned_wait_without_failing() {
+    use luther_workflow::daemon::scheduler::{RunSummary, SchedulerError, SkippedPollReason};
+
+    let conn =
+        rusqlite::Connection::open_in_memory().expect("open in-memory db for orphaned-wait test");
+    seed_orphaned_pollable_wait(&conn);
+
+    let target = SchedulerTarget::new(
+        "test-cfg".to_string(),
+        luther_workflow::workflow::schema::DiscoveryConfig {
+            enabled: false,
+            ..Default::default()
+        },
+        DaemonPathBases::default(),
+        std::collections::BTreeMap::new(),
+    );
+
+    let result: Result<RunSummary, SchedulerError> =
+        run_supervisor_scheduler_pass(&[target], &conn);
+    let summary = result.expect("orphaned wait must degrade the pass, not abort it");
+
+    assert_eq!(summary.skipped_polls, 1);
+    assert_eq!(summary.skipped_poll_details_dropped, 0);
+    assert_eq!(summary.skipped_poll_details.len(), 1);
+    let detail = &summary.skipped_poll_details[0];
+    assert_eq!(detail.run_id, "run-orphan");
+    assert_eq!(detail.reason, SkippedPollReason::RunMissing);
+    assert_eq!(detail.step_id, "wait_step");
+}

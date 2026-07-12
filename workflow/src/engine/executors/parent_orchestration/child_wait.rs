@@ -32,7 +32,8 @@ fn commit_child_wait_record(
     run_id: &str,
     record: &WaitStateRecord,
 ) -> Result<(), EngineError> {
-    upsert_wait_state(conn, record).map_err(sql_error)?;
+    upsert_wait_state(conn, record)
+        .map_err(|err| parent_error(format!("persist child wait-state: {err}")))?;
     write_wait_state_artifact(run_id, record)
         .map(|_| ())
         .map_err(|err| parent_error(format!("write child wait-state artifact: {err}")))

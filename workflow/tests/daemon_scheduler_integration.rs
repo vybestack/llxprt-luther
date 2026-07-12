@@ -128,7 +128,7 @@ fn run_once_for_test(
     conn: &Connection,
     launcher: &dyn WorkflowLauncher,
     config_id: &str,
-) -> Result<RunSummary, rusqlite::Error> {
+) -> Result<RunSummary, luther_workflow::daemon::scheduler::SchedulerError> {
     run_once_with_bases(
         cfg,
         query,
@@ -209,7 +209,7 @@ fn parent_routing_launches_with_parent_config_and_workflow_type() {
     );
 }
 #[test]
-fn parent_routed_ready_lease_resumes_from_originating_scheduler_target() {
+fn ready_lease_resumes_via_ready_lease_collection_without_poller_input() {
     let query = MockQuery {
         issues: vec![],
         parent_issue_numbers: vec![],
@@ -255,6 +255,10 @@ fn parent_routed_ready_lease_resumes_from_originating_scheduler_target() {
 
     assert_eq!(summary.resumed, 1);
     assert_eq!(summary.launched, 0);
+    assert_eq!(
+        summary.pollable_waits, 0,
+        "ReadyToResume is collected directly from leases, not fed back through the poller"
+    );
     let launched = launcher.launched.lock().unwrap();
     assert_eq!(launched.len(), 1);
     assert_eq!(launched[0].config_id, "parent-orchestrator-luther");

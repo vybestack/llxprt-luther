@@ -22,13 +22,23 @@ use crate::daemon::launcher::{
     claim_for_launch, finish_lease_after_result, prepare_resume_lease, DaemonPathBases,
     LaunchOutcome, LaunchRequest, WorkflowLauncher,
 };
-use crate::daemon::poller::{apply_poll_decision, ExternalWaitPoller, SystemExternalWaitPoller};
+use crate::daemon::poller::{
+    apply_poll_decision, ArtifactPhase, ExternalWaitPoller, PollApplyError, PollApplyOutcome,
+    SystemExternalWaitPoller,
+};
 use crate::persistence::leases::{
     count_active_leases, count_active_leases_for_config, count_active_leases_for_repository,
     list_ready_to_resume_leases, mark_stale_leases, mark_stale_ready_to_resume_leases, IssueLease,
 };
 use crate::persistence::wait_state::list_pollable_wait_states;
 use crate::workflow::schema::DiscoveryConfig;
+
+/// Maximum number of per-run skipped-poll details retained in one pass.
+pub const MAX_SKIPPED_POLL_DETAILS: usize = 100;
+/// Maximum number of preserved lease-state details retained in one pass.
+pub const MAX_LEASE_STATE_PRESERVED_DETAILS: usize = 100;
+/// Maximum number of post-commit artifact warning details retained in one pass.
+pub const MAX_ARTIFACT_WARNING_DETAILS: usize = 100;
 
 /// Summary of a single scheduler pass.
 /// @plan:PLAN-20260415-DAEMON-DISCOVERY.P06
@@ -39,9 +49,149 @@ pub struct RunSummary {
     pub resumed: usize,
     pub suspended: usize,
     pub failed: usize,
+    /// Engine results that lost a guarded lease transition to newer durable state.
+    pub lease_states_preserved: usize,
+    /// Bounded details identifying preserved lease transitions.
+    pub lease_state_preserved_details: Vec<LeaseStatePreservedDetail>,
+    /// Number of preserved-state details omitted after the per-pass cap.
+    pub lease_state_preserved_details_dropped: usize,
     pub skipped: usize,
     pub pollable_waits: usize,
     pub polls_applied: usize,
+    /// Polls skipped because of concurrent transitions or row-level integrity
+    /// violations. These are observable but not counted in `polls_applied` so
+    /// the applied metric remains reliable.
+    pub skipped_polls: usize,
+    /// Human-readable details for skipped polls, preserving the run id and
+    /// skip reason for operator inspection. Capped at
+    /// [`MAX_SKIPPED_POLL_DETAILS`] per pass.
+    pub skipped_poll_details: Vec<SkippedPollDetail>,
+    /// Number of skipped-poll details omitted after the per-pass cap was
+    /// reached. `skipped_polls` remains the authoritative total count.
+    pub skipped_poll_details_dropped: usize,
+    /// Post-commit artifact write warnings. The DB transaction committed but
+    /// one or more observability artifacts failed to persist. The committed
+    /// DB state is authoritative; these warnings are advisory and capped at
+    /// [`MAX_ARTIFACT_WARNING_DETAILS`] per pass.
+    pub artifact_warnings: Vec<ArtifactWarningDetail>,
+    /// Number of artifact-warning details omitted after the per-pass cap.
+    pub artifact_warnings_dropped: usize,
+}
+
+impl RunSummary {
+    fn record_lease_state_preserved(&mut self, detail: LeaseStatePreservedDetail) {
+        self.lease_states_preserved += 1;
+        if self.lease_state_preserved_details.len() < MAX_LEASE_STATE_PRESERVED_DETAILS {
+            self.lease_state_preserved_details.push(detail);
+        } else {
+            self.lease_state_preserved_details_dropped += 1;
+        }
+    }
+
+    fn record_skipped_poll(&mut self, detail: SkippedPollDetail) {
+        self.skipped_polls += 1;
+        if self.skipped_poll_details.len() < MAX_SKIPPED_POLL_DETAILS {
+            self.skipped_poll_details.push(detail);
+        } else {
+            self.skipped_poll_details_dropped += 1;
+        }
+    }
+
+    fn record_artifact_warning(&mut self, detail: ArtifactWarningDetail) {
+        if self.artifact_warnings.len() < MAX_ARTIFACT_WARNING_DETAILS {
+            self.artifact_warnings.push(detail);
+        } else {
+            self.artifact_warnings_dropped += 1;
+        }
+    }
+
+    /// Total artifact warnings observed, including details omitted by the cap.
+    pub fn artifact_warning_count(&self) -> usize {
+        self.artifact_warnings
+            .len()
+            .saturating_add(self.artifact_warnings_dropped)
+    }
+}
+
+/// Structured detail for a guarded launcher result that preserved newer lease state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LeaseStatePreservedDetail {
+    /// Run whose stale engine result lost the guarded transition.
+    pub run_id: String,
+    /// Durable lease status observed after rejection, or `None` when missing.
+    pub current_status: Option<crate::persistence::leases::LeaseStatus>,
+    /// Durable owner observed after rejection, or `None` when absent/missing.
+    pub current_run_id: Option<String>,
+}
+
+/// Structured detail for a post-commit artifact write warning.
+///
+/// The DB transaction already committed, so this is advisory only — the
+/// committed run/lease/wait-state fact cannot be rolled back.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArtifactWarningDetail {
+    /// Run whose post-commit artifact write failed.
+    pub run_id: String,
+    /// Artifact phase that failed after the database commit.
+    pub phase: ArtifactPhase,
+    /// Error reported by the artifact writer.
+    pub error: String,
+}
+
+/// Structured detail for a single poll skip.
+///
+/// Recorded in [`RunSummary::skipped_poll_details`] so operators can see
+/// *which* run was skipped and *why* without grepping logs. Not counted in
+/// `polls_applied`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkippedPollDetail {
+    /// Run whose stale poll decision was skipped.
+    pub run_id: String,
+    /// Lease involved in the skip, when the wait record has one.
+    pub lease_id: Option<String>,
+    /// Resume step whose poll decision was skipped.
+    pub step_id: String,
+    /// Domain reason the poll was skipped.
+    pub reason: SkippedPollReason,
+    /// Precise lease guard rejection, when [`SkippedPollReason::LeaseTransitionRejected`].
+    pub lease_transition_reason: Option<&'static str>,
+}
+
+/// Categorises why an individual poll was skipped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkippedPollReason {
+    /// The lease advanced past the expected status set (concurrent poller or
+    /// launcher classification).
+    LeaseTransitionRejected,
+    /// Another path already processed this wait-state row.
+    WaitStateConcurrentTransition,
+    /// The run already advanced to a terminal status, so the stale poller's
+    /// status update was rejected by the conditional guard.
+    RunStatusConcurrentTransition,
+    /// A pollable wait-state row has no backing run metadata. This integrity
+    /// violation is skipped so it cannot block unrelated waits.
+    RunMissing,
+}
+
+/// Domain error returned by the scheduler pass.
+///
+/// Carries both the poll-phase domain errors ([`PollApplyError`]) and the
+/// SQLite errors from the discovery/launch/resume phases without converting
+/// between them, so callers can pattern-match on the precise failure kind.
+#[derive(Debug, thiserror::Error)]
+pub enum SchedulerError {
+    /// External-wait poll application failed (integrity failure, persistence
+    /// failure, or database error from the poll transaction).
+    #[error(transparent)]
+    PollApply(#[from] PollApplyError),
+    /// Database error from discovery, launch, or resume phases.
+    #[error(transparent)]
+    Sqlite(#[from] rusqlite::Error),
+    /// Internal invariant violation: the caller passed mismatched targets and
+    /// query slices. Surfaced as a structured error instead of a silent
+    /// eprintln + Ok so the scheduler pass is not silently degraded.
+    #[error("scheduler invariant violated: targets len ({targets}) != queries len ({queries})")]
+    TargetsQueriesMismatch { targets: usize, queries: usize },
 }
 
 #[derive(Debug, Clone)]
@@ -102,7 +252,7 @@ pub fn run_once_with_bases(
     config_id: &str,
     path_bases: DaemonPathBases,
     parent_path_bases: BTreeMap<String, DaemonPathBases>,
-) -> Result<RunSummary, rusqlite::Error> {
+) -> Result<RunSummary, SchedulerError> {
     let poller = SystemExternalWaitPoller::new();
     let target = SchedulerTarget::new(
         config_id.to_string(),
@@ -118,25 +268,42 @@ pub fn run_multi_target_once(
     queries: &[&dyn GithubIssueQuery],
     conn: &Connection,
     launcher: &dyn WorkflowLauncher,
-) -> Result<RunSummary, rusqlite::Error> {
+) -> Result<RunSummary, SchedulerError> {
     let poller = SystemExternalWaitPoller::new();
     run_multi_target_once_with_poller(targets, queries, conn, launcher, &poller)
 }
 
+/// Execute a single multi-target discovery + launch pass with an explicit poller.
+///
+/// # Invariants
+///
+/// `targets` and `queries` must have equal length: each target is zipped with
+/// its corresponding query for discovery. A length mismatch is a programming
+/// error (not a runtime condition) and returns
+/// [`SchedulerError::TargetsQueriesMismatch`] rather than silently degrading.
+///
+/// All production callers satisfy this invariant by construction:
+/// - [`run_once_with_bases`] passes single-element slices.
+/// - [`run_multi_target_once`] forwards the caller's slices unchanged.
+/// - `run_supervisor_scheduler_pass` builds `queries` via
+///   `targets.iter().map(|_| query)` (1:1).
+/// - `run_discovery_scheduler_pass` passes single-element slices.
+/// - `run_loop` passes single-element slices via `slice::from_ref`.
+///
+/// The error is surfaced (not swallowed) so that a future caller violating the
+/// invariant fails loudly instead of launching against the wrong queries.
 pub fn run_multi_target_once_with_poller(
     targets: &[SchedulerTarget],
     queries: &[&dyn GithubIssueQuery],
     conn: &Connection,
     launcher: &dyn WorkflowLauncher,
     poller: &dyn ExternalWaitPoller,
-) -> Result<RunSummary, rusqlite::Error> {
+) -> Result<RunSummary, SchedulerError> {
     if targets.len() != queries.len() {
-        eprintln!(
-            "scheduler error: targets len ({}) != queries len ({})",
-            targets.len(),
-            queries.len()
-        );
-        return Ok(RunSummary::default());
+        return Err(SchedulerError::TargetsQueriesMismatch {
+            targets: targets.len(),
+            queries: queries.len(),
+        });
     }
     let mut summary = poll_due_waits(conn, poller)?;
     let limits = capacity_limits(targets);
@@ -151,7 +318,7 @@ fn collect_resume_units(
     targets: &[SchedulerTarget],
     conn: &Connection,
     limits: &CapacityLimits,
-) -> Result<Vec<DispatchUnit>, rusqlite::Error> {
+) -> Result<Vec<DispatchUnit>, SchedulerError> {
     let mut units = Vec::new();
     for (resume_config_id, discovery) in resume_config_targets(targets, limits) {
         let ready_leases = match list_ready_to_resume_leases(conn, &resume_config_id) {
@@ -242,7 +409,7 @@ fn upsert_resume_config_target(
 fn prepare_resume_unit(
     lease: &IssueLease,
     conn: &Connection,
-) -> Result<Option<DispatchUnit>, rusqlite::Error> {
+) -> Result<Option<DispatchUnit>, SchedulerError> {
     let Ok(claimed) = prepare_resume_lease(lease, conn)? else {
         return Ok(None);
     };
@@ -260,7 +427,7 @@ fn collect_launch_units(
     limits: &CapacityLimits,
     units: &mut Vec<DispatchUnit>,
     summary: &mut RunSummary,
-) -> Result<(), rusqlite::Error> {
+) -> Result<(), SchedulerError> {
     let parent_discoveries = parent_launch_discoveries(targets, limits);
     for (target, query) in targets.iter().zip(queries.iter()) {
         let repo = target.discovery.repo.as_deref().unwrap_or("");
@@ -316,7 +483,7 @@ fn launch_discovery_for<'a>(
     launch_config_id: &str,
     limits: &CapacityLimits,
     parent_discoveries: &'a BTreeMap<String, DiscoveryConfig>,
-) -> Result<Cow<'a, DiscoveryConfig>, rusqlite::Error> {
+) -> Result<Cow<'a, DiscoveryConfig>, SchedulerError> {
     if launch_config_id == target.config_id {
         return Ok(Cow::Borrowed(&target.discovery));
     }
@@ -380,7 +547,7 @@ fn parent_launch_discoveries(
 fn parent_capacity_discovery(
     discovery: &DiscoveryConfig,
     limits: &CapacityLimits,
-) -> Result<DiscoveryConfig, rusqlite::Error> {
+) -> Result<DiscoveryConfig, SchedulerError> {
     let mut parent = discovery.clone();
     let limit = discovery
         .max_concurrent_runs_per_config
@@ -400,7 +567,7 @@ fn dispatch_units(
     units: Vec<DispatchUnit>,
     max_parallel: usize,
     summary: &mut RunSummary,
-) -> Result<(), rusqlite::Error> {
+) -> Result<(), SchedulerError> {
     let max_parallel = max_parallel.max(1);
     for chunk in units.chunks(max_parallel) {
         dispatch_unit_chunk(conn, launcher, chunk, summary)?;
@@ -413,7 +580,7 @@ fn dispatch_unit_chunk(
     launcher: &dyn WorkflowLauncher,
     units: &[DispatchUnit],
     summary: &mut RunSummary,
-) -> Result<(), rusqlite::Error> {
+) -> Result<(), SchedulerError> {
     thread::scope(|scope| {
         let handles: Vec<_> = units
             .iter()
@@ -478,7 +645,7 @@ fn has_capacity(
     config_id: &str,
     repo: &str,
     limits: &CapacityLimits,
-) -> Result<bool, rusqlite::Error> {
+) -> Result<bool, SchedulerError> {
     let config_limit = cfg
         .max_concurrent_runs_per_config
         .or(cfg.max_concurrent_runs)
@@ -497,6 +664,15 @@ fn record_outcome(outcome: LaunchOutcome, was_resume: bool, summary: &mut RunSum
         LaunchOutcome::Launched { success: true, .. } => summary.launched += 1,
         LaunchOutcome::Launched { success: false, .. } => summary.failed += 1,
         LaunchOutcome::WaitingExternal { .. } => summary.suspended += 1,
+        LaunchOutcome::LeaseStatePreserved {
+            run_id,
+            current_status,
+            current_run_id,
+        } => summary.record_lease_state_preserved(LeaseStatePreservedDetail {
+            run_id,
+            current_status,
+            current_run_id,
+        }),
         LaunchOutcome::Skipped(_) => summary.skipped += 1,
     }
 }
@@ -504,7 +680,7 @@ fn record_outcome(outcome: LaunchOutcome, was_resume: bool, summary: &mut RunSum
 fn poll_due_waits(
     conn: &Connection,
     poller: &dyn ExternalWaitPoller,
-) -> Result<RunSummary, rusqlite::Error> {
+) -> Result<RunSummary, PollApplyError> {
     let waits = list_pollable_wait_states(conn, chrono::Utc::now())?;
     let mut summary = RunSummary {
         pollable_waits: waits.len(),
@@ -512,10 +688,127 @@ fn poll_due_waits(
     };
     for wait in waits {
         let decision = poller.poll(&wait);
-        apply_poll_decision(conn, &wait, &decision)?;
-        summary.polls_applied += 1;
+        match apply_poll_decision(conn, &wait, &decision) {
+            Ok(PollApplyOutcome::Committed) => summary.polls_applied += 1,
+            Ok(PollApplyOutcome::CommittedWithArtifactWarnings(warnings)) => {
+                summary.polls_applied += 1;
+                for warning in warnings {
+                    summary.record_artifact_warning(ArtifactWarningDetail {
+                        run_id: wait.run_id.clone(),
+                        phase: warning.phase,
+                        error: warning.error,
+                    });
+                }
+            }
+            Err(PollApplyError::LeaseTransitionRejected {
+                run_id,
+                lease_id,
+                reason,
+            }) => record_lease_transition_skip(
+                &mut summary,
+                run_id,
+                lease_id,
+                wait.resume_step.clone(),
+                reason,
+            ),
+            Err(PollApplyError::WaitStateConcurrentTransition(run_id)) => {
+                record_wait_state_transition_skip(&mut summary, &wait, run_id);
+            }
+            Err(PollApplyError::RunStatusConcurrentTransition { run_id, step_id }) => {
+                record_run_status_transition_skip(&mut summary, &wait, run_id, step_id);
+            }
+            Err(PollApplyError::RunMissing { run_id, step_id }) => {
+                record_run_missing_skip(&mut summary, &wait, run_id, step_id);
+            }
+            Err(err @ PollApplyError::Sqlite(_)) => return Err(err),
+            Err(err @ PollApplyError::Persistence(_)) => return Err(err),
+        }
     }
     Ok(summary)
+}
+
+fn record_lease_transition_skip(
+    summary: &mut RunSummary,
+    run_id: String,
+    lease_id: String,
+    step_id: String,
+    reason: &'static str,
+) {
+    tracing::warn!(
+        run_id = %run_id,
+        lease_id = %lease_id,
+        step_id = %step_id,
+        reason,
+        "poll skipped: lease transition rejected"
+    );
+    summary.record_skipped_poll(SkippedPollDetail {
+        run_id,
+        lease_id: Some(lease_id),
+        step_id,
+        reason: SkippedPollReason::LeaseTransitionRejected,
+        lease_transition_reason: Some(reason),
+    });
+}
+
+fn record_wait_state_transition_skip(
+    summary: &mut RunSummary,
+    wait: &crate::persistence::wait_state::WaitStateRecord,
+    run_id: String,
+) {
+    tracing::warn!(
+        run_id = %run_id,
+        step_id = %wait.resume_step,
+        "poll skipped: wait-state was concurrently transitioned"
+    );
+    summary.record_skipped_poll(SkippedPollDetail {
+        run_id,
+        lease_id: wait.lease_id.clone(),
+        step_id: wait.resume_step.clone(),
+        reason: SkippedPollReason::WaitStateConcurrentTransition,
+        lease_transition_reason: None,
+    });
+}
+
+fn record_run_status_transition_skip(
+    summary: &mut RunSummary,
+    wait: &crate::persistence::wait_state::WaitStateRecord,
+    run_id: String,
+    step_id: String,
+) {
+    tracing::warn!(
+        run_id = %run_id,
+        step_id = %step_id,
+        "poll skipped: run already terminal — stale status update rejected"
+    );
+    summary.record_skipped_poll(SkippedPollDetail {
+        run_id,
+        lease_id: wait.lease_id.clone(),
+        step_id,
+        reason: SkippedPollReason::RunStatusConcurrentTransition,
+        lease_transition_reason: None,
+    });
+}
+
+fn record_run_missing_skip(
+    summary: &mut RunSummary,
+    wait: &crate::persistence::wait_state::WaitStateRecord,
+    run_id: String,
+    step_id: String,
+) {
+    tracing::error!(
+        run_id = %run_id,
+        step_id = %step_id,
+        lease_id = ?wait.lease_id,
+        integrity_violation = "pollable_wait_missing_run_metadata",
+        "poll skipped: orphaned wait-state row"
+    );
+    summary.record_skipped_poll(SkippedPollDetail {
+        run_id,
+        lease_id: wait.lease_id.clone(),
+        step_id,
+        reason: SkippedPollReason::RunMissing,
+        lease_transition_reason: None,
+    });
 }
 
 /// Run the scheduler loop until `shutdown` is set.
@@ -533,7 +826,7 @@ pub fn run_loop(
     launcher: &dyn WorkflowLauncher,
     shutdown: Arc<AtomicBool>,
     stale_timeout_secs: u64,
-) -> Result<(), rusqlite::Error> {
+) -> Result<(), SchedulerError> {
     let recovered = mark_stale_leases(conn, stale_timeout_secs)?;
     let ready_recovered = mark_stale_ready_to_resume_leases(conn, stale_timeout_secs)?;
     if recovered > 0 || ready_recovered > 0 {
@@ -549,14 +842,26 @@ pub fn run_loop(
             || summary.resumed > 0
             || summary.suspended > 0
             || summary.failed > 0
+            || summary.lease_states_preserved > 0
+            || summary.skipped_polls > 0
+            || !summary.artifact_warnings.is_empty()
         {
             println!(
-                "scheduler pass: {} launched, {} resumed, {} suspended, {} failed, {} skipped",
-                summary.launched,
-                summary.resumed,
-                summary.suspended,
-                summary.failed,
-                summary.skipped
+                "scheduler pass: {launched} launched, {resumed} resumed, {suspended} suspended, \
+                 {failed} failed, {preserved} lease states preserved ({details_dropped} details \
+                 dropped), {skipped} skipped, {pollable} pollable waits, {polls_applied} polls \
+                 applied, {polls_skipped} polls skipped, {artifact_warnings} artifact warnings",
+                launched = summary.launched,
+                resumed = summary.resumed,
+                suspended = summary.suspended,
+                failed = summary.failed,
+                preserved = summary.lease_states_preserved,
+                details_dropped = summary.lease_state_preserved_details_dropped,
+                skipped = summary.skipped,
+                pollable = summary.pollable_waits,
+                polls_applied = summary.polls_applied,
+                polls_skipped = summary.skipped_polls,
+                artifact_warnings = summary.artifact_warning_count()
             );
         }
         sleep_with_shutdown(poll, &shutdown);
@@ -576,359 +881,4 @@ fn sleep_with_shutdown(secs: u64, shutdown: &Arc<AtomicBool>) {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::adapters::github::GithubError;
-    use crate::adapters::github_issues::GithubIssue;
-    use crate::daemon::launcher::{LaunchRequest, WorkflowLaunchResult};
-    use crate::daemon::poller::{ExternalWaitPoller, PollDecision};
-    use crate::persistence::leases::{
-        count_active_leases, get_lease_for_issue, init_leases_table, try_claim,
-        update_lease_status, LeaseStatus,
-    };
-    use crate::persistence::wait_state::WaitStateRecord;
-    use std::sync::Mutex;
-
-    fn cfg(max: u32) -> DiscoveryConfig {
-        DiscoveryConfig {
-            enabled: true,
-            repo: Some("o/r".to_string()),
-            include_labels: vec!["ok".to_string()],
-            exclude_labels: vec![],
-            active_parent_label: None,
-            issue_states: vec!["open".to_string()],
-            assignee_filter: None,
-            milestone_order: Some("none".to_string()),
-            max_concurrent_runs: Some(max),
-            poll_interval_secs: Some(300),
-            max_concurrent_active_runs: None,
-            max_concurrent_runs_per_repository: None,
-            max_concurrent_runs_per_config: None,
-            route_parent_issues: false,
-            parent_workflow_type_id: Some("parent-issue-orchestrator-v1".to_string()),
-            parent_config_id: None,
-            skip_children_of_active_parents: false,
-        }
-    }
-
-    fn issue(number: u64) -> GithubIssue {
-        GithubIssue {
-            number,
-            title: format!("Issue {number}"),
-            state: "open".to_string(),
-            labels: vec!["ok".to_string()],
-            assignee: None,
-            milestone: None,
-            body: None,
-        }
-    }
-
-    struct MockQuery {
-        issues: Vec<GithubIssue>,
-    }
-    impl GithubIssueQuery for MockQuery {
-        fn list_issues(
-            &self,
-            _r: &str,
-            _l: &[String],
-            _s: &[String],
-        ) -> Result<Vec<GithubIssue>, GithubError> {
-            Ok(self.issues.clone())
-        }
-        fn has_open_pr_for_issue(&self, _r: &str, _n: u64) -> Result<bool, GithubError> {
-            Ok(false)
-        }
-        fn list_milestones(&self, _r: &str) -> Result<Vec<String>, GithubError> {
-            Ok(vec![])
-        }
-    }
-
-    struct MockLauncher {
-        launched: Mutex<Vec<u64>>,
-    }
-    impl WorkflowLauncher for MockLauncher {
-        fn launch(&self, request: &LaunchRequest) -> Result<WorkflowLaunchResult, String> {
-            self.launched.lock().unwrap().push(request.issue_number);
-            Ok(WorkflowLaunchResult::CompletedSuccess)
-        }
-    }
-    struct ReadyPoller;
-
-    impl ExternalWaitPoller for ReadyPoller {
-        fn poll(&self, record: &WaitStateRecord) -> PollDecision {
-            PollDecision::ready(record, serde_json::json!({ "state": "ready" }))
-        }
-    }
-
-    #[test]
-    fn due_wait_states_are_polled_and_resumed_before_new_discovery() {
-        let c = conn();
-        let lease = try_claim(&c, "o/r", 99, "cfg").unwrap().unwrap();
-        update_lease_status(
-            &c,
-            &lease.lease_id,
-            LeaseStatus::WaitingExternal,
-            Some("run-wait"),
-        )
-        .unwrap();
-        let mut wait = WaitStateRecord::new("run-wait", "cfg");
-        wait.lease_id = Some(lease.lease_id);
-        wait.repository = "o/r".to_string();
-        wait.issue_number = 99;
-        wait.resume_step = "watch_pr_checks".to_string();
-        crate::persistence::wait_state::upsert_wait_state(&c, &wait).unwrap();
-        let q = MockQuery {
-            issues: vec![issue(1)],
-        };
-        let l = MockLauncher {
-            launched: Mutex::new(vec![]),
-        };
-
-        let target = SchedulerTarget::new(
-            "cfg".to_string(),
-            cfg(1),
-            DaemonPathBases::default(),
-            BTreeMap::new(),
-        );
-        let summary = run_multi_target_once_with_poller(
-            &[target],
-            &[&q as &dyn GithubIssueQuery],
-            &c,
-            &l,
-            &ReadyPoller,
-        )
-        .unwrap();
-
-        assert_eq!(summary.pollable_waits, 1);
-        assert_eq!(summary.polls_applied, 1);
-        assert_eq!(summary.resumed, 1);
-        assert_eq!(summary.launched, 0);
-        assert_eq!(l.launched.lock().unwrap().as_slice(), &[99]);
-    }
-
-    fn conn() -> Connection {
-        let c = Connection::open_in_memory().unwrap();
-        crate::persistence::sqlite::init_runs_schema(&c).unwrap();
-        init_leases_table(&c).unwrap();
-        crate::persistence::wait_state::init_wait_states_table(&c).unwrap();
-        crate::persistence::checkpoint::save_checkpoint_with_conn(
-            &c,
-            &crate::persistence::checkpoint::Checkpoint::new("run-wait", "watch_pr_checks"),
-        )
-        .unwrap();
-        let mut metadata = crate::persistence::RunMetadata::new("run-wait", "wf", "cfg");
-        metadata.set_current_step("watch_pr_checks");
-        crate::persistence::persist_run_with_conn(&c, &metadata).unwrap();
-        c
-    }
-
-    #[test]
-    fn run_once_launches_up_to_limit() {
-        let c = conn();
-        let q = MockQuery {
-            issues: vec![issue(1), issue(2), issue(3)],
-        };
-        let l = MockLauncher {
-            launched: Mutex::new(vec![]),
-        };
-        let summary = run_once_with_bases(
-            &cfg(2),
-            &q,
-            &c,
-            &l,
-            "cfg",
-            DaemonPathBases::default(),
-            BTreeMap::new(),
-        )
-        .unwrap();
-        assert_eq!(summary.eligible, 2);
-        assert_eq!(summary.launched, 2);
-        assert_eq!(l.launched.lock().unwrap().len(), 2);
-    }
-
-    #[test]
-    fn second_pass_prevents_duplicate_launch() {
-        let c = conn();
-        let q = MockQuery {
-            issues: vec![issue(1)],
-        };
-        let l = MockLauncher {
-            launched: Mutex::new(vec![]),
-        };
-        // First pass launches and completes issue 1.
-        run_once_with_bases(
-            &cfg(2),
-            &q,
-            &c,
-            &l,
-            "cfg",
-            DaemonPathBases::default(),
-            BTreeMap::new(),
-        )
-        .unwrap();
-        // Manually re-mark the completed lease active to emulate a still-open
-        // claim; a second pass must not relaunch it.
-        let lease = get_lease_for_issue(&c, "o/r", 1).unwrap().unwrap();
-        update_lease_status(&c, &lease.lease_id, LeaseStatus::Running, None).unwrap();
-        let summary2 = run_once_with_bases(
-            &cfg(2),
-            &q,
-            &c,
-            &l,
-            "cfg",
-            DaemonPathBases::default(),
-            BTreeMap::new(),
-        )
-        .unwrap();
-        assert_eq!(
-            summary2.eligible, 0,
-            "active lease should suppress eligibility"
-        );
-        assert_eq!(l.launched.lock().unwrap().len(), 1);
-    }
-
-    #[test]
-    fn due_wait_states_are_reported_without_consuming_capacity() {
-        let c = conn();
-        let lease = try_claim(&c, "o/r", 99, "cfg").unwrap().unwrap();
-        update_lease_status(
-            &c,
-            &lease.lease_id,
-            LeaseStatus::WaitingExternal,
-            Some("run-wait"),
-        )
-        .unwrap();
-        let mut wait = crate::persistence::wait_state::WaitStateRecord::new("run-wait", "cfg");
-        wait.lease_id = Some(lease.lease_id);
-        wait.repository = "o/r".to_string();
-        wait.issue_number = 99;
-        wait.resume_step = "watch_pr_checks".to_string();
-        crate::persistence::wait_state::upsert_wait_state(&c, &wait).unwrap();
-        let q = MockQuery {
-            issues: vec![issue(1)],
-        };
-        let l = MockLauncher {
-            launched: Mutex::new(vec![]),
-        };
-        let target = SchedulerTarget::new(
-            "cfg".to_string(),
-            cfg(1),
-            DaemonPathBases::default(),
-            BTreeMap::new(),
-        );
-        let summary = run_multi_target_once_with_poller(
-            &[target],
-            &[&q as &dyn GithubIssueQuery],
-            &c,
-            &l,
-            &ReadyPoller,
-        )
-        .unwrap();
-        assert_eq!(summary.pollable_waits, 1);
-        assert_eq!(summary.resumed, 1);
-        assert_eq!(summary.launched, 0);
-    }
-
-    #[test]
-    fn multi_target_respects_global_and_repository_limits() {
-        let c = conn();
-        let targets = vec![
-            SchedulerTarget::new(
-                "cfg-a".to_string(),
-                DiscoveryConfig {
-                    max_concurrent_active_runs: Some(2),
-                    max_concurrent_runs_per_repository: Some(1),
-                    max_concurrent_runs: Some(2),
-                    ..cfg(2)
-                },
-                DaemonPathBases::default(),
-                BTreeMap::new(),
-            ),
-            SchedulerTarget::new(
-                "cfg-b".to_string(),
-                DiscoveryConfig {
-                    repo: Some("o/other".to_string()),
-                    max_concurrent_active_runs: Some(2),
-                    max_concurrent_runs_per_repository: Some(1),
-                    max_concurrent_runs: Some(2),
-                    ..cfg(2)
-                },
-                DaemonPathBases::default(),
-                BTreeMap::new(),
-            ),
-        ];
-        let q1 = MockQuery {
-            issues: vec![issue(1), issue(2)],
-        };
-        let q2 = MockQuery {
-            issues: vec![issue(3), issue(4)],
-        };
-        let queries: Vec<&dyn GithubIssueQuery> = vec![&q1, &q2];
-        let l = MockLauncher {
-            launched: Mutex::new(vec![]),
-        };
-
-        let summary = run_multi_target_once(&targets, &queries, &c, &l).unwrap();
-
-        assert_eq!(summary.launched, 2);
-        assert_eq!(l.launched.lock().unwrap().len(), 2);
-        assert_eq!(count_active_leases(&c).unwrap(), 0);
-    }
-
-    #[test]
-    fn run_loop_recovers_stale_then_stops() {
-        let c = conn();
-        // Insert a stale running lease (old heartbeat).
-        let stale = try_claim(&c, "o/r", 9, "cfg").unwrap().unwrap();
-        update_lease_status(&c, &stale.lease_id, LeaseStatus::Running, None).unwrap();
-        let old = (chrono::Utc::now() - chrono::Duration::seconds(10_000)).to_rfc3339();
-        c.execute(
-            "UPDATE issue_leases SET heartbeat_at = ?1 WHERE lease_id = ?2",
-            rusqlite::params![old, stale.lease_id],
-        )
-        .unwrap();
-
-        let q = MockQuery { issues: vec![] };
-        let l = MockLauncher {
-            launched: Mutex::new(vec![]),
-        };
-        let shutdown = Arc::new(AtomicBool::new(true)); // stop immediately after startup sweep
-        let target = SchedulerTarget::new(
-            "cfg".to_string(),
-            cfg(1),
-            DaemonPathBases::default(),
-            BTreeMap::new(),
-        );
-        run_loop(target, &q, &c, &l, shutdown, 300).unwrap();
-        let recovered = get_lease_for_issue(&c, "o/r", 9).unwrap().unwrap();
-        assert_eq!(recovered.status, LeaseStatus::Stale);
-    }
-
-    #[test]
-    fn parent_routed_launch_without_parent_bases_warns_and_uses_empty_fallback() {
-        let target = SchedulerTarget::new(
-            "child-cfg".to_string(),
-            DiscoveryConfig {
-                parent_config_id: Some("parent-cfg".to_string()),
-                ..cfg(1)
-            },
-            DaemonPathBases {
-                work_dir_base: Some(std::path::PathBuf::from("/tmp/child-work")),
-                artifact_dir_base: Some(std::path::PathBuf::from("/tmp/child-artifacts")),
-            },
-            BTreeMap::new(),
-        );
-
-        let bases = path_bases_for(&target, "parent-cfg");
-
-        assert_eq!(bases.as_ref(), &DaemonPathBases::default());
-    }
-
-    #[test]
-    fn sleep_with_shutdown_returns_early() {
-        let shutdown = Arc::new(AtomicBool::new(true));
-        let start = std::time::Instant::now();
-        sleep_with_shutdown(300, &shutdown);
-        assert!(start.elapsed() < Duration::from_secs(1));
-    }
-}
+mod tests;
