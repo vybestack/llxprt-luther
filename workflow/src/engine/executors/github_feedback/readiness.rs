@@ -2,7 +2,9 @@ use super::*;
 use crate::engine::executor::StepContext;
 use crate::engine::executors::github_pr::GithubPrCommandRunner;
 use crate::engine::executors::pr_followup_artifacts::{ClockSleeper, PrFollowupArtifactStore};
-use crate::engine::executors::pr_followup_types::{PrFollowupBinding, PR_FOLLOWUP_SCHEMA_VERSION};
+use crate::engine::executors::pr_followup_types::{
+    is_summary_marker_key, PrFollowupBinding, PR_FOLLOWUP_SCHEMA_VERSION,
+};
 use crate::engine::runner::EngineError;
 use crate::engine::transition::StepOutcome;
 use serde_json::{json, Value};
@@ -545,8 +547,9 @@ pub(super) fn mark_coderabbit_feedback(
         &mut pending_artifact,
         params,
         clock,
-    );
-    let pending_actions = pending_marker_actions_from_artifact(&store, &binding, &pending_artifact);
+    )?;
+    let pending_actions =
+        pending_marker_actions_from_artifact(&store, &binding, &pending_artifact)?;
     if write_marker_validation_failure(
         &store,
         &binding,
@@ -596,17 +599,28 @@ pub(super) fn pending_marker_actions_from_artifact(
     store: &PrFollowupArtifactStore,
     binding: &PrFollowupBinding,
     pending_artifact: &Value,
-) -> Vec<PendingMarkerAction> {
-    let thread_identifiers = collect_thread_identifiers_by_action_key(store, binding);
-    pending_artifact
-        .get("pending_actions")
+) -> Result<Vec<PendingMarkerAction>, EngineError> {
+    let thread_identifiers = collect_thread_identifiers_by_action_key(store, binding)?;
+    let action_values = pending_artifact
+        .as_object()
+        .and_then(|object| object.get("pending_actions"))
         .and_then(Value::as_array)
         .cloned()
-        .unwrap_or_default()
-        .into_iter()
-        .map(|value| backfill_thread_identifiers(value, &thread_identifiers))
-        .filter_map(|value| pending_marker_action_from_value(value).ok())
-        .collect()
+        .ok_or_else(|| {
+            github_feedback_error(
+                "invalid pending marker artifact: pending_actions must be an array",
+            )
+        })?;
+    let mut actions = Vec::with_capacity(action_values.len());
+    for value in action_values {
+        let backfilled = backfill_thread_identifiers(value, &thread_identifiers);
+        // A malformed pending action must fail closed: silently dropping it
+        // (the old .ok() swallow) would cause the marker step to skip a
+        // valid remediation evidence anchor and produce an incomplete report.
+        let action = pending_marker_action_from_value(backfilled)?;
+        actions.push(action);
+    }
+    Ok(actions)
 }
 
 pub(super) fn write_marker_validation_failure(
@@ -699,6 +713,38 @@ pub(super) fn process_pending_marker_actions(
     processor: &MarkerActionProcessor<'_>,
     pending_actions: Vec<PendingMarkerAction>,
 ) -> Result<Vec<MarkerActionOutcome>, EngineError> {
+    let needs_history_ledger = pending_actions.iter().any(|action| {
+        !is_summary_marker_key(&action.stable_marker_key)
+            && action.action_kind == "comment_fixed"
+            && action.source_head_sha != processor.binding.head_sha
+    });
+    let history_ledger = needs_history_ledger
+        .then(|| processor.store.validate_history_ledger(processor.binding))
+        .transpose()?;
+    let mut evidence_failures = Vec::new();
+    for action in &pending_actions {
+        if is_summary_marker_key(&action.stable_marker_key)
+            || action.action_kind == "skip_needs_user_judgment"
+        {
+            continue;
+        }
+        let comment_key = marker_action_key(processor.binding, action, "comment");
+        let resolution_key = marker_action_key(processor.binding, action, "resolution");
+        if let Some(outcome) = validate_marker_action_evidence(
+            processor.binding,
+            processor.store,
+            action,
+            comment_key,
+            resolution_key,
+            history_ledger.as_ref(),
+            processor.clock,
+        )? {
+            evidence_failures.push(outcome);
+        }
+    }
+    if !evidence_failures.is_empty() {
+        return Ok(evidence_failures);
+    }
     pending_actions
         .into_iter()
         .map(|action| process_marker_action(processor, action))

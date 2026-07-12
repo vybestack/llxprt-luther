@@ -1,9 +1,6 @@
-use std::fs;
-use std::io::ErrorKind;
-
 use serde_json::{json, Value};
 
-use crate::engine::executors::pr_followup_artifacts::{ArtifactWriter, PrFollowupArtifactStore};
+use crate::engine::executors::pr_followup_artifacts::PrFollowupArtifactStore;
 use crate::engine::executors::pr_followup_types::PrFollowupBinding;
 use crate::engine::runner::EngineError;
 
@@ -25,38 +22,9 @@ pub(super) fn read_plan_inputs(
         ci_failures: store.read_current_json(binding, "ci-failures")?,
         coderabbit_feedback: store.read_current_json(binding, "coderabbit-feedback")?,
         evaluations: store.read_current_json(binding, "feedback-evaluations")?,
-        post_pr_test_result: read_optional_current_json(store, binding, "post-pr-test-result")?,
+        post_pr_test_result: store
+            .read_optional_current_json_for_head(binding, "post-pr-test-result")?,
     })
-}
-
-pub(super) fn read_optional_current_json(
-    store: &PrFollowupArtifactStore,
-    binding: &PrFollowupBinding,
-    artifact_family: &str,
-) -> Result<Option<Value>, EngineError> {
-    let path = store.canonical_path(binding, artifact_family);
-    let content = match fs::read_to_string(&path) {
-        Ok(content) => content,
-        Err(err) if err.kind() == ErrorKind::NotFound => return Ok(None),
-        Err(err) => {
-            return Err(optional_artifact_error(format!(
-                "read {}: {err}",
-                path.display()
-            )))
-        }
-    };
-    let value: Value = serde_json::from_str(&content)
-        .map_err(|err| optional_artifact_error(format!("parse {}: {err}", path.display())))?;
-    store.validate_artifact_value(binding, artifact_family, &value)?;
-    store.validate_artifact_invariants(artifact_family, &value)?;
-    Ok(Some(value))
-}
-
-fn optional_artifact_error(message: impl Into<String>) -> EngineError {
-    EngineError::StepExecutionError {
-        step_id: "pr_followup_artifact_store".to_string(),
-        message: message.into(),
-    }
 }
 
 pub(super) fn remediation_plan_source_artifacts(pr: &Value, inputs: &PlanInputs) -> Vec<Value> {
@@ -153,7 +121,8 @@ pub(super) fn remediation_plan_covers_current_post_pr_test_result(
     binding: &PrFollowupBinding,
     plan: &Value,
 ) -> Result<bool, EngineError> {
-    let Some(test_result) = read_optional_current_json(store, binding, "post-pr-test-result")?
+    let Some(test_result) =
+        store.read_optional_current_json_for_head(binding, "post-pr-test-result")?
     else {
         return Ok(true);
     };

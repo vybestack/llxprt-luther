@@ -3,21 +3,62 @@ use crate::engine::executors::pr_followup_artifacts::{
     ArtifactWriter, ClockSleeper, PrFollowupArtifactStore,
 };
 use crate::engine::executors::pr_followup_types::{
-    value_has_summary_marker_key, PrFollowupBinding,
+    value_has_summary_marker_key, PrFollowupBinding, NO_REMEDIATION_OUTPUT_HEAD,
 };
 use crate::engine::runner::EngineError;
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 
+/// Thread identifier map keyed by pending-action collision key.
+/// Each value carries the optional GraphQL thread id and numeric comment id.
+type ThreadIdentifierMap = BTreeMap<String, (Option<String>, Option<i64>)>;
+
 pub(super) fn read_pending_marker_artifact(
     store: &PrFollowupArtifactStore,
     binding: &PrFollowupBinding,
 ) -> Result<Value, EngineError> {
-    let path = store.canonical_path(binding, PENDING_MARKER_ACTIONS_FAMILY);
-    if !path.exists() {
-        return Ok(empty_pending_marker_artifact());
+    // Pending marker actions must survive a remediation head change. A prior-
+    // head artifact for the **same PR** is carried forward because each
+    // pending action inside carries its own `source_head_sha` binding: the
+    // marker gate uses that identity to locate immutable remediation evidence
+    // from the history directory. Only an absent artifact degrades to empty;
+    // a genuinely different-PR artifact remains a fatal binding mismatch.
+    match store.read_carried_forward_json(binding, PENDING_MARKER_ACTIONS_FAMILY)? {
+        Some(value) => Ok(normalize_legacy_pending_marker_artifact(value)),
+        None => Ok(empty_pending_marker_artifact()),
     }
-    store.read_current_json(binding, PENDING_MARKER_ACTIONS_FAMILY)
+}
+
+/// Normalizes legacy pending-action routing fields while preserving stored
+/// action IDs and hashes so retries retain their original idempotency identity.
+pub(crate) fn normalize_legacy_pending_marker_artifact(mut artifact: Value) -> Value {
+    let Some(actions) = artifact
+        .get_mut("pending_actions")
+        .and_then(Value::as_array_mut)
+    else {
+        return artifact;
+    };
+    for action in actions {
+        let Some(object) = action.as_object_mut() else {
+            continue;
+        };
+        if object.contains_key("remediation_output_head") {
+            continue;
+        }
+        match object.get("remediation_output_head_sha") {
+            Some(Value::String(head)) if !head.trim().is_empty() => {
+                object.insert("remediation_output_head".to_string(), json!(head));
+            }
+            None | Some(Value::Null) => {
+                object.insert(
+                    "remediation_output_head".to_string(),
+                    json!(NO_REMEDIATION_OUTPUT_HEAD),
+                );
+            }
+            _ => {}
+        }
+    }
+    artifact
 }
 
 pub(super) fn empty_pending_marker_artifact() -> Value {
@@ -35,15 +76,15 @@ pub(super) fn refresh_pending_marker_actions_from_current_artifacts(
     pending_artifact: &mut Value,
     params: &Value,
     clock: &dyn ClockSleeper,
-) {
-    let Some(feedback) = read_optional_current_json(store, binding, "coderabbit-feedback") else {
-        return;
+) -> Result<(), EngineError> {
+    let Some(feedback) = read_optional_current_json(store, binding, "coderabbit-feedback")? else {
+        return Ok(());
     };
-    let Some(evaluations) = read_optional_current_json(store, binding, "feedback-evaluations")
+    let Some(evaluations) = read_optional_current_json(store, binding, "feedback-evaluations")?
     else {
         pending_artifact["refreshed_from_current_artifacts_at"] = json!(clock.now_rfc3339());
         pending_artifact["refresh_incomplete_reason"] = json!("missing_feedback_evaluations");
-        return;
+        return Ok(());
     };
     let feedback_items = feedback_items_by_identity(&feedback);
     let mut actions = pending_artifact
@@ -82,24 +123,24 @@ pub(super) fn refresh_pending_marker_actions_from_current_artifacts(
     pending_artifact["pending_actions"] = json!(actions);
     pending_artifact["refreshed_from_current_artifacts_at"] = json!(clock.now_rfc3339());
     pending_artifact["refresh_incomplete_reason"] = json!(null);
+    Ok(())
 }
 
 pub(super) fn read_optional_current_json(
     store: &PrFollowupArtifactStore,
     binding: &PrFollowupBinding,
     artifact_family: &str,
-) -> Option<Value> {
+) -> Result<Option<Value>, EngineError> {
     let path = store.canonical_path(binding, artifact_family);
     if !path.exists() {
-        return None;
+        return Ok(None);
     }
-    match store.read_current_json(binding, artifact_family) {
-        Ok(value) => Some(value),
-        Err(err) => {
-            eprintln!("warning: failed to read {artifact_family} artifact: {err}");
-            None
-        }
-    }
+    // A present-but-corrupt or binding-mismatched artifact is a fatal error:
+    // pending-action producers must never silently swallow artifact read
+    // failures because that would produce incomplete pending actions that
+    // skip valid remediation evidence. Only a genuine NotFound degrades to
+    // None.
+    store.read_current_json(binding, artifact_family).map(Some)
 }
 
 pub(super) fn feedback_items_by_identity(feedback: &Value) -> BTreeMap<String, Value> {
@@ -120,10 +161,10 @@ pub(super) fn feedback_items_by_identity(feedback: &Value) -> BTreeMap<String, V
 pub(super) fn collect_thread_identifiers_by_action_key(
     store: &PrFollowupArtifactStore,
     binding: &PrFollowupBinding,
-) -> BTreeMap<String, (Option<String>, Option<i64>)> {
-    let mut identifiers = BTreeMap::new();
-    let Some(feedback) = read_optional_current_json(store, binding, "coderabbit-feedback") else {
-        return identifiers;
+) -> Result<ThreadIdentifierMap, EngineError> {
+    let mut identifiers: ThreadIdentifierMap = BTreeMap::new();
+    let Some(feedback) = read_optional_current_json(store, binding, "coderabbit-feedback")? else {
+        return Ok(identifiers);
     };
     let items = feedback
         .get("items")
@@ -152,7 +193,7 @@ pub(super) fn collect_thread_identifiers_by_action_key(
             identifiers.insert(key, (thread_id, comment_database_id));
         }
     }
-    identifiers
+    Ok(identifiers)
 }
 
 /// Fill in missing `thread_id`/`comment_database_id` on a pending marker action
@@ -171,16 +212,12 @@ pub(super) fn backfill_thread_identifiers(
         return value;
     };
     if let Some(object) = value.as_object_mut() {
-        if object.get("thread_id").and_then(Value::as_str).is_none() {
+        if object.get("thread_id").is_none_or(Value::is_null) {
             if let Some(thread_id) = thread_id {
                 object.insert("thread_id".to_string(), json!(thread_id));
             }
         }
-        if object
-            .get("comment_database_id")
-            .and_then(Value::as_i64)
-            .is_none()
-        {
+        if object.get("comment_database_id").is_none_or(Value::is_null) {
             if let Some(comment_database_id) = comment_database_id {
                 object.insert(
                     "comment_database_id".to_string(),
@@ -258,7 +295,7 @@ pub(super) fn pending_action_collision_key(action: &Value) -> String {
                     .or_else(|| action
                         .get("remediation_output_head_sha")
                         .and_then(Value::as_str))
-                    .unwrap_or("none"),
+                    .unwrap_or(NO_REMEDIATION_OUTPUT_HEAD),
                 string_field(action, "body_hash"),
                 string_field(action, "action_kind"),
                 string_field(action, "stable_marker_key")

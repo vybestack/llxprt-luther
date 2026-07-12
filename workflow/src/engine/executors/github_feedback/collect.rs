@@ -242,6 +242,7 @@ pub(super) struct FeedbackObservation {
 #[derive(Clone, Debug)]
 pub(super) struct PendingMarkerAction {
     pub(super) value: Value,
+    pub(super) action_id: String,
     pub(super) action_kind: String,
     pub(super) item_id: String,
     pub(super) stable_marker_key: String,

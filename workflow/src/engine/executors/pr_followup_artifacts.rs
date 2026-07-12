@@ -5,6 +5,10 @@
 //! @pseudocode lines 5-7
 mod identity_discovery;
 
+mod history;
+pub(crate) use history::ValidatedHistoryLedger;
+use history::*;
+
 use self::identity_discovery::{discover_current_pr_artifact, is_current_pr_identity};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -350,6 +354,8 @@ impl PrFollowupArtifactStore {
         read_json_file(&self.canonical_path(binding, artifact_family))
     }
 
+    // Immutable history lookup methods are implemented in `history`.
+
     pub fn validate_artifact_value(
         &self,
         expected: &PrFollowupBinding,
@@ -510,6 +516,7 @@ impl PrFollowupArtifactStore {
     ) -> Result<RecoveredSequenceState, EngineError> {
         let mut state = RecoveredSequenceState::default();
         let mut last_path = None;
+        let history_root = self.history_binding_root(binding);
         for path in self.sequence_candidate_paths(binding, consumed_family)? {
             let value = read_json_file(&path)?;
             if let Some(family) = consumed_family {
@@ -529,6 +536,11 @@ impl PrFollowupArtifactStore {
                 ))
             })?;
             self.validate_sequence_artifact_value(binding, &family, &value)?;
+            if path.starts_with(&history_root) {
+                self.validate_history_snapshot(&family, &value, &path)?;
+                validate_history_filename(&family, &value, &path)?;
+                validate_history_embedded_path(&value, &path)?;
+            }
             state.accept_snapshot(&family, &value, &path)?;
             last_path = Some(path);
         }
@@ -767,43 +779,6 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), EngineError> {
         artifact_error(format!("atomic rename into {}: {err}", path.display()))
     })?;
     Ok(())
-}
-
-/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P05
-/// @requirement:REQ-PRFU-002
-/// @pseudocode lines 5-7
-fn collect_json_paths(root: &Path, paths: &mut Vec<PathBuf>) -> Result<(), EngineError> {
-    for entry in fs::read_dir(root).map_err(|err| artifact_error(format!("read dir: {err}")))? {
-        let entry = entry.map_err(|err| artifact_error(format!("read dir entry: {err}")))?;
-        let path = entry.path();
-        if path.is_dir() {
-            collect_json_paths(&path, paths)?;
-        } else if path.extension().and_then(|ext| ext.to_str()) == Some("json") {
-            paths.push(path);
-        }
-    }
-    Ok(())
-}
-
-/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P05
-/// @requirement:REQ-PRFU-002
-/// @pseudocode lines 5-7
-fn read_json_file(path: &Path) -> Result<Value, EngineError> {
-    let content = fs::read_to_string(path)
-        .map_err(|err| artifact_error(format!("read {}: {err}", path.display())))?;
-    serde_json::from_str(&content)
-        .map_err(|err| artifact_error(format!("parse {}: {err}", path.display())))
-}
-
-/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P05
-/// @requirement:REQ-PRFU-002
-/// @pseudocode lines 5-7
-fn validate_json_object(value: &Value) -> Result<(), EngineError> {
-    if value.is_object() {
-        Ok(())
-    } else {
-        Err(artifact_error("artifact JSON must be an object"))
-    }
 }
 
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P05

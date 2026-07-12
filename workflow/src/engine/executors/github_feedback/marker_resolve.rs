@@ -3,6 +3,7 @@ use crate::engine::executors::github_pr::GithubPrCommandRunner;
 use crate::engine::executors::pr_followup_artifacts::{ClockSleeper, PrFollowupArtifactStore};
 use crate::engine::executors::pr_followup_types::{
     is_summary_marker_key, value_has_summary_marker_key, PrFollowupBinding,
+    NO_REMEDIATION_OUTPUT_HEAD,
 };
 use crate::engine::runner::EngineError;
 use serde_json::{json, Value};
@@ -98,7 +99,7 @@ impl<'a> CurrentEvaluationMarkerContext<'a> {
             self.binding.repository_name,
             self.binding.pr_number,
             self.source_head_sha,
-            "none",
+            NO_REMEDIATION_OUTPUT_HEAD,
             self.stable_marker_key,
             self.action_kind
         )
@@ -111,7 +112,7 @@ pub(super) fn current_evaluation_marker_json(
     clock: &dyn ClockSleeper,
 ) -> Value {
     json!({
-        "action_id": format!("{}:{}:{}:none", context.action_kind, context.stable_marker_key, context.body_hash),
+        "action_id": format!("{}:{}:{}:{}:{}", context.action_kind, context.stable_marker_key, context.body_hash, context.source_head_sha, NO_REMEDIATION_OUTPUT_HEAD),
         "action_kind": context.action_kind,
         "item_id": context.item_id,
         "original_feedback_identity": {
@@ -126,7 +127,7 @@ pub(super) fn current_evaluation_marker_json(
         "source_head_sha": context.source_head_sha,
         "remediation_input_head_sha": context.source_head_sha,
         "remediation_output_head_sha": Value::Null,
-        "remediation_output_head": "none",
+        "remediation_output_head": NO_REMEDIATION_OUTPUT_HEAD,
         "body_hash": context.body_hash,
         "idempotency_key": context.idempotency_key(),
         "comment_body_template_id": context.action_kind,
@@ -143,44 +144,8 @@ pub(super) fn current_evaluation_marker_json(
     })
 }
 
-/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P15
-/// @requirement:REQ-PRFU-015,REQ-PRFU-016,REQ-PRFU-026
-/// @pseudocode lines 41-49
-pub(super) fn pending_marker_action_from_value(
-    value: Value,
-) -> Result<PendingMarkerAction, EngineError> {
-    let action_kind = string_field(&value, "action_kind");
-    let resolution_required = pending_action_resolution_required(&action_kind, &value);
-    Ok(PendingMarkerAction {
-        action_kind,
-        item_id: string_field(&value, "item_id"),
-        stable_marker_key: string_field(&value, "stable_marker_key"),
-        source_head_sha: string_field(&value, "source_head_sha"),
-        remediation_output_head: pending_action_remediation_output_head(&value),
-        body_hash: string_field(&value, "body_hash"),
-        reason: pending_action_reason(&value),
-        response_text: pending_action_response_text(&value),
-        thread_id: pending_action_thread_id(&value),
-        comment_database_id: pending_action_comment_database_id(&value),
-        status: pending_action_status(&value),
-        resolution_required,
-        value,
-    })
-}
-
-pub(super) fn pending_action_remediation_output_head(value: &Value) -> String {
-    value
-        .get("remediation_output_head")
-        .and_then(Value::as_str)
-        .map(ToString::to_string)
-        .or_else(|| {
-            value
-                .get("remediation_output_head_sha")
-                .and_then(Value::as_str)
-                .map(ToString::to_string)
-        })
-        .unwrap_or_else(|| "none".to_string())
-}
+mod pending_action_parse;
+pub(crate) use pending_action_parse::*;
 
 pub(super) fn pending_action_reason(value: &Value) -> String {
     value
@@ -218,37 +183,6 @@ pub(super) fn pending_action_comment_database_id(value: &Value) -> Option<i64> {
                 .pointer("/original_feedback_identity/comment_database_id")
                 .and_then(Value::as_i64)
         })
-}
-
-pub(super) fn pending_action_status(value: &Value) -> String {
-    value
-        .get("status")
-        .and_then(Value::as_str)
-        .unwrap_or("pending")
-        .to_string()
-}
-
-pub(super) fn pending_action_resolution_required(action_kind: &str, value: &Value) -> bool {
-    value
-        .get("resolution_required")
-        .and_then(Value::as_bool)
-        .unwrap_or_else(|| unified_status_requires_resolution(action_kind, value))
-}
-
-/// Derive whether Luther must resolve the review thread from the unified
-/// per-item status implied by the marker action and its remediation result.
-/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P15
-/// @requirement:REQ-PRFU-015,REQ-PRFU-026
-pub(super) fn unified_status_requires_resolution(action_kind: &str, value: &Value) -> bool {
-    let remediation_status = value
-        .get("remediation_result_status")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    matches!(action_kind, "comment_fixed")
-        && matches!(
-            remediation_status,
-            "fixed" | "changed" | "already_satisfied" | "not_reproduced"
-        )
 }
 
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P15
@@ -325,10 +259,23 @@ pub(super) fn validate_marker_actions_before_mutation(
     actions: &[PendingMarkerAction],
 ) -> Option<Vec<Value>> {
     let mut violations = Vec::new();
-    let mut seen_item_ids = BTreeSet::new();
+    let mut seen_action_ids = BTreeSet::new();
+    let mut seen_cycle_identities = BTreeSet::new();
     for action in actions {
+        // Policy-disabled judgment actions never reach a GitHub mutation and
+        // retain their legacy exemption from mutation-cycle uniqueness checks.
         if action.action_kind == "skip_needs_user_judgment" {
             continue;
+        }
+        if !seen_action_ids.insert(action.action_id.clone()) {
+            violations.push(json!({
+                "action_id": action.action_id,
+                "item_id": action.item_id,
+                "stable_marker_key": action.stable_marker_key,
+                "source_head_sha": action.source_head_sha,
+                "remediation_output_head": action.remediation_output_head,
+                "violation": "duplicate_action_id"
+            }));
         }
         // Informational summary/walkthrough markers are skipped at the mutation
         // gate (post nothing, resolve nothing), so they cannot violate any
@@ -336,11 +283,14 @@ pub(super) fn validate_marker_actions_before_mutation(
         if is_summary_marker_key(&action.stable_marker_key) {
             continue;
         }
-        if !action.item_id.is_empty() && !seen_item_ids.insert(action.item_id.clone()) {
+        let cycle_identity = marker_action_cycle_identity(action);
+        if !seen_cycle_identities.insert(cycle_identity) {
             violations.push(json!({
                 "item_id": action.item_id,
                 "stable_marker_key": action.stable_marker_key,
-                "violation": "duplicate_result_for_item"
+                "source_head_sha": action.source_head_sha,
+                "remediation_output_head": action.remediation_output_head,
+                "violation": "duplicate_result_for_remediation_cycle"
             }));
         }
         let response_text_present = action
@@ -384,6 +334,18 @@ pub(super) fn validate_marker_actions_before_mutation(
     } else {
         Some(violations)
     }
+}
+
+fn marker_action_cycle_identity(action: &PendingMarkerAction) -> String {
+    format!(
+        "{}:{}:{}:{}:{}:{}",
+        action.item_id,
+        action.stable_marker_key,
+        action.source_head_sha,
+        action.remediation_output_head,
+        action.body_hash,
+        action.action_kind
+    )
 }
 
 // Pre-existing marker action workflow; split in a dedicated refactor stage.
@@ -438,14 +400,7 @@ pub(super) fn marker_action_early_outcome(
             processor.clock,
         )));
     }
-    validate_marker_action_evidence(
-        processor.binding,
-        processor.store,
-        action,
-        comment_key,
-        resolution_key,
-        processor.clock,
-    )
+    Ok(None)
 }
 
 pub(super) fn handle_marker_comment(

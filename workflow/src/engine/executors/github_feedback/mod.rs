@@ -25,6 +25,7 @@ use collect::*;
 use marker_parse::*;
 use marker_reply::*;
 use marker_resolve::*;
+pub(crate) use pending_actions::normalize_legacy_pending_marker_artifact;
 use pending_actions::*;
 use readiness::*;
 use reply_record::*;

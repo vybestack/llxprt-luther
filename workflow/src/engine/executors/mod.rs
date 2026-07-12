@@ -71,8 +71,8 @@ pub use pr_followup_artifacts::{
 };
 pub use pr_followup_types::{
     ArtifactSequenceMetadata, CiFailures, CodeRabbitFeedback, CollectionState, EvaluationState,
-    FeedbackEvaluations, FeedbackMarkerReport, FeedbackState, OverallState, PlanState,
-    PostPrFailureTerminal, PostPrIterationGuard, PostPrTestResult, PrCheckStatus,
+    FeedbackEvaluations, FeedbackMarkerReport, FeedbackState, FixedActionEvidenceRef, OverallState,
+    PlanState, PostPrFailureTerminal, PostPrIterationGuard, PostPrTestResult, PrCheckStatus,
     PrFollowupBinding, PrIdentity, PrRemediationPlan, PrRemediationResult, PushRemediationResult,
     ValidationState, PR_FOLLOWUP_SCHEMA_VERSION,
 };

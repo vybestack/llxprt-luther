@@ -1,8 +1,11 @@
 use super::*;
 use crate::engine::executors::pr_followup_artifacts::{
-    ArtifactWriter, ClockSleeper, PrFollowupArtifactStore,
+    ClockSleeper, PrFollowupArtifactStore, ValidatedHistoryLedger,
 };
-use crate::engine::executors::pr_followup_types::{PrFollowupBinding, PR_FOLLOWUP_SCHEMA_VERSION};
+use crate::engine::executors::pr_followup_types::{
+    FixedActionEvidenceRef, PrFollowupBinding, NO_REMEDIATION_OUTPUT_HEAD,
+    PR_FOLLOWUP_SCHEMA_VERSION,
+};
 use crate::engine::runner::EngineError;
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
@@ -29,6 +32,15 @@ pub(super) fn marker_action_audit(
         "comment_database_id": action.comment_database_id,
         "action_kind": action.action_kind,
         "status": status,
+        "source_head_sha": action.source_head_sha,
+        "remediation_output_head": action.remediation_output_head,
+        "remediation_output_head_sha": action.value.get("remediation_output_head_sha").cloned().unwrap_or(Value::Null),
+        "body_hash": action.body_hash,
+        "remediation_result_artifact_sequence": action.value.get("remediation_result_artifact_sequence").cloned().unwrap_or(Value::Null),
+        "remediation_result_write_sequence": action.value.get("remediation_result_write_sequence").cloned().unwrap_or(Value::Null),
+        "remediation_result_producer_step_id": action.value.get("remediation_result_producer_step_id").cloned().unwrap_or(Value::Null),
+        "plan_artifact_sequence": action.value.get("plan_artifact_sequence").cloned().unwrap_or(Value::Null),
+        "remediation_attempt_index": action.value.get("remediation_attempt_index").cloned().unwrap_or(Value::Null),
         "idempotency_key": comment_key,
         "reply_comment_id": posted_comment
             .and_then(|comment| comment.get("comment_id").cloned())
@@ -240,140 +252,18 @@ pub(super) fn skipped_needs_user_judgment_outcome(
     }
 }
 
-pub(super) fn validate_marker_action_evidence(
-    binding: &PrFollowupBinding,
-    store: &PrFollowupArtifactStore,
-    action: PendingMarkerAction,
-    comment_key: String,
-    resolution_key: String,
-    clock: &dyn ClockSleeper,
-) -> Result<Option<MarkerActionOutcome>, EngineError> {
-    if !matches!(
-        action.action_kind.as_str(),
-        "comment_fixed" | "resolve_thread"
-    ) {
-        return Ok(None);
-    }
-    let result = store.read_current_json(binding, "pr-remediation-result");
-    let valid = match result {
-        Ok(payload) => marker_action_has_validator_success(binding, &action, &payload),
-        Err(err) => {
-            if store
-                .canonical_path(binding, "pr-remediation-result")
-                .exists()
-            {
-                return Err(err);
-            }
-            false
-        }
-    };
-    if valid {
-        return Ok(None);
-    }
-    let failed = json!({
-        "idempotency_key": comment_key,
-        "resolution_idempotency_key": resolution_key,
-        "action_id": action.value.get("action_id").cloned().unwrap_or(Value::Null),
-        "reason": "missing_validator_success_evidence",
-        "failure_state": "failed_fatal"
-    });
-    let mut updated_action = action.value.clone();
-    if let Some(object) = updated_action.as_object_mut() {
-        object.insert("status".to_string(), json!("failed"));
-        object.insert("comment_idempotency_key".to_string(), json!(comment_key));
-        object.insert(
-            "resolution_idempotency_key".to_string(),
-            json!(resolution_key),
-        );
-        object.insert(
-            "failure_reason".to_string(),
-            json!("missing_validator_success_evidence"),
-        );
-        object.insert("updated_at".to_string(), json!(clock.now_rfc3339()));
-    }
-    let audit = marker_action_audit(
-        &action,
-        "failed",
-        &comment_key,
-        None,
-        &ResolveAudit {
-            resolve_attempted: false,
-            resolve_succeeded: false,
-            resolve_error: None,
-            final_thread_resolved_state: None,
-        },
-    );
-    Ok(Some(MarkerActionOutcome {
-        action,
-        status: "failed".to_string(),
-        comment_key,
-        resolution_key,
-        posted_comment: None,
-        resolved_thread: None,
-        skipped: Vec::new(),
-        partial: None,
-        retryable: None,
-        failed: Some(failed),
-        audit,
-        updated_action,
-    }))
-}
-
-pub(super) fn marker_action_has_validator_success(
-    binding: &PrFollowupBinding,
-    action: &PendingMarkerAction,
-    result: &Value,
-) -> bool {
-    if result.get("validation_state").and_then(Value::as_str) != Some("valid") {
-        return false;
-    }
-    if action
-        .value
-        .get("remediation_result_evidence")
-        .is_none_or(|evidence| evidence.is_null())
-    {
-        return false;
-    }
-    let result_input_head = result
-        .get("input_head_sha")
-        .and_then(Value::as_str)
-        .unwrap_or(&binding.head_sha);
-    if result_input_head != action.source_head_sha {
-        return false;
-    }
-    if action.remediation_output_head != "none"
-        && result.get("output_head_sha").and_then(Value::as_str)
-            != Some(action.remediation_output_head.as_str())
-    {
-        return false;
-    }
-    result
-        .get("results")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .any(|item| {
-            item.get("source_type").and_then(Value::as_str) == Some("coderabbit_feedback")
-                && item.get("source_id").and_then(Value::as_str) == Some(action.item_id.as_str())
-                && matches!(
-                    item.get("status").and_then(Value::as_str),
-                    Some("fixed" | "changed" | "already_satisfied" | "not_reproduced")
-                )
-                && item.get("input_head_sha").and_then(Value::as_str)
-                    == Some(action.source_head_sha.as_str())
-                && item.get("body_hash").and_then(Value::as_str) == Some(action.body_hash.as_str())
-                && item.get("stable_marker_key").and_then(Value::as_str)
-                    == Some(action.stable_marker_key.as_str())
-                && item
-                    .get("evidence")
-                    .is_some_and(|evidence| !evidence.is_null())
-                && result
-                    .get("retry_scope")
-                    .and_then(|scope| scope.get("run_id"))
-                    .and_then(Value::as_str)
-                    == Some(binding.run_id.as_str())
-        })
-}
+/// Extracts and validates the complete fixed-action evidence reference
+/// from a cross-head `comment_fixed` pending marker action. This delegates
+/// to the single canonical [`FixedActionEvidenceRef::from_action_value`]
+/// validator so every field (result sequence, plan sequence, attempt index,
+/// source/output heads) is enforced together before any history read.
+///
+/// A malformed or incomplete evidence reference fails closed rather than
+/// silently producing a false-negative evidence miss.
+/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P05
+/// @requirement:REQ-PRFU-002
+mod evidence;
+pub(crate) use evidence::*;
 
 pub(super) fn write_marker_comment_body_file(
     store: &PrFollowupArtifactStore,
@@ -478,7 +368,7 @@ pub(super) fn marker_action_key_from_marker(
         marker
             .remediation_output_head_sha
             .clone()
-            .unwrap_or_else(|| "none".to_string()),
+            .unwrap_or_else(|| NO_REMEDIATION_OUTPUT_HEAD.to_string()),
         marker.body_hash,
         marker.action_kind,
         marker.stable_marker_key
