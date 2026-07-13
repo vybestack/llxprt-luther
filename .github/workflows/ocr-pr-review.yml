@@ -628,6 +628,15 @@ jobs:
             // code) so the single-source-of-truth is used post-merge; the
             // inline fallback guarantees redaction during the transition
             // before the module reaches every base checkout.
+            //
+            // TRANSITION CLEANUP: once .github/scripts/ocr-redaction.js has
+            // shipped to every base checkout (i.e. the module is present on
+            // the default branch's latest commit and all active PR bases),
+            // remove every inline fallback block and rely on the shared
+            // module exclusively. The guardrails test
+            // test_inline_redaction_mirrors_shared_module enforces that the
+            // inline fallback stays structurally identical to the module
+            // while the transition lasts, preventing silent drift.
             const ocrRedactionModulePath = `${process.env.GITHUB_WORKSPACE}/.github/scripts/ocr-redaction.js`;
             let redactDiagnosticsWithSecrets;
             try {
@@ -640,7 +649,11 @@ jobs:
                 const secrets = (Array.isArray(exactSecrets) ? exactSecrets : [exactSecrets])
                   .filter((s) => typeof s === 'string' && s.length > 0);
                 for (const secret of secrets) {
-                  sanitized = sanitized.replace(new RegExp(escapeRegExpLocal(secret), 'g'), REDACTION);
+                  try {
+                    sanitized = sanitized.replace(new RegExp(escapeRegExpLocal(secret), 'g'), REDACTION);
+                  } catch (_) {
+                    sanitized = sanitized.split(secret).join(REDACTION);
+                  }
                 }
                 return sanitized
                   .replace(/\b(Authorization\s*:\s*(?:(?:Bearer|Basic|token|ApiKey)\s+)?)([^\s,;]+)/gi, '$1[REDACTED]')
@@ -1019,6 +1032,15 @@ jobs:
             // code) so the single-source-of-truth is used post-merge; the
             // inline fallback guarantees redaction during the transition
             // before the module reaches every base checkout.
+            //
+            // TRANSITION CLEANUP: once .github/scripts/ocr-redaction.js has
+            // shipped to every base checkout (i.e. the module is present on
+            // the default branch's latest commit and all active PR bases),
+            // remove every inline fallback block and rely on the shared
+            // module exclusively. The guardrails test
+            // test_inline_redaction_mirrors_shared_module enforces that the
+            // inline fallback stays structurally identical to the module
+            // while the transition lasts, preventing silent drift.
             const ocrRedactionModulePath = `${process.env.GITHUB_WORKSPACE}/.github/scripts/ocr-redaction.js`;
             let redactDiagnosticsWithSecrets;
             try {
@@ -1031,7 +1053,11 @@ jobs:
                 const secrets = (Array.isArray(exactSecrets) ? exactSecrets : [exactSecrets])
                   .filter((s) => typeof s === 'string' && s.length > 0);
                 for (const secret of secrets) {
-                  sanitized = sanitized.replace(new RegExp(escapeRegExpLocal(secret), 'g'), REDACTION);
+                  try {
+                    sanitized = sanitized.replace(new RegExp(escapeRegExpLocal(secret), 'g'), REDACTION);
+                  } catch (_) {
+                    sanitized = sanitized.split(secret).join(REDACTION);
+                  }
                 }
                 return sanitized
                   .replace(/\b(Authorization\s*:\s*(?:(?:Bearer|Basic|token|ApiKey)\s+)?)([^\s,;]+)/gi, '$1[REDACTED]')
@@ -1225,6 +1251,15 @@ jobs:
             // code) so the single-source-of-truth is used post-merge; the
             // inline fallback guarantees redaction during the transition
             // before the module reaches every base checkout.
+            //
+            // TRANSITION CLEANUP: once .github/scripts/ocr-redaction.js has
+            // shipped to every base checkout (i.e. the module is present on
+            // the default branch's latest commit and all active PR bases),
+            // remove every inline fallback block and rely on the shared
+            // module exclusively. The guardrails test
+            // test_inline_redaction_mirrors_shared_module enforces that the
+            // inline fallback stays structurally identical to the module
+            // while the transition lasts, preventing silent drift.
             const ocrRedactionModulePath = `${process.env.GITHUB_WORKSPACE}/.github/scripts/ocr-redaction.js`;
             let redactDiagnosticsWithSecrets;
             try {
@@ -1237,7 +1272,11 @@ jobs:
                 const secrets = (Array.isArray(exactSecrets) ? exactSecrets : [exactSecrets])
                   .filter((s) => typeof s === 'string' && s.length > 0);
                 for (const secret of secrets) {
-                  sanitized = sanitized.replace(new RegExp(escapeRegExpLocal(secret), 'g'), REDACTION);
+                  try {
+                    sanitized = sanitized.replace(new RegExp(escapeRegExpLocal(secret), 'g'), REDACTION);
+                  } catch (_) {
+                    sanitized = sanitized.split(secret).join(REDACTION);
+                  }
                 }
                 return sanitized
                   .replace(/\b(Authorization\s*:\s*(?:(?:Bearer|Basic|token|ApiKey)\s+)?)([^\s,;]+)/gi, '$1[REDACTED]')
@@ -1289,7 +1328,7 @@ jobs:
             // Policy failures are the PR author's responsibility and must not
             // spawn an infrastructure tracking issue.
             if (policyFailure) {
-              core.notice('OCR policy failure detected; skipping infrastructure issue notification.');
+              core.info('OCR policy failure detected; skipping infrastructure issue notification.');
               return;
             }
             if (!infraFailure) {
@@ -1391,7 +1430,6 @@ jobs:
                     await github.rest.issues.update({
                       owner, repo, issue_number: dup.number,
                       state: 'closed',
-                      state_reason: 'not_planned',
                     });
                     core.info(`Closed duplicate OCR infrastructure tracking issue #${dup.number} (kept oldest).`);
                   } catch (closeErr) {

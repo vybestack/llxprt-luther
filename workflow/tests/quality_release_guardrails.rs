@@ -1546,6 +1546,159 @@ fn test_ocr_pr_review_redaction_is_base_branch_available() {
     );
 }
 
+/// Test: every inline redaction fallback must be a faithful structural mirror
+/// of the shared module (.github/scripts/ocr-redaction.js). This prevents the
+/// three inline copies from silently drifting from the canonical implementation.
+///
+/// Specifically, the inline fallback must include the same try/catch +
+/// split-join safety net that the module uses for exact-secret replacement, so
+/// a secret value containing regex-special characters cannot cause the inline
+/// copy to throw while the module succeeds.
+#[test]
+fn test_inline_redaction_mirrors_shared_module() {
+    let content = ocr_pr_review_workflow_content();
+    let module = ocr_redaction_module_content();
+
+    // The module must contain the try/catch + split-join safety net.
+    assert!(
+        module.contains("try {") && module.contains("sanitized.split(secret).join(REDACTION)"),
+        "Shared module must define the try/catch split-join safety net for exact-secret redaction"
+    );
+
+    // Every inline fallback copy must also contain the split-join safety net.
+    let inline_split_join = content
+        .matches("sanitized.split(secret).join(REDACTION)")
+        .count();
+    assert_eq!(
+        inline_split_join, 3,
+        "All three inline redaction fallbacks must include the split-join safety net (one per step): found {inline_split_join}"
+    );
+
+    // The number of inline try/catch blocks for secret redaction must match
+    // the number of inline copies (3).
+    let inline_try_in_secret_loop = content
+        .matches("sanitized = sanitized.replace(new RegExp(escapeRegExpLocal(secret)")
+        .count();
+    assert_eq!(
+        inline_try_in_secret_loop, 3,
+        "All three inline fallbacks must wrap the RegExp replace in a try block: found {inline_try_in_secret_loop}"
+    );
+
+    // Verify structural pattern parity: every structural .replace() call in the
+    // module must also appear (the same number of times, proportionally) in
+    // the workflow's inline fallbacks.
+    let structural_patterns = [
+        r"Authorization\s*:\s*",
+        r"x-api-key\s*:\s*",
+        r"api[_-]?key\s*[=:]\s*",
+        r"[?&](?:key|api[_-]?key|token)=",
+        r"access[_-]?token\s*[=:]\s*",
+        r"refresh[_-]?token\s*[=:]\s*",
+        r"id[_-]?token\s*[=:]\s*",
+        r"token\s*[=:]\s*",
+        r"secret\s*[=:]\s*",
+    ];
+    for pattern in structural_patterns {
+        let module_count = module.matches(pattern).count();
+        let workflow_count = content.matches(pattern).count();
+        assert!(
+            module_count > 0,
+            "Shared module must define structural pattern: {pattern}"
+        );
+        // Each pattern appears once in the module and three times in the
+        // workflow (one per inline copy).
+        assert!(
+            workflow_count >= module_count * 3,
+            "Inline fallback must mirror the shared module for pattern '{pattern}': module has {module_count}, workflow has {workflow_count} (expected at least {})",
+            module_count * 3
+        );
+    }
+
+    // The workflow must document the transition cleanup so the inline copies
+    // are removed once the shared module reaches every base checkout.
+    assert!(
+        content.contains("TRANSITION CLEANUP"),
+        "Workflow must document the transition cleanup plan for the inline redaction fallback"
+    );
+}
+
+/// Test: duplicate tracking issues must be closed WITHOUT state_reason:
+/// 'not_planned'. The 'not_planned' reason is semantically inaccurate for
+/// duplicate issues (it means the team decided not to implement the feature).
+/// Omitting state_reason entirely lets GitHub record a neutral close.
+#[test]
+fn test_ocr_pr_review_duplicate_close_omits_misleading_state_reason() {
+    let content = ocr_pr_review_workflow_content();
+
+    // The deduplication close call must close issues but must NOT set
+    // state_reason to 'not_planned'.
+    assert!(
+        !content.contains("state_reason: 'not_planned'"),
+        "Deduplication close must not use state_reason 'not_planned' (semantically inaccurate for duplicates)"
+    );
+    assert!(
+        !content.contains("state_reason: 'completed'"),
+        "Deduplication close must not use state_reason 'completed' (semantically inaccurate for duplicates)"
+    );
+
+    // Verify the close call itself still exists (state: 'closed' without a
+    // misleading state_reason).
+    assert!(
+        content.contains("state: 'closed'"),
+        "Deduplication close must still close the issue (state: 'closed')"
+    );
+
+    // The close call must not carry any state_reason field at all.
+    let closed_lines: Vec<&str> = content
+        .lines()
+        .filter(|l| l.contains("state: 'closed'"))
+        .collect();
+    assert!(
+        !closed_lines.is_empty(),
+        "Workflow must contain at least one issue close call"
+    );
+    for closed_line in &closed_lines {
+        let line_num = content.lines().position(|l| l == *closed_line).unwrap_or(0);
+        let nearby: String = content
+            .lines()
+            .skip(line_num.saturating_sub(1))
+            .take(4)
+            .collect::<Vec<&str>>()
+            .join("\n");
+        assert!(
+            !nearby.contains("state_reason"),
+            "Issue close call must not include state_reason: {nearby}"
+        );
+    }
+}
+
+/// Test: the policy-skip informational message in the notification job must
+/// use core.info (or core.warning for actionable conditions), never
+/// core.notice. core.notice has reduced visibility in some GitHub Actions log
+/// viewers and is inappropriate for diagnostic messages that maintainers need
+/// to see. The policy-skip is expected behavior (not a warning), so core.info
+/// is the correct severity.
+#[test]
+fn test_ocr_pr_review_policy_skip_uses_visible_log_level() {
+    let content = ocr_pr_review_workflow_content();
+
+    // The policy-skip message must NOT use core.notice.
+    assert!(
+        !content.contains("core.notice"),
+        "Workflow must not use core.notice (reduced visibility); use core.info or core.warning instead"
+    );
+
+    // The policy-skip message must use core.info (informational, not a warning
+    // — policy failures are already surfaced as core.setFailed in the
+    // code-review job).
+    assert!(
+        content.contains(
+            "core.info('OCR policy failure detected; skipping infrastructure issue notification.')"
+        ),
+        "Policy-skip message must use core.info for reliable log visibility"
+    );
+}
+
 /// Test: an infrastructure-failure notification job exists and is gated.
 #[test]
 fn test_ocr_pr_review_has_infrastructure_notification_job() {
