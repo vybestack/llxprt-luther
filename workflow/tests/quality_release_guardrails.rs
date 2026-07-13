@@ -423,36 +423,229 @@ fn ocr_pr_review_workflow_content() -> String {
         .unwrap_or_else(|e| panic!("Failed to read ocr-pr-review.yml at {workflow_path:?}: {e}"))
 }
 
+/// Extract the exact pinned OCR version from the single-source-of-truth
+/// `OCR_VERSION` env var declared on the `code-review` job.
+///
+/// The install command and the cache key both reference `${OCR_VERSION}`, so
+/// this is the one place the version is spelled out literally. This helper
+/// fails the test if the variable is missing or not a concrete (non-range)
+/// semver pin, keeping the guardrails strict without re-hardcoding the version.
+fn ocr_version_from_workflow() -> String {
+    let content = ocr_pr_review_workflow_content();
+    let raw_value = content
+        .lines()
+        .map(str::trim)
+        .find_map(|line| line.strip_prefix("OCR_VERSION:"))
+        .map(|rest| rest.trim())
+        .unwrap_or_else(|| {
+            panic!("Workflow must declare OCR_VERSION as the single source of truth for the pinned OCR version")
+        });
+    let unquoted = if (raw_value.starts_with('"') && raw_value.ends_with('"'))
+        || (raw_value.starts_with('\'') && raw_value.ends_with('\''))
+    {
+        &raw_value[1..raw_value.len() - 1]
+    } else {
+        raw_value
+    };
+    assert!(
+        !unquoted.is_empty(),
+        "OCR_VERSION must be a non-empty concrete semver, not an empty value"
+    );
+    // Reject anything that looks like an npm range/operator instead of a pin.
+    assert!(
+        !unquoted.contains(['^', '~', '>', '*', ' ']),
+        "OCR_VERSION must be an exact pinned semver (no ranges, comparators, or spaces): found {unquoted:?}"
+    );
+    let core = unquoted.split(['-', '+']).next().unwrap_or(unquoted);
+    let semver_parts: Vec<&str> = core.split('.').collect();
+    assert!(
+        semver_parts.len() == 3
+            && semver_parts
+                .iter()
+                .all(|part| !part.is_empty() && part.chars().all(|ch| ch.is_ascii_digit())),
+        "OCR_VERSION must be a concrete three-part semver pin, found {unquoted:?}"
+    );
+    unquoted.to_string()
+}
+
+/// Path to the single shared OCR secret-redaction module. Every github-script
+/// step loads this file via require() so the redaction patterns live in exactly
+/// one place instead of being duplicated inline per step.
+fn ocr_redaction_module_path() -> PathBuf {
+    repository_root()
+        .join(".github")
+        .join("scripts")
+        .join("ocr-redaction.js")
+}
+
+/// Helper to read the shared OCR secret-redaction module for guardrail tests.
+fn ocr_redaction_module_content() -> String {
+    let module_path = ocr_redaction_module_path();
+    fs::read_to_string(&module_path)
+        .unwrap_or_else(|e| panic!("Failed to read ocr-redaction.js at {module_path:?}: {e}"))
+}
+
 fn yaml_block_after(content: &str, header: &str) -> String {
     let header_key = header.trim();
-    let mut header_indent = 0;
-    let mut in_block = false;
-    let mut block = String::new();
+    let start_idx = find_yaml_key_line(content, header_key).unwrap_or_else(|| {
+        panic!("yaml_block_after: header '{header_key}' not found as a real YAML key in content")
+    });
 
-    for line in content.lines() {
-        if !in_block {
-            if line.trim() == header_key {
-                header_indent = line.chars().take_while(|ch| *ch == ' ').count();
-                in_block = true;
-                block.push_str(line);
-                block.push('\n');
-            }
+    let lines: Vec<&str> = content.lines().collect();
+    let header_line = lines[start_idx];
+    let header_indent = indent_of(header_line);
+    let mut block = String::new();
+    block.push_str(header_line);
+    block.push('\n');
+
+    // Walk subsequent lines until a real YAML key (or value) at the same or
+    // lesser indent is encountered. Block-scalar indicator tails (|, >) are
+    // never treated as block boundaries so a `run: |` step body is not cut
+    // short by a line that merely starts with `|`.
+    for line in lines.iter().skip(start_idx + 1) {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            block.push_str(line);
+            block.push('\n');
             continue;
         }
-
-        let trimmed = line.trim();
-        let indent = line.chars().take_while(|ch| *ch == ' ').count();
-        if !trimmed.is_empty() && !trimmed.starts_with('#') && indent <= header_indent {
+        let indent = indent_of(line);
+        if indent <= header_indent
+            && !trimmed.starts_with('#')
+            && !is_block_scalar_indicator(trimmed)
+        {
             break;
         }
         block.push_str(line);
         block.push('\n');
     }
 
-    assert!(
-        !block.is_empty(),
-        "yaml_block_after: header '{header_key}' not found in content"
-    );
+    block
+}
+
+/// Indentation (number of leading spaces) of a line.
+fn indent_of(line: &str) -> usize {
+    line.chars().take_while(|ch| *ch == ' ').count()
+}
+
+/// True if the trimmed line looks like a YAML block-scalar indicator tail
+/// (e.g. "|", "|-", ">", ">+"). Used to avoid treating these as block
+/// boundaries.
+fn is_block_scalar_indicator(trimmed: &str) -> bool {
+    let first = trimmed.chars().next();
+    first == Some('|') || first == Some('>')
+}
+
+/// Find the line index of a YAML key, skipping block-scalar content.
+///
+/// This walks the content tracking block-scalar context: once a line ends with
+/// `|` or `>` (a YAML literal/folded scalar indicator), subsequent lines at a
+/// deeper indentation are scalar content (not YAML keys) and are skipped.
+/// This prevents a literal string like `permissions:` inside a `run:` script
+/// from being mistaken for a real YAML key.
+fn find_yaml_key_line(content: &str, key: &str) -> Option<usize> {
+    let lines: Vec<&str> = content.lines().collect();
+    let mut block_scalar_indent: Option<usize> = None;
+
+    for (idx, line) in lines.iter().enumerate() {
+        let trimmed = line.trim();
+
+        // Skip blank lines and full-line comments (a comment line can never be
+        // a YAML key, and a key never follows `#` on its own line).
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+
+        let indent = indent_of(line);
+
+        // If we are inside a block scalar, lines at a deeper indent are scalar
+        // content — skip them for key detection.
+        if let Some(scalar_indent) = block_scalar_indent {
+            if indent > scalar_indent {
+                // Still inside the scalar; this line is script content.
+                // But a line at or below the scalar indent could be a new key.
+                continue;
+            } else {
+                // Dedented out of the scalar.
+                block_scalar_indent = None;
+            }
+        }
+
+        // Check if this line opens a block scalar (ends with | or >), so the
+        // *next* matching key search must skip the scalar body.
+        if line_ends_with_block_scalar(trimmed) {
+            block_scalar_indent = Some(indent);
+        }
+
+        // Does this line define the key we are looking for?
+        if trimmed == key
+            || trimmed.starts_with(&format!("{key} "))
+            || trimmed.starts_with(&format!("{key}\t"))
+        {
+            return Some(idx);
+        }
+    }
+    None
+}
+
+/// True if a trimmed line ends with a YAML block scalar indicator (| or >,
+/// optionally followed by a chomping indicator like |- or >+).
+fn line_ends_with_block_scalar(trimmed: &str) -> bool {
+    // A block scalar indicator is the last non-whitespace token and is | or >
+    // optionally followed by a single chomping char (- or +).
+    let last_word = trimmed.split_whitespace().last().unwrap_or("");
+    if last_word.is_empty() {
+        return false;
+    }
+    let bytes = last_word.as_bytes();
+    let first = bytes[0] as char;
+    (first == '|' || first == '>')
+        && last_word[1..].chars().all(|c| c == '-' || c == '+')
+        && last_word.len() <= 2
+}
+
+/// Extract the YAML block for a single top-level job, stopping at the next
+/// top-level key (the next job header or the end of the `jobs:` section).
+/// This isolates each job so permission validation cannot leak across jobs.
+fn job_yaml_block(content: &str, job_name: &str) -> String {
+    let job_header = format!("{job_name}:");
+    let all_job_names = workflow_job_names(content);
+    let start_idx = find_yaml_key_line(content, &job_header).unwrap_or_else(|| {
+        panic!("job_yaml_block: job '{job_name}' header not found as a real YAML key")
+    });
+    let lines: Vec<&str> = content.lines().collect();
+    let header_indent = indent_of(lines[start_idx]);
+    let mut block = String::new();
+    block.push_str(lines[start_idx]);
+    block.push('\n');
+
+    for line in lines.iter().skip(start_idx + 1) {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            block.push_str(line);
+            block.push('\n');
+            continue;
+        }
+        let indent = indent_of(line);
+        // Stop at the next top-level job (indent <= header_indent and the line
+        // is another job header) or any key at a lesser indent.
+        if indent <= header_indent && !trimmed.starts_with('#') {
+            // Is this the next job header?
+            let candidate = trimmed.trim_end_matches(':');
+            if indent == header_indent
+                && all_job_names.iter().any(|jn| jn == candidate)
+                && candidate != job_name
+            {
+                break;
+            }
+            if indent < header_indent {
+                // Left the jobs section entirely.
+                break;
+            }
+        }
+        block.push_str(line);
+        block.push('\n');
+    }
     block
 }
 
@@ -756,18 +949,77 @@ fn test_ocr_pr_review_uses_pull_request_target() {
     }
 }
 
+/// Extract top-level job names from a GitHub Actions workflow YAML string.
+///
+/// Finds the `jobs:` key as a real top-level YAML key (indent 0) by scanning
+/// with block-scalar awareness, then collects the direct child keys (job names)
+/// at the first nested indentation level.
+fn workflow_job_names(content: &str) -> Vec<String> {
+    let jobs_idx = find_yaml_key_line(content, "jobs:")
+        .expect("workflow must have a top-level jobs: section (not inside a block scalar)");
+    let lines: Vec<&str> = content.lines().collect();
+    // The job-name indentation is the first non-blank, non-comment line after
+    // the jobs: header. This avoids hard-coding a 2-space assumption.
+    let job_indent = lines[jobs_idx + 1..]
+        .iter()
+        .find_map(|line| {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                None
+            } else {
+                Some(indent_of(line))
+            }
+        })
+        .unwrap_or(2);
+
+    let mut names = Vec::new();
+    let mut block_scalar_indent: Option<usize> = None;
+    for line in lines.iter().skip(jobs_idx + 1) {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let indent = indent_of(line);
+
+        // Track block-scalar context to skip script content.
+        if let Some(scalar_indent) = block_scalar_indent {
+            if indent > scalar_indent {
+                continue;
+            } else {
+                block_scalar_indent = None;
+            }
+        }
+
+        // A line at indent 0 after jobs: means we left the jobs section.
+        if indent == 0 && !trimmed.starts_with('#') {
+            break;
+        }
+
+        if trimmed.starts_with('#') {
+            continue;
+        }
+
+        if line_ends_with_block_scalar(trimmed) {
+            block_scalar_indent = Some(indent);
+        }
+
+        if indent == job_indent {
+            if let Some(name) = trimmed.strip_suffix(':') {
+                if !name.contains(' ') && !name.contains('\t') && !name.is_empty() {
+                    names.push(name.to_string());
+                }
+            }
+        }
+    }
+    names
+}
+
 /// Test: permissions are minimal and explicit.
 #[test]
 fn test_ocr_pr_review_permissions_are_minimal() {
     let content = ocr_pr_review_workflow_content();
-    let permission_block_count = content
-        .lines()
-        .filter(|line| line.trim_start() == "permissions:")
-        .count();
-    assert_eq!(
-        permission_block_count, 1,
-        "Workflow must not add job-level permissions overrides"
-    );
+
+    // The top-level permissions block defines the approved minimal set.
     let permissions = yaml_block_after(&content, "permissions:");
     let permission_lines: Vec<&str> = permissions
         .lines()
@@ -775,14 +1027,162 @@ fn test_ocr_pr_review_permissions_are_minimal() {
         .map(str::trim)
         .filter(|line| !line.is_empty() && !line.starts_with('#'))
         .collect();
-    let mut sorted_permission_lines = permission_lines;
+    let mut sorted_permission_lines = permission_lines.clone();
     sorted_permission_lines.sort_unstable();
-    let mut expected_permission_lines =
-        vec!["contents: read", "pull-requests: write", "issues: write"];
+    let mut expected_permission_lines = vec![
+        "contents: read",
+        "pull-requests: write",
+        "issues: write",
+        "actions: read",
+    ];
     expected_permission_lines.sort_unstable();
     assert_eq!(
         sorted_permission_lines, expected_permission_lines,
-        "Workflow permissions must be exactly the approved minimal set"
+        "Top-level workflow permissions must be exactly the approved minimal set"
+    );
+
+    // Every job that declares its own `permissions:` block must be a strict
+    // subset of the top-level block (least-privilege narrowing). Iterate over
+    // all job blocks so a future change cannot add excessive permissions to
+    // any job (e.g. gate or code-review) without triggering a failure.
+    let job_names = workflow_job_names(&content);
+    assert!(
+        !job_names.is_empty(),
+        "Workflow must define at least one job"
+    );
+    for job_name in &job_names {
+        // Use the structural job-block extractor so each job is validated in
+        // isolation (the block stops at the next job header). This prevents a
+        // nested `permissions:` occurrence in another job or a `run:` script
+        // from leaking into the wrong job's permission check.
+        let job_block = job_yaml_block(&content, job_name);
+        if !job_block
+            .lines()
+            .any(|line| line.trim_start() == "permissions:")
+        {
+            continue;
+        }
+        let job_perms = yaml_block_after(&job_block, "permissions:");
+        let job_permission_lines: Vec<&str> = job_perms
+            .lines()
+            .skip(1)
+            .map(str::trim)
+            .filter(|line| !line.is_empty() && !line.starts_with('#'))
+            .collect();
+        for job_perm in &job_permission_lines {
+            assert!(
+                permission_lines.iter().any(|top| top == job_perm),
+                "Job '{job_name}' permission '{job_perm}' must be a subset of the top-level minimal permissions"
+            );
+        }
+    }
+}
+
+/// Test: find_yaml_key_line skips occurrences of a key name inside YAML
+/// block-scalar content (run: |, script: |). This is the structural guard
+/// against a literal `permissions:` inside a step's shell script being
+/// mistaken for a real YAML permissions key.
+#[test]
+fn test_find_yaml_key_line_skips_block_scalar_content() {
+    let workflow = r#"name: Test
+on: push
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Step with permissions in script
+        run: |
+          echo "checking permissions:"
+          if [ -f config ]; then
+            permissions: read
+          fi
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - run: echo hi
+"#;
+    // The FIRST real `permissions:` key is the top-level one (line 3).
+    let idx =
+        find_yaml_key_line(workflow, "permissions:").expect("should find top-level permissions:");
+    let lines: Vec<&str> = workflow.lines().collect();
+    assert_eq!(lines[idx].trim(), "permissions:");
+    // The line must NOT be the one inside the run: | block.
+    assert!(
+        !lines[idx].contains("echo"),
+        "find_yaml_key_line must not match keys inside block-scalar (run: |) content"
+    );
+}
+
+/// Test: workflow_job_names finds jobs: as a top-level key and extracts all
+/// job names structurally, even when a step script contains `jobs:`-like text.
+#[test]
+fn test_workflow_job_names_structural_extraction() {
+    let workflow = r#"name: Test
+on: push
+env:
+  NOTE: "jobs: is also a string here"
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "jobs: appear in scripts too"
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo hi
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo bye
+"#;
+    let names = workflow_job_names(workflow);
+    assert_eq!(names, vec!["gate", "build", "deploy"]);
+}
+
+/// Test: job_yaml_block isolates each job, stopping at the next job header so
+/// permission validation never leaks across jobs. The build job's block must
+/// not contain the deploy job's content.
+#[test]
+fn test_job_yaml_block_isolates_jobs() {
+    let workflow = r#"name: Test
+on: push
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - run: echo build
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - run: echo deploy
+"#;
+    let build_block = job_yaml_block(workflow, "build");
+    assert!(
+        !build_block.contains("deploy:"),
+        "job_yaml_block for 'build' must not include the deploy job header"
+    );
+    assert!(
+        !build_block.contains("packages: write"),
+        "job_yaml_block for 'build' must not include deploy's permissions"
+    );
+    assert!(
+        build_block.contains("contents: read"),
+        "job_yaml_block for 'build' must include build's own permissions"
+    );
+
+    let deploy_block = job_yaml_block(workflow, "deploy");
+    assert!(
+        deploy_block.contains("packages: write"),
+        "job_yaml_block for 'deploy' must include its own permissions"
     );
 }
 
@@ -837,6 +1237,543 @@ fn test_ocr_pr_review_uses_timeout_30_and_merge_base() {
         content.contains("merge-base"),
         "Workflow must review the merge-base..head diff, not origin/main..head"
     );
+    assert!(
+        content.contains("--concurrency 2"),
+        "Workflow must cap OCR provider contention with an explicit --concurrency value"
+    );
+}
+
+/// Test: CI reviews are deterministic — OCR self-update checks are disabled.
+#[test]
+fn test_ocr_pr_review_sets_ocr_no_update_env() {
+    let content = ocr_pr_review_workflow_content();
+    assert!(
+        content.contains(r#"OCR_NO_UPDATE: "1""#) || content.contains("OCR_NO_UPDATE: '1'"),
+        "Workflow must set OCR_NO_UPDATE to keep CI reviews deterministic"
+    );
+}
+
+/// Test: OCR installs to an isolated local prefix, exposes it on PATH, exports
+/// OCR_BIN for later steps, and pins the version through the single-source
+/// `OCR_VERSION` env var referenced by both the install command and the cache
+/// key.
+#[test]
+fn test_ocr_pr_review_installs_locally_pinned_version() {
+    let content = ocr_pr_review_workflow_content();
+    // Single source of truth: OCR_VERSION must be an exact pinned semver.
+    let pinned_version = ocr_version_from_workflow();
+    assert!(
+        content
+            .contains(r#"OCR_PREFIX="${RUNNER_TEMP}/ocr-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}""#),
+        "Install must scope the prefix per run and attempt so concurrent runners cannot collide"
+    );
+    // The install must reference the OCR_VERSION variable (not a hard-coded
+    // version literal) so the single source of truth cannot drift.
+    assert!(
+        content.contains(r#"npm install --prefix "$OCR_PREFIX" --ignore-scripts "@alibaba-group/open-code-review@${OCR_VERSION}""#),
+        "Install must target the isolated local prefix and reference the single-source OCR_VERSION variable"
+    );
+    // The literal version may only appear in the OCR_VERSION declaration.
+    let literal_occurrences = content
+        .lines()
+        .filter(|line| {
+            let trimmed = line.trim();
+            trimmed.contains(&format!("@alibaba-group/open-code-review@{pinned_version}"))
+        })
+        .count();
+    assert_eq!(
+        literal_occurrences, 0,
+        "Pinned version {pinned_version} must only appear in the OCR_VERSION declaration, not hard-coded in the install command"
+    );
+    assert!(
+        content.contains(r#"echo "${OCR_PREFIX}/node_modules/.bin" >> "$GITHUB_PATH""#),
+        "Install must append the local prefix bin dir to GITHUB_PATH"
+    );
+    assert!(
+        content.contains("OCR_BIN=${OCR_BIN}") && content.contains(r#""$OCR_BIN" version"#),
+        "Install must export OCR_BIN and invoke it directly in later steps"
+    );
+    assert!(
+        !content.contains("npm install -g"),
+        "Install must never fall back to a global npm install"
+    );
+}
+
+/// Test: every action reference is a pinned SHA with a ratchet comment.
+#[test]
+fn test_ocr_pr_review_pins_action_shas_with_ratchet() {
+    let content = ocr_pr_review_workflow_content();
+    let uses_lines: Vec<&str> = content
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.starts_with("uses:"))
+        .collect();
+    assert!(
+        !uses_lines.is_empty(),
+        "Workflow must reference at least one pinned action"
+    );
+    for line in &uses_lines {
+        // Distinguish two distinct failure modes so the error message points to
+        // the correct root cause: (1) a missing ratchet comment, and (2) a
+        // reference that is not pinned to a 40-hex SHA.
+        assert!(
+            line.contains("# ratchet:actions/"),
+            "Pinned action must carry a ratchet comment naming the tracked version: {line}"
+        );
+        let reference = line
+            .trim_start_matches("uses:")
+            .trim()
+            .split_once('#')
+            .map(|(reference, _)| reference.trim())
+            .unwrap_or("");
+        let sha = reference
+            .split_once('@')
+            .map(|(_, sha)| sha)
+            .unwrap_or_default();
+        assert!(
+            sha.len() == 40 && sha.chars().all(|ch| ch.is_ascii_hexdigit()),
+            "Action reference must be pinned to a 40-hex commit SHA: {line}"
+        );
+    }
+    assert!(
+        !content.contains("uses: actions/checkout@v")
+            && !content.contains("uses: actions/github-script@v")
+            && !content.contains("uses: actions/upload-artifact@v")
+            && !content.contains("uses: actions/download-artifact@v"),
+        "Workflow must not reference actions by a bare @vN tag"
+    );
+}
+
+/// Test: phase tracking and infrastructure-vs-policy classification are wired.
+#[test]
+fn test_ocr_pr_review_tracks_phase_and_classifies_failures() {
+    let content = ocr_pr_review_workflow_content();
+    for phase_write in [
+        r#"echo "install" > ocr-phase.txt"#,
+        r#"echo "validate" > ocr-phase.txt"#,
+        r#"echo "llm-preflight" > ocr-phase.txt"#,
+        r#"echo "preview" > ocr-phase.txt"#,
+        r#"echo "review" > ocr-phase.txt"#,
+    ] {
+        assert!(
+            content.contains(phase_write),
+            "Each OCR step must record its phase: missing {phase_write}"
+        );
+    }
+    assert!(
+        content.contains("ocr-infrastructure-failure.txt")
+            && content.contains("ocr-policy-failure.txt"),
+        "Workflow must record infrastructure and policy failure markers"
+    );
+    assert!(
+        content.contains("id: ocr-classification")
+            && content.contains("policy_failure=true")
+            && content.contains("infrastructure_failure=true"),
+        "Workflow must resolve a classification step that emits policy/infrastructure outputs"
+    );
+    assert!(
+        content.contains(
+            "infrastructure_failure: ${{ steps.ocr-classification.outputs.infrastructure_failure }}"
+        ) && content
+            .contains("policy_failure: ${{ steps.ocr-classification.outputs.policy_failure }}"),
+        "code-review job must expose classification outputs for the notification job"
+    );
+    assert!(
+        content.contains("[ -s ocr-exit-code.txt ]"),
+        "Setup/validate/preview/review steps must short-circuit gracefully once an earlier failure is recorded"
+    );
+}
+
+/// Test: secrets are redacted in both the posting step and the artifact
+/// redaction step, and redaction runs via github-script (never a node/perl
+/// interpreter in a run step).
+#[test]
+fn test_ocr_pr_review_redacts_secrets_in_artifacts_and_comments() {
+    let content = ocr_pr_review_workflow_content();
+    let module = ocr_redaction_module_content();
+
+    // The redaction implementation must be defined exactly once, in the shared
+    // module, and must cover the common secret patterns there.
+    assert!(
+        module.contains("function redactSecretDiagnostics(value"),
+        "Shared module must define the redaction helper"
+    );
+    assert_eq!(
+        module.matches("function redactSecretDiagnostics").count(),
+        1,
+        "The shared module is the single source of truth: redactSecretDiagnostics must be defined exactly once"
+    );
+    for pattern in [
+        r"Authorization\s*:",
+        r"x-api-key\s*:",
+        r"api[_-]?key\s*[=:]",
+        r"access[_-]?token\s*[=:]",
+    ] {
+        assert!(
+            module.contains(pattern),
+            "Shared redaction module must cover common secret patterns: missing {pattern}"
+        );
+    }
+    assert!(
+        module.contains("module.exports") && module.contains("redactSecretDiagnostics"),
+        "Shared module must export redactSecretDiagnostics for reuse across steps"
+    );
+
+    // The workflow inlines a canonical redaction fallback (kept in sync with
+    // the shared module) so redaction works even when the shared module is not
+    // yet present in the base-branch checkout (the transition window before
+    // this PR's module reaches every base commit). The inline fallback must
+    // contain the SAME canonical patterns as the shared module so there is no
+    // drift between the two definitions.
+    let inline_fallback_count = content.matches("escapeRegExpLocal").count();
+    assert!(
+        inline_fallback_count >= 3,
+        "All three OCR steps must define an inline redaction fallback (escapeRegExpLocal): found {inline_fallback_count}"
+    );
+    // Every canonical pattern in the shared module must also appear in the
+    // workflow's inline fallback, so the fallback can never be weaker than the
+    // module. We check the distinctive pattern fragments that are unique to
+    // each redaction rule.
+    for canonical_pattern in [
+        r"Authorization\s*:\s*",
+        r"x-api-key\s*:\s*",
+        r"api[_-]?key\s*[=:]\s*",
+        r"access[_-]?token\s*[=:]\s*",
+        r"refresh[_-]?token\s*[=:]\s*",
+        r"id[_-]?token\s*[=:]\s*",
+    ] {
+        assert!(
+            module.contains(canonical_pattern),
+            "Shared redaction module must define canonical pattern: {canonical_pattern}"
+        );
+        assert!(
+            content.contains(canonical_pattern),
+            "Workflow inline fallback must mirror the shared module's canonical pattern: missing {canonical_pattern}"
+        );
+    }
+    // The inline fallback must be gated behind a try/catch that first attempts
+    // to load the shared module, so post-merge (when the module is on the base
+    // branch) the single source of truth is used rather than the inline copy.
+    assert!(
+        content.contains("redactDiagnosticsWithSecrets = require(ocrRedactionModulePath).redactSecretDiagnostics")
+            && content.contains("} catch (_) {"),
+        "Inline redaction fallback must only activate when the shared module cannot be loaded (try/catch guard)"
+    );
+    let require_count = content.matches(".github/scripts/ocr-redaction.js").count();
+    assert!(
+        require_count >= 3,
+        "All three OCR steps (posting, artifact redaction, notification) must load the shared redaction module: found {require_count} require(s)"
+    );
+    // Every shared-redaction require must resolve to the trusted file inside the
+    // workspace. Accept any valid resolution strategy (process.env.GITHUB_WORKSPACE,
+    // github.workspace, or a relative path) as long as it targets the checked-in
+    // module — do not lock the test to a single path-expression syntax.
+    for line in content.lines() {
+        if line.contains(".github/scripts/ocr-redaction.js") && line.contains("require(") {
+            assert!(
+                line.contains("GITHUB_WORKSPACE")
+                    || line.contains("github.workspace")
+                    || line.contains("__dirname"),
+                "Every shared-redaction require must resolve via the trusted workspace root: {line}"
+            );
+        }
+    }
+
+    assert!(
+        content.contains("name: Redact OCR diagnostic artifacts")
+            && content.contains("fs.writeFileSync(fileName, placeholder)")
+            && content.contains("redactSecretDiagnostics(raw)"),
+        "Artifact redaction must read/write each diagnostic file via github-script fs with fail-closed placeholder, not a node/perl heredoc"
+    );
+    // Fail-closed invariant: the artifact redaction loop must destroy the
+    // original content *before* attempting redaction so a redaction error or
+    // fallback-write error can never leave unredacted secrets on disk for the
+    // artifact upload step.
+    assert!(
+        content.contains("Fail closed: destroy the original on disk")
+            && content.contains("[redaction unavailable for"),
+        "Artifact redaction must fail closed: overwrite with a placeholder before redaction so unredacted secrets are never uploaded"
+    );
+    // Lock in the architectural decision: redaction/notify must not reintroduce
+    // an inline node/perl interpreter or a sourced helper script.
+    let scanned_commands = scanned_ocr_pr_review_run_commands();
+    for forbidden in ["node", "perl", "npx"] {
+        assert!(
+            !shell_command_segments(&scanned_commands)
+                .any(|token| token_invokes_forbidden_command(token, forbidden)),
+            "Redaction/notify logic must not invoke {forbidden} from a run step"
+        );
+    }
+    assert!(
+        !content.contains("ocr-workflow-helpers.sh"),
+        "Cross-step markers must use plain redirection, not a sourced helper script"
+    );
+}
+
+/// Test: the OCR workflow is self-contained for redaction and does NOT hard-
+/// depend on the shared module being present in the base-branch checkout.
+///
+/// Under pull_request_target the code-review job checks out the PR's base SHA.
+/// If the shared module (.github/scripts/ocr-redaction.js) is new in this PR
+/// and not yet on every base commit, a hard `require()` would throw
+/// MODULE_NOT_FOUND and silently disable redaction. The workflow must define
+/// an inline canonical fallback so redaction works in all scenarios:
+/// pre-merge transition, post-merge, and future PRs against any base — without
+/// ever loading PR-supplied code.
+#[test]
+fn test_ocr_pr_review_redaction_is_base_branch_available() {
+    let content = ocr_pr_review_workflow_content();
+    // Every redaction step must attempt the shared module first (single source
+    // of truth post-merge) but fall back to an inline implementation.
+    let require_attempts = content
+        .matches("require(ocrRedactionModulePath).redactSecretDiagnostics")
+        .count();
+    assert!(
+        require_attempts >= 3,
+        "All three OCR steps must attempt to load the shared redaction module: found {require_attempts}"
+    );
+    let inline_fallbacks = content.matches("escapeRegExpLocal").count();
+    assert_eq!(
+        inline_fallbacks, 6,
+        "All three OCR steps must define an inline fallback (escapeRegExpLocal defined + used = 2 per step): found {inline_fallbacks}"
+    );
+    // The fallback must be inside a catch block so a MODULE_NOT_FOUND never
+    // propagates as an uncaught error.
+    assert!(
+        content.contains("} catch (_) {")
+            && content.contains("redactDiagnosticsWithSecrets = (value, exactSecrets = [])"),
+        "Inline redaction fallback must be activated only inside a catch block"
+    );
+}
+
+/// Test: every inline redaction fallback must be a faithful structural mirror
+/// of the shared module (.github/scripts/ocr-redaction.js). This prevents the
+/// three inline copies from silently drifting from the canonical implementation.
+///
+/// Specifically, the inline fallback must include the same try/catch +
+/// split-join safety net that the module uses for exact-secret replacement, so
+/// a secret value containing regex-special characters cannot cause the inline
+/// copy to throw while the module succeeds.
+#[test]
+fn test_inline_redaction_mirrors_shared_module() {
+    let content = ocr_pr_review_workflow_content();
+    let module = ocr_redaction_module_content();
+
+    // The module must contain the try/catch + split-join safety net.
+    assert!(
+        module.contains("try {") && module.contains("sanitized.split(secret).join(REDACTION)"),
+        "Shared module must define the try/catch split-join safety net for exact-secret redaction"
+    );
+
+    // Every inline fallback copy must also contain the split-join safety net.
+    let inline_split_join = content
+        .matches("sanitized.split(secret).join(REDACTION)")
+        .count();
+    assert_eq!(
+        inline_split_join, 3,
+        "All three inline redaction fallbacks must include the split-join safety net (one per step): found {inline_split_join}"
+    );
+
+    // The number of inline try/catch blocks for secret redaction must match
+    // the number of inline copies (3).
+    let inline_try_in_secret_loop = content
+        .matches("sanitized = sanitized.replace(new RegExp(escapeRegExpLocal(secret)")
+        .count();
+    assert_eq!(
+        inline_try_in_secret_loop, 3,
+        "All three inline fallbacks must wrap the RegExp replace in a try block: found {inline_try_in_secret_loop}"
+    );
+
+    // Verify structural pattern parity: every structural .replace() call in the
+    // module must also appear (the same number of times, proportionally) in
+    // the workflow's inline fallbacks.
+    let structural_patterns = [
+        r"Authorization\s*:\s*",
+        r"x-api-key\s*:\s*",
+        r"api[_-]?key\s*[=:]\s*",
+        r"[?&](?:key|api[_-]?key|token)=",
+        r"access[_-]?token\s*[=:]\s*",
+        r"refresh[_-]?token\s*[=:]\s*",
+        r"id[_-]?token\s*[=:]\s*",
+        r"token\s*[=:]\s*",
+        r"secret\s*[=:]\s*",
+    ];
+    for pattern in structural_patterns {
+        let module_count = module.matches(pattern).count();
+        let workflow_count = content.matches(pattern).count();
+        assert!(
+            module_count > 0,
+            "Shared module must define structural pattern: {pattern}"
+        );
+        // Each pattern appears once in the module and three times in the
+        // workflow (one per inline copy).
+        assert!(
+            workflow_count >= module_count * 3,
+            "Inline fallback must mirror the shared module for pattern '{pattern}': module has {module_count}, workflow has {workflow_count} (expected at least {})",
+            module_count * 3
+        );
+    }
+
+    // The workflow must document the transition cleanup so the inline copies
+    // are removed once the shared module reaches every base checkout.
+    assert!(
+        content.contains("TRANSITION CLEANUP"),
+        "Workflow must document the transition cleanup plan for the inline redaction fallback"
+    );
+}
+
+/// Test: duplicate tracking issues must be closed WITHOUT state_reason:
+/// 'not_planned'. The 'not_planned' reason is semantically inaccurate for
+/// duplicate issues (it means the team decided not to implement the feature).
+/// Omitting state_reason entirely lets GitHub record a neutral close.
+#[test]
+fn test_ocr_pr_review_duplicate_close_omits_misleading_state_reason() {
+    let content = ocr_pr_review_workflow_content();
+
+    // The deduplication close call must close issues but must NOT set
+    // state_reason to 'not_planned'.
+    assert!(
+        !content.contains("state_reason: 'not_planned'"),
+        "Deduplication close must not use state_reason 'not_planned' (semantically inaccurate for duplicates)"
+    );
+    assert!(
+        !content.contains("state_reason: 'completed'"),
+        "Deduplication close must not use state_reason 'completed' (semantically inaccurate for duplicates)"
+    );
+
+    // Verify the close call itself still exists (state: 'closed' without a
+    // misleading state_reason).
+    assert!(
+        content.contains("state: 'closed'"),
+        "Deduplication close must still close the issue (state: 'closed')"
+    );
+
+    // The close call must not carry any state_reason field at all.
+    let closed_lines: Vec<&str> = content
+        .lines()
+        .filter(|l| l.contains("state: 'closed'"))
+        .collect();
+    assert!(
+        !closed_lines.is_empty(),
+        "Workflow must contain at least one issue close call"
+    );
+    for closed_line in &closed_lines {
+        let line_num = content.lines().position(|l| l == *closed_line).unwrap_or(0);
+        let nearby: String = content
+            .lines()
+            .skip(line_num.saturating_sub(1))
+            .take(4)
+            .collect::<Vec<&str>>()
+            .join("\n");
+        assert!(
+            !nearby.contains("state_reason"),
+            "Issue close call must not include state_reason: {nearby}"
+        );
+    }
+}
+
+/// Test: the policy-skip informational message in the notification job must
+/// use core.info (or core.warning for actionable conditions), never
+/// core.notice. core.notice has reduced visibility in some GitHub Actions log
+/// viewers and is inappropriate for diagnostic messages that maintainers need
+/// to see. The policy-skip is expected behavior (not a warning), so core.info
+/// is the correct severity.
+#[test]
+fn test_ocr_pr_review_policy_skip_uses_visible_log_level() {
+    let content = ocr_pr_review_workflow_content();
+
+    // The policy-skip message must NOT use core.notice.
+    assert!(
+        !content.contains("core.notice"),
+        "Workflow must not use core.notice (reduced visibility); use core.info or core.warning instead"
+    );
+
+    // The policy-skip message must use core.info (informational, not a warning
+    // — policy failures are already surfaced as core.setFailed in the
+    // code-review job).
+    assert!(
+        content.contains(
+            "core.info('OCR policy failure detected; skipping infrastructure issue notification.')"
+        ),
+        "Policy-skip message must use core.info for reliable log visibility"
+    );
+}
+
+/// Test: an infrastructure-failure notification job exists and is gated.
+#[test]
+fn test_ocr_pr_review_has_infrastructure_notification_job() {
+    let content = ocr_pr_review_workflow_content();
+    assert!(
+        content.contains("notify-ocr-infrastructure-failure:"),
+        "Workflow must define the infrastructure-failure notification job"
+    );
+    assert!(
+        content.contains("needs: code-review"),
+        "Notification job must depend on the code-review job"
+    );
+    assert!(
+        content.contains("!cancelled()")
+            && content.contains("needs.code-review.result == 'success'")
+            && content.contains("needs.code-review.result == 'failure'"),
+        "Notification job must run for completed (non-cancelled) code-review outcomes"
+    );
+    assert!(
+        content.contains("actions/download-artifact"),
+        "Notification job must download the OCR artifacts"
+    );
+    // The notification job must declare its own minimal permissions block
+    // rather than relying on the inherited top-level permissions, so the
+    // least-privilege surface is auditable per-job.
+    let notify_block = yaml_block_after(&content, "notify-ocr-infrastructure-failure:");
+    assert!(
+        notify_block.contains("permissions:")
+            && notify_block.contains("issues: write")
+            && notify_block.contains("actions: read"),
+        "Notification job must declare explicit minimal permissions (issues: write, actions: read)"
+    );
+    assert!(
+        content.contains("const ISSUE_TITLE = 'OCR review infrastructure failure'")
+            && content.contains("github.rest.search.issuesAndPullRequests")
+            && content.contains("github.rest.issues.create(")
+            && content.contains("github.rest.issues.createComment("),
+        "Notification job must find-or-create a single tracking issue via github-script"
+    );
+    assert!(
+        content.contains("skipping infrastructure issue notification"),
+        "Notification job must skip when a policy failure was recorded"
+    );
+}
+
+/// Test: rate-limit responses are classified distinctly from auth/config
+/// failures so a shared provider quota is not misreported.
+#[test]
+fn test_ocr_pr_review_run_uses_concurrency_and_classifies_rate_limit() {
+    let content = ocr_pr_review_workflow_content();
+    assert!(
+        content.contains("--concurrency 2"),
+        "OCR review must cap provider contention with --concurrency 2"
+    );
+    // Check each rate-limit signal as a separate literal so the guardrail
+    // remains valid regardless of how the workflow expresses the pattern
+    // (grep -E alternation, separate grep calls, or a case statement).
+    for rate_limit_signal in ["http 429", "concurrency reached", "rate limit"] {
+        assert!(
+            content.contains(rate_limit_signal),
+            "OCR review must classify rate-limit signal: missing {rate_limit_signal}"
+        );
+    }
+    assert!(
+        content.contains("reason=rate-limited"),
+        "OCR review must map HTTP 429 / concurrency-reached stderr to a distinct rate-limit reason"
+    );
+    // Verify the provider-failure classification covers the key structural
+    // phrases without relying on regex-metacharacter literal matching.
+    for provider_failure_signal in ["file review", "failed", "provider/config/auth failure"] {
+        assert!(
+            content.contains(provider_failure_signal),
+            "OCR review must classify wholesale per-file review failure: missing {provider_failure_signal}"
+        );
+    }
 }
 
 fn secret_reference_names(content: &str) -> Vec<String> {
@@ -880,7 +1817,7 @@ fn test_ocr_pr_review_test_scope_guard_fails_closed() {
         "Changed-test detection must include common language-specific test filenames outside test directories"
     );
     assert!(
-        content.contains("if ! \"$OCR_BIN\" review --preview --from \"$BASE_SHA\" --to \"$HEAD_SHA\"")
+        content.contains("\"$OCR_BIN\" review --preview --from \"$BASE_SHA\" --to \"$HEAD_SHA\"")
             && content.contains("Could not verify OCR preview scope for changed test files")
             && content.contains("OCR preview did not list changed test files in the reviewed set")
             && content.contains("/^Will review[[:space:]]*\\(/ { in_section = 1; next }")
@@ -891,6 +1828,15 @@ fn test_ocr_pr_review_test_scope_guard_fails_closed() {
             && content.contains("candidate = fields[1]")
             && content.contains("if (candidate == target) found = 1"),
         "Changed-test scope validation must fail closed when OCR preview cannot be generated or parsed"
+    );
+    // A genuine policy breach (changed test missing from / excluded by OCR's
+    // reviewed set) must record a policy failure and block the PR check with a
+    // non-zero exit, while infrastructure problems remain non-blocking.
+    assert!(
+        content.contains("echo \"changed test files were missing from OCR reviewed set\" > ocr-policy-failure.txt")
+            && content.contains("echo \"changed test files were excluded from OCR reviewed set\" > ocr-policy-failure.txt")
+            && content.contains("phase=preview; reason=OCR preview command failed"),
+        "Changed-test scope guard must record a blocking policy failure on a genuine breach and an infrastructure failure when the preview command itself fails"
     );
 }
 
@@ -955,16 +1901,26 @@ fn test_ocr_pr_review_has_sticky_marker_and_artifacts() {
         content.contains("ocr-result.json")
             && content.contains("ocr-stdout.raw")
             && content.contains("ocr-stderr.log")
-            && content.contains("if-no-files-found: error"),
-        "Workflow must upload OCR artifacts and fail if no output files are present"
+            && content.contains("if-no-files-found: warn"),
+        "Workflow must upload OCR artifacts; placeholders guarantee presence so a missing file is a non-blocking warning"
     );
     assert!(
         content.contains("ocr-exit-code.txt")
             && content.contains(": > ocr-result.json")
             && content.contains(": > ocr-preview-stderr.log")
-            && content
-                .contains("core.setFailed(`OpenCodeReview failed or produced unparsable output"),
-        "Workflow must preserve OCR exit status and fail the posting step on OCR failure"
+            && content.contains(": > ocr-phase.txt")
+            && content.contains(": > ocr-infrastructure-failure.txt")
+            && content.contains(": > ocr-policy-failure.txt"),
+        "Workflow must seed the exit-code, phase, and failure-classification artifacts up front"
+    );
+    // Policy failures block the PR check; infrastructure/unparsable output is
+    // surfaced as a non-blocking warning rather than failing the job.
+    assert!(
+        content.contains("core.setFailed(`OCR policy failure:")
+            && content.contains(
+                "core.warning(`OpenCodeReview failed or produced unparsable output"
+            ),
+        "Posting step must fail only on policy failures and warn (not fail) on infrastructure/unparsable output"
     );
     assert!(
         content.contains("github.paginate(github.rest.issues.listComments"),
@@ -1043,7 +1999,7 @@ fn test_ocr_pr_review_inline_payload_is_github_compatible() {
             && content.contains("const MAX_INLINE_FALLBACK = 50")
             && content.contains("for (const [index, c] of inline.entries())")
             && content.contains("if (index >= MAX_INLINE_FALLBACK)")
-            && content.contains("core.warning(`Failed to post inline comment on ${c.path}:${c.line}:")
+            && content.contains("Failed to post inline comment on ${c.path}:${c.line}:")
             && content.contains("const lineRange = c.start_line && c.start_line !== c.line")
             && content.contains("const overflowBody = `${unrenderFindingText(c.body)} (line ${lineRange})`")
             && content.contains("const fallbackBody = `${unrenderFindingText(c.body)} (line ${lineRange})`")
@@ -1484,33 +2440,45 @@ fn test_ocr_pr_review_uses_only_pinned_ocr_install() {
         .collect();
     assert_eq!(
         ocr_installs,
-        vec!["npm install -g --ignore-scripts @alibaba-group/open-code-review@1.6.1"],
-        "Workflow may only globally install the reviewed pinned OCR version"
+        vec![
+            r#"npm install --prefix "$OCR_PREFIX" --ignore-scripts "@alibaba-group/open-code-review@${OCR_VERSION}" 2>> ocr-stderr.log"#
+        ],
+        "Workflow may only install the reviewed pinned OCR version, referenced via the single-source OCR_VERSION variable, to an isolated local prefix"
     );
     for install in &ocr_installs {
         assert!(
-            install.ends_with("@1.6.1")
+            install.contains("@${OCR_VERSION}")
                 && install.contains(" --ignore-scripts ")
+                && install.contains(r#"--prefix "$OCR_PREFIX""#)
+                && !install.contains("install -g")
                 && !install.contains("@file:")
                 && !install.contains("@link:")
                 && !install.contains("@./")
                 && !install.contains("@../"),
-            "OCR install must use an explicit registry version, not a local or linked package"
-        );
-        let version = install
-            .strip_prefix("npm install -g --ignore-scripts @alibaba-group/open-code-review@")
-            .expect("install command must include the OCR package prefix");
-        let core = version.split(['-', '+']).next().unwrap_or(version);
-        let semver_parts: Vec<&str> = core.split('.').collect();
-        assert!(
-            semver_parts.len() == 3
-                && semver_parts
-                    .iter()
-                    .all(|part| !part.is_empty() && part.chars().all(|ch| ch.is_ascii_digit())),
-            "OCR install pin must be a concrete semver version"
+            "OCR install must reference the OCR_VERSION variable as an explicit registry version to an isolated local prefix, not a global, local, or linked package"
         );
     }
+    // The OCR_VERSION variable (single source of truth) must resolve to an
+    // exact pinned semver. Verifying the variable itself keeps the guardrail
+    // strict without re-hardcoding the version literal in the install command.
+    let pinned_version = ocr_version_from_workflow();
     let content = ocr_pr_review_workflow_content();
+    // No alternate installs: the pinned version literal must only appear in the
+    // OCR_VERSION declaration, never re-hardcoded in any install command.
+    let literal_install_occurrences = content
+        .lines()
+        .filter(|line| line.contains(&format!("@alibaba-group/open-code-review@{pinned_version}")))
+        .count();
+    assert_eq!(
+        literal_install_occurrences, 0,
+        "Pinned version {pinned_version} must not be hard-coded in any install command; only the OCR_VERSION variable may be referenced"
+    );
+    // The cache key must reference the same OCR_VERSION variable so a version
+    // bump never leaves a stale cache key pointing at the old version.
+    assert!(
+        content.contains("key: npm-ocr-${{ runner.os }}-${{ env.OCR_VERSION }}"),
+        "Cache key must reference the single-source OCR_VERSION variable so it rotates with the pinned version"
+    );
     assert!(
         !content.contains("safe.directory '*'")
             && !content.contains("safe.directory=*")

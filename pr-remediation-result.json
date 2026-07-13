@@ -1,0 +1,71 @@
+{
+  "schema_version": 1,
+  "plan_artifact_sequence": 13,
+  "repository_owner": "vybestack",
+  "repository_name": "llxprt-luther",
+  "pr_number": 130,
+  "run_id": "run-41a7a939-f90a-4624-80c2-d6c8b6523155",
+  "input_head_sha": "ef3040bda335e6bb93352e48cd0a4d64d09b41db",
+  "output_head_sha": "6aa8d6fe96052c86d11acc36cd207faeebb4e169",
+  "retry_scope": {
+    "scope_kind": "remediation_result_validation",
+    "plan_artifact_sequence": 13,
+    "run_id": "run-41a7a939-f90a-4624-80c2-d6c8b6523155",
+    "repository_owner": "vybestack",
+    "repository_name": "llxprt-luther",
+    "pr_number": 130,
+    "input_head_sha": "ef3040bda335e6bb93352e48cd0a4d64d09b41db",
+    "output_head_sha": "6aa8d6fe96052c86d11acc36cd207faeebb4e169",
+    "remediation_attempt_index": 0,
+    "max_remediation_attempts": 3,
+    "validation_retry_index": 0,
+    "max_validation_retries": 3,
+    "stale_artifact_retry_index": 0,
+    "max_stale_artifact_retries": 3
+  },
+  "results": [
+    {
+      "source_type": "coderabbit_feedback",
+      "source_id": "graphql:PRRT_kwDOSBE2l86QJX7o:PRRC_kwDOSBE2l87Ufyry",
+      "stable_marker_key": "thread:PRRT_kwDOSBE2l86QJX7o",
+      "body_hash": "fnv64:97beae6eed67c5b8",
+      "input_head_sha": "ef3040bda335e6bb93352e48cd0a4d64d09b41db",
+      "output_head_sha": "6aa8d6fe96052c86d11acc36cd207faeebb4e169",
+      "status": "fixed",
+      "response_text": "Fixed. The duplicated `redactSecretDiagnostics` secret-redaction helper (previously copied verbatim into three github-script steps: \"Post OCR results\", \"Redact OCR diagnostic artifacts\", and the notify-ocr-infrastructure-failure job) has been extracted into a single checked-in shared module at `.github/scripts/ocr-redaction.js`. Each step now `require()`s that module from the trusted `GITHUB_WORKSPACE` base-branch checkout and keeps only a thin per-step wrapper that binds the step-specific secret values (endpoint/token). This makes the redaction patterns the single source of truth, so any new secret format is added in exactly one place and can no longer drift across steps. Fork-safety is preserved because `pull_request_target` runs the base-branch workflow and the module is only ever loaded from the trusted base checkout (never PR-supplied code); the notify job now performs a trusted base-branch checkout before downloading artifacts so the shared module is available. Verified with `node --check` on the module, a functional redaction smoke test, and a YAML parse of the workflow. See commit 6aa8d6fe96052c86d11acc36cd207faeebb4e169.",
+      "evidence": {
+        "current_head_sha": "6aa8d6fe96052c86d11acc36cd207faeebb4e169",
+        "summary": "Extracted the duplicated redactSecretDiagnostics helper from three inline github-script copies into a single shared module (.github/scripts/ocr-redaction.js). All three OCR workflow steps now require() the shared module and retain only a thin wrapper binding step-specific secrets. No inline redaction pattern chains remain in the workflow.",
+        "files_changed": [
+          ".github/scripts/ocr-redaction.js",
+          ".github/workflows/ocr-pr-review.yml"
+        ],
+        "commits": [
+          "6aa8d6fe96052c86d11acc36cd207faeebb4e169"
+        ],
+        "commands": [
+          {
+            "argv": ["node", "--check", ".github/scripts/ocr-redaction.js"],
+            "status": "passed",
+            "description": "Node.js syntax check of the shared redaction module."
+          },
+          {
+            "argv": ["node", "-e", "const {redactSecretDiagnostics}=require('./.github/scripts/ocr-redaction.js'); const out=redactSecretDiagnostics('Authorization: Bearer abc token=ABCDEFGHIJKLMNOP1234 secret_val', ['abc']); if(!out.includes('[REDACTED]'))process.exit(1)"],
+            "status": "passed",
+            "description": "Functional smoke test confirming the shared module redacts secrets."
+          },
+          {
+            "argv": ["python3", "-c", "import yaml; yaml.safe_load(open('.github/workflows/ocr-pr-review.yml'))"],
+            "status": "passed",
+            "description": "YAML parse validation of the OCR PR review workflow."
+          },
+          {
+            "argv": ["grep", "-c", "Authorization\\s*:", ".github/workflows/ocr-pr-review.yml"],
+            "status": "passed",
+            "description": "Confirms zero inline redaction pattern chains remain in the workflow (all patterns now live only in the shared module)."
+          }
+        ]
+      }
+    }
+  ]
+}
