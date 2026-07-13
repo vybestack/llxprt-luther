@@ -12,7 +12,7 @@ use crate::engine::executors::pr_followup_artifacts::{
 use crate::engine::executors::pr_followup_types::PrFollowupBinding;
 use crate::engine::runner::EngineError;
 
-const RETRY_STATE_FAMILY: &str = "pr-remediation-retry-state";
+pub(super) const RETRY_STATE_FAMILY: &str = "pr-remediation-retry-state";
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(super) struct RetryScopeKey {
@@ -47,9 +47,9 @@ impl RetryScopeKey {
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(super) struct RetryBudget {
-    pub max_remediation_attempts: u64,
-    pub max_validation_retries: u64,
-    pub max_stale_artifact_retries: u64,
+    pub(super) max_remediation_attempts: u64,
+    pub(super) max_validation_retries: u64,
+    pub(super) max_stale_artifact_retries: u64,
 }
 
 impl RetryBudget {
@@ -78,9 +78,9 @@ impl RetryBudget {
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub(super) struct RetryCounters {
-    pub remediation_attempt_index: u64,
-    pub validation_retry_index: u64,
-    pub stale_artifact_retry_index: u64,
+    pub(super) remediation_attempt_index: u64,
+    pub(super) validation_retry_index: u64,
+    pub(super) stale_artifact_retry_index: u64,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -93,35 +93,35 @@ pub(super) enum LaunchPhase {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(super) struct RetryState {
-    pub scope: RetryScopeKey,
-    pub budget: RetryBudget,
-    pub counters: RetryCounters,
-    pub transition_id: String,
-    pub transition_type: String,
-    pub launch_phase: LaunchPhase,
-    pub launch_ordinal: u64,
-    pub predecessor_artifact_sequence: Option<u64>,
+    pub(super) scope: RetryScopeKey,
+    pub(super) budget: RetryBudget,
+    pub(super) counters: RetryCounters,
+    pub(super) transition_id: String,
+    pub(super) transition_type: String,
+    pub(super) launch_phase: LaunchPhase,
+    pub(super) launch_ordinal: u64,
+    pub(super) predecessor_artifact_sequence: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub validation_source_id: Option<String>,
+    pub(super) validation_source_id: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum RetryExhaustionReason {
+enum RetryExhaustionReason {
     RemediationAttempts,
     ValidationRetries,
     StaleArtifactRetries,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub(crate) struct RetryExhaustionView {
-    pub reason: RetryExhaustionReason,
-    pub remediation_attempt_index: u64,
-    pub validation_retry_index: u64,
-    pub stale_artifact_retry_index: u64,
-    pub max_remediation_attempts: u64,
-    pub max_validation_retries: u64,
-    pub max_stale_artifact_retries: u64,
+struct RetryExhaustionView {
+    reason: RetryExhaustionReason,
+    remediation_attempt_index: u64,
+    validation_retry_index: u64,
+    stale_artifact_retry_index: u64,
+    max_remediation_attempts: u64,
+    max_validation_retries: u64,
+    max_stale_artifact_retries: u64,
 }
 
 impl RetryExhaustionView {
@@ -367,7 +367,7 @@ fn launch_transition_id(binding: &PrFollowupBinding, plan: &Value, ordinal: u64)
     format!("fnv64:{:016x}", fnv64(identity.as_bytes()))
 }
 
-fn fnv64(bytes: &[u8]) -> u64 {
+pub(super) fn fnv64(bytes: &[u8]) -> u64 {
     bytes.iter().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
         (hash ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3)
     })

@@ -6619,6 +6619,113 @@ fn remediation_provider_failures_are_bounded_across_executor_reconstruction() {
 }
 
 #[test]
+fn remediation_recovered_launch_consumes_ordinal_after_interruption() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_p12_plan(&temp);
+    let runner = P12FakeLlxprtRunner::new(p12_result("timeout"));
+    let mut params = p12_params(&temp);
+    params["max_remediation_attempts"] = serde_json::json!(2);
+
+    // First invocation reserves and completes ordinal 1 normally.
+    let mut context = p12_context(&temp);
+    let outcome = PrFollowupRemediationExecutorWithRunner::new(runner.clone(), FixedClock)
+        .execute(&mut context, &params)
+        .expect("first remediation");
+    assert_eq!(outcome, StepOutcome::Success);
+
+    // Simulate a crash mid-launch: rewrite the persisted retry state so the
+    // launch phase is `launched` (never reached `completed`). The engine must
+    // treat the launched ordinal as consumed and advance to the next.
+    let retry_state_path = p10_current_artifact_path(&temp, "pr-remediation-retry-state");
+    let mut crashed = read_json(&retry_state_path);
+    crashed["launch_phase"] = serde_json::json!("launched");
+    fs::write(
+        &retry_state_path,
+        serde_json::to_vec_pretty(&crashed).expect("rewrite crashed state"),
+    )
+    .expect("persist crashed state");
+
+    // The recovery must reserve ordinal 2 (not reuse 1).
+    let mut resumed_context = p12_context(&temp);
+    let outcome = PrFollowupRemediationExecutorWithRunner::new(runner.clone(), FixedClock)
+        .execute(&mut resumed_context, &params)
+        .expect("recovered launch reserves next ordinal");
+    assert_eq!(outcome, StepOutcome::Success);
+    let recovered = read_json(&retry_state_path);
+    assert_eq!(recovered["launch_ordinal"], serde_json::json!(2));
+    assert_eq!(
+        recovered["counters"]["remediation_attempt_index"],
+        serde_json::json!(2)
+    );
+    assert_eq!(recovered["launch_phase"], serde_json::json!("completed"));
+    assert_eq!(
+        runner.requests().len(),
+        2,
+        "crashed ordinal must consume a budget slot"
+    );
+
+    // A third launch must be rejected because the budget is exhausted.
+    let mut third_context = p12_context(&temp);
+    let error = PrFollowupRemediationExecutorWithRunner::new(runner.clone(), FixedClock)
+        .execute(&mut third_context, &params)
+        .expect_err("budget exhausted after consumed launched ordinal");
+    assert!(error.to_string().contains("retry budget exhausted"));
+}
+
+#[test]
+fn terminal_degrades_gracefully_when_retry_state_is_corrupt() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_p12_plan(&temp);
+
+    // Write a corrupt retry-state artifact so the terminal cannot deserialize it.
+    let retry_state_path = p10_current_artifact_path(&temp, "pr-remediation-retry-state");
+    if let Some(parent) = retry_state_path.parent() {
+        fs::create_dir_all(parent).expect("create retry state dir");
+    }
+    fs::write(&retry_state_path, b"not-json").expect("corrupt retry state");
+
+    let mut context = p12_context(&temp);
+    let outcome = PostPrFailureTerminalExecutor
+        .execute(&mut context, &p12_params(&temp))
+        .expect("terminal must degrade gracefully on corrupt retry state");
+    assert_eq!(outcome, StepOutcome::Fatal);
+    let terminal = read_json(&p10_current_artifact_path(
+        &temp,
+        "post-pr-failure-terminal",
+    ));
+    assert_eq!(terminal["terminal_state"], serde_json::json!("failed"));
+    assert_eq!(
+        terminal["terminal_reason"],
+        serde_json::json!("post_pr_failure")
+    );
+    assert!(terminal.get("exhausted_budget").is_none_or(|v| v.is_null()));
+}
+
+#[test]
+fn terminal_reports_generic_failure_when_no_plan_exists() {
+    let temp = tempfile::tempdir().expect("tempdir");
+
+    // No remediation plan written, so the terminal has no retry state to load.
+    let mut context = p12_context(&temp);
+    let outcome = PostPrFailureTerminalExecutor
+        .execute(&mut context, &p12_params(&temp))
+        .expect("terminal without plan must still write artifact");
+    assert_eq!(outcome, StepOutcome::Fatal);
+    let terminal = read_json(&p10_current_artifact_path(
+        &temp,
+        "post-pr-failure-terminal",
+    ));
+    assert_eq!(terminal["terminal_state"], serde_json::json!("failed"));
+    assert_eq!(
+        terminal["terminal_reason"],
+        serde_json::json!("post_pr_failure")
+    );
+    assert!(terminal
+        .get("remediation_attempt_index")
+        .is_none_or(|v| v.is_null()));
+}
+
+#[test]
 fn pr_followup_remediation_prompt_requires_complete_retry_scope() {
     let temp = tempfile::tempdir().expect("tempdir");
     write_p12_plan(&temp);

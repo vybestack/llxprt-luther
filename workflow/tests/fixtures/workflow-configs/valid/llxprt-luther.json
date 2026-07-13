@@ -21,7 +21,7 @@
     "max_cost": 50.0
   },
   "discovery": {
-    "enabled": false,
+    "enabled": true,
     "include_labels": [
       "OK for Luther"
     ],
@@ -42,10 +42,10 @@
   "variables": {
     "primary_issue_number": "3",
     "issue_number": "3",
-    "profile_planning": "opusthinking",
-    "profile_evaluating": "opusthinking",
-    "profile_implementing": "opusthinking",
-    "profile_remediating": "opusthinking",
+    "profile_planning": "gpt56solhigh",
+    "profile_evaluating": "gpt56solhigh",
+    "profile_implementing": "gpt56solhigh",
+    "profile_remediating": "gpt56solhigh",
     "plan_static_content": ""
   },
   "target_profile": {

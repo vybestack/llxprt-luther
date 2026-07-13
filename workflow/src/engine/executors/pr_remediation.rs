@@ -15,6 +15,7 @@ mod push_stages;
 mod push_support;
 mod result_freshness;
 mod retry_state;
+mod stale_scope;
 pub use self::failure_terminal::PostPrFailureTerminalExecutor;
 use self::post_pr_plan_inputs::{
     append_pending_ci_judgment, append_post_pr_test_failures, read_plan_inputs,
@@ -35,9 +36,10 @@ use self::result_freshness::{
     remediation_result_state, result_file_non_empty, PreviousResultSnapshot, RemediationResultState,
 };
 use self::retry_state::{
-    load_current_state, record_launch_phase, record_validation, reserve_launch, LaunchPhase,
+    fnv64, load_current_state, record_launch_phase, record_validation, reserve_launch, LaunchPhase,
     RetryScopeKey, RetryState, ValidationTransition,
 };
+use self::stale_scope::{classify_stale_remediation_scope, retry_scope_json, retry_scope_u64};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
 #[cfg(unix)]
@@ -1167,6 +1169,12 @@ impl RemediationRun {
 }
 
 fn project_engine_retry_state(mut result: Value, state: &RetryState) -> Value {
+    if !result.is_object() {
+        // An agent-authored result that is not a JSON object cannot carry
+        // authoritative counters; replace it with a fresh object so the
+        // engine's durable counters are the only source of truth.
+        result = json!({});
+    }
     let object = result
         .as_object_mut()
         .expect("engine retry projection must be a JSON object");
@@ -2072,30 +2080,30 @@ const REMEDIATION_RESULT_SUCCESS_STATUSES: &[&str] =
 const REMEDIATION_RESULT_UNSUCCESSFUL_STATUSES: &[&str] = &["not_fixed", "skipped", "failed"];
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
-struct RemediationRetryScope {
-    run_id: String,
-    repository_owner: String,
-    repository_name: String,
-    pr_number: u64,
-    input_head_sha: String,
-    output_head_sha: Option<String>,
-    plan_artifact_sequence: u64,
-    remediation_attempt_index: u64,
-    max_remediation_attempts: u64,
-    validation_retry_index: u64,
-    max_validation_retries: u64,
-    stale_artifact_retry_index: u64,
-    max_stale_artifact_retries: u64,
-    scope_kind: String,
+pub(super) struct RemediationRetryScope {
+    pub(super) run_id: String,
+    pub(super) repository_owner: String,
+    pub(super) repository_name: String,
+    pub(super) pr_number: u64,
+    pub(super) input_head_sha: String,
+    pub(super) output_head_sha: Option<String>,
+    pub(super) plan_artifact_sequence: u64,
+    pub(super) remediation_attempt_index: u64,
+    pub(super) max_remediation_attempts: u64,
+    pub(super) validation_retry_index: u64,
+    pub(super) max_validation_retries: u64,
+    pub(super) stale_artifact_retry_index: u64,
+    pub(super) max_stale_artifact_retries: u64,
+    pub(super) scope_kind: String,
 }
 
 #[derive(Clone, Debug)]
-struct StaleScopeClassification {
-    expected_scope: RemediationRetryScope,
-    observed_scope: Value,
-    errors: Vec<String>,
-    stale_artifact_retry_index: u64,
-    max_stale_artifact_retries: u64,
+pub(super) struct StaleScopeClassification {
+    pub(super) expected_scope: RemediationRetryScope,
+    pub(super) observed_scope: Value,
+    pub(super) errors: Vec<String>,
+    pub(super) stale_artifact_retry_index: u64,
+    pub(super) max_stale_artifact_retries: u64,
 }
 
 #[derive(Clone, Debug, serde::Serialize)]
@@ -2175,47 +2183,20 @@ fn validate_remediation_result(
         advance_validation,
     );
     if let Some(state) = &mut retry_state {
-        let stale_index = validation
-            .stale_scope
-            .as_ref()
-            .map_or(state.counters.stale_artifact_retry_index, |scope| {
-                scope.stale_artifact_retry_index
-            });
-        let transition = ValidationTransition {
-            source_id: &validation_source_id,
-            validation_retry_index: validation.validation_retry_index,
-            stale_artifact_retry_index: stale_index,
-            transition_type: validation.state.as_str(),
-        };
-        record_validation(
-            &store,
-            &binding,
-            &step_id,
+        record_validation_transition(ValidationRetryContext {
+            store: &store,
+            binding: &binding,
+            step_id: &step_id,
             step_order,
             state,
-            &transition,
+            validation: &validation,
+            validation_source_id: &validation_source_id,
             clock,
-        )?;
+        })?;
     }
     let payload =
         remediation_result_payload(&binding, &result, &validation, &validation_source_id, clock);
-    let failure = if validation.outcome == StepOutcome::Fatal {
-        Some((
-            validation.state.as_str(),
-            validation.failure_reason.as_str(),
-            json!({
-                "validation_errors": validation.errors,
-                "unsuccessful_statuses": validation.unsuccessful_statuses,
-                "no_change_after_remediation": validation.no_change_after_remediation,
-                "remediation_attempt_index": validation.remediation_attempt_index,
-                "max_remediation_attempts": validation.max_remediation_attempts,
-                "validation_retry_index": validation.validation_retry_index,
-                "max_validation_retries": validation.max_validation_retries
-            }),
-        ))
-    } else {
-        None
-    };
+    let failure = fatal_validation_failure(&validation);
     let result_write_record = store.write_json_artifact(
         &binding,
         "pr-remediation-result",
@@ -2241,6 +2222,64 @@ fn validate_remediation_result(
     Ok(validation.outcome)
 }
 
+/// Groups the durable retry-state recording inputs to keep
+/// `validate_remediation_result` under the function-size guardrail.
+struct ValidationRetryContext<'a> {
+    store: &'a PrFollowupArtifactStore,
+    binding: &'a PrFollowupBinding,
+    step_id: &'a str,
+    step_order: u64,
+    state: &'a mut RetryState,
+    validation: &'a RemediationResultValidation,
+    validation_source_id: &'a str,
+    clock: &'a dyn ClockSleeper,
+}
+
+fn record_validation_transition(ctx: ValidationRetryContext<'_>) -> Result<(), EngineError> {
+    let stale_index = ctx
+        .validation
+        .stale_scope
+        .as_ref()
+        .map_or(ctx.state.counters.stale_artifact_retry_index, |scope| {
+            scope.stale_artifact_retry_index
+        });
+    let transition = ValidationTransition {
+        source_id: ctx.validation_source_id,
+        validation_retry_index: ctx.validation.validation_retry_index,
+        stale_artifact_retry_index: stale_index,
+        transition_type: ctx.validation.state.as_str(),
+    };
+    record_validation(
+        ctx.store,
+        ctx.binding,
+        ctx.step_id,
+        ctx.step_order,
+        ctx.state,
+        &transition,
+        ctx.clock,
+    )
+}
+
+fn fatal_validation_failure(
+    validation: &RemediationResultValidation,
+) -> Option<(&str, &str, Value)> {
+    (validation.outcome == StepOutcome::Fatal).then(|| {
+        (
+            validation.state.as_str(),
+            validation.failure_reason.as_str(),
+            json!({
+                "validation_errors": validation.errors,
+                "unsuccessful_statuses": validation.unsuccessful_statuses,
+                "no_change_after_remediation": validation.no_change_after_remediation,
+                "remediation_attempt_index": validation.remediation_attempt_index,
+                "max_remediation_attempts": validation.max_remediation_attempts,
+                "validation_retry_index": validation.validation_retry_index,
+                "max_validation_retries": validation.max_validation_retries
+            }),
+        )
+    })
+}
+
 fn remediation_validation_source_id(result: &Value) -> Result<String, EngineError> {
     if let Some(source_id) = result
         .get("validation_source_id")
@@ -2251,10 +2290,7 @@ fn remediation_validation_source_id(result: &Value) -> Result<String, EngineErro
     }
     let bytes = serde_json::to_vec(result)
         .map_err(|error| pr_remediation_error(format!("serialize validation source: {error}")))?;
-    let hash = bytes.iter().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
-        (hash ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3)
-    });
-    Ok(format!("fnv64:{hash:016x}"))
+    Ok(format!("fnv64:{:016x}", fnv64(&bytes)))
 }
 
 fn read_remediation_result_for_validation(
@@ -2439,14 +2475,6 @@ fn stale_artifact_retry_counters_for_scope(result: &Value, params: &Value) -> (u
     )
 }
 
-fn retry_scope_u64(result: &Value, field: &str) -> Option<u64> {
-    result
-        .get("retry_scope")
-        .and_then(|scope| scope.get(field))
-        .and_then(Value::as_u64)
-        .or_else(|| result.get(field).and_then(Value::as_u64))
-}
-
 fn remediation_retry_scope(
     binding: &PrFollowupBinding,
     plan: &Value,
@@ -2479,203 +2507,6 @@ fn remediation_retry_scope(
         stale_artifact_retry_index: stale_counters.0,
         max_stale_artifact_retries: stale_counters.1,
         scope_kind: "remediation_result_validation".to_string(),
-    }
-}
-
-fn retry_scope_json(scope: &RemediationRetryScope) -> Value {
-    json!({
-        "run_id": scope.run_id,
-        "repository_owner": scope.repository_owner,
-        "repository_name": scope.repository_name,
-        "pr_number": scope.pr_number,
-        "input_head_sha": scope.input_head_sha,
-        "output_head_sha": scope.output_head_sha,
-        "plan_artifact_sequence": scope.plan_artifact_sequence,
-        "remediation_attempt_index": scope.remediation_attempt_index,
-        "max_remediation_attempts": scope.max_remediation_attempts,
-        "validation_retry_index": scope.validation_retry_index,
-        "max_validation_retries": scope.max_validation_retries,
-        "stale_artifact_retry_index": scope.stale_artifact_retry_index,
-        "max_stale_artifact_retries": scope.max_stale_artifact_retries,
-        "scope_kind": scope.scope_kind,
-    })
-}
-
-fn classify_stale_remediation_scope(
-    result: &Value,
-    expected: &RemediationRetryScope,
-    advance_validation: bool,
-) -> Option<StaleScopeClassification> {
-    if is_stale_scope_validation_result(result) {
-        return None;
-    }
-    let observed = observed_retry_scope(result);
-    let errors = stale_scope_errors(result, &observed, expected);
-    (!errors.is_empty()).then(|| StaleScopeClassification {
-        expected_scope: expected.clone(),
-        observed_scope: observed,
-        errors,
-        stale_artifact_retry_index: expected.stale_artifact_retry_index
-            + u64::from(advance_validation),
-        max_stale_artifact_retries: expected.max_stale_artifact_retries,
-    })
-}
-
-fn is_stale_scope_validation_result(result: &Value) -> bool {
-    matches!(
-        result.get("validation_state").and_then(Value::as_str),
-        Some("stale_artifact" | "stale_artifact_cap_exhausted")
-    )
-}
-
-fn observed_retry_scope(result: &Value) -> Value {
-    result
-        .get("retry_scope")
-        .filter(|value| value.is_object())
-        .cloned()
-        .unwrap_or_else(|| json!({}))
-}
-
-fn stale_scope_errors(
-    result: &Value,
-    observed: &Value,
-    expected: &RemediationRetryScope,
-) -> Vec<String> {
-    let mut errors = Vec::new();
-    compare_required_scope_fields(observed, expected, &mut errors);
-    compare_optional_scope_fields(result, observed, expected, &mut errors);
-    errors
-}
-
-fn compare_required_scope_fields(
-    observed: &Value,
-    expected: &RemediationRetryScope,
-    errors: &mut Vec<String>,
-) {
-    compare_scope_string(observed, "run_id", &expected.run_id, errors);
-    compare_scope_string(
-        observed,
-        "repository_owner",
-        &expected.repository_owner,
-        errors,
-    );
-    compare_scope_string(
-        observed,
-        "repository_name",
-        &expected.repository_name,
-        errors,
-    );
-    compare_scope_u64(observed, "pr_number", expected.pr_number, errors);
-    compare_scope_string(observed, "input_head_sha", &expected.input_head_sha, errors);
-    compare_scope_u64(
-        observed,
-        "plan_artifact_sequence",
-        expected.plan_artifact_sequence,
-        errors,
-    );
-}
-
-fn compare_optional_scope_fields(
-    result: &Value,
-    observed: &Value,
-    expected: &RemediationRetryScope,
-    errors: &mut Vec<String>,
-) {
-    if let Some(output_head_sha) = expected.output_head_sha.as_deref() {
-        compare_scope_string_if_present(
-            result,
-            observed,
-            "output_head_sha",
-            output_head_sha,
-            errors,
-        );
-    }
-    compare_scope_u64_if_present(
-        result,
-        observed,
-        "remediation_attempt_index",
-        expected.remediation_attempt_index,
-        errors,
-    );
-    compare_scope_u64_if_present(
-        result,
-        observed,
-        "max_remediation_attempts",
-        expected.max_remediation_attempts,
-        errors,
-    );
-    compare_scope_u64_if_present(
-        result,
-        observed,
-        "validation_retry_index",
-        expected.validation_retry_index,
-        errors,
-    );
-    compare_scope_u64_if_present(
-        result,
-        observed,
-        "max_validation_retries",
-        expected.max_validation_retries,
-        errors,
-    );
-    compare_scope_string_if_present(result, observed, "scope_kind", &expected.scope_kind, errors);
-}
-
-fn compare_scope_string(observed: &Value, field: &str, expected: &str, errors: &mut Vec<String>) {
-    let value = observed.get(field).and_then(Value::as_str);
-    if value != Some(expected) {
-        errors.push(format!(
-            "retry_scope.{field} mismatch: expected {expected}, got {}",
-            value.unwrap_or("<missing>")
-        ));
-    }
-}
-
-fn compare_scope_string_if_present(
-    result: &Value,
-    observed: &Value,
-    field: &str,
-    expected: &str,
-    errors: &mut Vec<String>,
-) {
-    let value = observed
-        .get(field)
-        .or_else(|| result.get(field))
-        .and_then(Value::as_str);
-    if value.is_some() && value != Some(expected) {
-        errors.push(format!(
-            "retry_scope.{field} mismatch: expected {expected}, got {}",
-            value.unwrap_or("<missing>")
-        ));
-    }
-}
-
-fn compare_scope_u64(observed: &Value, field: &str, expected: u64, errors: &mut Vec<String>) {
-    let value = observed.get(field).and_then(Value::as_u64);
-    if value != Some(expected) {
-        errors.push(format!(
-            "retry_scope.{field} mismatch: expected {expected}, got {}",
-            value.map_or_else(|| "<missing>".to_string(), |value| value.to_string())
-        ));
-    }
-}
-
-fn compare_scope_u64_if_present(
-    result: &Value,
-    observed: &Value,
-    field: &str,
-    expected: u64,
-    errors: &mut Vec<String>,
-) {
-    let value = observed
-        .get(field)
-        .or_else(|| result.get(field))
-        .and_then(Value::as_u64);
-    if value.is_some() && value != Some(expected) {
-        errors.push(format!(
-            "retry_scope.{field} mismatch: expected {expected}, got {}",
-            value.map_or_else(|| "<missing>".to_string(), |value| value.to_string())
-        ));
     }
 }
 

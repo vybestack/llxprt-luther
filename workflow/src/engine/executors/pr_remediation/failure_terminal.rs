@@ -1,6 +1,8 @@
 //! Post-PR terminal failure projection.
 
-use super::retry_state::{load_current_state, RetryScopeKey, RetryState};
+use std::fs;
+
+use super::retry_state::{load_current_state, RetryScopeKey, RetryState, RETRY_STATE_FAMILY};
 use super::{artifact_root, binding_for_context, current_step_id, u64_param};
 use crate::engine::executor::{StepContext, StepExecutor};
 use crate::engine::executors::pr_followup_artifacts::{
@@ -56,7 +58,32 @@ fn matching_retry_state(
     }
     let plan = store.read_current_json(binding, "pr-remediation-plan")?;
     let scope = RetryScopeKey::new(binding, &plan)?;
-    load_current_state(store, binding, &scope)
+    // The terminal step must always be able to record the failure artifact.
+    // A corrupt retry-state file would poison the store's sequence-recovery
+    // scan and block the terminal write, so quarantine it before proceeding.
+    // The corrupt state is already useless for accounting; quarantine
+    // preserves the evidence for diagnosis while unblocking the write.
+    match load_current_state(store, binding, &scope) {
+        Ok(state) => Ok(state),
+        Err(_) => {
+            quarantine_corrupt_retry_state(store, binding)?;
+            Ok(None)
+        }
+    }
+}
+
+fn quarantine_corrupt_retry_state(
+    store: &PrFollowupArtifactStore,
+    binding: &crate::engine::executors::pr_followup_types::PrFollowupBinding,
+) -> Result<(), EngineError> {
+    let path = store.canonical_path(binding, RETRY_STATE_FAMILY);
+    if path.exists() {
+        let quarantined = path.with_extension("json.corrupt");
+        fs::rename(&path, &quarantined).map_err(|error| {
+            EngineError::InvalidState(format!("quarantine corrupt retry state: {error}"))
+        })?;
+    }
+    Ok(())
 }
 
 fn terminal_payload(state: Option<&RetryState>) -> Value {
