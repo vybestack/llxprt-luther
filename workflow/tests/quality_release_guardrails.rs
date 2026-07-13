@@ -423,6 +423,51 @@ fn ocr_pr_review_workflow_content() -> String {
         .unwrap_or_else(|e| panic!("Failed to read ocr-pr-review.yml at {workflow_path:?}: {e}"))
 }
 
+/// Extract the exact pinned OCR version from the single-source-of-truth
+/// `OCR_VERSION` env var declared on the `code-review` job.
+///
+/// The install command and the cache key both reference `${OCR_VERSION}`, so
+/// this is the one place the version is spelled out literally. This helper
+/// fails the test if the variable is missing or not a concrete (non-range)
+/// semver pin, keeping the guardrails strict without re-hardcoding the version.
+fn ocr_version_from_workflow() -> String {
+    let content = ocr_pr_review_workflow_content();
+    let raw_value = content
+        .lines()
+        .map(str::trim)
+        .find_map(|line| line.strip_prefix("OCR_VERSION:"))
+        .map(|rest| rest.trim())
+        .unwrap_or_else(|| {
+            panic!("Workflow must declare OCR_VERSION as the single source of truth for the pinned OCR version")
+        });
+    let unquoted = if (raw_value.starts_with('"') && raw_value.ends_with('"'))
+        || (raw_value.starts_with('\'') && raw_value.ends_with('\''))
+    {
+        &raw_value[1..raw_value.len() - 1]
+    } else {
+        raw_value
+    };
+    assert!(
+        !unquoted.is_empty(),
+        "OCR_VERSION must be a non-empty concrete semver, not an empty value"
+    );
+    // Reject anything that looks like an npm range/operator instead of a pin.
+    assert!(
+        !unquoted.contains(['^', '~', '>', '*', ' ']),
+        "OCR_VERSION must be an exact pinned semver (no ranges, comparators, or spaces): found {unquoted:?}"
+    );
+    let core = unquoted.split(['-', '+']).next().unwrap_or(unquoted);
+    let semver_parts: Vec<&str> = core.split('.').collect();
+    assert!(
+        semver_parts.len() == 3
+            && semver_parts
+                .iter()
+                .all(|part| !part.is_empty() && part.chars().all(|ch| ch.is_ascii_digit())),
+        "OCR_VERSION must be a concrete three-part semver pin, found {unquoted:?}"
+    );
+    unquoted.to_string()
+}
+
 /// Path to the single shared OCR secret-redaction module. Every github-script
 /// step loads this file via require() so the redaction patterns live in exactly
 /// one place instead of being duplicated inline per step.
@@ -926,19 +971,37 @@ fn test_ocr_pr_review_sets_ocr_no_update_env() {
     );
 }
 
-/// Test: OCR installs to an isolated local prefix, exposes it on PATH, and
-/// exports OCR_BIN for later steps.
+/// Test: OCR installs to an isolated local prefix, exposes it on PATH, exports
+/// OCR_BIN for later steps, and pins the version through the single-source
+/// `OCR_VERSION` env var referenced by both the install command and the cache
+/// key.
 #[test]
 fn test_ocr_pr_review_installs_locally_pinned_version() {
     let content = ocr_pr_review_workflow_content();
+    // Single source of truth: OCR_VERSION must be an exact pinned semver.
+    let pinned_version = ocr_version_from_workflow();
     assert!(
         content
             .contains(r#"OCR_PREFIX="${RUNNER_TEMP}/ocr-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}""#),
         "Install must scope the prefix per run and attempt so concurrent runners cannot collide"
     );
+    // The install must reference the OCR_VERSION variable (not a hard-coded
+    // version literal) so the single source of truth cannot drift.
     assert!(
-        content.contains(r#"npm install --prefix "$OCR_PREFIX" --ignore-scripts @alibaba-group/open-code-review@1.7.7"#),
-        "Install must target the isolated local prefix with the pinned 1.7.7 version"
+        content.contains(r#"npm install --prefix "$OCR_PREFIX" --ignore-scripts "@alibaba-group/open-code-review@${OCR_VERSION}""#),
+        "Install must target the isolated local prefix and reference the single-source OCR_VERSION variable"
+    );
+    // The literal version may only appear in the OCR_VERSION declaration.
+    let literal_occurrences = content
+        .lines()
+        .filter(|line| {
+            let trimmed = line.trim();
+            trimmed.contains(&format!("@alibaba-group/open-code-review@{pinned_version}"))
+        })
+        .count();
+    assert_eq!(
+        literal_occurrences, 0,
+        "Pinned version {pinned_version} must only appear in the OCR_VERSION declaration, not hard-coded in the install command"
     );
     assert!(
         content.contains(r#"echo "${OCR_PREFIX}/node_modules/.bin" >> "$GITHUB_PATH""#),
@@ -1887,13 +1950,13 @@ fn test_ocr_pr_review_uses_only_pinned_ocr_install() {
     assert_eq!(
         ocr_installs,
         vec![
-            r#"npm install --prefix "$OCR_PREFIX" --ignore-scripts @alibaba-group/open-code-review@1.7.7 2>> ocr-stderr.log"#
+            r#"npm install --prefix "$OCR_PREFIX" --ignore-scripts "@alibaba-group/open-code-review@${OCR_VERSION}" 2>> ocr-stderr.log"#
         ],
-        "Workflow may only install the reviewed pinned OCR version to an isolated local prefix"
+        "Workflow may only install the reviewed pinned OCR version, referenced via the single-source OCR_VERSION variable, to an isolated local prefix"
     );
     for install in &ocr_installs {
         assert!(
-            install.contains("@1.7.7")
+            install.contains("@${OCR_VERSION}")
                 && install.contains(" --ignore-scripts ")
                 && install.contains(r#"--prefix "$OCR_PREFIX""#)
                 && !install.contains("install -g")
@@ -1901,27 +1964,30 @@ fn test_ocr_pr_review_uses_only_pinned_ocr_install() {
                 && !install.contains("@link:")
                 && !install.contains("@./")
                 && !install.contains("@../"),
-            "OCR install must use an explicit registry version to an isolated local prefix, not a global, local, or linked package"
-        );
-        let after_version = install
-            .split("@alibaba-group/open-code-review@")
-            .nth(1)
-            .expect("install command must include the OCR package prefix");
-        let version = after_version
-            .split_whitespace()
-            .next()
-            .expect("install command must include a version token");
-        let core = version.split(['-', '+']).next().unwrap_or(version);
-        let semver_parts: Vec<&str> = core.split('.').collect();
-        assert!(
-            semver_parts.len() == 3
-                && semver_parts
-                    .iter()
-                    .all(|part| !part.is_empty() && part.chars().all(|ch| ch.is_ascii_digit())),
-            "OCR install pin must be a concrete semver version"
+            "OCR install must reference the OCR_VERSION variable as an explicit registry version to an isolated local prefix, not a global, local, or linked package"
         );
     }
+    // The OCR_VERSION variable (single source of truth) must resolve to an
+    // exact pinned semver. Verifying the variable itself keeps the guardrail
+    // strict without re-hardcoding the version literal in the install command.
+    let pinned_version = ocr_version_from_workflow();
     let content = ocr_pr_review_workflow_content();
+    // No alternate installs: the pinned version literal must only appear in the
+    // OCR_VERSION declaration, never re-hardcoded in any install command.
+    let literal_install_occurrences = content
+        .lines()
+        .filter(|line| line.contains(&format!("@alibaba-group/open-code-review@{pinned_version}")))
+        .count();
+    assert_eq!(
+        literal_install_occurrences, 0,
+        "Pinned version {pinned_version} must not be hard-coded in any install command; only the OCR_VERSION variable may be referenced"
+    );
+    // The cache key must reference the same OCR_VERSION variable so a version
+    // bump never leaves a stale cache key pointing at the old version.
+    assert!(
+        content.contains("key: npm-ocr-${{ runner.os }}-${{ env.OCR_VERSION }}"),
+        "Cache key must reference the single-source OCR_VERSION variable so it rotates with the pinned version"
+    );
     assert!(
         !content.contains("safe.directory '*'")
             && !content.contains("safe.directory=*")
