@@ -1,8 +1,13 @@
 use super::*;
 use crate::engine::executor::StepContext;
 use crate::engine::executors::pr_followup_types::PR_FOLLOWUP_SCHEMA_VERSION;
+use crate::engine::executors::GithubPrCommandRunner;
+use crate::engine::executors::{PrFollowupArtifactStore, PrFollowupBinding, SystemClockSleeper};
 use crate::engine::runner::EngineError;
-use serde_json::json;
+use crate::engine::transition::StepOutcome;
+use serde_json::{json, Value};
+use std::collections::BTreeSet;
+use std::sync::Mutex;
 
 fn marker_comment(fields: &str) -> String {
     format!("<!-- {MARKER_NAMESPACE} {fields} -->")
@@ -330,3 +335,5 @@ fn github_feedback_error_carries_message() {
         other => panic!("unexpected error variant: {other:?}"),
     }
 }
+
+mod issue132;

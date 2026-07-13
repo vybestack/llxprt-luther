@@ -1127,6 +1127,52 @@ fn rewrite_json_field(path: &std::path::Path, field: &str, value: serde_json::Va
     .expect("write mutated artifact");
 }
 
+fn rewrite_history_sequence_field(path: &std::path::Path, field: &str, value: serde_json::Value) {
+    let mut artifact: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(path).expect("read artifact for mutation"))
+            .expect("parse artifact for mutation");
+    artifact
+        .as_object_mut()
+        .expect("artifact object")
+        .insert(field.to_string(), value);
+    let artifact_sequence = artifact["artifact_sequence"]
+        .as_u64()
+        .expect("artifact sequence");
+    let write_sequence = artifact["write_sequence"].as_u64().expect("write sequence");
+    let producer = artifact["producer_step_id"]
+        .as_str()
+        .expect("producer step id");
+    let file_name = if let Some(artifact_name) = artifact
+        .get("artifact_name")
+        .and_then(serde_json::Value::as_str)
+    {
+        let sanitized_artifact_name: String = artifact_name
+            .chars()
+            .map(|ch| {
+                if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.') {
+                    ch
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        format!("{artifact_sequence}-{write_sequence}-{producer}-{sanitized_artifact_name}.json")
+    } else {
+        format!("{artifact_sequence}-{write_sequence}-{producer}.json")
+    };
+    let rewritten_path = path.with_file_name(file_name);
+    artifact["history_metadata"]["history_path"] =
+        serde_json::json!(rewritten_path.to_string_lossy());
+    std::fs::write(
+        &rewritten_path,
+        serde_json::to_vec_pretty(&artifact).expect("serialize mutated artifact"),
+    )
+    .expect("write mutated artifact");
+    if rewritten_path != path {
+        std::fs::remove_file(path).expect("remove original history artifact");
+    }
+}
+
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P05
 /// @requirement:REQ-PRFU-002
 /// @pseudocode lines 5-7
@@ -1162,7 +1208,7 @@ fn artifact_store_rejects_non_monotonic_global_artifact_sequence_for_consumed_fa
             &clock,
         )
         .expect("second write");
-    rewrite_json_field(
+    rewrite_history_sequence_field(
         &second.history_path,
         "artifact_sequence",
         serde_json::json!(3),
@@ -1213,7 +1259,7 @@ fn artifact_store_rejects_duplicate_global_artifact_sequence_for_consumed_family
             &clock,
         )
         .expect("second write");
-    rewrite_json_field(
+    rewrite_history_sequence_field(
         &second.history_path,
         "artifact_sequence",
         serde_json::json!(1),
@@ -1264,7 +1310,7 @@ fn artifact_store_rejects_non_monotonic_per_family_write_sequence_for_consumed_f
             &clock,
         )
         .expect("second write");
-    rewrite_json_field(&second.history_path, "write_sequence", serde_json::json!(3));
+    rewrite_history_sequence_field(&second.history_path, "write_sequence", serde_json::json!(3));
 
     let err = store
         .next_sequence(&binding, "pr-check-status")

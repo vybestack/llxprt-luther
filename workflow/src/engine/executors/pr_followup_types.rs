@@ -217,6 +217,10 @@ impl ValidationState {
     }
 }
 
+/// Sentinel used when a marker action has no remediation output head.
+/// Empty strings are invalid and are never equivalent to this value.
+pub const NO_REMEDIATION_OUTPUT_HEAD: &str = "none";
+
 /// Common PR artifact binding fields shared by PR follow-through artifacts.
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P03
 /// @requirement:REQ-PRFU-002
@@ -234,6 +238,66 @@ pub struct PrFollowupBinding {
     pub base_sha: Option<String>,
 }
 
+/// Describes whether two bindings refer to the same logical PR identity
+/// (same run, repository, PR number, and branch topology), independent of
+/// the current head revision. Two bindings that share PR identity but differ
+/// in `head_sha` belong to the same PR at different revisions — exactly the
+/// situation that arises after a remediation push advances the branch head.
+///
+/// This separation is the architectural invariant that lets the artifact
+/// store distinguish "stale prior-head artifact for the same PR" from
+/// "artifact for a genuinely different PR." Only the former may be
+/// gracefully ignored; the latter is always a binding mismatch.
+/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P03
+/// @requirement:REQ-PRFU-002
+impl PrFollowupBinding {
+    /// Returns true when `self` and `other` identify the same PR within the
+    /// same run (stable identity fields match and are non-empty/valid). The
+    /// head revision (`head_sha`/`base_sha`) is intentionally excluded so
+    /// that a prior-head artifact does not masquerade as a different PR.
+    #[must_use]
+    pub fn pr_identity_matches(&self, other: &PrFollowupBinding) -> bool {
+        self.schema_version != 0
+            && self.schema_version == other.schema_version
+            && !self.run_id.is_empty()
+            && self.run_id == other.run_id
+            && !self.repository_owner.is_empty()
+            && self.repository_owner == other.repository_owner
+            && !self.repository_name.is_empty()
+            && self.repository_name == other.repository_name
+            && self.pr_number != 0
+            && self.pr_number == other.pr_number
+            && !self.head_ref.is_empty()
+            && self.head_ref == other.head_ref
+            && !self.base_ref.is_empty()
+            && self.base_ref == other.base_ref
+    }
+
+    /// Returns true when `self` and `other` share the same head revision
+    /// (head SHA and base SHA). Both bindings must also carry non-empty SHAs
+    /// so that an uninitialized binding can never match a real one.
+    #[must_use]
+    pub fn head_revision_matches(&self, other: &PrFollowupBinding) -> bool {
+        !self.head_sha.is_empty()
+            && self.head_sha == other.head_sha
+            && self.base_sha.as_ref().is_none_or(|sha| !sha.is_empty())
+            && other.base_sha.as_ref().is_none_or(|sha| !sha.is_empty())
+            && self.base_sha == other.base_sha
+    }
+
+    /// Returns true when `other` describes a different head revision of the
+    /// **same** PR as `self`. This is the precise condition under which an
+    /// artifact bound to `other` may be treated as stale (and for optional
+    /// inputs, as absent) rather than as a fatal binding mismatch.
+    ///
+    /// Returns `false` for genuinely different PRs.
+    /// @requirement:REQ-PRFU-002
+    #[must_use]
+    pub fn is_stale_prior_head_of(&self, other: &PrFollowupBinding) -> bool {
+        self.pr_identity_matches(other) && !self.head_revision_matches(other)
+    }
+}
+
 /// Common artifact sequence metadata shared by PR follow-through artifacts.
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P03
 /// @requirement:REQ-PRFU-002
@@ -243,6 +307,114 @@ pub struct ArtifactSequenceMetadata {
     pub artifact_sequence: u64,
     pub write_sequence: u64,
     pub producer_step_id: String,
+}
+
+/// Unified immutable evidence reference carried by a `comment_fixed` pending
+/// marker action. Every field is extracted from the action's JSON value by
+/// [`FixedActionEvidenceRef::from_action_value`] and validated together, so
+/// the cross-head evidence lookup enforces a complete, self-consistent
+/// provenance anchor before any history read.
+///
+/// Fields:
+/// - `result_sequence`: the `artifact_sequence`/`write_sequence`/`producer_step_id`
+///   of the exact remediation-result artifact snapshot the action was derived
+///   from. All three must be nonzero and non-empty.
+/// - `plan_artifact_sequence`: the `artifact_sequence` of the remediation plan
+///   that produced the result, anchoring retry-scope consistency.
+/// - `remediation_attempt_index`: the attempt index from the result's retry
+///   scope, anchoring the retry-scope family.
+/// - `source_head_sha` / `output_head_sha`: the input/output heads of the
+///   remediation cycle that produced this action. `output_head_sha` must be
+///   non-empty for a cross-head `comment_fixed` action (no `none` wildcard).
+///
+/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P05
+/// @requirement:REQ-PRFU-002
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FixedActionEvidenceRef {
+    pub result_sequence: ArtifactSequenceMetadata,
+    pub plan_artifact_sequence: u64,
+    pub remediation_attempt_index: u64,
+    pub source_head_sha: String,
+    pub output_head_sha: String,
+}
+
+impl FixedActionEvidenceRef {
+    /// Extracts and validates a complete evidence reference from a pending
+    /// action JSON value. Returns `Ok` only when every field is present,
+    /// nonzero/non-empty, and internally consistent. A missing or zero-valued
+    /// field produces a descriptive error so the caller fails closed.
+    /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P05
+    /// @requirement:REQ-PRFU-002
+    pub fn from_action_value(value: &Value) -> Result<Self, String> {
+        let artifact_sequence = value
+            .get("remediation_result_artifact_sequence")
+            .and_then(Value::as_u64)
+            .ok_or("missing remediation_result_artifact_sequence")?;
+        let write_sequence = value
+            .get("remediation_result_write_sequence")
+            .and_then(Value::as_u64)
+            .ok_or("missing remediation_result_write_sequence")?;
+        let producer_step_id = value
+            .get("remediation_result_producer_step_id")
+            .and_then(Value::as_str)
+            .filter(|text| !text.is_empty())
+            .ok_or("missing or empty remediation_result_producer_step_id")?;
+        if artifact_sequence == 0 || write_sequence == 0 {
+            return Err("zero remediation_result sequence value".to_string());
+        }
+        let plan_artifact_sequence = value
+            .get("plan_artifact_sequence")
+            .and_then(Value::as_u64)
+            .ok_or("missing plan_artifact_sequence")?;
+        if plan_artifact_sequence == 0 {
+            return Err("zero plan_artifact_sequence".to_string());
+        }
+        let remediation_attempt_index = value
+            .get("remediation_attempt_index")
+            .and_then(Value::as_u64)
+            .ok_or("missing remediation_attempt_index")?;
+        let source_head_sha = value
+            .get("source_head_sha")
+            .and_then(Value::as_str)
+            .filter(|text| !text.is_empty())
+            .ok_or("missing or empty source_head_sha")?
+            .to_string();
+        let output_head = value.get("remediation_output_head").and_then(Value::as_str);
+        let output_head_sha_field = value
+            .get("remediation_output_head_sha")
+            .and_then(Value::as_str);
+        if matches!((output_head, output_head_sha_field), (Some(left), Some(right)) if left != right)
+        {
+            return Err("inconsistent remediation output head fields".to_string());
+        }
+        if value
+            .get("remediation_input_head_sha")
+            .and_then(Value::as_str)
+            .is_some_and(|head| head != source_head_sha)
+        {
+            return Err("inconsistent remediation input head fields".to_string());
+        }
+        let output_head_sha = output_head
+            .or(output_head_sha_field)
+            .unwrap_or_default()
+            .to_string();
+        if output_head_sha.is_empty() || output_head_sha == NO_REMEDIATION_OUTPUT_HEAD {
+            return Err(format!(
+                "comment_fixed cross-head action must carry a non-empty remediation_output_head, got {output_head_sha:?}"
+            ));
+        }
+        Ok(Self {
+            result_sequence: ArtifactSequenceMetadata {
+                artifact_sequence,
+                write_sequence,
+                producer_step_id: producer_step_id.to_string(),
+            },
+            plan_artifact_sequence,
+            remediation_attempt_index,
+            source_head_sha,
+            output_head_sha,
+        })
+    }
 }
 
 /// PR identity artifact schema contract for `pr.json`.

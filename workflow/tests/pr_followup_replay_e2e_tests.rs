@@ -16,6 +16,7 @@
 
 use std::collections::VecDeque;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use luther_workflow::engine::executor::ExecutorRegistry;
@@ -210,6 +211,20 @@ fn pr_identity_view() -> Value {
     })
 }
 
+fn pr_identity_view_with_head(head_sha: &str) -> Value {
+    json!({
+        "number": PR_NUMBER.parse::<u64>().unwrap(),
+        "url": "https://github.com/example/workflow/pull/1910",
+        "headRefName": format!("luther/issue-{ISSUE_NUMBER}"),
+        "headRefOid": head_sha,
+        "baseRefName": "main",
+        "baseRefOid": BASE_SHA,
+        "state": "OPEN",
+        "isDraft": false,
+        "id": "PR_kwDOExample"
+    })
+}
+
 fn empty_review_threads() -> Value {
     json!({
         "data": { "repository": { "pullRequest": { "reviewThreads": {
@@ -262,6 +277,8 @@ fn coderabbit_ready_readiness() -> Value {
 #[derive(Clone)]
 struct ReplayGithubRunner {
     pr_view: Value,
+    next_pr_view: Value,
+    head_advanced: Arc<AtomicBool>,
     checks: Arc<Mutex<VecDeque<CheckObservation>>>,
     last_check: CheckObservation,
     review_thread_pages: Vec<Value>,
@@ -273,7 +290,7 @@ struct ReplayGithubRunner {
 }
 
 impl ReplayGithubRunner {
-    fn new(scenario: &ScenarioFixtures) -> Self {
+    fn new(scenario: &ScenarioFixtures, head_advanced: Arc<AtomicBool>) -> Self {
         let last_check = scenario
             .check_observations
             .last()
@@ -286,6 +303,8 @@ impl ReplayGithubRunner {
             .unwrap_or_else(|| json!({ "total_count": 0, "check_runs": [] }));
         Self {
             pr_view: pr_identity_view(),
+            next_pr_view: pr_identity_view_with_head(NEXT_HEAD_SHA),
+            head_advanced,
             checks: Arc::new(Mutex::new(
                 scenario.check_observations.iter().cloned().collect(),
             )),
@@ -346,7 +365,12 @@ impl GithubPrCommandRunner for ReplayGithubRunner {
         let is = |needle: &str| argv.iter().any(|arg| arg == needle);
 
         if is("view") {
-            return Ok(self.pr_view.to_string());
+            let view = if self.head_advanced.load(Ordering::Acquire) {
+                self.next_pr_view.clone()
+            } else {
+                self.pr_view.clone()
+            };
+            return Ok(view.to_string());
         }
         if is("checks") {
             return Ok(self.pop_check().gh_pr_checks.to_string());
@@ -507,29 +531,36 @@ fn replay_remediation_result(plan: &Value, run_id: &str) -> Value {
         .get("artifact_sequence")
         .cloned()
         .unwrap_or(Value::Null);
+    // Derive input_head_sha from the plan artifact so that multi-pass
+    // remediation reflects the current head binding rather than a hardcoded
+    // initial head.
+    let input_head = plan
+        .get("head_sha")
+        .and_then(Value::as_str)
+        .unwrap_or(HEAD_SHA);
     json!({
         "run_id": run_id,
         "repository_owner": REPO_OWNER,
         "repository_name": REPO_NAME,
         "pr_number": PR_NUMBER.parse::<u64>().expect("PR_NUMBER is numeric"),
-        "input_head_sha": HEAD_SHA,
+        "input_head_sha": input_head,
         "output_head_sha": NEXT_HEAD_SHA,
         "overall_status": "success",
         "plan_artifact_sequence": plan_sequence,
         "results": replay_remediation_results(plan),
         "verification_commands": [],
-        "retry_scope": replay_retry_scope(run_id, plan_sequence)
+        "retry_scope": replay_retry_scope_for_head(run_id, plan_sequence, input_head)
     })
 }
 
-fn replay_retry_scope(run_id: &str, plan_sequence: Value) -> Value {
+fn replay_retry_scope_for_head(run_id: &str, plan_sequence: Value, input_head: &str) -> Value {
     json!({
         "scope_kind": "remediation_result_validation",
         "run_id": run_id,
         "repository_owner": REPO_OWNER,
         "repository_name": REPO_NAME,
         "pr_number": PR_NUMBER.parse::<u64>().expect("PR_NUMBER is numeric"),
-        "input_head_sha": HEAD_SHA,
+        "input_head_sha": input_head,
         "output_head_sha": NEXT_HEAD_SHA,
         "plan_artifact_sequence": plan_sequence,
         "remediation_attempt_index": 0,
@@ -552,6 +583,10 @@ fn replay_remediation_results(plan: &Value) -> Vec<Value> {
 }
 
 fn replay_remediation_item_result(item: &Value) -> Value {
+    let input_head = item
+        .get("input_head_sha")
+        .and_then(Value::as_str)
+        .unwrap_or(HEAD_SHA);
     let source_type = item
         .get("source_type")
         .and_then(Value::as_str)
@@ -566,7 +601,7 @@ fn replay_remediation_item_result(item: &Value) -> Value {
         "source_type": source_type,
         "source_id": source_id,
         "stable_marker_key": item.get("stable_marker_key").cloned().unwrap_or(Value::Null),
-        "input_head_sha": HEAD_SHA,
+        "input_head_sha": input_head,
         "output_head_sha": NEXT_HEAD_SHA,
         "status": "fixed",
         "action": "scripted remediation",
@@ -650,12 +685,14 @@ impl PostPrTestCommandRunner for ReplayTestRunner {
 #[derive(Clone)]
 struct ReplayPushRunner {
     calls: Arc<Mutex<Vec<PushRemediationCommandRequest>>>,
+    head_advanced: Arc<AtomicBool>,
 }
 
 impl ReplayPushRunner {
-    fn new() -> Self {
+    fn with_head_signal(head_advanced: Arc<AtomicBool>) -> Self {
         Self {
             calls: Arc::new(Mutex::new(Vec::new())),
+            head_advanced,
         }
     }
 }
@@ -706,7 +743,10 @@ impl PushRemediationCommandRunner for ReplayPushRunner {
             }
             "status-porcelain" => " M src/lib.rs\0".to_string(),
             "commit" => String::new(),
-            "push" => String::new(),
+            "push" => {
+                self.head_advanced.store(true, Ordering::Release);
+                String::new()
+            }
             _ => String::new(),
         };
         PushRemediationCommandResult {
@@ -742,9 +782,10 @@ struct ReplayHandles {
 /// `log_completion` and `abandon_and_log` steps.
 fn build_replay_registry(scenario: &ScenarioFixtures) -> (ExecutorRegistry, ReplayHandles) {
     let clock = NoSleepClock::default();
-    let github = ReplayGithubRunner::new(scenario);
+    let head_advanced = Arc::new(AtomicBool::new(false));
+    let github = ReplayGithubRunner::new(scenario, head_advanced.clone());
     let feedback = ReplayFeedbackAdapter::new(scenario.feedback_decisions.clone());
-    let push = ReplayPushRunner::new();
+    let push = ReplayPushRunner::with_head_signal(head_advanced);
 
     let mut registry = ExecutorRegistry::new();
     // Terminal/log steps.
@@ -1392,8 +1433,277 @@ fn replay_terminal_fatal_propagates_fatal_source() {
 }
 
 // ============================================================================
+// Multi-pass regression: remediation push changes head; second feedback/
+// evaluation/plan cycle must succeed using only current-head artifacts.
+// ============================================================================
+
+/// Scenario for the multi-pass head-change regression: actionable feedback on
+/// the first head drives a remediation+push, then the re-review reports the
+/// thread resolved, terminating the loop with a clean plan on the new head.
+/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P05
+/// @requirement:REQ-PRFU-002
+fn multi_pass_head_change_scenario() -> ScenarioFixtures {
+    ScenarioFixtures {
+        check_observations: vec![CheckObservation::all_passed()],
+        review_thread_pages: vec![
+            coderabbit_actionable_threads(),
+            coderabbit_actionable_threads(),
+            empty_review_threads(),
+        ],
+        review_comment_pages: vec![json!([])],
+        issue_comment_pages: vec![json!([coderabbit_summary_comment()])],
+        readiness_pages: vec![
+            coderabbit_ready_readiness(),
+            coderabbit_ready_readiness(),
+            coderabbit_ready_readiness_with_head(NEXT_HEAD_SHA),
+            coderabbit_ready_readiness_with_head(NEXT_HEAD_SHA),
+        ],
+        feedback_decisions: vec!["valid".to_string()],
+    }
+}
+
+/// Reads all immutable history snapshots for `artifact_family` and returns
+/// them as parsed JSON values paired with their on-disk paths.
+fn read_history_snapshots(
+    run: &TailRun,
+    artifact_family: &str,
+) -> Vec<(std::path::PathBuf, Value)> {
+    let root = run
+        .artifact_root
+        .join("pr-followup")
+        .join("history")
+        .join(&run.run_id)
+        .join(REPO_OWNER)
+        .join(REPO_NAME)
+        .join(PR_NUMBER)
+        .join(artifact_family);
+    assert!(
+        root.exists(),
+        "immutable history directory for {artifact_family} must exist"
+    );
+    let mut paths: Vec<_> = std::fs::read_dir(&root)
+        .unwrap_or_else(|err| panic!("read history dir {}: {err}", root.display()))
+        .filter_map(std::result::Result::ok)
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|ext| ext == "json"))
+        .collect();
+    paths.sort();
+    paths
+        .into_iter()
+        .map(|path| {
+            let raw = std::fs::read_to_string(&path)
+                .unwrap_or_else(|err| panic!("read history file {}: {err}", path.display()));
+            let value: Value = serde_json::from_str(&raw)
+                .unwrap_or_else(|err| panic!("parse history file {}: {err}", path.display()));
+            (path, value)
+        })
+        .collect()
+}
+
+/// Asserts every history snapshot for `artifact_family` carries the correct
+/// `history_metadata.artifact_family` and that its filename stem matches its
+/// embedded `artifact_sequence-write_sequence-producer_step_id` identity.
+fn assert_history_snapshots_well_formed(run: &TailRun, artifact_family: &str) {
+    let snapshots = read_history_snapshots(run, artifact_family);
+    assert!(
+        !snapshots.is_empty(),
+        "at least one immutable history snapshot must exist for {artifact_family}"
+    );
+    for (path, value) in &snapshots {
+        let family = value
+            .get("history_metadata")
+            .and_then(|m| m.get("artifact_family"))
+            .and_then(Value::as_str);
+        assert_eq!(
+            family,
+            Some(artifact_family),
+            "every history snapshot must carry correct artifact_family metadata in {}",
+            path.display()
+        );
+        let a_seq = value
+            .get("artifact_sequence")
+            .and_then(Value::as_u64)
+            .unwrap_or_else(|| panic!("missing artifact_sequence in {}", path.display()));
+        let w_seq = value
+            .get("write_sequence")
+            .and_then(Value::as_u64)
+            .unwrap_or_else(|| panic!("missing write_sequence in {}", path.display()));
+        let producer = value
+            .get("producer_step_id")
+            .and_then(Value::as_str)
+            .unwrap_or_else(|| panic!("missing producer_step_id in {}", path.display()));
+        let expected_prefix = format!("{a_seq}-{w_seq}-{producer}");
+        let stem = path
+            .file_stem()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default();
+        assert!(
+            stem.starts_with(&expected_prefix),
+            "history filename {stem} must start with expected prefix {expected_prefix}"
+        );
+    }
+}
+
+/// Asserts that immutable history for `artifact_family` contains at least one
+/// snapshot whose `input_head_sha` equals `expected_head`.
+fn assert_history_contains_input_head(run: &TailRun, artifact_family: &str, expected_head: &str) {
+    let snapshots = read_history_snapshots(run, artifact_family);
+    let has_head = snapshots.iter().any(|(_, value)| {
+        value.get("input_head_sha").and_then(Value::as_str) == Some(expected_head)
+    });
+    assert!(
+        has_head,
+        "immutable history must contain a snapshot with input_head_sha={expected_head}"
+    );
+}
+
+/// Asserts every `comment_fixed` pending marker action carries nonzero
+/// immutable remediation-result sequence references. This is the provenance
+/// anchor the cross-head evidence lookup uses to select the exact snapshot
+/// from history.
+fn assert_pending_actions_carry_evidence_provenance(run: &TailRun) {
+    let pending = read_artifact(run, "pending-feedback-marker-actions");
+    let pending_actions = pending
+        .get("pending_actions")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    for action in &pending_actions {
+        if action.get("action_kind").and_then(Value::as_str) != Some("comment_fixed") {
+            continue;
+        }
+        assert!(
+            action
+                .get("remediation_result_artifact_sequence")
+                .and_then(Value::as_u64)
+                .is_some_and(|seq| seq > 0),
+            "comment_fixed action must carry nonzero remediation_result_artifact_sequence: {:?}",
+            action.get("remediation_result_artifact_sequence")
+        );
+        assert!(
+            action
+                .get("remediation_result_write_sequence")
+                .and_then(Value::as_u64)
+                .is_some_and(|seq| seq > 0),
+            "comment_fixed action must carry nonzero remediation_result_write_sequence"
+        );
+        assert!(
+            action
+                .get("remediation_result_producer_step_id")
+                .and_then(Value::as_str)
+                .is_some_and(|text| !text.is_empty()),
+            "comment_fixed action must carry non-empty remediation_result_producer_step_id"
+        );
+    }
+}
+
+/// Regression for issue 132: after a remediation push advances the PR head,
+/// the second capture_pr_identity -> watch_pr_checks -> collect_ci_failures
+/// -> collect_coderabbit_feedback -> evaluate -> build_remediation_plan cycle
+/// must succeed. A stale prior-head `post-pr-test-result` (written before the
+/// push and not re-collected after it) occupies the canonical path and must
+/// not poison the plan builder's binding validation.
+/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P05
+/// @requirement:REQ-PRFU-002
+#[test]
+fn multi_pass_remediation_head_change_second_plan_succeeds() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let scenario = multi_pass_head_change_scenario();
+    let run = run_tail(&scenario, &temp);
+
+    assert_success_at_log_completion(&run);
+
+    let result = read_artifact(&run, "pr-remediation-result");
+    assert_eq!(
+        result.get("overall_status").and_then(Value::as_str),
+        Some("success"),
+        "valid actionable feedback should drive a successful remediation result"
+    );
+    assert!(
+        run.handles.push.push_invocations() >= 1,
+        "the remediation loop must invoke at least one git push"
+    );
+
+    let plan = read_artifact(&run, "pr-remediation-plan");
+    assert_eq!(
+        plan.get("head_sha").and_then(Value::as_str),
+        Some(NEXT_HEAD_SHA),
+        "the plan artifact must carry the current head_sha after the push"
+    );
+
+    let pr = read_artifact(&run, "pr");
+    assert_eq!(
+        pr.get("head_sha").and_then(Value::as_str),
+        Some(NEXT_HEAD_SHA),
+        "the pr identity artifact must reflect the post-push head_sha"
+    );
+
+    assert_eq!(
+        result.get("input_head_sha").and_then(Value::as_str),
+        Some(HEAD_SHA),
+        "the canonical remediation result carries the first pass input_head_sha (HEAD_SHA)"
+    );
+
+    assert_history_contains_input_head(&run, "pr-remediation-result", HEAD_SHA);
+    assert_history_snapshots_well_formed(&run, "pr-remediation-result");
+    assert_pending_actions_carry_evidence_provenance(&run);
+
+    // The marker step must actually reply and resolve through the cross-head
+    // evidence path: the carried-forward pending actions have
+    // source_head=HEAD_SHA but the binding head is NEXT_HEAD_SHA, so evidence
+    // is located from immutable history, not the canonical envelope.
+    assert_marker_replied_and_resolved(&run);
+}
+
+/// Asserts the marker report shows a complete state with at least one posted
+/// comment and one resolved thread, proving the reply+resolve replay executed
+/// against cross-head evidence.
+fn assert_marker_replied_and_resolved(run: &TailRun) {
+    let marker_report = read_artifact(run, "pr-feedback-marker-report");
+    assert_eq!(
+        marker_report.get("marker_state").and_then(Value::as_str),
+        Some("complete"),
+        "marker step must complete after replying and resolving"
+    );
+    let posted = marker_report
+        .get("posted_comments")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        !posted.is_empty(),
+        "marker must post at least one deterministic reply comment for carried-forward actions"
+    );
+    let resolved = marker_report
+        .get("resolved_threads")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        !resolved.is_empty(),
+        "marker must resolve at least one thread for carried-forward fixed actions"
+    );
+}
+
+// ============================================================================
 // Additional canned payloads used by feedback scenarios.
 // ============================================================================
+
+/// Readiness check-run payload for a given head SHA.
+fn coderabbit_ready_readiness_with_head(head_sha: &str) -> Value {
+    json!({
+        "total_count": 1,
+        "check_runs": [{
+            "id": 6001,
+            "name": "CodeRabbit",
+            "status": "completed",
+            "conclusion": "success",
+            "head_sha": head_sha,
+            "app": { "slug": "coderabbitai[bot]" },
+            "output": { "summary": "CodeRabbit review completed" }
+        }]
+    })
+}
 
 /// One unresolved CodeRabbit review thread carrying an actionable comment.
 fn coderabbit_actionable_threads() -> Value {

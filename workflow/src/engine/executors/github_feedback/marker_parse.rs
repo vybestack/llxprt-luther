@@ -1,6 +1,7 @@
 use super::*;
 use crate::engine::executor::{interpolate_string, StepContext};
 use crate::engine::executors::pr_followup_artifacts::PrFollowupArtifactStore;
+use crate::engine::executors::pr_followup_types::NO_REMEDIATION_OUTPUT_HEAD;
 use crate::engine::executors::pr_followup_types::{PrFollowupBinding, PR_FOLLOWUP_SCHEMA_VERSION};
 use crate::engine::runner::EngineError;
 use serde_json::{json, Value};
@@ -57,7 +58,7 @@ pub(super) fn parse_hidden_marker(body: &str) -> Result<RemoteFeedbackMarker, Ma
     Ok(RemoteFeedbackMarker {
         stable_marker_key,
         source_head_sha,
-        remediation_output_head_sha: (remediation_output_head != "none")
+        remediation_output_head_sha: (remediation_output_head != NO_REMEDIATION_OUTPUT_HEAD)
             .then(|| remediation_output_head.to_string()),
         body_hash,
         action_kind,

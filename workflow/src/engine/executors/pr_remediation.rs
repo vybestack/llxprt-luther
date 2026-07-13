@@ -44,13 +44,14 @@ use std::time::{Duration, Instant};
 use serde_json::{json, Value};
 
 use crate::engine::executor::{interpolate_string, StepContext, StepExecutor};
+use crate::engine::executors::github_feedback::normalize_legacy_pending_marker_artifact;
 use crate::engine::executors::pr_followup_artifacts::{
     ArtifactWriter, ClockSleeper, PrFollowupArtifactStore, SystemClockSleeper,
     SystemPrFollowupFilesystem,
 };
 use crate::engine::executors::pr_followup_types::{
-    value_has_summary_marker_key, PlanState, PrFollowupBinding, ValidationState,
-    PR_FOLLOWUP_SCHEMA_VERSION,
+    value_has_summary_marker_key, ArtifactSequenceMetadata, PlanState, PrFollowupBinding,
+    ValidationState, PR_FOLLOWUP_SCHEMA_VERSION,
 };
 use crate::engine::runner::EngineError;
 use crate::engine::transition::StepOutcome;
@@ -437,291 +438,14 @@ fn append_evaluation_blockers(
     }
 }
 
+#[cfg(test)]
+mod issue132_pending_action_tests;
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P10
 /// @requirement:REQ-PRFU-013
 /// @pseudocode lines 9-10
-fn write_pending_marker_actions_for_invalid_feedback(
-    store: &PrFollowupArtifactStore,
-    binding: &PrFollowupBinding,
-    step_id: &str,
-    step_order: u64,
-    mark_invalid: &[Value],
-    clock: &dyn ClockSleeper,
-) -> Result<(), EngineError> {
-    if mark_invalid.is_empty() {
-        return Ok(());
-    }
+mod pending_marker_actions;
+use pending_marker_actions::*;
 
-    write_pending_marker_actions(
-        store,
-        binding,
-        step_id,
-        step_order,
-        mark_invalid,
-        None,
-        clock,
-    )
-}
-
-fn write_pending_marker_actions(
-    store: &PrFollowupArtifactStore,
-    binding: &PrFollowupBinding,
-    step_id: &str,
-    step_order: u64,
-    items: &[Value],
-    remediation_output_head_sha: Option<&str>,
-    clock: &dyn ClockSleeper,
-) -> Result<(), EngineError> {
-    let prior = store
-        .read_current_json(binding, "pending-feedback-marker-actions")
-        .ok();
-    let carry_forward = prior
-        .as_ref()
-        .and_then(|value| value.get("artifact_sequence"))
-        .and_then(Value::as_u64);
-    let mut pending_actions: Vec<Value> = prior
-        .as_ref()
-        .and_then(|value| value.get("pending_actions"))
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
-    // Carry-forward pruning: drop any prior summary-keyed action so stale
-    // pre-fix pending summary actions are removed instead of re-persisted.
-    pending_actions.retain(|action| !value_has_summary_marker_key(action));
-    let mut seen: BTreeSet<String> = pending_actions
-        .iter()
-        .filter_map(|action| {
-            action
-                .get("idempotency_key")
-                .and_then(Value::as_str)
-                .map(ToString::to_string)
-        })
-        .collect();
-
-    for item in items {
-        // Defensive second gate: never materialize a pending action for an
-        // informational summary/walkthrough marker, regardless of upstream
-        // routing.
-        if value_has_summary_marker_key(item) {
-            continue;
-        }
-        let action = pending_marker_action(binding, item, remediation_output_head_sha);
-        if let Some(key) = action.get("idempotency_key").and_then(Value::as_str) {
-            if seen.insert(key.to_string()) {
-                pending_actions.push(action);
-            }
-        }
-    }
-
-    pending_actions.sort_by(|left, right| {
-        left.get("idempotency_key")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .cmp(
-                right
-                    .get("idempotency_key")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default(),
-            )
-    });
-
-    let remediation_output_head_sha_value = remediation_output_head_sha
-        .map(|head| json!(head))
-        .unwrap_or(Value::Null);
-    let payload = PendingMarkerActionsArtifact {
-        pending_actions,
-        carry_forward_from_artifact_sequence: carry_forward,
-        marker_policy: json!({
-            "invalid": "comment_invalid",
-            "out_of_scope": "comment_out_of_scope",
-            "fixed": "comment_fixed",
-            "changed": "comment_fixed",
-            "remediation_output_head_sha": remediation_output_head_sha_value
-        }),
-        updated_at: clock.now_rfc3339(),
-    };
-    store.write_json_artifact(
-        binding,
-        "pending-feedback-marker-actions",
-        step_id,
-        step_order,
-        &payload,
-        None,
-        clock,
-    )?;
-    Ok(())
-}
-
-/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P10
-/// @requirement:REQ-PRFU-013
-/// @pseudocode lines 7-9
-fn pending_marker_action(
-    binding: &PrFollowupBinding,
-    item: &Value,
-    remediation_output_head_sha: Option<&str>,
-) -> Value {
-    let source_id = string_field(item, "source_id", "unknown-feedback-item");
-    let stable_marker_key = item
-        .get("stable_marker_key")
-        .and_then(Value::as_str)
-        .unwrap_or(&source_id)
-        .to_string();
-    let decision = item
-        .get("decision")
-        .and_then(Value::as_str)
-        .unwrap_or("invalid");
-    let marker_action = item
-        .get("marker_action")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    let action_kind = if marker_action == "comment_fixed" {
-        "comment_fixed"
-    } else if decision == "out_of_scope" {
-        "comment_out_of_scope"
-    } else {
-        "comment_invalid"
-    };
-    let body_hash = item
-        .get("body_hash")
-        .and_then(Value::as_str)
-        .unwrap_or("no-body-hash")
-        .to_string();
-    let remediation_output_head_value = remediation_output_head_sha
-        .map(|head| json!(head))
-        .unwrap_or(Value::Null);
-    let remediation_output_head = remediation_output_head_sha.unwrap_or("none");
-    let remediation_input_head_sha = item
-        .get("remediation_input_head_sha")
-        .cloned()
-        .unwrap_or_else(|| json!(binding.head_sha));
-    let idempotency_key = format!(
-        "{}:{}:{}:{}:{}:{}:{}:{}",
-        binding.run_id,
-        binding.repository_owner,
-        binding.repository_name,
-        binding.pr_number,
-        binding.head_sha,
-        remediation_output_head,
-        stable_marker_key,
-        action_kind
-    );
-
-    json!({
-        "action_id": format!("{action_kind}:{stable_marker_key}:{body_hash}:{remediation_output_head}"),
-        "action_kind": action_kind,
-        "item_id": source_id,
-        "original_feedback_identity": {
-            "item_id": source_id,
-            "stable_marker_key": stable_marker_key,
-            "body_hash": body_hash,
-            "source_head_sha": binding.head_sha,
-            "thread_id": item.get("thread_id").cloned().unwrap_or(Value::Null),
-            "comment_database_id": item.get("comment_database_id").cloned().unwrap_or(Value::Null)
-        },
-        "thread_id": item.get("thread_id").cloned().unwrap_or(Value::Null),
-        "comment_database_id": item.get("comment_database_id").cloned().unwrap_or(Value::Null),
-        "stable_marker_key": stable_marker_key,
-        "source_head_sha": binding.head_sha,
-        "remediation_input_head_sha": remediation_input_head_sha,
-        "remediation_output_head_sha": remediation_output_head_value,
-        "remediation_output_head": remediation_output_head,
-        "body_hash": body_hash,
-        "idempotency_key": idempotency_key,
-        "comment_body_template_id": action_kind,
-        "comment_body_artifact_path": Value::Null,
-        "resolution_required": action_kind == "comment_fixed",
-        "status": "pending",
-        "reason": string_field(item, "reason", decision),
-        "response_text": item.get("response_text").cloned().unwrap_or(Value::Null),
-        "remediation_result_status": item.get("remediation_result_status").cloned().unwrap_or(Value::Null),
-        "remediation_result_evidence": item.get("remediation_result_evidence").cloned().unwrap_or(Value::Null),
-        "evidence": item.get("evidence").cloned().unwrap_or_else(|| item.clone()),
-        "source_artifact_sequence": item.get("source_artifact_sequence").cloned().unwrap_or(Value::Null)
-    })
-}
-
-/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P11
-/// @requirement:REQ-PRFU-014
-/// @pseudocode lines 24-28
-fn write_pending_marker_actions_for_fixed_feedback(
-    store: &PrFollowupArtifactStore,
-    binding: &PrFollowupBinding,
-    step_id: &str,
-    step_order: u64,
-    plan: &Value,
-    validation_payload: &RemediationResultValidationArtifact,
-    clock: &dyn ClockSleeper,
-) -> Result<(), EngineError> {
-    let fixed_items = fixed_feedback_marker_items(plan, validation_payload);
-    if fixed_items.is_empty() {
-        return Ok(());
-    }
-    write_pending_marker_actions(
-        store,
-        binding,
-        step_id,
-        step_order,
-        &fixed_items,
-        Some(validation_payload.output_head_sha.as_str()),
-        clock,
-    )
-}
-
-/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P11
-/// @requirement:REQ-PRFU-014
-/// @pseudocode lines 24-28
-fn fixed_feedback_marker_items(
-    plan: &Value,
-    validation_payload: &RemediationResultValidationArtifact,
-) -> Vec<Value> {
-    let mut plan_items = plan_items_by_key(plan);
-    let mut items = Vec::new();
-    for result in &validation_payload.results {
-        let source_type = string_field(result, "source_type", "");
-        let source_id = string_field(result, "source_id", "");
-        if source_type != "coderabbit_feedback" {
-            continue;
-        }
-        let status = string_field(result, "status", "");
-        if !matches!(
-            status.as_str(),
-            "fixed" | "changed" | "already_satisfied" | "not_reproduced"
-        ) {
-            continue;
-        }
-        let key = format!("{source_type}:{source_id}");
-        let Some(mut item) = plan_items.remove(&key) else {
-            continue;
-        };
-        if let Some(thread_id) = result.get("thread_id").cloned() {
-            item["thread_id"] = thread_id;
-        }
-        if let Some(comment_database_id) = result.get("comment_database_id").cloned() {
-            item["comment_database_id"] = comment_database_id;
-        }
-        item["decision"] = json!("valid");
-        item["marker_action"] = json!("comment_fixed");
-        item["remediation_result_status"] = json!(status);
-        item["remediation_input_head_sha"] = json!(validation_payload.input_head_sha.clone());
-        item["remediation_output_head_sha"] = json!(validation_payload.output_head_sha.clone());
-        if let Some(response_text) = result.get("response_text").cloned() {
-            item["response_text"] = response_text;
-        }
-        item["remediation_result_evidence"] = result
-            .get("evidence")
-            .cloned()
-            .unwrap_or_else(|| result.clone());
-        items.push(item);
-    }
-    items
-}
-
-/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P10
-/// @requirement:REQ-PRFU-013
-/// @pseudocode lines 3,10-11
-/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P10
-/// @requirement:REQ-PRFU-013
-/// @pseudocode lines 3
 // Pre-existing artifact writer shape shared by remediation executors.
 #[allow(clippy::too_many_arguments)]
 fn write_fatal_plan(
@@ -2354,7 +2078,7 @@ fn validate_remediation_result(
     } else {
         None
     };
-    store.write_json_artifact(
+    let result_write_record = store.write_json_artifact(
         &binding,
         "pr-remediation-result",
         &step_id,
@@ -2364,9 +2088,16 @@ fn validate_remediation_result(
         clock,
     )?;
     if validation.outcome == StepOutcome::Success {
-        write_pending_marker_actions_for_fixed_feedback(
-            &store, &binding, &step_id, step_order, &plan, &payload, clock,
-        )?;
+        write_pending_marker_actions_for_fixed_feedback(&FixedFeedbackMarkerContext {
+            store: &store,
+            binding: &binding,
+            step_id: &step_id,
+            step_order,
+            plan: &plan,
+            validation_payload: &payload,
+            result_sequence: &result_write_record.sequence,
+            clock,
+        })?;
     }
 
     Ok(validation.outcome)
