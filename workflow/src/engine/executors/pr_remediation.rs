@@ -5,6 +5,7 @@
 //! @requirement:REQ-PRFU-013,REQ-PRFU-015,REQ-PRFU-017,REQ-PRFU-020
 //! @pseudocode lines 1-53
 
+mod failure_terminal;
 mod post_pr_plan_inputs;
 mod post_pr_stages;
 mod post_pr_test_process;
@@ -13,15 +14,17 @@ mod push_porcelain;
 mod push_stages;
 mod push_support;
 mod result_freshness;
+mod retry_state;
+pub use self::failure_terminal::PostPrFailureTerminalExecutor;
 use self::post_pr_plan_inputs::{
     append_pending_ci_judgment, append_post_pr_test_failures, read_plan_inputs,
     remediation_plan_covers_current_post_pr_test_result, remediation_plan_source_artifacts,
 };
 use self::post_pr_stages::{sanitize_command_id, validate_safe_working_directory};
 pub use self::post_pr_stages::{
-    PostPrFailureTerminalExecutor, PostPrIterationGuardExecutor, PostPrTestCommandRequest,
-    PostPrTestCommandResult, PostPrTestCommandRunner, RunPostPrTestsExecutor,
-    RunPostPrTestsExecutorWithRunner, SystemPostPrTestCommandRunner,
+    PostPrIterationGuardExecutor, PostPrTestCommandRequest, PostPrTestCommandResult,
+    PostPrTestCommandRunner, RunPostPrTestsExecutor, RunPostPrTestsExecutorWithRunner,
+    SystemPostPrTestCommandRunner,
 };
 use self::post_pr_test_process::apply_allowed_command_environment;
 pub use self::push_stages::{
@@ -30,6 +33,10 @@ pub use self::push_stages::{
 };
 use self::result_freshness::{
     remediation_result_state, result_file_non_empty, PreviousResultSnapshot, RemediationResultState,
+};
+use self::retry_state::{
+    load_current_state, record_launch_phase, record_validation, reserve_launch, LaunchPhase,
+    RetryScopeKey, RetryState, ValidationTransition,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
@@ -948,6 +955,7 @@ fn remediate_pr_followup(
     run.invoke(context, params, runner);
     run.handle_result_state(clock)?;
     run.write_llxprt_run_artifact(clock)?;
+    run.complete_launch(clock)?;
     Ok(run.outcome())
 }
 
@@ -960,6 +968,7 @@ struct RemediationRun {
     result_path: PathBuf,
     previous_result: Option<Value>,
     previous_result_snapshot: PreviousResultSnapshot,
+    retry_state: RetryState,
     argv: Vec<String>,
     invocation: Option<LlxprtInvocationResult>,
 }
@@ -976,9 +985,24 @@ impl RemediationRun {
         let binding = binding_for_context(context, params, &store, clock)?;
         let plan = read_or_build_remediation_plan(context, params, clock, &store, &binding)?;
         let result_path = store.canonical_path(&binding, "pr-remediation-result");
+        let step_id = current_step_id(context, "remediate_pr_followup");
+        let step_order = u64_param(params, "step_order_index", 8);
+        let mut retry_state =
+            reserve_launch(&store, &binding, &plan, params, &step_id, step_order, clock)?;
+        record_launch_phase(
+            &store,
+            &binding,
+            &step_id,
+            step_order,
+            &mut retry_state,
+            LaunchPhase::Launched,
+            clock,
+        )?;
         let previous_result = store
             .read_current_raw_json(&binding, "pr-remediation-result")
-            .ok();
+            .ok()
+            .unwrap_or_else(|| json!({}));
+        let previous_result = Some(project_engine_retry_state(previous_result, &retry_state));
         let previous_result_snapshot = PreviousResultSnapshot::capture(&result_path);
         let prompt =
             render_remediation_prompt(&binding, &plan, &result_path, previous_result.as_ref());
@@ -986,11 +1010,12 @@ impl RemediationRun {
             store,
             binding,
             plan,
-            step_id: current_step_id(context, "remediate_pr_followup"),
-            step_order: u64_param(params, "step_order_index", 8),
+            step_id,
+            step_order,
             result_path,
             previous_result,
             previous_result_snapshot,
+            retry_state,
             argv: remediation_argv(params, &prompt, context),
             invocation: None,
         })
@@ -1114,6 +1139,18 @@ impl RemediationRun {
         )
     }
 
+    fn complete_launch(&mut self, clock: &dyn ClockSleeper) -> Result<(), EngineError> {
+        record_launch_phase(
+            &self.store,
+            &self.binding,
+            &self.step_id,
+            self.step_order,
+            &mut self.retry_state,
+            LaunchPhase::Completed,
+            clock,
+        )
+    }
+
     fn outcome(&self) -> StepOutcome {
         if result_file_non_empty(&self.result_path) {
             StepOutcome::Success
@@ -1127,6 +1164,66 @@ impl RemediationRun {
             .as_ref()
             .expect("remediation invocation must be recorded before artifact handling")
     }
+}
+
+fn project_engine_retry_state(mut result: Value, state: &RetryState) -> Value {
+    let object = result
+        .as_object_mut()
+        .expect("engine retry projection must be a JSON object");
+    object.insert(
+        "remediation_attempt_index".to_string(),
+        json!(state.counters.remediation_attempt_index),
+    );
+    object.insert(
+        "max_remediation_attempts".to_string(),
+        json!(state.budget.max_remediation_attempts),
+    );
+    object.insert(
+        "validation_retry_index".to_string(),
+        json!(state.counters.validation_retry_index),
+    );
+    object.insert(
+        "max_validation_retries".to_string(),
+        json!(state.budget.max_validation_retries),
+    );
+    object.insert(
+        "stale_artifact_retry_index".to_string(),
+        json!(state.counters.stale_artifact_retry_index),
+    );
+    object.insert(
+        "max_stale_artifact_retries".to_string(),
+        json!(state.budget.max_stale_artifact_retries),
+    );
+    let scope = object
+        .entry("retry_scope".to_string())
+        .or_insert_with(|| json!({}));
+    if let Some(scope) = scope.as_object_mut() {
+        scope.insert(
+            "remediation_attempt_index".to_string(),
+            json!(state.counters.remediation_attempt_index),
+        );
+        scope.insert(
+            "max_remediation_attempts".to_string(),
+            json!(state.budget.max_remediation_attempts),
+        );
+        scope.insert(
+            "validation_retry_index".to_string(),
+            json!(state.counters.validation_retry_index),
+        );
+        scope.insert(
+            "max_validation_retries".to_string(),
+            json!(state.budget.max_validation_retries),
+        );
+        scope.insert(
+            "stale_artifact_retry_index".to_string(),
+            json!(state.counters.stale_artifact_retry_index),
+        );
+        scope.insert(
+            "max_stale_artifact_retries".to_string(),
+            json!(state.budget.max_stale_artifact_retries),
+        );
+    }
+    result
 }
 
 fn read_or_build_remediation_plan(
@@ -2026,6 +2123,7 @@ struct RemediationResultValidationArtifact {
     stale_artifact_retry_index: u64,
     max_stale_artifact_retries: u64,
     classified_as: Option<String>,
+    validation_source_id: String,
     validated_at: String,
 }
 
@@ -2054,13 +2152,53 @@ fn validate_remediation_result(
         PrFollowupArtifactStore::with_filesystem(&artifact_root, &SystemPrFollowupFilesystem)?;
     let binding = binding_for_context(context, params, &store, clock)?;
     let plan = store.read_current_json(&binding, "pr-remediation-plan")?;
-    let result = read_remediation_result_for_validation(&store, &binding, &plan)?;
+    let mut result = read_remediation_result_for_validation(&store, &binding, &plan)?;
+    let validation_source_id = remediation_validation_source_id(&result)?;
+    let retry_scope = RetryScopeKey::new(&binding, &plan)?;
+    let mut retry_state = load_current_state(&store, &binding, &retry_scope)?;
+    let advance_validation = retry_state
+        .as_ref()
+        .is_none_or(|state| state.validation_source_id.as_deref() != Some(&validation_source_id));
+    if let Some(retry_state) = &retry_state {
+        result = project_engine_retry_state(result, retry_state);
+    }
     let step_id = current_step_id(context, "validate_remediation_result");
     let step_order = u64_param(params, "step_order_index", 9);
 
     let expected_scope = remediation_retry_scope(&binding, &plan, &result, params);
-    let validation = evaluate_remediation_result(&binding, &plan, &result, &expected_scope);
-    let payload = remediation_result_payload(&binding, &result, &validation, clock);
+    let validation = evaluate_remediation_result(
+        &binding,
+        &plan,
+        &result,
+        &expected_scope,
+        retry_state.is_some(),
+        advance_validation,
+    );
+    if let Some(state) = &mut retry_state {
+        let stale_index = validation
+            .stale_scope
+            .as_ref()
+            .map_or(state.counters.stale_artifact_retry_index, |scope| {
+                scope.stale_artifact_retry_index
+            });
+        let transition = ValidationTransition {
+            source_id: &validation_source_id,
+            validation_retry_index: validation.validation_retry_index,
+            stale_artifact_retry_index: stale_index,
+            transition_type: validation.state.as_str(),
+        };
+        record_validation(
+            &store,
+            &binding,
+            &step_id,
+            step_order,
+            state,
+            &transition,
+            clock,
+        )?;
+    }
+    let payload =
+        remediation_result_payload(&binding, &result, &validation, &validation_source_id, clock);
     let failure = if validation.outcome == StepOutcome::Fatal {
         Some((
             validation.state.as_str(),
@@ -2101,6 +2239,22 @@ fn validate_remediation_result(
     }
 
     Ok(validation.outcome)
+}
+
+fn remediation_validation_source_id(result: &Value) -> Result<String, EngineError> {
+    if let Some(source_id) = result
+        .get("validation_source_id")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+    {
+        return Ok(source_id.to_string());
+    }
+    let bytes = serde_json::to_vec(result)
+        .map_err(|error| pr_remediation_error(format!("serialize validation source: {error}")))?;
+    let hash = bytes.iter().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
+        (hash ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3)
+    });
+    Ok(format!("fnv64:{hash:016x}"))
 }
 
 fn read_remediation_result_for_validation(
@@ -2350,6 +2504,7 @@ fn retry_scope_json(scope: &RemediationRetryScope) -> Value {
 fn classify_stale_remediation_scope(
     result: &Value,
     expected: &RemediationRetryScope,
+    advance_validation: bool,
 ) -> Option<StaleScopeClassification> {
     if is_stale_scope_validation_result(result) {
         return None;
@@ -2360,7 +2515,8 @@ fn classify_stale_remediation_scope(
         expected_scope: expected.clone(),
         observed_scope: observed,
         errors,
-        stale_artifact_retry_index: expected.stale_artifact_retry_index + 1,
+        stale_artifact_retry_index: expected.stale_artifact_retry_index
+            + u64::from(advance_validation),
         max_stale_artifact_retries: expected.max_stale_artifact_retries,
     })
 }
@@ -2528,19 +2684,23 @@ fn evaluate_remediation_result(
     plan: &Value,
     result: &Value,
     expected_scope: &RemediationRetryScope,
+    engine_retry_state_present: bool,
+    advance_validation: bool,
 ) -> RemediationResultValidation {
-    if let Some(stale_scope) = classify_stale_remediation_scope(result, expected_scope) {
+    if let Some(stale_scope) =
+        classify_stale_remediation_scope(result, expected_scope, advance_validation)
+    {
         return stale_scope_validation(stale_scope, expected_scope);
     }
 
     let semantic = semantic_remediation_validation(binding, plan, result);
     if !semantic.errors.is_empty() {
-        return malformed_remediation_validation(semantic);
+        return malformed_remediation_validation(semantic, advance_validation);
     }
     if !semantic.unsuccessful_statuses.is_empty()
         || semantic.successful_count != semantic.result_count
     {
-        return unsuccessful_remediation_validation(semantic);
+        return unsuccessful_remediation_validation(semantic, engine_retry_state_present);
     }
     successful_remediation_validation(semantic)
 }
@@ -2783,8 +2943,10 @@ fn validate_success_evidence(
 
 fn malformed_remediation_validation(
     semantic: SemanticRemediationValidation,
+    advance_validation: bool,
 ) -> RemediationResultValidation {
-    let exhausted = semantic.validation_retry_index >= semantic.max_validation_retries;
+    let validation_retry_index = semantic.validation_retry_index + u64::from(advance_validation);
+    let exhausted = validation_retry_index >= semantic.max_validation_retries;
     RemediationResultValidation {
         outcome: if exhausted {
             StepOutcome::Fatal
@@ -2800,7 +2962,7 @@ fn malformed_remediation_validation(
         errors: semantic.errors,
         unsuccessful_statuses: semantic.unsuccessful_statuses,
         no_change_after_remediation: semantic.no_change_after_remediation,
-        validation_retry_index: semantic.validation_retry_index + 1,
+        validation_retry_index,
         max_validation_retries: semantic.max_validation_retries,
         remediation_attempt_index: semantic.remediation_attempt_index,
         max_remediation_attempts: semantic.max_remediation_attempts,
@@ -2810,8 +2972,11 @@ fn malformed_remediation_validation(
 
 fn unsuccessful_remediation_validation(
     mut semantic: SemanticRemediationValidation,
+    engine_retry_state_present: bool,
 ) -> RemediationResultValidation {
-    semantic.remediation_attempt_index += 1;
+    if !engine_retry_state_present {
+        semantic.remediation_attempt_index += 1;
+    }
     let exhausted = semantic.remediation_attempt_index >= semantic.max_remediation_attempts;
     RemediationResultValidation {
         outcome: if exhausted {
@@ -3041,6 +3206,7 @@ fn remediation_result_payload(
     binding: &PrFollowupBinding,
     result: &Value,
     validation: &RemediationResultValidation,
+    validation_source_id: &str,
     clock: &dyn ClockSleeper,
 ) -> RemediationResultValidationArtifact {
     RemediationResultValidationArtifact {
@@ -3104,6 +3270,7 @@ fn remediation_result_payload(
                 "stale_artifact_retryable".to_string()
             }
         }),
+        validation_source_id: validation_source_id.to_string(),
         validated_at: clock.now_rfc3339(),
     }
 }

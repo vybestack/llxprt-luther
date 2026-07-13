@@ -6561,6 +6561,64 @@ fn pr_followup_remediation_only_promotes_failed_post_pr_commands() {
 }
 
 #[test]
+fn remediation_provider_failures_are_bounded_across_executor_reconstruction() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_p12_plan(&temp);
+    let runner = P12FakeLlxprtRunner::new(p12_result("timeout"));
+    let mut params = p12_params(&temp);
+    params["max_remediation_attempts"] = serde_json::json!(2);
+
+    for _ in 0..2 {
+        let mut context = p12_context(&temp);
+        let outcome = PrFollowupRemediationExecutorWithRunner::new(runner.clone(), FixedClock)
+            .execute(&mut context, &params)
+            .expect("budgeted remediation provider failure");
+        assert_eq!(outcome, StepOutcome::Success);
+    }
+
+    let mut resumed_context = p12_context(&temp);
+    let error = PrFollowupRemediationExecutorWithRunner::new(runner.clone(), FixedClock)
+        .execute(&mut resumed_context, &params)
+        .expect_err("third provider launch must be rejected after continuation");
+
+    assert!(error.to_string().contains("retry budget exhausted"));
+    assert_eq!(
+        runner.requests().len(),
+        2,
+        "provider launches must remain bounded"
+    );
+    let retry_state = read_json(&p10_current_artifact_path(
+        &temp,
+        "pr-remediation-retry-state",
+    ));
+    assert_eq!(retry_state["launch_phase"], serde_json::json!("completed"));
+    assert_eq!(retry_state["launch_ordinal"], serde_json::json!(2));
+    assert_eq!(
+        retry_state["counters"]["remediation_attempt_index"],
+        serde_json::json!(2)
+    );
+
+    let terminal_outcome = PostPrFailureTerminalExecutor
+        .execute(&mut resumed_context, &params)
+        .expect("write retry exhaustion terminal artifact");
+    assert_eq!(terminal_outcome, StepOutcome::Fatal);
+    let terminal = read_json(&p10_current_artifact_path(
+        &temp,
+        "post-pr-failure-terminal",
+    ));
+    assert_eq!(
+        terminal["terminal_reason"],
+        serde_json::json!("remediation_attempts_exhausted")
+    );
+    assert_eq!(
+        terminal["exhausted_budget"],
+        serde_json::json!("remediation_attempts_exhausted")
+    );
+    assert_eq!(terminal["remediation_attempt_index"], serde_json::json!(2));
+    assert_eq!(terminal["max_remediation_attempts"], serde_json::json!(2));
+}
+
+#[test]
 fn pr_followup_remediation_prompt_requires_complete_retry_scope() {
     let temp = tempfile::tempdir().expect("tempdir");
     write_p12_plan(&temp);
@@ -6637,7 +6695,7 @@ fn pr_followup_remediation_wrapper_writes_complete_retry_scope_on_failure() {
 }
 
 #[test]
-fn pr_followup_remediation_wrapper_carries_stale_retry_scope_on_failure() {
+fn pr_followup_remediation_wrapper_replaces_agent_retry_counters_on_failure() {
     let temp = tempfile::tempdir().expect("tempdir");
     write_p12_plan(&temp);
     let previous_path = p10_current_artifact_path(&temp, "pr-remediation-result");
@@ -6696,7 +6754,7 @@ fn write_previous_p12_stale_retry_result(previous_path: &std::path::Path) {
 fn assert_p12_stale_retry_counters(artifact: &serde_json::Value) {
     assert_eq!(
         artifact.pointer("/retry_scope/stale_artifact_retry_index"),
-        Some(&serde_json::json!(1))
+        Some(&serde_json::json!(0))
     );
     assert_eq!(
         artifact.pointer("/retry_scope/max_stale_artifact_retries"),
@@ -6704,7 +6762,7 @@ fn assert_p12_stale_retry_counters(artifact: &serde_json::Value) {
     );
     assert_eq!(
         artifact.get("stale_artifact_retry_index"),
-        Some(&serde_json::json!(1))
+        Some(&serde_json::json!(0))
     );
     assert_eq!(
         artifact.get("max_stale_artifact_retries"),
@@ -6757,35 +6815,35 @@ fn assert_p12_stale_retry_scope_heads(artifact: &serde_json::Value) {
 fn assert_p12_normal_retry_counters(artifact: &serde_json::Value) {
     assert_eq!(
         artifact.pointer("/retry_scope/validation_retry_index"),
-        Some(&serde_json::json!(7))
+        Some(&serde_json::json!(0))
     );
     assert_eq!(
         artifact.pointer("/retry_scope/max_validation_retries"),
-        Some(&serde_json::json!(8))
+        Some(&serde_json::json!(2))
     );
     assert_eq!(
         artifact.pointer("/retry_scope/remediation_attempt_index"),
-        Some(&serde_json::json!(9))
+        Some(&serde_json::json!(1))
     );
     assert_eq!(
         artifact.pointer("/retry_scope/max_remediation_attempts"),
-        Some(&serde_json::json!(10))
+        Some(&serde_json::json!(2))
     );
     assert_eq!(
         artifact.get("validation_retry_index"),
-        Some(&serde_json::json!(7))
+        Some(&serde_json::json!(0))
     );
     assert_eq!(
         artifact.get("max_validation_retries"),
-        Some(&serde_json::json!(8))
+        Some(&serde_json::json!(2))
     );
     assert_eq!(
         artifact.get("remediation_attempt_index"),
-        Some(&serde_json::json!(9))
+        Some(&serde_json::json!(1))
     );
     assert_eq!(
         artifact.get("max_remediation_attempts"),
-        Some(&serde_json::json!(10))
+        Some(&serde_json::json!(2))
     );
 }
 

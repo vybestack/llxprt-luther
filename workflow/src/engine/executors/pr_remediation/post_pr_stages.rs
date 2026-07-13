@@ -973,23 +973,3 @@ fn latest_guard_for_current_run(
     });
     Ok(values.pop())
 }
-
-/// Post-PR failure terminal executor contract for `post_pr_failure_terminal`.
-/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P03
-/// @requirement:REQ-PRFU-020
-/// @pseudocode lines 50-53
-#[derive(Debug, Default)]
-pub struct PostPrFailureTerminalExecutor;
-
-/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P03
-/// @requirement:REQ-PRFU-020
-/// @pseudocode lines 50-53
-impl StepExecutor for PostPrFailureTerminalExecutor {
-    fn execute(
-        &self,
-        _context: &mut StepContext,
-        _params: &serde_json::Value,
-    ) -> Result<StepOutcome, EngineError> {
-        Ok(StepOutcome::Fatal)
-    }
-}

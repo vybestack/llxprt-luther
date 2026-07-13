@@ -620,4 +620,12 @@ pub struct PostPrFailureTerminal {
     pub binding: PrFollowupBinding,
     pub sequence: ArtifactSequenceMetadata,
     pub terminal_state: String,
+    pub terminal_reason: Option<String>,
+    pub exhausted_budget: Option<String>,
+    pub remediation_attempt_index: Option<u64>,
+    pub max_remediation_attempts: Option<u64>,
+    pub validation_retry_index: Option<u64>,
+    pub max_validation_retries: Option<u64>,
+    pub stale_artifact_retry_index: Option<u64>,
+    pub max_stale_artifact_retries: Option<u64>,
 }

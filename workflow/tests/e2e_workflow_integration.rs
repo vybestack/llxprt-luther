@@ -1576,6 +1576,27 @@ fn post_pr_exact_p17_routing_contract_is_present() {
         Some(2),
         "stale pr-remediation-result scope must use a dedicated infrastructure retry budget",
     );
+    let retry_state_path =
+        Some("{artifact_dir}/pr-followup/current/pr-remediation-retry-state.json");
+    for step_id in [
+        "remediate_pr_followup",
+        "validate_remediation_result",
+        "post_pr_failure_terminal",
+    ] {
+        let params = workflow_type
+            .steps
+            .iter()
+            .find(|step| step.step_id == step_id)
+            .and_then(|step| step.parameters.as_ref())
+            .unwrap_or_else(|| panic!("{step_id} params"));
+        assert_eq!(
+            params
+                .get("remediation_retry_state_path")
+                .and_then(serde_json::Value::as_str),
+            retry_state_path,
+            "{step_id} must share the durable engine retry-state artifact",
+        );
+    }
     assert_single_target(
         &workflow_type,
         "run_post_pr_tests",
