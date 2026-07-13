@@ -107,6 +107,11 @@ jobs:
     # The gate job computes the comment authorization, command check, and
     # concurrency key once so skip/run decisions cannot drift.
     if: needs.gate.outputs.should_run == 'true'
+    env:
+      # Single source of truth for the pinned OCR package version. The cache
+      # key and the install command both reference this so a version bump can
+      # never leave a stale cache key pointing at the old version.
+      OCR_VERSION: "1.7.7"
     # Infrastructure failures are intentionally non-blocking for PR checks, but
     # these outputs let the notification job distinguish a completed OCR review
     # from a review that could not run because of provider, install, or script
@@ -228,7 +233,7 @@ jobs:
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # ratchet:actions/cache@v4
         with:
           path: ~/.npm
-          key: npm-ocr-${{ runner.os }}-1.7.7
+          key: npm-ocr-${{ runner.os }}-${{ env.OCR_VERSION }}
           restore-keys: |
             npm-ocr-${{ runner.os }}-
 
@@ -242,7 +247,7 @@ jobs:
           # runners cannot collide. Failures here are non-blocking infrastructure
           # failures, recorded for the posting and notification steps.
           OCR_PREFIX="${RUNNER_TEMP}/ocr-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          npm install --prefix "$OCR_PREFIX" --ignore-scripts @alibaba-group/open-code-review@1.7.7 2>> ocr-stderr.log
+          npm install --prefix "$OCR_PREFIX" --ignore-scripts "@alibaba-group/open-code-review@${OCR_VERSION}" 2>> ocr-stderr.log
           install_status=$?
           if [ "$install_status" -ne 0 ]; then
             echo "::warning::OpenCodeReview installation failed."
@@ -1139,7 +1144,6 @@ jobs:
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # ratchet:actions/github-script@v7
         env:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          CODE_REVIEW_RESULT: ${{ needs.code-review.result }}
           CODE_REVIEW_POLICY_FAILURE: ${{ needs.code-review.outputs.policy_failure }}
           CODE_REVIEW_INFRASTRUCTURE_FAILURE: ${{ needs.code-review.outputs.infrastructure_failure }}
           OCR_LLM_TOKEN: ${{ secrets.OCR_LLM_AUTH_TOKEN }}
@@ -1157,7 +1161,6 @@ jobs:
             const owner = context.repo.owner;
             const repo = context.repo.repo;
             const runUrl = process.env.RUN_URL;
-            const codeReviewResult = process.env.CODE_REVIEW_RESULT || '';
             const policyFailureOutput = process.env.CODE_REVIEW_POLICY_FAILURE === 'true';
             const infrastructureFailureOutput = process.env.CODE_REVIEW_INFRASTRUCTURE_FAILURE === 'true';
 
@@ -1190,10 +1193,16 @@ jobs:
               policyFailure = 'policy failure recorded by code-review job output';
             }
             const artifactsPresent = fs.existsSync(ARTIFACT_DIR);
-            if (!infraFailure && !artifactsPresent
-                && (codeReviewResult === 'failure' || infrastructureFailureOutput)) {
+            // Only synthesize an artifact-phase infrastructure failure when the
+            // code-review job explicitly recorded one (infrastructureFailureOutput
+            // is set by the classification step, which reads the
+            // ocr-infrastructure-failure.txt file written by the OCR steps
+            // themselves). This prevents spurious issues for non-OCR failures
+            // (git checkout errors, cache failures, posting-step exceptions) that
+            // fail the code-review job without producing an OCR diagnostic.
+            if (!infraFailure && !artifactsPresent && infrastructureFailureOutput) {
               phase = 'artifact';
-              infraFailure = 'phase=artifact; reason=OCR artifacts were unavailable after code-review completed with failure or infrastructure diagnostics';
+              infraFailure = 'phase=artifact; reason=OCR artifacts were unavailable after code-review recorded an infrastructure failure';
             }
 
             // Policy failures are the PR author's responsibility and must not
