@@ -487,34 +487,165 @@ fn ocr_redaction_module_content() -> String {
 
 fn yaml_block_after(content: &str, header: &str) -> String {
     let header_key = header.trim();
-    let mut header_indent = 0;
-    let mut in_block = false;
-    let mut block = String::new();
+    let start_idx = find_yaml_key_line(content, header_key).unwrap_or_else(|| {
+        panic!("yaml_block_after: header '{header_key}' not found as a real YAML key in content")
+    });
 
-    for line in content.lines() {
-        if !in_block {
-            if line.trim() == header_key {
-                header_indent = line.chars().take_while(|ch| *ch == ' ').count();
-                in_block = true;
-                block.push_str(line);
-                block.push('\n');
-            }
+    let lines: Vec<&str> = content.lines().collect();
+    let header_line = lines[start_idx];
+    let header_indent = indent_of(header_line);
+    let mut block = String::new();
+    block.push_str(header_line);
+    block.push('\n');
+
+    // Walk subsequent lines until a real YAML key (or value) at the same or
+    // lesser indent is encountered. Block-scalar indicator tails (|, >) are
+    // never treated as block boundaries so a `run: |` step body is not cut
+    // short by a line that merely starts with `|`.
+    for line in lines.iter().skip(start_idx + 1) {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            block.push_str(line);
+            block.push('\n');
             continue;
         }
-
-        let trimmed = line.trim();
-        let indent = line.chars().take_while(|ch| *ch == ' ').count();
-        if !trimmed.is_empty() && !trimmed.starts_with('#') && indent <= header_indent {
+        let indent = indent_of(line);
+        if indent <= header_indent
+            && !trimmed.starts_with('#')
+            && !is_block_scalar_indicator(trimmed)
+        {
             break;
         }
         block.push_str(line);
         block.push('\n');
     }
 
-    assert!(
-        !block.is_empty(),
-        "yaml_block_after: header '{header_key}' not found in content"
-    );
+    block
+}
+
+/// Indentation (number of leading spaces) of a line.
+fn indent_of(line: &str) -> usize {
+    line.chars().take_while(|ch| *ch == ' ').count()
+}
+
+/// True if the trimmed line looks like a YAML block-scalar indicator tail
+/// (e.g. "|", "|-", ">", ">+"). Used to avoid treating these as block
+/// boundaries.
+fn is_block_scalar_indicator(trimmed: &str) -> bool {
+    let first = trimmed.chars().next();
+    first == Some('|') || first == Some('>')
+}
+
+/// Find the line index of a YAML key, skipping block-scalar content.
+///
+/// This walks the content tracking block-scalar context: once a line ends with
+/// `|` or `>` (a YAML literal/folded scalar indicator), subsequent lines at a
+/// deeper indentation are scalar content (not YAML keys) and are skipped.
+/// This prevents a literal string like `permissions:` inside a `run:` script
+/// from being mistaken for a real YAML key.
+fn find_yaml_key_line(content: &str, key: &str) -> Option<usize> {
+    let lines: Vec<&str> = content.lines().collect();
+    let mut block_scalar_indent: Option<usize> = None;
+
+    for (idx, line) in lines.iter().enumerate() {
+        let trimmed = line.trim();
+
+        // Skip blank lines and full-line comments (a comment line can never be
+        // a YAML key, and a key never follows `#` on its own line).
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+
+        let indent = indent_of(line);
+
+        // If we are inside a block scalar, lines at a deeper indent are scalar
+        // content — skip them for key detection.
+        if let Some(scalar_indent) = block_scalar_indent {
+            if indent > scalar_indent {
+                // Still inside the scalar; this line is script content.
+                // But a line at or below the scalar indent could be a new key.
+                continue;
+            } else {
+                // Dedented out of the scalar.
+                block_scalar_indent = None;
+            }
+        }
+
+        // Check if this line opens a block scalar (ends with | or >), so the
+        // *next* matching key search must skip the scalar body.
+        if line_ends_with_block_scalar(trimmed) {
+            block_scalar_indent = Some(indent);
+        }
+
+        // Does this line define the key we are looking for?
+        if trimmed == key
+            || trimmed.starts_with(&format!("{key} "))
+            || trimmed.starts_with(&format!("{key}\t"))
+        {
+            return Some(idx);
+        }
+    }
+    None
+}
+
+/// True if a trimmed line ends with a YAML block scalar indicator (| or >,
+/// optionally followed by a chomping indicator like |- or >+).
+fn line_ends_with_block_scalar(trimmed: &str) -> bool {
+    // A block scalar indicator is the last non-whitespace token and is | or >
+    // optionally followed by a single chomping char (- or +).
+    let last_word = trimmed.split_whitespace().last().unwrap_or("");
+    if last_word.is_empty() {
+        return false;
+    }
+    let bytes = last_word.as_bytes();
+    let first = bytes[0] as char;
+    (first == '|' || first == '>')
+        && last_word[1..].chars().all(|c| c == '-' || c == '+')
+        && last_word.len() <= 2
+}
+
+/// Extract the YAML block for a single top-level job, stopping at the next
+/// top-level key (the next job header or the end of the `jobs:` section).
+/// This isolates each job so permission validation cannot leak across jobs.
+fn job_yaml_block(content: &str, job_name: &str) -> String {
+    let job_header = format!("{job_name}:");
+    let all_job_names = workflow_job_names(content);
+    let start_idx = find_yaml_key_line(content, &job_header).unwrap_or_else(|| {
+        panic!("job_yaml_block: job '{job_name}' header not found as a real YAML key")
+    });
+    let lines: Vec<&str> = content.lines().collect();
+    let header_indent = indent_of(lines[start_idx]);
+    let mut block = String::new();
+    block.push_str(lines[start_idx]);
+    block.push('\n');
+
+    for line in lines.iter().skip(start_idx + 1) {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            block.push_str(line);
+            block.push('\n');
+            continue;
+        }
+        let indent = indent_of(line);
+        // Stop at the next top-level job (indent <= header_indent and the line
+        // is another job header) or any key at a lesser indent.
+        if indent <= header_indent && !trimmed.starts_with('#') {
+            // Is this the next job header?
+            let candidate = trimmed.trim_end_matches(':');
+            if indent == header_indent
+                && all_job_names.iter().any(|jn| jn == candidate)
+                && candidate != job_name
+            {
+                break;
+            }
+            if indent < header_indent {
+                // Left the jobs section entirely.
+                break;
+            }
+        }
+        block.push_str(line);
+        block.push('\n');
+    }
     block
 }
 
@@ -819,25 +950,64 @@ fn test_ocr_pr_review_uses_pull_request_target() {
 }
 
 /// Extract top-level job names from a GitHub Actions workflow YAML string.
+///
+/// Finds the `jobs:` key as a real top-level YAML key (indent 0) by scanning
+/// with block-scalar awareness, then collects the direct child keys (job names)
+/// at the first nested indentation level.
 fn workflow_job_names(content: &str) -> Vec<String> {
-    let jobs_header = content
-        .find("\njobs:")
-        .or_else(|| content.find("\njobs :"))
-        .expect("workflow must have a jobs: section");
-    let after_jobs = &content[jobs_header..];
+    let jobs_idx = find_yaml_key_line(content, "jobs:")
+        .expect("workflow must have a top-level jobs: section (not inside a block scalar)");
+    let lines: Vec<&str> = content.lines().collect();
+    // The job-name indentation is the first non-blank, non-comment line after
+    // the jobs: header. This avoids hard-coding a 2-space assumption.
+    let job_indent = lines[jobs_idx + 1..]
+        .iter()
+        .find_map(|line| {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                None
+            } else {
+                Some(indent_of(line))
+            }
+        })
+        .unwrap_or(2);
+
     let mut names = Vec::new();
-    for line in after_jobs.lines().skip(1) {
-        let indent = line.chars().take_while(|ch| *ch == ' ').count();
-        if indent != 2 {
-            continue;
-        }
+    let mut block_scalar_indent: Option<usize> = None;
+    for line in lines.iter().skip(jobs_idx + 1) {
         let trimmed = line.trim();
-        if trimmed.starts_with('#') || trimmed.is_empty() {
+        if trimmed.is_empty() {
             continue;
         }
-        if let Some(name) = trimmed.strip_suffix(':') {
-            if !name.contains(' ') && !name.contains('\t') {
-                names.push(name.to_string());
+        let indent = indent_of(line);
+
+        // Track block-scalar context to skip script content.
+        if let Some(scalar_indent) = block_scalar_indent {
+            if indent > scalar_indent {
+                continue;
+            } else {
+                block_scalar_indent = None;
+            }
+        }
+
+        // A line at indent 0 after jobs: means we left the jobs section.
+        if indent == 0 && !trimmed.starts_with('#') {
+            break;
+        }
+
+        if trimmed.starts_with('#') {
+            continue;
+        }
+
+        if line_ends_with_block_scalar(trimmed) {
+            block_scalar_indent = Some(indent);
+        }
+
+        if indent == job_indent {
+            if let Some(name) = trimmed.strip_suffix(':') {
+                if !name.contains(' ') && !name.contains('\t') && !name.is_empty() {
+                    names.push(name.to_string());
+                }
             }
         }
     }
@@ -881,7 +1051,11 @@ fn test_ocr_pr_review_permissions_are_minimal() {
         "Workflow must define at least one job"
     );
     for job_name in &job_names {
-        let job_block = yaml_block_after(&content, &format!("{job_name}:"));
+        // Use the structural job-block extractor so each job is validated in
+        // isolation (the block stops at the next job header). This prevents a
+        // nested `permissions:` occurrence in another job or a `run:` script
+        // from leaking into the wrong job's permission check.
+        let job_block = job_yaml_block(&content, job_name);
         if !job_block
             .lines()
             .any(|line| line.trim_start() == "permissions:")
@@ -902,6 +1076,114 @@ fn test_ocr_pr_review_permissions_are_minimal() {
             );
         }
     }
+}
+
+/// Test: find_yaml_key_line skips occurrences of a key name inside YAML
+/// block-scalar content (run: |, script: |). This is the structural guard
+/// against a literal `permissions:` inside a step's shell script being
+/// mistaken for a real YAML permissions key.
+#[test]
+fn test_find_yaml_key_line_skips_block_scalar_content() {
+    let workflow = r#"name: Test
+on: push
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Step with permissions in script
+        run: |
+          echo "checking permissions:"
+          if [ -f config ]; then
+            permissions: read
+          fi
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - run: echo hi
+"#;
+    // The FIRST real `permissions:` key is the top-level one (line 3).
+    let idx =
+        find_yaml_key_line(workflow, "permissions:").expect("should find top-level permissions:");
+    let lines: Vec<&str> = workflow.lines().collect();
+    assert_eq!(lines[idx].trim(), "permissions:");
+    // The line must NOT be the one inside the run: | block.
+    assert!(
+        !lines[idx].contains("echo"),
+        "find_yaml_key_line must not match keys inside block-scalar (run: |) content"
+    );
+}
+
+/// Test: workflow_job_names finds jobs: as a top-level key and extracts all
+/// job names structurally, even when a step script contains `jobs:`-like text.
+#[test]
+fn test_workflow_job_names_structural_extraction() {
+    let workflow = r#"name: Test
+on: push
+env:
+  NOTE: "jobs: is also a string here"
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "jobs: appear in scripts too"
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo hi
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo bye
+"#;
+    let names = workflow_job_names(workflow);
+    assert_eq!(names, vec!["gate", "build", "deploy"]);
+}
+
+/// Test: job_yaml_block isolates each job, stopping at the next job header so
+/// permission validation never leaks across jobs. The build job's block must
+/// not contain the deploy job's content.
+#[test]
+fn test_job_yaml_block_isolates_jobs() {
+    let workflow = r#"name: Test
+on: push
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - run: echo build
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - run: echo deploy
+"#;
+    let build_block = job_yaml_block(workflow, "build");
+    assert!(
+        !build_block.contains("deploy:"),
+        "job_yaml_block for 'build' must not include the deploy job header"
+    );
+    assert!(
+        !build_block.contains("packages: write"),
+        "job_yaml_block for 'build' must not include deploy's permissions"
+    );
+    assert!(
+        build_block.contains("contents: read"),
+        "job_yaml_block for 'build' must include build's own permissions"
+    );
+
+    let deploy_block = job_yaml_block(workflow, "deploy");
+    assert!(
+        deploy_block.contains("packages: write"),
+        "job_yaml_block for 'deploy' must include its own permissions"
+    );
 }
 
 /// Test: duplicate runs for a PR are cancelled by concurrency.
@@ -1137,26 +1419,46 @@ fn test_ocr_pr_review_redacts_secrets_in_artifacts_and_comments() {
         "Shared module must export redactSecretDiagnostics for reuse across steps"
     );
 
-    // The workflow must not reintroduce an inline copy of the redaction
-    // *logic* in any step; the secret patterns live only in the shared module.
-    // Thin per-step wrappers that merely bind step-specific secrets and delegate
-    // to the shared implementation are allowed, but the regex patterns
-    // themselves must not be duplicated inline.
-    //
-    // Check for the JS regex-literal syntax that would actually appear if a
-    // developer inlined the patterns (e.g. .replace(/Authorization\s*:/, ...))
-    // rather than using raw regex fragments that never match in practice.
-    for inlined_regex_fragment in [
-        r"/Authorization\s*:",
-        r"/x-api-key\s*:",
-        r"/api[_-]?key\s*[=:]",
-        r"/access[_-]?token\s*[=:]",
+    // The workflow inlines a canonical redaction fallback (kept in sync with
+    // the shared module) so redaction works even when the shared module is not
+    // yet present in the base-branch checkout (the transition window before
+    // this PR's module reaches every base commit). The inline fallback must
+    // contain the SAME canonical patterns as the shared module so there is no
+    // drift between the two definitions.
+    let inline_fallback_count = content.matches("escapeRegExpLocal").count();
+    assert!(
+        inline_fallback_count >= 3,
+        "All three OCR steps must define an inline redaction fallback (escapeRegExpLocal): found {inline_fallback_count}"
+    );
+    // Every canonical pattern in the shared module must also appear in the
+    // workflow's inline fallback, so the fallback can never be weaker than the
+    // module. We check the distinctive pattern fragments that are unique to
+    // each redaction rule.
+    for canonical_pattern in [
+        r"Authorization\s*:\s*",
+        r"x-api-key\s*:\s*",
+        r"api[_-]?key\s*[=:]\s*",
+        r"access[_-]?token\s*[=:]\s*",
+        r"refresh[_-]?token\s*[=:]\s*",
+        r"id[_-]?token\s*[=:]\s*",
     ] {
         assert!(
-            !content.contains(inlined_regex_fragment),
-            "Redaction regex patterns must not be inlined as JS regex literals in the workflow: found {inlined_regex_fragment}"
+            module.contains(canonical_pattern),
+            "Shared redaction module must define canonical pattern: {canonical_pattern}"
+        );
+        assert!(
+            content.contains(canonical_pattern),
+            "Workflow inline fallback must mirror the shared module's canonical pattern: missing {canonical_pattern}"
         );
     }
+    // The inline fallback must be gated behind a try/catch that first attempts
+    // to load the shared module, so post-merge (when the module is on the base
+    // branch) the single source of truth is used rather than the inline copy.
+    assert!(
+        content.contains("redactDiagnosticsWithSecrets = require(ocrRedactionModulePath).redactSecretDiagnostics")
+            && content.contains("} catch (_) {"),
+        "Inline redaction fallback must only activate when the shared module cannot be loaded (try/catch guard)"
+    );
     let require_count = content.matches(".github/scripts/ocr-redaction.js").count();
     assert!(
         require_count >= 3,
@@ -1205,6 +1507,42 @@ fn test_ocr_pr_review_redacts_secrets_in_artifacts_and_comments() {
     assert!(
         !content.contains("ocr-workflow-helpers.sh"),
         "Cross-step markers must use plain redirection, not a sourced helper script"
+    );
+}
+
+/// Test: the OCR workflow is self-contained for redaction and does NOT hard-
+/// depend on the shared module being present in the base-branch checkout.
+///
+/// Under pull_request_target the code-review job checks out the PR's base SHA.
+/// If the shared module (.github/scripts/ocr-redaction.js) is new in this PR
+/// and not yet on every base commit, a hard `require()` would throw
+/// MODULE_NOT_FOUND and silently disable redaction. The workflow must define
+/// an inline canonical fallback so redaction works in all scenarios:
+/// pre-merge transition, post-merge, and future PRs against any base — without
+/// ever loading PR-supplied code.
+#[test]
+fn test_ocr_pr_review_redaction_is_base_branch_available() {
+    let content = ocr_pr_review_workflow_content();
+    // Every redaction step must attempt the shared module first (single source
+    // of truth post-merge) but fall back to an inline implementation.
+    let require_attempts = content
+        .matches("require(ocrRedactionModulePath).redactSecretDiagnostics")
+        .count();
+    assert!(
+        require_attempts >= 3,
+        "All three OCR steps must attempt to load the shared redaction module: found {require_attempts}"
+    );
+    let inline_fallbacks = content.matches("escapeRegExpLocal").count();
+    assert_eq!(
+        inline_fallbacks, 6,
+        "All three OCR steps must define an inline fallback (escapeRegExpLocal defined + used = 2 per step): found {inline_fallbacks}"
+    );
+    // The fallback must be inside a catch block so a MODULE_NOT_FOUND never
+    // propagates as an uncaught error.
+    assert!(
+        content.contains("} catch (_) {")
+            && content.contains("redactDiagnosticsWithSecrets = (value, exactSecrets = [])"),
+        "Inline redaction fallback must be activated only inside a catch block"
     );
 }
 

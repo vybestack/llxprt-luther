@@ -621,12 +621,39 @@ jobs:
               }
             }
 
-            // Load the single shared redaction implementation from the trusted
-            // base-branch checkout (never PR-supplied code) so the secret
-            // patterns are defined exactly once for every OCR step.
-            const { redactSecretDiagnostics: redactDiagnosticsWithSecrets } = require(
-              `${process.env.GITHUB_WORKSPACE}/.github/scripts/ocr-redaction.js`
-            );
+            // Redaction is defined inline below (canonical patterns kept in
+            // sync with .github/scripts/ocr-redaction.js) so this step never
+            // depends on a separately checked-out file. The shared module is
+            // loaded when present (trusted base-branch checkout, never PR
+            // code) so the single-source-of-truth is used post-merge; the
+            // inline fallback guarantees redaction during the transition
+            // before the module reaches every base checkout.
+            const ocrRedactionModulePath = `${process.env.GITHUB_WORKSPACE}/.github/scripts/ocr-redaction.js`;
+            let redactDiagnosticsWithSecrets;
+            try {
+              redactDiagnosticsWithSecrets = require(ocrRedactionModulePath).redactSecretDiagnostics;
+            } catch (_) {
+              const REDACTION = '[REDACTED]';
+              const escapeRegExpLocal = (v) => String(v).replace(/[\\^$.*+?()[\]{}|]/g, '\\$&');
+              redactDiagnosticsWithSecrets = (value, exactSecrets = []) => {
+                let sanitized = String(value ?? '');
+                const secrets = (Array.isArray(exactSecrets) ? exactSecrets : [exactSecrets])
+                  .filter((s) => typeof s === 'string' && s.length > 0);
+                for (const secret of secrets) {
+                  sanitized = sanitized.replace(new RegExp(escapeRegExpLocal(secret), 'g'), REDACTION);
+                }
+                return sanitized
+                  .replace(/\b(Authorization\s*:\s*(?:(?:Bearer|Basic|token|ApiKey)\s+)?)([^\s,;]+)/gi, '$1[REDACTED]')
+                  .replace(/\b(x-api-key\s*:\s*)([^\s,;]+)/gi, '$1[REDACTED]')
+                  .replace(/\b(api[_-]?key\s*[=:]\s*)([^\s,;&]+)/gi, '$1[REDACTED]')
+                  .replace(/([?&](?:key|api[_-]?key|token)=)([^\s,;&]+)/gi, '$1[REDACTED]')
+                  .replace(/\b(access[_-]?token\s*[=:]\s*)([^\s,;&]+)/gi, '$1[REDACTED]')
+                  .replace(/\b(refresh[_-]?token\s*[=:]\s*)([^\s,;&]+)/gi, '$1[REDACTED]')
+                  .replace(/\b(id[_-]?token\s*[=:]\s*)([^\s,;&]+)/gi, '$1[REDACTED]')
+                  .replace(/\b(token\s*[=:]\s*)([A-Za-z0-9_./+=:@-]{16,})/gi, '$1[REDACTED]')
+                  .replace(/\b(secret\s*[=:]\s*)([A-Za-z0-9_./+=:@-]{16,})/gi, '$1[REDACTED]');
+              };
+            }
             function redactSecretDiagnostics(value) {
               return redactDiagnosticsWithSecrets(value, [ocrTokenForRedaction, ocrUrlForRedaction]);
             }
@@ -985,12 +1012,39 @@ jobs:
             const ocrUrl = process.env.OCR_LLM_URL;
             delete process.env.OCR_LLM_TOKEN;
             delete process.env.OCR_LLM_URL;
-            // Load the single shared redaction implementation from the trusted
-            // base-branch checkout (never PR-supplied code) so the secret
-            // patterns are defined exactly once for every OCR step.
-            const { redactSecretDiagnostics: redactDiagnosticsWithSecrets } = require(
-              `${process.env.GITHUB_WORKSPACE}/.github/scripts/ocr-redaction.js`
-            );
+            // Redaction is defined inline below (canonical patterns kept in
+            // sync with .github/scripts/ocr-redaction.js) so this step never
+            // depends on a separately checked-out file. The shared module is
+            // loaded when present (trusted base-branch checkout, never PR
+            // code) so the single-source-of-truth is used post-merge; the
+            // inline fallback guarantees redaction during the transition
+            // before the module reaches every base checkout.
+            const ocrRedactionModulePath = `${process.env.GITHUB_WORKSPACE}/.github/scripts/ocr-redaction.js`;
+            let redactDiagnosticsWithSecrets;
+            try {
+              redactDiagnosticsWithSecrets = require(ocrRedactionModulePath).redactSecretDiagnostics;
+            } catch (_) {
+              const REDACTION = '[REDACTED]';
+              const escapeRegExpLocal = (v) => String(v).replace(/[\\^$.*+?()[\]{}|]/g, '\\$&');
+              redactDiagnosticsWithSecrets = (value, exactSecrets = []) => {
+                let sanitized = String(value ?? '');
+                const secrets = (Array.isArray(exactSecrets) ? exactSecrets : [exactSecrets])
+                  .filter((s) => typeof s === 'string' && s.length > 0);
+                for (const secret of secrets) {
+                  sanitized = sanitized.replace(new RegExp(escapeRegExpLocal(secret), 'g'), REDACTION);
+                }
+                return sanitized
+                  .replace(/\b(Authorization\s*:\s*(?:(?:Bearer|Basic|token|ApiKey)\s+)?)([^\s,;]+)/gi, '$1[REDACTED]')
+                  .replace(/\b(x-api-key\s*:\s*)([^\s,;]+)/gi, '$1[REDACTED]')
+                  .replace(/\b(api[_-]?key\s*[=:]\s*)([^\s,;&]+)/gi, '$1[REDACTED]')
+                  .replace(/([?&](?:key|api[_-]?key|token)=)([^\s,;&]+)/gi, '$1[REDACTED]')
+                  .replace(/\b(access[_-]?token\s*[=:]\s*)([^\s,;&]+)/gi, '$1[REDACTED]')
+                  .replace(/\b(refresh[_-]?token\s*[=:]\s*)([^\s,;&]+)/gi, '$1[REDACTED]')
+                  .replace(/\b(id[_-]?token\s*[=:]\s*)([^\s,;&]+)/gi, '$1[REDACTED]')
+                  .replace(/\b(token\s*[=:]\s*)([A-Za-z0-9_./+=:@-]{16,})/gi, '$1[REDACTED]')
+                  .replace(/\b(secret\s*[=:]\s*)([A-Za-z0-9_./+=:@-]{16,})/gi, '$1[REDACTED]');
+              };
+            }
             function redactSecretDiagnostics(value) {
               return redactDiagnosticsWithSecrets(value, [ocrToken, ocrUrl]);
             }
@@ -1164,12 +1218,39 @@ jobs:
             const policyFailureOutput = process.env.CODE_REVIEW_POLICY_FAILURE === 'true';
             const infrastructureFailureOutput = process.env.CODE_REVIEW_INFRASTRUCTURE_FAILURE === 'true';
 
-            // Load the single shared redaction implementation from the trusted
-            // base-branch checkout (never PR-supplied code) so the secret
-            // patterns are defined exactly once for every OCR step.
-            const { redactSecretDiagnostics: redactDiagnosticsWithSecrets } = require(
-              `${process.env.GITHUB_WORKSPACE}/.github/scripts/ocr-redaction.js`
-            );
+            // Redaction is defined inline below (canonical patterns kept in
+            // sync with .github/scripts/ocr-redaction.js) so this step never
+            // depends on a separately checked-out file. The shared module is
+            // loaded when present (trusted base-branch checkout, never PR
+            // code) so the single-source-of-truth is used post-merge; the
+            // inline fallback guarantees redaction during the transition
+            // before the module reaches every base checkout.
+            const ocrRedactionModulePath = `${process.env.GITHUB_WORKSPACE}/.github/scripts/ocr-redaction.js`;
+            let redactDiagnosticsWithSecrets;
+            try {
+              redactDiagnosticsWithSecrets = require(ocrRedactionModulePath).redactSecretDiagnostics;
+            } catch (_) {
+              const REDACTION = '[REDACTED]';
+              const escapeRegExpLocal = (v) => String(v).replace(/[\\^$.*+?()[\]{}|]/g, '\\$&');
+              redactDiagnosticsWithSecrets = (value, exactSecrets = []) => {
+                let sanitized = String(value ?? '');
+                const secrets = (Array.isArray(exactSecrets) ? exactSecrets : [exactSecrets])
+                  .filter((s) => typeof s === 'string' && s.length > 0);
+                for (const secret of secrets) {
+                  sanitized = sanitized.replace(new RegExp(escapeRegExpLocal(secret), 'g'), REDACTION);
+                }
+                return sanitized
+                  .replace(/\b(Authorization\s*:\s*(?:(?:Bearer|Basic|token|ApiKey)\s+)?)([^\s,;]+)/gi, '$1[REDACTED]')
+                  .replace(/\b(x-api-key\s*:\s*)([^\s,;]+)/gi, '$1[REDACTED]')
+                  .replace(/\b(api[_-]?key\s*[=:]\s*)([^\s,;&]+)/gi, '$1[REDACTED]')
+                  .replace(/([?&](?:key|api[_-]?key|token)=)([^\s,;&]+)/gi, '$1[REDACTED]')
+                  .replace(/\b(access[_-]?token\s*[=:]\s*)([^\s,;&]+)/gi, '$1[REDACTED]')
+                  .replace(/\b(refresh[_-]?token\s*[=:]\s*)([^\s,;&]+)/gi, '$1[REDACTED]')
+                  .replace(/\b(id[_-]?token\s*[=:]\s*)([^\s,;&]+)/gi, '$1[REDACTED]')
+                  .replace(/\b(token\s*[=:]\s*)([A-Za-z0-9_./+=:@-]{16,})/gi, '$1[REDACTED]')
+                  .replace(/\b(secret\s*[=:]\s*)([A-Za-z0-9_./+=:@-]{16,})/gi, '$1[REDACTED]');
+              };
+            }
             function redactSecretDiagnostics(value) {
               return redactDiagnosticsWithSecrets(value, [ocrToken, ocrUrl]);
             }
@@ -1257,25 +1338,24 @@ jobs:
               return match ? match.number : undefined;
             }
 
-            try {
-              let existing = await findExistingIssue();
-              if (existing) {
-                // Do not retry createComment: it is non-idempotent and a
-                // transient response failure could create duplicate comments.
-                await github.rest.issues.createComment({
-                  owner, repo, issue_number: existing, body,
-                });
-                return;
-              }
-              // Re-check just before creating to avoid racing a concurrent run.
-              existing = await findExistingIssue();
-              if (existing) {
-                // Same non-idempotent write: no retry.
-                await github.rest.issues.createComment({
-                  owner, repo, issue_number: existing, body,
-                });
-                return;
-              }
+            // Practical idempotency (not atomic): GitHub's REST API provides no
+            // atomic create-if-absent for issues, so we cannot guarantee a
+            // single tracking issue under all concurrency. The strategy below
+            // is layered to minimize duplicates and self-heal if they occur:
+            //   1. The workflow-level concurrency group serializes notify runs.
+            //   2. A pre-create double-check narrows the race window.
+            //   3. A post-create deduplication sweep closes any duplicate
+            //      tracking issues (keeping the oldest), so a transient race
+            //      self-corrects on the next run rather than accumulating.
+            // createComment is non-idempotent: never retry it (a transient
+            // response failure could create duplicate comments).
+            async function commentOnExisting(issueNumber) {
+              await github.rest.issues.createComment({
+                owner, repo, issue_number: issueNumber, body,
+              });
+            }
+
+            async function createTrackingIssue() {
               // issues.create is non-idempotent: never retry the final create
               // call. The label-vs-no-label fallback handles a distinct error
               // class (missing label), not a retry of the same request.
@@ -1289,6 +1369,58 @@ jobs:
                   owner, repo, title: ISSUE_TITLE, body,
                 });
               }
+            }
+
+            // Self-healing deduplication: if two concurrent runs each created a
+            // tracking issue, close all but the oldest open one. This is called
+            // after every create and after every comment-on-existing path so the
+            // invariant (at most one open tracking issue) converges over time
+            // even if a race slipped through.
+            async function deduplicateTrackingIssues() {
+              try {
+                const query = `repo:${owner}/${repo} in:title is:issue state:open "${ISSUE_TITLE}"`;
+                const result = await withRetry(() => github.rest.search.issuesAndPullRequests({
+                  q: query, sort: 'created', order: 'asc', per_page: 30,
+                }));
+                const items = ((result && result.data && result.data.items) || [])
+                  .filter((item) => item.title === ISSUE_TITLE && !item.pull_request);
+                if (items.length <= 1) return;
+                // Keep the oldest (first in ascending order); close the rest.
+                for (const dup of items.slice(1)) {
+                  try {
+                    await github.rest.issues.update({
+                      owner, repo, issue_number: dup.number,
+                      state: 'closed',
+                      state_reason: 'not_planned',
+                    });
+                    core.info(`Closed duplicate OCR infrastructure tracking issue #${dup.number} (kept oldest).`);
+                  } catch (closeErr) {
+                    core.warning(redactSecretDiagnostics(`Could not close duplicate tracking issue #${dup.number}: ${closeErr.message || closeErr}`));
+                  }
+                }
+              } catch (dedupErr) {
+                core.warning(redactSecretDiagnostics(`Tracking-issue deduplication sweep failed; continuing: ${dedupErr.message || dedupErr}`));
+              }
+            }
+
+            try {
+              let existing = await findExistingIssue();
+              if (existing) {
+                await commentOnExisting(existing);
+                await deduplicateTrackingIssues();
+                return;
+              }
+              // Re-check just before creating to narrow the race window.
+              existing = await findExistingIssue();
+              if (existing) {
+                await commentOnExisting(existing);
+                await deduplicateTrackingIssues();
+                return;
+              }
+              await createTrackingIssue();
+              // After creating, sweep for any duplicate a concurrent run may
+              // have created in the gap between the second check and create.
+              await deduplicateTrackingIssues();
             } catch (notifyError) {
               core.warning(redactSecretDiagnostics(`OCR infrastructure issue notification failed; continuing: ${notifyError.message || notifyError}`));
             }
