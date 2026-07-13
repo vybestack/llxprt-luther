@@ -985,16 +985,34 @@ jobs:
               'ocr-policy-failure.txt',
             ];
             for (const fileName of diagnosticArtifacts) {
+              let raw;
               try {
-                fs.writeFileSync(fileName, redactSecretDiagnostics(fs.readFileSync(fileName, 'utf8')));
-              } catch (error) {
-                if (error && error.code !== 'ENOENT') {
-                  const code = error && error.code ? error.code : 'unknown';
-                  try {
-                    fs.writeFileSync(fileName, `redaction failed for ${fileName}: ${code}\n`);
-                  } catch (_) {
-                    core.warning(`Could not redact or replace ${fileName}: ${code}`);
-                  }
+                raw = fs.readFileSync(fileName, 'utf8');
+              } catch (readError) {
+                if (readError && readError.code === 'ENOENT') {
+                  continue;
+                }
+                raw = '';
+              }
+              // Fail closed: destroy the original on disk *before* attempting
+              // redaction so that a redaction or fallback write error can never
+              // leave unredacted secrets behind for the artifact upload.
+              const placeholder = `[redaction unavailable for ${fileName}]\n`;
+              try {
+                fs.writeFileSync(fileName, placeholder);
+              } catch (_) {
+                core.warning(`Could not overwrite ${fileName} before redaction; skipping upload of potentially unredacted content`);
+                continue;
+              }
+              try {
+                const redacted = redactSecretDiagnostics(raw);
+                fs.writeFileSync(fileName, redacted);
+              } catch (redactError) {
+                const code = (redactError && redactError.code) || 'unknown';
+                try {
+                  fs.writeFileSync(fileName, placeholder);
+                } catch (_) {
+                  core.warning(`Redaction failed for ${fileName} (${code}) and placeholder could not be rewritten`);
                 }
               }
             }
@@ -1062,6 +1080,12 @@ jobs:
     name: Notify OCR infrastructure failure
     runs-on: ubuntu-latest
     needs: code-review
+    # Minimal per-job permissions: only issue creation/commenting and read
+    # access to the run's own artifacts. Declared explicitly rather than
+    # inherited from the top-level block for least-privilege auditability.
+    permissions:
+      issues: write
+      actions: read
     # Skipped/cancelled superseded OCR runs should not create infrastructure
     # issues; successful runs still check artifacts because OCR runtime failures
     # are non-blocking, and failed runs may still have artifacts from an
