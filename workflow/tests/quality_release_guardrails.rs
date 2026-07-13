@@ -773,6 +773,32 @@ fn test_ocr_pr_review_uses_pull_request_target() {
     }
 }
 
+/// Extract top-level job names from a GitHub Actions workflow YAML string.
+fn workflow_job_names(content: &str) -> Vec<String> {
+    let jobs_header = content
+        .find("\njobs:")
+        .or_else(|| content.find("\njobs :"))
+        .expect("workflow must have a jobs: section");
+    let after_jobs = &content[jobs_header..];
+    let mut names = Vec::new();
+    for line in after_jobs.lines().skip(1) {
+        let indent = line.chars().take_while(|ch| *ch == ' ').count();
+        if indent != 2 {
+            continue;
+        }
+        let trimmed = line.trim();
+        if trimmed.starts_with('#') || trimmed.is_empty() {
+            continue;
+        }
+        if let Some(name) = trimmed.strip_suffix(':') {
+            if !name.contains(' ') && !name.contains('\t') {
+                names.push(name.to_string());
+            }
+        }
+    }
+    names
+}
+
 /// Test: permissions are minimal and explicit.
 #[test]
 fn test_ocr_pr_review_permissions_are_minimal() {
@@ -800,14 +826,24 @@ fn test_ocr_pr_review_permissions_are_minimal() {
         "Top-level workflow permissions must be exactly the approved minimal set"
     );
 
-    // Jobs may declare their own explicit permissions, but only if they are a
-    // strict subset of the top-level block (least-privilege narrowing).
-    let notify_block = yaml_block_after(&content, "notify-ocr-infrastructure-failure:");
-    if notify_block
-        .lines()
-        .any(|line| line.trim_start() == "permissions:")
-    {
-        let job_perms = yaml_block_after(&notify_block, "permissions:");
+    // Every job that declares its own `permissions:` block must be a strict
+    // subset of the top-level block (least-privilege narrowing). Iterate over
+    // all job blocks so a future change cannot add excessive permissions to
+    // any job (e.g. gate or code-review) without triggering a failure.
+    let job_names = workflow_job_names(&content);
+    assert!(
+        !job_names.is_empty(),
+        "Workflow must define at least one job"
+    );
+    for job_name in &job_names {
+        let job_block = yaml_block_after(&content, &format!("{job_name}:"));
+        if !job_block
+            .lines()
+            .any(|line| line.trim_start() == "permissions:")
+        {
+            continue;
+        }
+        let job_perms = yaml_block_after(&job_block, "permissions:");
         let job_permission_lines: Vec<&str> = job_perms
             .lines()
             .skip(1)
@@ -817,7 +853,7 @@ fn test_ocr_pr_review_permissions_are_minimal() {
         for job_perm in &job_permission_lines {
             assert!(
                 permission_lines.iter().any(|top| top == job_perm),
-                "Job-level permission '{job_perm}' must be a subset of the top-level minimal permissions"
+                "Job '{job_name}' permission '{job_perm}' must be a subset of the top-level minimal permissions"
             );
         }
     }
@@ -932,6 +968,13 @@ fn test_ocr_pr_review_pins_action_shas_with_ratchet() {
         "Workflow must reference at least one pinned action"
     );
     for line in &uses_lines {
+        // Distinguish two distinct failure modes so the error message points to
+        // the correct root cause: (1) a missing ratchet comment, and (2) a
+        // reference that is not pinned to a 40-hex SHA.
+        assert!(
+            line.contains("# ratchet:actions/"),
+            "Pinned action must carry a ratchet comment naming the tracked version: {line}"
+        );
         let reference = line
             .trim_start_matches("uses:")
             .trim()
@@ -945,10 +988,6 @@ fn test_ocr_pr_review_pins_action_shas_with_ratchet() {
         assert!(
             sha.len() == 40 && sha.chars().all(|ch| ch.is_ascii_hexdigit()),
             "Action reference must be pinned to a 40-hex commit SHA: {line}"
-        );
-        assert!(
-            line.contains("# ratchet:actions/"),
-            "Pinned action must carry a ratchet comment naming the tracked version: {line}"
         );
     }
     assert!(

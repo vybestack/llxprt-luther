@@ -147,6 +147,7 @@ jobs:
           persist-credentials: false
 
       - name: Initialize OCR artifact files
+        shell: bash
         run: |
           : > ocr-result.json
           : > ocr-stdout.raw
@@ -165,6 +166,7 @@ jobs:
           HEAD_SHA: ${{ steps.pr-context.outputs.head_sha }}
           BASE_SHA: ${{ steps.pr-context.outputs.base_sha }}
           GH_TOKEN: ${{ github.token }}
+        shell: bash
         run: |
           set -euo pipefail
           { set +x; } 2>/dev/null
@@ -222,7 +224,16 @@ jobs:
             echo "HEAD_SHA=${HEAD_SHA}"
           } >> "$GITHUB_ENV"
 
+      - name: Cache npm download cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # ratchet:actions/cache@v4
+        with:
+          path: ~/.npm
+          key: npm-ocr-${{ runner.os }}-1.7.7
+          restore-keys: |
+            npm-ocr-${{ runner.os }}-
+
       - name: Install OpenCodeReview
+        shell: bash
         run: |
           set -uo pipefail
           echo "install" > ocr-phase.txt
@@ -292,6 +303,7 @@ jobs:
                 "**/vendor/**"
               ]
             }
+        shell: bash
         run: |
           mkdir -p "${HOME}/.opencodereview"
           printf '%s' "$OCR_RULES_JSON" > "${HOME}/.opencodereview/rule.json"
@@ -302,6 +314,7 @@ jobs:
           OCR_LLM_TOKEN: ${{ secrets.OCR_LLM_AUTH_TOKEN }}
           OCR_LLM_MODEL: ${{ vars.OCR_LLM_MODEL }}
           OCR_USE_ANTHROPIC: ${{ vars.OCR_LLM_USE_ANTHROPIC }}
+        shell: bash
         run: |
           set -euo pipefail
           if [ -s ocr-exit-code.txt ]; then
@@ -337,6 +350,7 @@ jobs:
           OCR_LLM_TOKEN: ${{ secrets.OCR_LLM_AUTH_TOKEN }}
           OCR_LLM_MODEL: ${{ vars.OCR_LLM_MODEL }}
           OCR_USE_ANTHROPIC: ${{ vars.OCR_LLM_USE_ANTHROPIC }}
+        shell: bash
         run: |
           set -euo pipefail
           if [ -s ocr-exit-code.txt ]; then
@@ -375,6 +389,7 @@ jobs:
           OCR_LLM_TOKEN: ${{ secrets.OCR_LLM_AUTH_TOKEN }}
           OCR_LLM_MODEL: ${{ vars.OCR_LLM_MODEL }}
           OCR_USE_ANTHROPIC: ${{ vars.OCR_LLM_USE_ANTHROPIC }}
+        shell: bash
         run: |
           set -euo pipefail
           if [ -s ocr-exit-code.txt ]; then
@@ -515,6 +530,7 @@ jobs:
           OCR_LLM_TOKEN: ${{ secrets.OCR_LLM_AUTH_TOKEN }}
           OCR_LLM_MODEL: ${{ vars.OCR_LLM_MODEL }}
           OCR_USE_ANTHROPIC: ${{ vars.OCR_LLM_USE_ANTHROPIC }}
+        shell: bash
         run: |
           set +e
           if [ -s ocr-exit-code.txt ]; then
@@ -934,6 +950,7 @@ jobs:
       - name: Resolve OCR failure classification
         id: ocr-classification
         if: always()
+        shell: bash
         run: |
           set -euo pipefail
           if [ -s ocr-policy-failure.txt ]; then
@@ -1019,6 +1036,7 @@ jobs:
 
       - name: Ensure OCR artifact placeholders exist
         if: always()
+        shell: bash
         run: |
           set -euo pipefail
           missing=""
@@ -1072,6 +1090,7 @@ jobs:
 
       - name: Clean up scoped safe.directory
         if: always()
+        shell: bash
         run: |
           set +e
           git config --file "${HOME}/.gitconfig" --unset-all safe.directory "$GITHUB_WORKSPACE" 2>/dev/null || true
@@ -1232,28 +1251,34 @@ jobs:
             try {
               let existing = await findExistingIssue();
               if (existing) {
-                await withRetry(() => github.rest.issues.createComment({
+                // Do not retry createComment: it is non-idempotent and a
+                // transient response failure could create duplicate comments.
+                await github.rest.issues.createComment({
                   owner, repo, issue_number: existing, body,
-                }));
+                });
                 return;
               }
               // Re-check just before creating to avoid racing a concurrent run.
               existing = await findExistingIssue();
               if (existing) {
-                await withRetry(() => github.rest.issues.createComment({
+                // Same non-idempotent write: no retry.
+                await github.rest.issues.createComment({
                   owner, repo, issue_number: existing, body,
-                }));
+                });
                 return;
               }
+              // issues.create is non-idempotent: never retry the final create
+              // call. The label-vs-no-label fallback handles a distinct error
+              // class (missing label), not a retry of the same request.
               try {
-                await withRetry(() => github.rest.issues.create({
+                await github.rest.issues.create({
                   owner, repo, title: ISSUE_TITLE, body, labels: ['ci/cd'],
-                }));
+                });
               } catch (labelError) {
                 core.warning(redactSecretDiagnostics(`Failed to create OCR infrastructure issue with ci/cd label; retrying without labels: ${labelError.message || labelError}`));
-                await withRetry(() => github.rest.issues.create({
+                await github.rest.issues.create({
                   owner, repo, title: ISSUE_TITLE, body,
-                }));
+                });
               }
             } catch (notifyError) {
               core.warning(redactSecretDiagnostics(`OCR infrastructure issue notification failed; continuing: ${notifyError.message || notifyError}`));
