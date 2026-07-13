@@ -23,7 +23,7 @@ max_tokens = 500000
 max_cost = 50.0
 
 [discovery]
-enabled = false
+enabled = true
 include_labels = ["OK for Luther"]
 exclude_labels = ["Luther working"]
 active_parent_label = "Luther working"
