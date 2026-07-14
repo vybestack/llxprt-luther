@@ -6636,9 +6636,15 @@ fn remediation_recovered_launch_consumes_ordinal_after_interruption() {
     // Simulate a crash mid-launch: rewrite the persisted retry state so the
     // launch phase is `launched` (never reached `completed`). The engine must
     // treat the launched ordinal as consumed and advance to the next.
+    //
+    // The lease expiry must also be set to the past so that the crash-recovery
+    // path recognizes the lease as stale (the owning process crashed). With
+    // FixedClock, `now` is always 2026-04-30T00:00:00Z, so setting the lease
+    // to any earlier timestamp makes it expired.
     let retry_state_path = p10_current_artifact_path(&temp, "pr-remediation-retry-state");
     let mut crashed = read_json(&retry_state_path);
     crashed["launch_phase"] = serde_json::json!("launched");
+    crashed["lease_expiry"] = serde_json::json!("2026-04-29T00:00:00Z");
     fs::write(
         &retry_state_path,
         serde_json::to_vec_pretty(&crashed).expect("rewrite crashed state"),

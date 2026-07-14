@@ -750,6 +750,9 @@ description = "Write terminal PR follow-up failure artifact and fail the run"
 [steps.parameters]
 artifact_root = "{artifact_dir}"
 step_order_index = 13
+max_remediation_attempts = 2
+max_validation_retries = 2
+max_stale_artifact_retries = 2
 post_pr_failure_terminal_result_path = "{artifact_dir}/pr-followup/current/post-pr-failure-terminal.json"
 
 [[steps]]

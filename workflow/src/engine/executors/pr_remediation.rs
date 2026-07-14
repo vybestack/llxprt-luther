@@ -16,6 +16,7 @@ mod push_support;
 mod result_freshness;
 mod retry_state;
 mod stale_scope;
+mod validation_retry;
 pub use self::failure_terminal::PostPrFailureTerminalExecutor;
 use self::post_pr_plan_inputs::{
     append_pending_ci_judgment, append_post_pr_test_failures, read_plan_inputs,
@@ -36,10 +37,13 @@ use self::result_freshness::{
     remediation_result_state, result_file_non_empty, PreviousResultSnapshot, RemediationResultState,
 };
 use self::retry_state::{
-    fnv64, load_current_state, record_launch_phase, record_validation, reserve_launch, LaunchPhase,
-    RetryScopeKey, RetryState, ValidationTransition,
+    load_current_state, record_launch_phase, reserve_launch, LaunchPhase, RetryScopeKey, RetryState,
 };
 use self::stale_scope::{classify_stale_remediation_scope, retry_scope_json, retry_scope_u64};
+use self::validation_retry::{
+    fatal_validation_failure, project_engine_retry_state, record_validation_transition,
+    remediation_validation_source_id, ValidationRetryContext,
+};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
 #[cfg(unix)]
@@ -1168,72 +1172,6 @@ impl RemediationRun {
     }
 }
 
-fn project_engine_retry_state(mut result: Value, state: &RetryState) -> Value {
-    if !result.is_object() {
-        // An agent-authored result that is not a JSON object cannot carry
-        // authoritative counters; replace it with a fresh object so the
-        // engine's durable counters are the only source of truth.
-        result = json!({});
-    }
-    let object = result
-        .as_object_mut()
-        .expect("engine retry projection must be a JSON object");
-    object.insert(
-        "remediation_attempt_index".to_string(),
-        json!(state.counters.remediation_attempt_index),
-    );
-    object.insert(
-        "max_remediation_attempts".to_string(),
-        json!(state.budget.max_remediation_attempts),
-    );
-    object.insert(
-        "validation_retry_index".to_string(),
-        json!(state.counters.validation_retry_index),
-    );
-    object.insert(
-        "max_validation_retries".to_string(),
-        json!(state.budget.max_validation_retries),
-    );
-    object.insert(
-        "stale_artifact_retry_index".to_string(),
-        json!(state.counters.stale_artifact_retry_index),
-    );
-    object.insert(
-        "max_stale_artifact_retries".to_string(),
-        json!(state.budget.max_stale_artifact_retries),
-    );
-    let scope = object
-        .entry("retry_scope".to_string())
-        .or_insert_with(|| json!({}));
-    if let Some(scope) = scope.as_object_mut() {
-        scope.insert(
-            "remediation_attempt_index".to_string(),
-            json!(state.counters.remediation_attempt_index),
-        );
-        scope.insert(
-            "max_remediation_attempts".to_string(),
-            json!(state.budget.max_remediation_attempts),
-        );
-        scope.insert(
-            "validation_retry_index".to_string(),
-            json!(state.counters.validation_retry_index),
-        );
-        scope.insert(
-            "max_validation_retries".to_string(),
-            json!(state.budget.max_validation_retries),
-        );
-        scope.insert(
-            "stale_artifact_retry_index".to_string(),
-            json!(state.counters.stale_artifact_retry_index),
-        );
-        scope.insert(
-            "max_stale_artifact_retries".to_string(),
-            json!(state.budget.max_stale_artifact_retries),
-        );
-    }
-    result
-}
-
 fn read_or_build_remediation_plan(
     context: &StepContext,
     params: &Value,
@@ -2136,18 +2074,18 @@ struct RemediationResultValidationArtifact {
 }
 
 #[derive(Clone, Debug)]
-struct RemediationResultValidation {
-    outcome: StepOutcome,
-    state: ValidationState,
-    failure_reason: String,
-    errors: Vec<String>,
-    unsuccessful_statuses: Vec<String>,
-    no_change_after_remediation: bool,
-    validation_retry_index: u64,
-    max_validation_retries: u64,
-    remediation_attempt_index: u64,
-    max_remediation_attempts: u64,
-    stale_scope: Option<StaleScopeClassification>,
+pub(super) struct RemediationResultValidation {
+    pub(super) outcome: StepOutcome,
+    pub(super) state: ValidationState,
+    pub(super) failure_reason: String,
+    pub(super) errors: Vec<String>,
+    pub(super) unsuccessful_statuses: Vec<String>,
+    pub(super) no_change_after_remediation: bool,
+    pub(super) validation_retry_index: u64,
+    pub(super) max_validation_retries: u64,
+    pub(super) remediation_attempt_index: u64,
+    pub(super) max_remediation_attempts: u64,
+    pub(super) stale_scope: Option<StaleScopeClassification>,
 }
 
 fn validate_remediation_result(
@@ -2220,77 +2158,6 @@ fn validate_remediation_result(
     }
 
     Ok(validation.outcome)
-}
-
-/// Groups the durable retry-state recording inputs to keep
-/// `validate_remediation_result` under the function-size guardrail.
-struct ValidationRetryContext<'a> {
-    store: &'a PrFollowupArtifactStore,
-    binding: &'a PrFollowupBinding,
-    step_id: &'a str,
-    step_order: u64,
-    state: &'a mut RetryState,
-    validation: &'a RemediationResultValidation,
-    validation_source_id: &'a str,
-    clock: &'a dyn ClockSleeper,
-}
-
-fn record_validation_transition(ctx: ValidationRetryContext<'_>) -> Result<(), EngineError> {
-    let stale_index = ctx
-        .validation
-        .stale_scope
-        .as_ref()
-        .map_or(ctx.state.counters.stale_artifact_retry_index, |scope| {
-            scope.stale_artifact_retry_index
-        });
-    let transition = ValidationTransition {
-        source_id: ctx.validation_source_id,
-        validation_retry_index: ctx.validation.validation_retry_index,
-        stale_artifact_retry_index: stale_index,
-        transition_type: ctx.validation.state.as_str(),
-    };
-    record_validation(
-        ctx.store,
-        ctx.binding,
-        ctx.step_id,
-        ctx.step_order,
-        ctx.state,
-        &transition,
-        ctx.clock,
-    )
-}
-
-fn fatal_validation_failure(
-    validation: &RemediationResultValidation,
-) -> Option<(&str, &str, Value)> {
-    (validation.outcome == StepOutcome::Fatal).then(|| {
-        (
-            validation.state.as_str(),
-            validation.failure_reason.as_str(),
-            json!({
-                "validation_errors": validation.errors,
-                "unsuccessful_statuses": validation.unsuccessful_statuses,
-                "no_change_after_remediation": validation.no_change_after_remediation,
-                "remediation_attempt_index": validation.remediation_attempt_index,
-                "max_remediation_attempts": validation.max_remediation_attempts,
-                "validation_retry_index": validation.validation_retry_index,
-                "max_validation_retries": validation.max_validation_retries
-            }),
-        )
-    })
-}
-
-fn remediation_validation_source_id(result: &Value) -> Result<String, EngineError> {
-    if let Some(source_id) = result
-        .get("validation_source_id")
-        .and_then(Value::as_str)
-        .filter(|value| !value.is_empty())
-    {
-        return Ok(source_id.to_string());
-    }
-    let bytes = serde_json::to_vec(result)
-        .map_err(|error| pr_remediation_error(format!("serialize validation source: {error}")))?;
-    Ok(format!("fnv64:{:016x}", fnv64(&bytes)))
 }
 
 fn read_remediation_result_for_validation(

@@ -57,7 +57,7 @@ impl StepExecutor for PostPrFailureTerminalExecutor {
         let store =
             PrFollowupArtifactStore::with_filesystem(&artifact_root, &SystemPrFollowupFilesystem)?;
         let binding = binding_for_context(context, params, &store, &clock)?;
-        let retry_state = resolve_retry_state(&store, &binding, &clock)?;
+        let retry_state = resolve_retry_state(&store, &binding, params, &clock)?;
         let step_id = current_step_id(context, "post_pr_failure_terminal");
         let step_order = u64_param(params, "step_order_index", 13);
 
@@ -69,8 +69,9 @@ impl StepExecutor for PostPrFailureTerminalExecutor {
             .as_str()
             .unwrap_or_default()
             .to_string();
-        let reason = payload["failure_reason"]
+        let reason = payload["terminal_reason"]
             .as_str()
+            .or_else(|| payload["failure_reason"].as_str())
             .unwrap_or("post_pr_failure");
 
         // Idempotency: reuse existing terminal artifact with matching key.
@@ -92,6 +93,7 @@ impl StepExecutor for PostPrFailureTerminalExecutor {
 fn resolve_retry_state(
     store: &PrFollowupArtifactStore,
     binding: &PrFollowupBinding,
+    params: &Value,
     clock: &dyn ClockSleeper,
 ) -> Result<Option<RetryState>, EngineError> {
     if !store
@@ -130,7 +132,7 @@ fn resolve_retry_state(
                 // store's write_json_artifact) because the corrupt history
                 // would cause the store's sequence-recovery scan to fail.
                 quarantine_corrupt_retry_state(store, binding)?;
-                write_terminal_tombstone(store, binding, &scope, clock)?;
+                write_terminal_tombstone(store, binding, &scope, params, clock)?;
                 Ok(None)
             } else {
                 // I/O error — propagate rather than quarantining.
@@ -156,10 +158,46 @@ fn read_canonical_retry_state(
     let value: Value = serde_json::from_str(&raw).map_err(|err| {
         EngineError::InvalidState(format!("invalid remediation retry state: {err}"))
     })?;
+    // Validate that the canonical file carries full store-injected provenance
+    // metadata. A file that is valid JSON but lacks these fields was either
+    // tampered with or written outside the store's write path — treat it as
+    // corrupt and trigger recovery from immutable history.
+    if !validate_canonical_provenance(&value) {
+        return Err(EngineError::InvalidState(
+            "invalid remediation retry state: missing store-injected provenance metadata"
+                .to_string(),
+        ));
+    }
     let state: RetryState = serde_json::from_value(value).map_err(|err| {
         EngineError::InvalidState(format!("invalid remediation retry state: {err}"))
     })?;
     Ok(Some(state))
+}
+
+/// Validates that a canonical retry-state JSON value carries the full
+/// store-injected provenance metadata: artifact_sequence (>= 1),
+/// write_sequence (>= 1), producer_step_id (non-empty), and history_metadata
+/// with the correct artifact_family. A zero/absent sequence indicates a
+/// hand-crafted or pre-store file that does not participate in the durable
+/// sequence chain and must be treated as corrupt.
+fn validate_canonical_provenance(value: &Value) -> bool {
+    value
+        .get("artifact_sequence")
+        .and_then(Value::as_u64)
+        .is_some_and(|seq| seq >= 1)
+        && value
+            .get("write_sequence")
+            .and_then(Value::as_u64)
+            .is_some_and(|seq| seq >= 1)
+        && value
+            .get("producer_step_id")
+            .and_then(Value::as_str)
+            .is_some_and(|s| !s.is_empty())
+        && value
+            .get("history_metadata")
+            .and_then(|m| m.get("artifact_family"))
+            .and_then(Value::as_str)
+            .is_some_and(|f| f == RETRY_STATE_FAMILY)
 }
 
 /// Returns `true` if the error indicates a JSON parse corruption (as opposed
@@ -174,6 +212,14 @@ fn is_parse_error(error: &EngineError) -> bool {
 /// never overwritten, so the latest valid one for the scope is authoritative.
 /// Reads files directly (not through the store's sequence-recovery scan) to
 /// avoid failing on corrupt canonical artifacts.
+///
+/// Full provenance is validated: the history snapshot must carry valid
+/// `artifact_sequence`, `write_sequence`, and `producer_step_id` fields (store-
+/// injected metadata), and the deserialized RetryState must pass invariant
+/// validation (counters within budget, ordinal consistent). History files
+/// that fail JSON deserialization or provenance checks are skipped as
+/// individually corrupt, but I/O errors (permission denied, etc.) are
+/// propagated rather than swallowed.
 fn recover_retry_state_from_history(
     store: &PrFollowupArtifactStore,
     binding: &PrFollowupBinding,
@@ -183,29 +229,116 @@ fn recover_retry_state_from_history(
     if !history_root.exists() {
         return Ok(None);
     }
-    let mut paths = Vec::new();
-    collect_history_jsons(&history_root, &mut paths);
-    paths.sort();
-    paths.reverse();
+    let mut snapshots = Vec::new();
+    collect_history_jsons(&history_root, &mut snapshots);
+    // Sort by artifact_sequence descending to find the most recent valid state.
+    snapshots.sort_by(|a, b| {
+        let seq_a = read_artifact_sequence_from_path(a).unwrap_or(0);
+        let seq_b = read_artifact_sequence_from_path(b).unwrap_or(0);
+        seq_b.cmp(&seq_a)
+    });
     let scope_clone = scope.clone();
-    for path in &paths {
+    for path in &snapshots {
         let raw = match fs::read_to_string(path) {
             Ok(raw) => raw,
-            Err(_) => continue,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(err) => {
+                return Err(artifact_io_error(format!(
+                    "read history snapshot {}: {err}",
+                    path.display()
+                )))
+            }
         };
         let value: Value = match serde_json::from_str(&raw) {
             Ok(value) => value,
             Err(_) => continue,
         };
+        // Validate that the history snapshot carries full provenance metadata.
+        if !validate_history_provenance(&value, path) {
+            continue;
+        }
         let state: RetryState = match serde_json::from_value(value) {
             Ok(state) => state,
             Err(_) => continue,
         };
-        if state.scope == scope_clone {
-            return Ok(Some(state));
+        if state.scope != scope_clone {
+            continue;
         }
+        // Validate internal consistency of the recovered state.
+        if validate_recovered_state(&state).is_err() {
+            continue;
+        }
+        return Ok(Some(state));
     }
     Ok(None)
+}
+
+/// Reads the artifact_sequence from a history JSON file path's content for
+/// sorting purposes.
+fn read_artifact_sequence_from_path(path: &std::path::Path) -> Option<u64> {
+    let raw = fs::read_to_string(path).ok()?;
+    let value: Value = serde_json::from_str(&raw).ok()?;
+    value.get("artifact_sequence").and_then(Value::as_u64)
+}
+
+/// Validates that a history snapshot carries the full provenance metadata
+/// injected by the store: artifact_sequence, write_sequence, producer_step_id,
+/// and history_metadata.
+///
+/// Additionally, the artifact_sequence must be at least 1 (a zero or absent
+/// sequence indicates a pre-store or hand-crafted file that does not
+/// participate in the durable sequence chain). This prevents forged history
+/// files with sequence 0 from being treated as authoritative.
+fn validate_history_provenance(value: &Value, path: &std::path::Path) -> bool {
+    let has_sequence = value
+        .get("artifact_sequence")
+        .and_then(Value::as_u64)
+        .is_some_and(|seq| seq >= 1);
+    let has_write_sequence = value
+        .get("write_sequence")
+        .and_then(Value::as_u64)
+        .is_some_and(|seq| seq >= 1);
+    let has_producer = value
+        .get("producer_step_id")
+        .and_then(Value::as_str)
+        .is_some_and(|s| !s.is_empty());
+    let has_metadata = value
+        .get("history_metadata")
+        .and_then(|m| m.get("artifact_family"))
+        .and_then(Value::as_str)
+        .is_some_and(|f| f == RETRY_STATE_FAMILY);
+    if !has_sequence || !has_write_sequence || !has_producer || !has_metadata {
+        eprintln!(
+            "warn: history snapshot {} lacks provenance metadata, skipping",
+            path.display()
+        );
+        return false;
+    }
+    true
+}
+
+/// Validates a recovered RetryState for internal consistency: counters must
+/// not exceed budget maxima.
+fn validate_recovered_state(state: &RetryState) -> Result<(), EngineError> {
+    if state.counters.remediation_attempt_index > state.budget.max_remediation_attempts {
+        return Err(EngineError::InvalidState(format!(
+            "recovered remediation_attempt_index {} exceeds max {}",
+            state.counters.remediation_attempt_index, state.budget.max_remediation_attempts
+        )));
+    }
+    if state.counters.validation_retry_index > state.budget.max_validation_retries {
+        return Err(EngineError::InvalidState(format!(
+            "recovered validation_retry_index {} exceeds max {}",
+            state.counters.validation_retry_index, state.budget.max_validation_retries
+        )));
+    }
+    if state.counters.stale_artifact_retry_index > state.budget.max_stale_artifact_retries {
+        return Err(EngineError::InvalidState(format!(
+            "recovered stale_artifact_retry_index {} exceeds max {}",
+            state.counters.stale_artifact_retry_index, state.budget.max_stale_artifact_retries
+        )));
+    }
+    Ok(())
 }
 
 fn collect_history_jsons(root: &std::path::Path, paths: &mut Vec<std::path::PathBuf>) {
@@ -224,15 +357,45 @@ fn collect_history_jsons(root: &std::path::Path, paths: &mut Vec<std::path::Path
 
 /// Quarantines a corrupt retry-state file with unique evidence suffix to
 /// prevent collisions on repeated quarantine attempts.
+///
+/// The quarantine path is validated to stay within the same parent directory
+/// as the original file (path component containment), preventing directory
+/// traversal via crafted extensions.
 fn quarantine_corrupt_retry_state(
     store: &PrFollowupArtifactStore,
     binding: &PrFollowupBinding,
 ) -> Result<(), EngineError> {
     let path = store.canonical_path(binding, RETRY_STATE_FAMILY);
     if path.exists() {
+        let parent = path
+            .parent()
+            .ok_or_else(|| artifact_io_error(format!("missing parent for {}", path.display())))?;
         let timestamp = chrono::Utc::now().format("%Y%m%dT%H%M%SZ");
         let unique = uuid::Uuid::new_v4().simple();
-        let quarantined = path.with_extension(format!("corrupt.{timestamp}.{unique}"));
+        let stem = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("pr-remediation-retry-state");
+        // Use a filename composed of only safe characters. No path separators
+        // or `..` can appear in the formatted string.
+        let quarantine_name = format!("{stem}.corrupt.{timestamp}.{unique}");
+        // Validate no path traversal: the name must not contain separators.
+        if quarantine_name.contains('/') || quarantine_name.contains('\\') {
+            return Err(artifact_io_error(
+                "quarantine filename contains path separator",
+            ));
+        }
+        let quarantined = parent.join(&quarantine_name);
+        // Verify containment: the quarantined path's parent must equal the
+        // original file's parent.
+        let quarantined_parent = quarantined
+            .parent()
+            .ok_or_else(|| artifact_io_error("missing parent for quarantined path"))?;
+        if quarantined_parent != parent {
+            return Err(artifact_io_error(
+                "quarantine path escaped parent directory",
+            ));
+        }
         fs::rename(&path, &quarantined).map_err(|error| {
             EngineError::InvalidState(format!("quarantine corrupt retry state: {error}"))
         })?;
@@ -241,25 +404,99 @@ fn quarantine_corrupt_retry_state(
 }
 
 /// Republishes a recovered retry state to the canonical path, healing the
-/// corruption. The recovered state was read from immutable history (which
-/// includes store-injected metadata like `artifact_sequence`), so we serialize
-/// it directly and overwrite the corrupt canonical file. This bypasses the
-/// store's `write_json_artifact` (and its sequence-recovery scan) because
-/// co-resident corrupt artifacts would cause the scan to fail.
+/// corruption. The recovered state is written atomically (temp-file + rename)
+/// to ensure crash-safety. Because the history snapshot carries the full
+/// store-injected metadata (artifact_sequence, write_sequence, binding fields,
+/// history_metadata), we write the complete JSON value rather than re-
+/// serializing only the typed RetryState fields. This preserves the complete
+/// provenance chain.
 fn republish_recovered_state(
     store: &PrFollowupArtifactStore,
     binding: &PrFollowupBinding,
     state: &RetryState,
 ) -> Result<(), EngineError> {
     let canonical_path = store.canonical_path(binding, RETRY_STATE_FAMILY);
-    let bytes = serde_json::to_vec_pretty(state)
-        .map_err(|err| artifact_io_error(format!("serialize recovered state: {err}")))?;
+    // Serialize the full RetryState (which includes all store-injected fields
+    // because RetryState derives Serialize and the history snapshot carried
+    // them as top-level fields that were deserialized into the struct via
+    // serde(flatten)-like behavior — but RetryState does NOT capture those
+    // extra fields. So we need to find the raw history JSON to preserve them.)
+    //
+    // Actually, RetryState only has its own fields. The store injects
+    // artifact_sequence etc. as top-level JSON keys that are NOT part of
+    // RetryState. When we deserialize a history file into RetryState via
+    // serde_json::from_value, those extra keys are silently dropped. To
+    // preserve them, we must re-read the raw history file and write it
+    // directly to canonical.
+    let raw_json = find_raw_history_json_for_state(store, binding, state)?;
+    let bytes = match raw_json {
+        Some(bytes) => bytes,
+        None => serde_json::to_vec_pretty(state)
+            .map_err(|err| artifact_io_error(format!("serialize recovered state: {err}")))?,
+    };
     if let Some(parent) = canonical_path.parent() {
         fs::create_dir_all(parent)
             .map_err(|err| artifact_io_error(format!("create recovered state parent: {err}")))?;
     }
-    fs::write(&canonical_path, &bytes)
-        .map_err(|err| artifact_io_error(format!("write recovered state: {err}")))?;
+    atomic_write(&canonical_path, &bytes)?;
+    Ok(())
+}
+
+/// Finds the raw JSON bytes from the history snapshot that matches the
+/// recovered state's transition_id and ordinal, preserving the full metadata.
+fn find_raw_history_json_for_state(
+    store: &PrFollowupArtifactStore,
+    binding: &PrFollowupBinding,
+    state: &RetryState,
+) -> Result<Option<Vec<u8>>, EngineError> {
+    let history_root = store.history_root_for_family(binding, RETRY_STATE_FAMILY);
+    if !history_root.exists() {
+        return Ok(None);
+    }
+    let mut paths = Vec::new();
+    collect_history_jsons(&history_root, &mut paths);
+    for path in &paths {
+        let raw = match fs::read(path) {
+            Ok(raw) => raw,
+            Err(_) => continue,
+        };
+        let Ok(value): std::result::Result<Value, _> = serde_json::from_slice(&raw) else {
+            continue;
+        };
+        let matching = value
+            .get("transition_id")
+            .and_then(Value::as_str)
+            .is_some_and(|id| id == state.transition_id)
+            && value
+                .get("launch_ordinal")
+                .and_then(Value::as_u64)
+                .is_some_and(|ord| ord == state.launch_ordinal);
+        if matching {
+            return Ok(Some(raw));
+        }
+    }
+    Ok(None)
+}
+
+/// Atomically writes bytes to a path via temp-file + rename.
+fn atomic_write(path: &std::path::Path, bytes: &[u8]) -> Result<(), EngineError> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| artifact_io_error(format!("missing parent for {}", path.display())))?;
+    fs::create_dir_all(parent).map_err(|err| artifact_io_error(format!("create parent: {err}")))?;
+    let temp_path = parent.join(format!(
+        ".{}.{}.tmp",
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("retry-state"),
+        uuid::Uuid::new_v4()
+    ));
+    fs::write(&temp_path, bytes)
+        .map_err(|err| artifact_io_error(format!("write temp file: {err}")))?;
+    fs::rename(&temp_path, path).map_err(|err| {
+        let _ = fs::remove_file(&temp_path);
+        artifact_io_error(format!("atomic rename into {}: {err}", path.display()))
+    })?;
     Ok(())
 }
 
@@ -316,14 +553,12 @@ fn write_terminal_artifact_direct(
         fs::create_dir_all(parent)
             .map_err(|err| artifact_io_error(format!("create terminal history parent: {err}")))?;
     }
-    fs::write(&history_path, &bytes)
-        .map_err(|err| artifact_io_error(format!("write terminal history: {err}")))?;
+    atomic_write(&history_path, &bytes)?;
     if let Some(parent) = canonical_path.parent() {
         fs::create_dir_all(parent)
             .map_err(|err| artifact_io_error(format!("create terminal canonical parent: {err}")))?;
     }
-    fs::write(&canonical_path, &bytes)
-        .map_err(|err| artifact_io_error(format!("write terminal canonical: {err}")))?;
+    atomic_write(&canonical_path, &bytes)?;
     Ok(())
 }
 
@@ -356,11 +591,16 @@ struct SourceCandidate {
     step_order_index: u64,
     path: String,
     history_path: String,
+    failure_reason: Option<String>,
 }
 
 /// Selects the latest valid active-binding failure by durable sequence/provenance.
 /// Selection is deterministic: highest failure_sequence, then highest
 /// artifact_sequence, then write_sequence, then producer_step_id.
+///
+/// Each candidate is validated in isolation: a corrupt or malformed candidate
+/// is skipped without invalidating the remaining candidates. This prevents one
+/// bad artifact from suppressing the entire candidate set.
 enum SourceSelection {
     Selected(SourceCandidate, Vec<Value>, &'static str),
     NoCandidates,
@@ -377,10 +617,12 @@ fn select_failure_source(
     if candidates.is_empty() {
         return SourceSelection::NoCandidates;
     }
-    let parsed = candidates
+    // Parse each candidate independently. A malformed candidate is skipped
+    // without affecting the others.
+    let parsed: Vec<_> = candidates
         .iter()
-        .filter_map(parse_candidate)
-        .collect::<Vec<_>>();
+        .filter_map(|value| parse_candidate(value).or_else(|| log_skipped_candidate(value)))
+        .collect();
     if parsed.is_empty() {
         return SourceSelection::NoCandidates;
     }
@@ -408,11 +650,29 @@ fn select_failure_source(
                 "failure_sequence": c.failure_sequence,
                 "producer_step_id": c.producer_step_id,
                 "path": c.path,
-                "history_path": c.history_path
+                "history_path": c.history_path,
+                "failure_reason": c.failure_reason
             })
         })
         .collect::<Vec<_>>();
     SourceSelection::Selected(selected, candidate_views, "highest_failure_sequence")
+}
+
+/// Logs a skipped candidate and returns None for use in filter_map. This
+/// ensures isolated candidate validation: one bad candidate does not abort
+/// the entire parse loop.
+fn log_skipped_candidate(value: &Value) -> Option<SourceCandidate> {
+    let family = value
+        .get("history_metadata")
+        .and_then(|m| m.get("artifact_family"))
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let seq = value
+        .get("artifact_sequence")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    eprintln!("warn: terminal source candidate {family} seq={seq} failed validation, skipping");
+    None
 }
 
 fn parse_candidate(value: &Value) -> Option<SourceCandidate> {
@@ -439,6 +699,10 @@ fn parse_candidate(value: &Value) -> Option<SourceCandidate> {
         .and_then(|m| m.get("history_path"))
         .and_then(Value::as_str)?
         .to_string();
+    let failure_reason = value
+        .get("failure_reason")
+        .and_then(Value::as_str)
+        .map(ToString::to_string);
     Some(SourceCandidate {
         artifact_family,
         artifact_sequence,
@@ -448,7 +712,122 @@ fn parse_candidate(value: &Value) -> Option<SourceCandidate> {
         step_order_index,
         path,
         history_path,
+        failure_reason,
     })
+}
+
+/// Common context for terminal payload construction, holding pre-resolved
+/// metadata shared by both selection variants.
+struct TerminalPayloadContext<'a> {
+    binding: &'a PrFollowupBinding,
+    logged_at: String,
+    budget_exhaustion: Option<&'static str>,
+    retry_metadata: Option<Value>,
+}
+
+impl<'a> TerminalPayloadContext<'a> {
+    fn new(
+        binding: &'a PrFollowupBinding,
+        retry_state: Option<&RetryState>,
+        clock: &dyn ClockSleeper,
+    ) -> Self {
+        Self {
+            binding,
+            logged_at: clock.now_rfc3339(),
+            budget_exhaustion: retry_state.and_then(exhausted_budget),
+            retry_metadata: retry_state.map(retry_metadata_json),
+        }
+    }
+
+    /// Builds the terminal artifact payload conforming to the documented schema.
+    fn build(self, selection: &SourceSelection) -> Value {
+        match selection {
+            SourceSelection::NoCandidates => self.build_no_candidates(),
+            SourceSelection::Selected(source, candidates, reason) => {
+                self.build_selected(source, candidates, reason)
+            }
+        }
+    }
+
+    /// Builds the no-candidates variant: a terminal marker with no source
+    /// failure artifacts, using the budget-exhaustion reason or a generic
+    /// fallback.
+    fn build_no_candidates(&self) -> Value {
+        let terminal_reason = self.budget_exhaustion.unwrap_or("post_pr_failure");
+        let idempotency_key = format!(
+            "terminal:{}:{}:{}:{}",
+            self.binding.run_id, self.binding.pr_number, self.binding.head_sha, terminal_reason
+        );
+        let mut payload = json!({
+            "terminal_state": "fatal",
+            "terminal_reason": terminal_reason,
+            "failure_reason": terminal_reason,
+            "failed_step": "post_pr_failure_terminal",
+            "source_artifacts": [],
+            "selected_source_reason": "no_failure_candidates",
+            "idempotency_key": idempotency_key,
+            "logged_at": self.logged_at
+        });
+        self.apply_exhaustion(&mut payload);
+        merge_retry_metadata(&mut payload, &self.retry_metadata);
+        payload
+    }
+
+    /// Builds the selected-source variant: a terminal marker recording the
+    /// deterministically-selected source failure with full provenance.
+    fn build_selected(
+        &self,
+        source: &SourceCandidate,
+        candidates: &[Value],
+        selection_reason: &str,
+    ) -> Value {
+        let terminal_reason = self.budget_exhaustion.unwrap_or("selected_source_failure");
+        let idempotency_key = format!(
+            "terminal:{}:{}:{}:{}:{}",
+            self.binding.run_id,
+            self.binding.pr_number,
+            self.binding.head_sha,
+            source.failure_sequence,
+            source.artifact_sequence
+        );
+        // The terminal-level failure_reason uses the semantic reason from
+        // the selected source, not the generic "selected_source_failure"
+        // label. This ensures the terminal artifact carries a meaningful,
+        // actionable reason that traces back to the concrete failure.
+        let selected_failure_reason = source
+            .failure_reason
+            .clone()
+            .unwrap_or_else(|| terminal_reason.to_string());
+        let mut payload = json!({
+            "terminal_state": "fatal",
+            "terminal_reason": terminal_reason,
+            "failure_reason": selected_failure_reason,
+            "failed_step": source.producer_step_id,
+            "source_artifacts": candidates,
+            "source_failure_sequence": source.failure_sequence,
+            "source_artifact_sequence": source.artifact_sequence,
+            "source_write_sequence": source.write_sequence,
+            "source_producer_step_id": source.producer_step_id,
+            "source_step_order_index": source.step_order_index,
+            "source_artifact_path": source.path,
+            "source_history_path": source.history_path,
+            "source_failure_reason": source.failure_reason.clone().unwrap_or_else(|| "unknown".to_string()),
+            "source_artifact_family": source.artifact_family,
+            "selected_source_reason": selection_reason,
+            "idempotency_key": idempotency_key,
+            "logged_at": self.logged_at
+        });
+        self.apply_exhaustion(&mut payload);
+        merge_retry_metadata(&mut payload, &self.retry_metadata);
+        payload
+    }
+
+    /// Applies the budget-exhaustion field if present.
+    fn apply_exhaustion(&self, payload: &mut Value) {
+        if let Some(reason) = self.budget_exhaustion {
+            payload["exhausted_budget"] = json!(reason);
+        }
+    }
 }
 
 /// Builds the terminal artifact payload conforming to the documented schema.
@@ -458,77 +837,21 @@ fn build_terminal_payload(
     selection: &SourceSelection,
     clock: &dyn ClockSleeper,
 ) -> Value {
-    let logged_at = clock.now_rfc3339();
-    let budget_exhaustion = retry_state.and_then(exhausted_budget);
-    let retry_metadata = retry_state.map(|state| {
-        json!({
-            "remediation_attempt_index": state.counters.remediation_attempt_index,
-            "max_remediation_attempts": state.budget.max_remediation_attempts,
-            "validation_retry_index": state.counters.validation_retry_index,
-            "max_validation_retries": state.budget.max_validation_retries,
-            "stale_artifact_retry_index": state.counters.stale_artifact_retry_index,
-            "max_stale_artifact_retries": state.budget.max_stale_artifact_retries,
-            "retry_transition_id": state.transition_id,
-            "retry_launch_phase": state.launch_phase,
-        })
-    });
-    match selection {
-        SourceSelection::NoCandidates => {
-            let terminal_reason = budget_exhaustion.unwrap_or("post_pr_failure");
-            let idempotency_key = format!(
-                "terminal:{}:{}:{}:{}",
-                binding.run_id, binding.pr_number, binding.head_sha, terminal_reason
-            );
-            let mut payload = json!({
-                "terminal_state": "fatal",
-                "terminal_reason": terminal_reason,
-                "failure_reason": terminal_reason,
-                "failed_step": "post_pr_failure_terminal",
-                "source_artifacts": [],
-                "selected_source_reason": "no_failure_candidates",
-                "idempotency_key": idempotency_key,
-                "logged_at": logged_at
-            });
-            if let Some(reason) = budget_exhaustion {
-                payload["exhausted_budget"] = json!(reason);
-            }
-            merge_retry_metadata(&mut payload, &retry_metadata);
-            payload
-        }
-        SourceSelection::Selected(source, candidates, selection_reason) => {
-            let terminal_reason = budget_exhaustion.unwrap_or("selected_source_failure");
-            let idempotency_key = format!(
-                "terminal:{}:{}:{}:{}:{}",
-                binding.run_id,
-                binding.pr_number,
-                binding.head_sha,
-                source.failure_sequence,
-                source.artifact_sequence
-            );
-            let mut payload = json!({
-                "terminal_state": "fatal",
-                "terminal_reason": terminal_reason,
-                "failure_reason": terminal_reason,
-                "failed_step": source.producer_step_id,
-                "source_artifacts": candidates,
-                "source_failure_sequence": source.failure_sequence,
-                "source_artifact_sequence": source.artifact_sequence,
-                "source_write_sequence": source.write_sequence,
-                "source_producer_step_id": source.producer_step_id,
-                "source_step_order_index": source.step_order_index,
-                "source_artifact_path": source.path,
-                "source_history_path": source.history_path,
-                "selected_source_reason": selection_reason,
-                "idempotency_key": idempotency_key,
-                "logged_at": logged_at
-            });
-            if let Some(reason) = budget_exhaustion {
-                payload["exhausted_budget"] = json!(reason);
-            }
-            merge_retry_metadata(&mut payload, &retry_metadata);
-            payload
-        }
-    }
+    TerminalPayloadContext::new(binding, retry_state, clock).build(selection)
+}
+
+/// Constructs the retry-state metadata JSON value from a `RetryState`.
+fn retry_metadata_json(state: &RetryState) -> Value {
+    json!({
+        "remediation_attempt_index": state.counters.remediation_attempt_index,
+        "max_remediation_attempts": state.budget.max_remediation_attempts,
+        "validation_retry_index": state.counters.validation_retry_index,
+        "max_validation_retries": state.budget.max_validation_retries,
+        "stale_artifact_retry_index": state.counters.stale_artifact_retry_index,
+        "max_stale_artifact_retries": state.budget.max_stale_artifact_retries,
+        "retry_transition_id": state.transition_id,
+        "retry_launch_phase": state.launch_phase,
+    })
 }
 
 fn exhausted_budget(state: &RetryState) -> Option<&'static str> {

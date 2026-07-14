@@ -38,6 +38,12 @@ const DEFAULT_MAX_REMEDIATION_ATTEMPTS: u64 = 2;
 const DEFAULT_MAX_VALIDATION_RETRIES: u64 = 2;
 const DEFAULT_MAX_STALE_ARTIFACT_RETRIES: u64 = 2;
 
+/// Duration after which an active launch lease is considered stale (the owning
+/// process crashed). This bounds the time a concurrent executor waits before
+/// it can reclaim the ordinal, preventing permanent deadlock while still
+/// serializing genuinely concurrent live invocations.
+const LEASE_DURATION_SECONDS: i64 = 7200; // 2 hours
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(super) struct RetryScopeKey {
     run_id: String,
@@ -82,6 +88,11 @@ pub(super) struct RetryBudget {
 
 impl RetryBudget {
     pub(super) fn from_params(params: &Value) -> Result<Self, EngineError> {
+        if !params.is_object() {
+            return Err(EngineError::InvalidState(
+                "remediation retry parameters must be a JSON object".to_string(),
+            ));
+        }
         Ok(Self {
             max_remediation_attempts: parameter(
                 params,
@@ -156,6 +167,33 @@ pub(super) struct RetryCounters {
     pub(super) stale_artifact_retry_index: u64,
 }
 
+impl RetryCounters {
+    /// Validates that no counter exceeds the corresponding budget maximum.
+    /// Recovered or deserialized state must satisfy this invariant to be
+    /// considered internally consistent.
+    fn validate_against_budget(&self, budget: RetryBudget) -> Result<(), EngineError> {
+        if self.remediation_attempt_index > budget.max_remediation_attempts {
+            return Err(EngineError::InvalidState(format!(
+                "remediation_attempt_index {} exceeds max_remediation_attempts {}",
+                self.remediation_attempt_index, budget.max_remediation_attempts
+            )));
+        }
+        if self.validation_retry_index > budget.max_validation_retries {
+            return Err(EngineError::InvalidState(format!(
+                "validation_retry_index {} exceeds max_validation_retries {}",
+                self.validation_retry_index, budget.max_validation_retries
+            )));
+        }
+        if self.stale_artifact_retry_index > budget.max_stale_artifact_retries {
+            return Err(EngineError::InvalidState(format!(
+                "stale_artifact_retry_index {} exceeds max_stale_artifact_retries {}",
+                self.stale_artifact_retry_index, budget.max_stale_artifact_retries
+            )));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(super) enum LaunchPhase {
@@ -184,6 +222,12 @@ pub(super) struct RetryState {
     /// and verified via CAS on every subsequent write.
     #[serde(default)]
     pub(super) owner_token: String,
+    /// RFC3339 timestamp after which the active lease is considered stale
+    /// (the owning process crashed). Allows a subsequent invocation to
+    /// reclaim the ordinal after the lease expires, preventing permanent
+    /// deadlock while still serializing concurrent live invocations.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) lease_expiry: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -269,6 +313,148 @@ pub(super) fn reserve_launch(
     })
 }
 
+/// Context for reserving a remediation launch ordinal under the per-scope
+/// lock. Holds all inputs and the resolved scope/budget/previous state so
+/// the orchestration logic reads cleanly without re-deriving intermediate
+/// values.
+struct LaunchReservation<'a> {
+    store: &'a PrFollowupArtifactStore,
+    binding: &'a PrFollowupBinding,
+    plan: &'a Value,
+    producer_step_id: &'a str,
+    step_order: u64,
+    clock: &'a dyn ClockSleeper,
+    scope: RetryScopeKey,
+    configured_budget: RetryBudget,
+    previous: Option<RetryState>,
+}
+
+impl<'a> LaunchReservation<'a> {
+    fn new(
+        store: &'a PrFollowupArtifactStore,
+        binding: &'a PrFollowupBinding,
+        plan: &'a Value,
+        params: &'a Value,
+        producer_step_id: &'a str,
+        step_order: u64,
+        clock: &'a dyn ClockSleeper,
+    ) -> Result<Self, EngineError> {
+        let scope = RetryScopeKey::new(binding, plan)?;
+        let configured_budget = RetryBudget::from_params(params)?;
+        let previous = load_matching_state(store, binding, &scope)?;
+        Ok(Self {
+            store,
+            binding,
+            plan,
+            producer_step_id,
+            step_order,
+            clock,
+            scope,
+            configured_budget,
+            previous,
+        })
+    }
+
+    /// Resolves the effective budget: for a first launch it is the configured
+    /// budget; for subsequent launches the persisted budget may only be
+    /// tightened, never expanded.
+    fn resolve_budget(&self) -> Result<RetryBudget, EngineError> {
+        match &self.previous {
+            None => Ok(self.configured_budget),
+            Some(state) => {
+                state.budget.reject_expansion(self.configured_budget)?;
+                Ok(state.budget.tightened_with(self.configured_budget))
+            }
+        }
+    }
+
+    /// If a previous state is active (Reserved/Launched) and its lease has not
+    /// expired, returns an error to serialize concurrent executors. A stale
+    /// lease (crashed process) or Completed phase falls through to allow the
+    /// next ordinal.
+    fn guard_active_launch(&self) -> Result<(), EngineError> {
+        let Some(state) = self.previous.as_ref() else {
+            return Ok(());
+        };
+        match state.launch_phase {
+            LaunchPhase::Reserved | LaunchPhase::Launched => {
+                if !is_lease_expired(state, self.clock) {
+                    return Err(EngineError::InvalidState(format!(
+                        "remediation launch already in progress for scope \
+                         (run_id={}, pr={}, head_sha={}): ordinal={}, \
+                         phase={:?}, owner_token={}",
+                        self.scope.run_id,
+                        self.scope.pr_number,
+                        self.scope.input_head_sha,
+                        state.launch_ordinal,
+                        state.launch_phase,
+                        state.owner_token
+                    )));
+                }
+                // Lease expired — the previous process crashed. Fall through
+                // to allocate the next ordinal from the last persisted
+                // counters. The crashed ordinal is already counted in
+                // remediation_attempt_index, so the next ordinal is
+                // counters.remediation_attempt_index + 1.
+                Ok(())
+            }
+            LaunchPhase::Completed => Ok(()),
+        }
+    }
+
+    /// Builds and persists the reserved `RetryState` for the next ordinal.
+    fn reserve(self) -> Result<RetryState, EngineError> {
+        self.guard_active_launch()?;
+        let budget = self.resolve_budget()?;
+        let counters = self
+            .previous
+            .as_ref()
+            .map_or_else(RetryCounters::default, |state| state.counters);
+        if counters.remediation_attempt_index >= budget.max_remediation_attempts {
+            let exhaustion = RetryExhaustionView::new(
+                RetryExhaustionReason::RemediationAttempts,
+                counters,
+                budget,
+            );
+            return Err(EngineError::InvalidState(format!(
+                "remediation retry budget exhausted: {exhaustion:?}"
+            )));
+        }
+        let launch_ordinal = counters.remediation_attempt_index + 1;
+        let predecessor_artifact_sequence = if self.previous.is_some() {
+            state_sequence(self.store, self.binding)?
+        } else {
+            None
+        };
+        let owner_token = uuid::Uuid::new_v4().to_string();
+        let state = RetryState {
+            scope: self.scope,
+            budget,
+            counters: RetryCounters {
+                remediation_attempt_index: launch_ordinal,
+                ..counters
+            },
+            transition_id: launch_transition_id(self.binding, self.plan, launch_ordinal),
+            transition_type: "launch_reserved".to_string(),
+            launch_phase: LaunchPhase::Reserved,
+            launch_ordinal,
+            predecessor_artifact_sequence,
+            validation_source_id: None,
+            owner_token,
+            lease_expiry: lease_expiry_from_now(self.clock),
+        };
+        persist(
+            self.store,
+            self.binding,
+            self.producer_step_id,
+            self.step_order,
+            &state,
+            self.clock,
+        )?;
+        Ok(state)
+    }
+}
+
 fn reserve_launch_locked(
     store: &PrFollowupArtifactStore,
     binding: &PrFollowupBinding,
@@ -278,64 +464,16 @@ fn reserve_launch_locked(
     step_order: u64,
     clock: &dyn ClockSleeper,
 ) -> Result<RetryState, EngineError> {
-    let scope = RetryScopeKey::new(binding, plan)?;
-    let configured_budget = RetryBudget::from_params(params)?;
-    let previous = load_matching_state(store, binding, &scope)?;
-    if let Some(state) = previous
-        .as_ref()
-        .filter(|state| state.launch_phase == LaunchPhase::Reserved)
-    {
-        // Reuse the existing Reserved state. The owner_token persisted at
-        // reservation time identifies the executor that holds this ordinal.
-        // A concurrent executor calling reserve_launch will obtain the same
-        // Reserved state and reuse the same owner_token, but the subsequent
-        // record_launch_phase call acquires the lock and verifies ownership
-        // via CAS — only the first to advance survives.
-        return Ok(state.clone());
-    }
-    let budget = match &previous {
-        None => configured_budget,
-        Some(state) => {
-            // Reject budget expansion: a persisted budget that was established
-            // from non-default configured values must not be silently expanded
-            // by a restart with higher configured values. Tightening is allowed.
-            state.budget.reject_expansion(configured_budget)?;
-            state.budget.tightened_with(configured_budget)
-        }
-    };
-    let counters = previous
-        .as_ref()
-        .map_or_else(RetryCounters::default, |state| state.counters);
-    if counters.remediation_attempt_index >= budget.max_remediation_attempts {
-        let exhaustion =
-            RetryExhaustionView::new(RetryExhaustionReason::RemediationAttempts, counters, budget);
-        return Err(EngineError::InvalidState(format!(
-            "remediation retry budget exhausted: {exhaustion:?}"
-        )));
-    }
-    let launch_ordinal = counters.remediation_attempt_index + 1;
-    let predecessor_artifact_sequence = if previous.is_some() {
-        state_sequence(store, binding)?
-    } else {
-        None
-    };
-    let state = RetryState {
-        scope,
-        budget,
-        counters: RetryCounters {
-            remediation_attempt_index: launch_ordinal,
-            ..counters
-        },
-        transition_id: launch_transition_id(binding, plan, launch_ordinal),
-        transition_type: "launch_reserved".to_string(),
-        launch_phase: LaunchPhase::Reserved,
-        launch_ordinal,
-        predecessor_artifact_sequence,
-        validation_source_id: None,
-        owner_token: uuid::Uuid::new_v4().to_string(),
-    };
-    persist(store, binding, producer_step_id, step_order, &state, clock)?;
-    Ok(state)
+    LaunchReservation::new(
+        store,
+        binding,
+        plan,
+        params,
+        producer_step_id,
+        step_order,
+        clock,
+    )?
+    .reserve()
 }
 
 pub(super) fn record_launch_phase(
@@ -373,12 +511,22 @@ pub(super) fn record_launch_phase(
             expected_ordinal,
         )?;
         state.launch_phase = phase;
+        // The valid_transition guard above only allows Reserved→Launched and
+        // Launched→Completed, so Reserved can never be the target phase here.
         state.transition_type = match phase {
-            LaunchPhase::Reserved => "launch_reserved",
             LaunchPhase::Launched => "launch_launched",
             LaunchPhase::Completed => "launch_completed",
+            LaunchPhase::Reserved => {
+                unreachable!("valid_transition guard prevents Reserved as target phase")
+            }
         }
         .to_string();
+        // Refresh the lease on transition to Launched so a long-running
+        // remediation does not have its lease expire prematurely relative
+        // to the actual invocation start.
+        if phase == LaunchPhase::Launched {
+            state.lease_expiry = lease_expiry_from_now(clock);
+        }
         persist(store, binding, producer_step_id, step_order, state, clock)
     })
 }
@@ -437,44 +585,59 @@ pub(super) fn load_current_state(
 /// sequence-recovery scan would fail on the corrupt history that triggered the
 /// tombstone. The tombstone is a terminal marker, not a normal sequence-
 /// participating artifact.
+///
+/// The tombstone carries the configured effective budget (not a hardcoded
+/// sentinel budget) so that the budget provenance is preserved across the
+/// tombstone. The counters are set to the budget maxima so that any
+/// subsequent `reserve_launch` correctly detects exhaustion and rejects.
 pub(super) fn write_terminal_tombstone(
     store: &PrFollowupArtifactStore,
     binding: &PrFollowupBinding,
     scope: &RetryScopeKey,
-    _clock: &dyn ClockSleeper,
+    params: &Value,
+    clock: &dyn ClockSleeper,
 ) -> Result<(), EngineError> {
-    let budget = RetryBudget {
-        max_remediation_attempts: 1,
-        max_validation_retries: 0,
-        max_stale_artifact_retries: 0,
-    };
+    let budget = RetryBudget::from_params(params).unwrap_or(RetryBudget {
+        max_remediation_attempts: DEFAULT_MAX_REMEDIATION_ATTEMPTS,
+        max_validation_retries: DEFAULT_MAX_VALIDATION_RETRIES,
+        max_stale_artifact_retries: DEFAULT_MAX_STALE_ARTIFACT_RETRIES,
+    });
     let tombstone = RetryState {
         scope: scope.clone(),
         budget,
         counters: RetryCounters {
-            remediation_attempt_index: 1,
-            validation_retry_index: 0,
-            stale_artifact_retry_index: 0,
+            remediation_attempt_index: budget.max_remediation_attempts,
+            validation_retry_index: budget.max_validation_retries,
+            stale_artifact_retry_index: budget.max_stale_artifact_retries,
         },
-        transition_id: format!("fnv64:tombstone:{}", binding.head_sha),
+        transition_id: format!(
+            "fnv64:tombstone:{}:{}",
+            binding.head_sha,
+            clock.now_rfc3339()
+        ),
         transition_type: "terminal_tombstone".to_string(),
         launch_phase: LaunchPhase::Completed,
-        launch_ordinal: 1,
+        launch_ordinal: budget.max_remediation_attempts,
         predecessor_artifact_sequence: None,
         validation_source_id: None,
         owner_token: uuid::Uuid::new_v4().to_string(),
+        lease_expiry: None,
     };
     with_retry_lock(store, binding, || {
         let path = store.canonical_path(binding, RETRY_STATE_FAMILY);
         let bytes = serde_json::to_vec_pretty(&tombstone)
             .map_err(|err| EngineError::InvalidState(format!("serialize tombstone: {err}")))?;
+        // The tombstone is a terminal marker written directly (bypassing the
+        // store's write_json_artifact) to avoid the sequence-recovery scan
+        // failing on corrupt co-resident artifacts. Use atomic_write to ensure
+        // crash-safety: either the complete tombstone is visible or the
+        // previous (corrupt) content is preserved.
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|err| {
                 EngineError::InvalidState(format!("create tombstone parent: {err}"))
             })?;
         }
-        std::fs::write(&path, &bytes)
-            .map_err(|err| EngineError::InvalidState(format!("write tombstone: {err}")))?;
+        atomic_write(&path, &bytes)?;
         Ok(())
     })
 }
@@ -488,10 +651,20 @@ fn load_matching_state(
     if !path.exists() {
         return Ok(None);
     }
-    let value = store.read_current_raw_json(binding, RETRY_STATE_FAMILY)?;
+    // Read the canonical file directly, bypassing the store's sequence-recovery
+    // scan. The scan walks all co-resident artifacts and would fail if any are
+    // corrupt. The retry state file is self-describing JSON and does not need
+    // sequence-recovery for correctness — its counters are the authoritative
+    // source of truth.
+    let raw = std::fs::read_to_string(&path)
+        .map_err(|err| EngineError::InvalidState(format!("read retry state: {err}")))?;
+    let value: Value = serde_json::from_str(&raw).map_err(|error| {
+        EngineError::InvalidState(format!("invalid remediation retry state: {error}"))
+    })?;
     let state: RetryState = serde_json::from_value(value).map_err(|error| {
         EngineError::InvalidState(format!("invalid remediation retry state: {error}"))
     })?;
+    validate_state_invariants(&state)?;
     Ok((state.scope == *scope).then_some(state))
 }
 
@@ -528,6 +701,19 @@ pub(super) fn record_validation(
         return Err(EngineError::InvalidState(
             "remediation validation counters cannot decrease".to_string(),
         ));
+    }
+    // Enforce that new counters do not exceed budget maxima.
+    if transition.validation_retry_index > state.budget.max_validation_retries {
+        return Err(EngineError::InvalidState(format!(
+            "validation_retry_index {} exceeds max_validation_retries {}",
+            transition.validation_retry_index, state.budget.max_validation_retries
+        )));
+    }
+    if transition.stale_artifact_retry_index > state.budget.max_stale_artifact_retries {
+        return Err(EngineError::InvalidState(format!(
+            "stale_artifact_retry_index {} exceeds max_stale_artifact_retries {}",
+            transition.stale_artifact_retry_index, state.budget.max_stale_artifact_retries
+        )));
     }
     let expected_token = state.owner_token.clone();
     let expected_phase = state.launch_phase;
@@ -583,7 +769,18 @@ fn state_sequence(
     store: &PrFollowupArtifactStore,
     binding: &PrFollowupBinding,
 ) -> Result<Option<u64>, EngineError> {
-    let value = store.read_current_raw_json(binding, RETRY_STATE_FAMILY)?;
+    let path = store.canonical_path(binding, RETRY_STATE_FAMILY);
+    if !path.exists() {
+        return Ok(None);
+    }
+    // Read the canonical file directly to avoid the store's sequence-recovery
+    // scan failing on corrupt co-resident artifacts.
+    let raw = std::fs::read_to_string(&path).map_err(|err| {
+        EngineError::InvalidState(format!("read retry state for sequence: {err}"))
+    })?;
+    let value: Value = serde_json::from_str(&raw).map_err(|err| {
+        EngineError::InvalidState(format!("parse retry state for sequence: {err}"))
+    })?;
     Ok(value.get("artifact_sequence").and_then(Value::as_u64))
 }
 
@@ -617,6 +814,74 @@ fn parameter(params: &Value, name: &str, default: u64) -> Result<u64, EngineErro
             ))
         }),
     }
+}
+
+/// Atomically writes bytes to a path via temp-file + rename, ensuring
+/// crash-atomicity: either the complete new content is visible or the old
+/// content is preserved. Never leaves a partially-written file.
+fn atomic_write(path: &std::path::Path, bytes: &[u8]) -> Result<(), EngineError> {
+    let parent = path.parent().ok_or_else(|| {
+        EngineError::InvalidState(format!("missing parent for {}", path.display()))
+    })?;
+    std::fs::create_dir_all(parent).map_err(|err| {
+        EngineError::InvalidState(format!("create parent for {}: {err}", path.display()))
+    })?;
+    let temp_path = parent.join(format!(
+        ".{}.{}.tmp",
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("retry-state"),
+        uuid::Uuid::new_v4()
+    ));
+    std::fs::write(&temp_path, bytes)
+        .map_err(|err| EngineError::InvalidState(format!("write temp file: {err}")))?;
+    std::fs::rename(&temp_path, path).map_err(|err| {
+        let _ = std::fs::remove_file(&temp_path);
+        EngineError::InvalidState(format!("atomic rename into {}: {err}", path.display()))
+    })?;
+    Ok(())
+}
+
+/// Validates that a recovered or deserialized RetryState is internally
+/// consistent: counters must not exceed budget maxima, ordinal must be
+/// consistent with attempt index, and terminal states must have matching
+/// phase/counters.
+fn validate_state_invariants(state: &RetryState) -> Result<(), EngineError> {
+    state.counters.validate_against_budget(state.budget)?;
+    if state.launch_ordinal > state.budget.max_remediation_attempts {
+        return Err(EngineError::InvalidState(format!(
+            "launch_ordinal {} exceeds max_remediation_attempts {}",
+            state.launch_ordinal, state.budget.max_remediation_attempts
+        )));
+    }
+    Ok(())
+}
+
+/// Returns an RFC3339 timestamp representing the lease expiry for a launch
+/// reserved at the current clock time.
+fn lease_expiry_from_now(clock: &dyn ClockSleeper) -> Option<String> {
+    let now = chrono::DateTime::parse_from_rfc3339(&clock.now_rfc3339()).ok()?;
+    let expiry = now + chrono::Duration::seconds(LEASE_DURATION_SECONDS);
+    Some(expiry.to_rfc3339())
+}
+
+/// Returns `true` if the state's active lease has expired (the owning process
+/// crashed or stalled). A `Completed` state never has an active lease. An
+/// absent or unparseable expiry is treated as expired to avoid deadlock.
+fn is_lease_expired(state: &RetryState, clock: &dyn ClockSleeper) -> bool {
+    if state.launch_phase == LaunchPhase::Completed {
+        return true;
+    }
+    let Some(expiry_str) = &state.lease_expiry else {
+        return true;
+    };
+    let Ok(expiry) = chrono::DateTime::parse_from_rfc3339(expiry_str) else {
+        return true;
+    };
+    let Ok(now) = chrono::DateTime::parse_from_rfc3339(&clock.now_rfc3339()) else {
+        return false;
+    };
+    now >= expiry
 }
 
 #[cfg(test)]
