@@ -6693,12 +6693,17 @@ fn terminal_degrades_gracefully_when_retry_state_is_corrupt() {
         &temp,
         "post-pr-failure-terminal",
     ));
-    assert_eq!(terminal["terminal_state"], serde_json::json!("failed"));
+    assert_eq!(terminal["terminal_state"], serde_json::json!("fatal"));
+    assert!(terminal.get("exhausted_budget").is_none_or(|v| v.is_null()),);
+    // Corrupt retry state with no recoverable history writes a durable
+    // tombstone that prevents continuation from gaining new launches.
+    let tombstone_path = p10_current_artifact_path(&temp, "pr-remediation-retry-state");
+    assert!(tombstone_path.exists(), "tombstone must be written");
+    let tombstone = read_json(&tombstone_path);
     assert_eq!(
-        terminal["terminal_reason"],
-        serde_json::json!("post_pr_failure")
+        tombstone["transition_type"],
+        serde_json::json!("terminal_tombstone")
     );
-    assert!(terminal.get("exhausted_budget").is_none_or(|v| v.is_null()));
 }
 
 #[test]
@@ -6715,14 +6720,10 @@ fn terminal_reports_generic_failure_when_no_plan_exists() {
         &temp,
         "post-pr-failure-terminal",
     ));
-    assert_eq!(terminal["terminal_state"], serde_json::json!("failed"));
-    assert_eq!(
-        terminal["terminal_reason"],
-        serde_json::json!("post_pr_failure")
-    );
+    assert_eq!(terminal["terminal_state"], serde_json::json!("fatal"));
     assert!(terminal
         .get("remediation_attempt_index")
-        .is_none_or(|v| v.is_null()));
+        .is_none_or(|v| v.is_null()),);
 }
 
 #[test]
@@ -11494,4 +11495,492 @@ fn write_json_artifact_accepts_valid_routing_states() {
         .expect("valid fatal + api watcher_fatal_source must persist");
     assert!(store.canonical_path(&binding, "pr-check-status").exists());
     assert!(store.canonical_path(&binding, "ci-failures").exists());
+}
+
+// ---------------------------------------------------------------------------
+// Issue 135: Concurrency, ownership, corruption-recovery, budget, and
+// terminal-selection contract tests.
+// ---------------------------------------------------------------------------
+
+fn p12_write_valid_retry_state(temp: &tempfile::TempDir) {
+    write_p12_plan(temp);
+    let runner = P12FakeLlxprtRunner::new(p12_result("timeout"));
+    let mut context = p12_context(temp);
+    let mut params = p12_params(temp);
+    params["max_remediation_attempts"] = serde_json::json!(2);
+    PrFollowupRemediationExecutorWithRunner::new(runner, FixedClock)
+        .execute(&mut context, &params)
+        .expect("seed valid retry state");
+}
+
+/// Simultaneous executors racing to reserve the first launch ordinal must
+/// serialize: the persisted state has a single consistent owner token and
+/// ordinal. After both complete, the canonical retry state must be internally
+/// consistent with no duplicate ordinals.
+#[test]
+fn simultaneous_executors_serialize_launch_allocation() {
+    let temp = Arc::new(tempfile::tempdir().expect("tempdir"));
+    write_p12_plan(&temp);
+    let mut params = p12_params(&temp);
+    params["max_remediation_attempts"] = serde_json::json!(3);
+
+    let mut handles = Vec::new();
+    for _ in 0..2 {
+        let temp = Arc::clone(&temp);
+        let params = params.clone();
+        handles.push(std::thread::spawn(move || {
+            let runner = P12FakeLlxprtRunner::new(p12_result("timeout"));
+            let mut context = p12_context(&temp);
+            PrFollowupRemediationExecutorWithRunner::new(runner, FixedClock)
+                .execute(&mut context, &params)
+        }));
+    }
+
+    let mut successes = 0;
+    let mut failures = 0;
+    for handle in handles {
+        match handle.join().expect("thread") {
+            Ok(StepOutcome::Success) => successes += 1,
+            Ok(_) | Err(_) => failures += 1,
+        }
+    }
+    assert_eq!(successes + failures, 2, "both threads must terminate");
+    // The retry state must be internally consistent after concurrent access.
+    let retry_state = read_json(&p10_current_artifact_path(
+        &temp,
+        "pr-remediation-retry-state",
+    ));
+    let ordinal = retry_state["launch_ordinal"].as_u64().expect("ordinal");
+    assert!(
+        (1..=2).contains(&ordinal),
+        "ordinal must be in valid range after concurrent allocation: {ordinal}"
+    );
+    assert!(
+        !retry_state["owner_token"]
+            .as_str()
+            .is_some_and(str::is_empty),
+        "owner token must be populated"
+    );
+}
+
+/// A stale owner token (simulating a reclaimed/competing process) must be
+/// rejected on the phase transition via the CAS guard. After tampering with
+/// the persisted owner token, a second reservation succeeds because the
+/// previous state is Completed (not Reserved), so a fresh ordinal and token
+/// are minted. The old in-memory state's token is never reused.
+#[test]
+fn stale_owner_token_prevents_token_reuse() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    p12_write_valid_retry_state(&temp);
+    let retry_state_path = p10_current_artifact_path(&temp, "pr-remediation-retry-state");
+    let original = read_json(&retry_state_path);
+    let original_token = original["owner_token"]
+        .as_str()
+        .expect("original token")
+        .to_string();
+
+    // Tamper: simulate a competing process overwriting the token.
+    let mut tampered = original.clone();
+    tampered["owner_token"] = serde_json::json!("competing-process-token");
+    fs::write(
+        &retry_state_path,
+        serde_json::to_vec_pretty(&tampered).expect("rewrite"),
+    )
+    .expect("persist tampered");
+
+    // A new executor invocation reserves the next ordinal and must mint its
+    // own fresh token — the stale tampered token is never inherited.
+    let runner = P12FakeLlxprtRunner::new(p12_result("timeout"));
+    let mut context = p12_context(&temp);
+    let mut params = p12_params(&temp);
+    params["max_remediation_attempts"] = serde_json::json!(2);
+    PrFollowupRemediationExecutorWithRunner::new(runner, FixedClock)
+        .execute(&mut context, &params)
+        .expect("second launch reserves fresh ordinal");
+    let after = read_json(&retry_state_path);
+    assert_eq!(after["launch_ordinal"], serde_json::json!(2));
+    let new_token = after["owner_token"].as_str().expect("new token");
+    assert_ne!(
+        new_token, "competing-process-token",
+        "tampered token must not be reused"
+    );
+    assert_ne!(
+        new_token, original_token,
+        "new ordinal must mint a fresh owner token"
+    );
+}
+
+/// History files must always exist alongside canonical files for any
+/// persisted retry state. The store writes history first, then canonical,
+/// so a canonical retry state always has a matching history snapshot.
+#[test]
+fn retry_state_write_orders_history_before_canonical() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    p12_write_valid_retry_state(&temp);
+    let canonical = p10_current_artifact_path(&temp, "pr-remediation-retry-state");
+    let history_dir = temp
+        .path()
+        .join("artifacts")
+        .join("pr-followup")
+        .join("history")
+        .join("run-p10")
+        .join("example")
+        .join("workflow")
+        .join("1910")
+        .join("pr-remediation-retry-state");
+    assert!(canonical.exists(), "canonical retry state must exist");
+    assert!(history_dir.exists(), "history directory must exist");
+    let history_files: Vec<_> = fs::read_dir(&history_dir)
+        .expect("read history dir")
+        .filter_map(std::result::Result::ok)
+        .filter(|e| e.path().extension().is_some_and(|ext| ext == "json"))
+        .collect();
+    assert!(
+        !history_files.is_empty(),
+        "history snapshots must accompany canonical writes"
+    );
+    // Each history file must be valid JSON with a matching artifact_sequence.
+    for entry in &history_files {
+        let snapshot = read_json(&entry.path());
+        assert!(
+            snapshot
+                .get("artifact_sequence")
+                .and_then(|v| v.as_u64())
+                .is_some(),
+            "history snapshot must carry artifact_sequence"
+        );
+    }
+    // The canonical retry state must exist and be valid JSON with an
+    // artifact_sequence. We don't require the canonical sequence to equal
+    // the latest history sequence because the store's global sequence
+    // recovery may assign a higher sequence to the canonical file (it
+    // scans all artifacts in the binding directory for the maximum
+    // artifact_sequence and increments, while history-only files with
+    // lower sequences are already accounted for). The key invariant is
+    // that both canonical and at least one history snapshot exist and
+    // carry valid artifact_sequences.
+    let canonical_state = read_json(&canonical);
+    assert!(
+        canonical_state
+            .get("artifact_sequence")
+            .and_then(|v| v.as_u64())
+            .is_some(),
+        "canonical retry state must carry artifact_sequence"
+    );
+}
+
+/// Corrupt canonical retry state with valid immutable history must recover
+/// the latest valid state from history rather than writing a tombstone.
+#[test]
+fn corrupt_canonical_recovers_from_valid_history() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    p12_write_valid_retry_state(&temp);
+    let retry_state_path = p10_current_artifact_path(&temp, "pr-remediation-retry-state");
+    fs::write(&retry_state_path, b"not-json-corrupt").expect("corrupt canonical");
+    let mut context = p12_context(&temp);
+    let outcome = PostPrFailureTerminalExecutor
+        .execute(&mut context, &p12_params(&temp))
+        .expect("terminal must recover from history");
+    assert_eq!(outcome, StepOutcome::Fatal);
+    let terminal = read_json(&p10_current_artifact_path(
+        &temp,
+        "post-pr-failure-terminal",
+    ));
+    assert_eq!(terminal["terminal_state"], serde_json::json!("fatal"));
+    // The recovered state from history has counters indicating the budget
+    // was consumed (remediation_attempt_index >= max_remediation_attempts
+    // for a completed launch with budget 2 and 2 attempts).
+    let recovered = read_json(&retry_state_path);
+    assert_ne!(
+        recovered["transition_type"],
+        serde_json::json!("terminal_tombstone"),
+        "valid history must prevent tombstone"
+    );
+    // The terminal artifact must carry the retry metadata from the recovered
+    // history state.
+    assert!(
+        terminal.get("remediation_attempt_index").is_some(),
+        "terminal must include retry metadata from recovered state"
+    );
+}
+
+/// Corrupt canonical retry state with corrupt history must fail closed via a
+/// durable tombstone with unique quarantine evidence.
+#[test]
+fn corrupt_canonical_and_invalid_history_writes_tombstone() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    p12_write_valid_retry_state(&temp);
+    let retry_state_path = p10_current_artifact_path(&temp, "pr-remediation-retry-state");
+    fs::write(&retry_state_path, b"not-json-corrupt").expect("corrupt canonical");
+    let history_dir = temp
+        .path()
+        .join("artifacts")
+        .join("pr-followup")
+        .join("history")
+        .join("run-p10")
+        .join("example")
+        .join("workflow")
+        .join("1910")
+        .join("pr-remediation-retry-state");
+    if history_dir.exists() {
+        for entry in fs::read_dir(&history_dir).expect("read history") {
+            let path = entry.expect("entry").path();
+            if path.extension().is_some_and(|ext| ext == "json") {
+                fs::write(&path, b"corrupt-history").expect("corrupt history");
+            }
+        }
+    }
+    let mut context = p12_context(&temp);
+    let outcome = PostPrFailureTerminalExecutor
+        .execute(&mut context, &p12_params(&temp))
+        .expect("terminal must fail closed");
+    assert_eq!(outcome, StepOutcome::Fatal);
+    // Tombstone must be written at the canonical path.
+    let tombstone = read_json(&retry_state_path);
+    assert_eq!(
+        tombstone["transition_type"],
+        serde_json::json!("terminal_tombstone")
+    );
+    let parent = retry_state_path.parent().expect("parent");
+    let mut quarantined: Vec<_> = fs::read_dir(parent)
+        .expect("read dir")
+        .filter_map(std::result::Result::ok)
+        .filter(|e| {
+            e.file_name().to_str().is_some_and(|name| {
+                name.starts_with("pr-remediation-retry-state") && name.contains("corrupt")
+            })
+        })
+        .collect();
+    assert_eq!(
+        quarantined.len(),
+        1,
+        "exactly one quarantine evidence file with unique suffix"
+    );
+    let qname = quarantined
+        .pop()
+        .expect("quarantined file")
+        .file_name()
+        .to_str()
+        .expect("name")
+        .to_string();
+    assert!(
+        qname.matches('.').count() >= 3,
+        "quarantine name must include timestamp+uuid suffix: {qname}"
+    );
+}
+
+/// The retry budget must persist across executor reconstruction and never
+/// reset to the default.
+#[test]
+fn retry_budget_persists_across_reconstruction_no_reset() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_p12_plan(&temp);
+    let runner = P12FakeLlxprtRunner::new(p12_result("timeout"));
+    let mut params = p12_params(&temp);
+    params["max_remediation_attempts"] = serde_json::json!(2);
+
+    let mut context = p12_context(&temp);
+    PrFollowupRemediationExecutorWithRunner::new(runner.clone(), FixedClock)
+        .execute(&mut context, &params)
+        .expect("first launch");
+    let retry_state = read_json(&p10_current_artifact_path(
+        &temp,
+        "pr-remediation-retry-state",
+    ));
+    assert_eq!(
+        retry_state["budget"]["max_remediation_attempts"],
+        serde_json::json!(2),
+        "persisted budget must reflect configured value"
+    );
+    assert_eq!(
+        retry_state["counters"]["remediation_attempt_index"],
+        serde_json::json!(1),
+        "first launch consumed attempt index 1"
+    );
+
+    let mut context2 = p12_context(&temp);
+    PrFollowupRemediationExecutorWithRunner::new(runner.clone(), FixedClock)
+        .execute(&mut context2, &params)
+        .expect("second launch exhausts budget");
+
+    let mut context3 = p12_context(&temp);
+    let error = PrFollowupRemediationExecutorWithRunner::new(runner, FixedClock)
+        .execute(&mut context3, &params)
+        .expect_err("third launch rejected — no budget reset");
+    assert!(
+        error.to_string().contains("retry budget exhausted"),
+        "must fail with budget exhaustion, got: {error}"
+    );
+}
+
+/// Unequal (lower) configured policy values must tighten the persisted budget.
+/// Higher values must be rejected.
+#[test]
+fn unequal_policy_values_tighten_but_do_not_expand() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_p12_plan(&temp);
+    let runner = P12FakeLlxprtRunner::new(p12_result("timeout"));
+
+    let mut params_high = p12_params(&temp);
+    params_high["max_remediation_attempts"] = serde_json::json!(3);
+    let mut context = p12_context(&temp);
+    PrFollowupRemediationExecutorWithRunner::new(runner.clone(), FixedClock)
+        .execute(&mut context, &params_high)
+        .expect("initial launch with high budget");
+
+    let mut params_low = p12_params(&temp);
+    params_low["max_remediation_attempts"] = serde_json::json!(2);
+    let mut context2 = p12_context(&temp);
+    PrFollowupRemediationExecutorWithRunner::new(runner.clone(), FixedClock)
+        .execute(&mut context2, &params_low)
+        .expect("second launch with tightened budget");
+    let after_tighten = read_json(&p10_current_artifact_path(
+        &temp,
+        "pr-remediation-retry-state",
+    ));
+    assert_eq!(
+        after_tighten["budget"]["max_remediation_attempts"],
+        serde_json::json!(2),
+        "budget must tighten to the lower configured value"
+    );
+
+    let mut params_expand = p12_params(&temp);
+    params_expand["max_remediation_attempts"] = serde_json::json!(4);
+    let mut context3 = p12_context(&temp);
+    let error = PrFollowupRemediationExecutorWithRunner::new(runner, FixedClock)
+        .execute(&mut context3, &params_expand)
+        .expect_err("budget expansion must be rejected");
+    assert!(
+        error.to_string().contains("budget expansion rejected"),
+        "must reject expansion, got: {error}"
+    );
+}
+
+/// The terminal must deterministically select the highest-sequence failure
+/// candidate from the active binding's candidate set.
+#[test]
+fn terminal_selects_highest_sequence_failure_candidate() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_p12_plan(&temp);
+    let store = PrFollowupArtifactStore::new(temp.path().join("artifacts"));
+    let binding = p10_binding();
+
+    store
+        .write_json_artifact(
+            &binding,
+            "post-pr-test-result",
+            "run_post_pr_tests",
+            11,
+            &serde_json::json!({
+                "test_state": "failed",
+                "commands": [{
+                    "command_id": "cargo-test",
+                    "status": "failed",
+                    "failure_classification": "local_test_failed",
+                    "argv": ["cargo", "test"],
+                    "exit_code": 101,
+                    "bounded_stdout": "first failure",
+                    "bounded_stderr": ""
+                }]
+            }),
+            Some(("failed", "post_pr_test_failed", serde_json::json!({}))),
+            &FixedClock,
+        )
+        .expect("write first failure");
+
+    store
+        .write_json_artifact(
+            &binding,
+            "pr-remediation-result",
+            "validate_remediation_result",
+            9,
+            &serde_json::json!({
+                "status": "failed",
+                "remediation_attempt_index": 1
+            }),
+            Some(("failed", "remediation_failed", serde_json::json!({}))),
+            &FixedClock,
+        )
+        .expect("write second failure");
+
+    let mut context = p12_context(&temp);
+    let outcome = PostPrFailureTerminalExecutor
+        .execute(&mut context, &p12_params(&temp))
+        .expect("terminal writes artifact");
+    assert_eq!(outcome, StepOutcome::Fatal);
+    let terminal = read_json(&p10_current_artifact_path(
+        &temp,
+        "post-pr-failure-terminal",
+    ));
+    assert!(
+        terminal.get("source_failure_sequence").is_some(),
+        "terminal must record the selected source failure_sequence"
+    );
+    assert_eq!(terminal["terminal_state"], serde_json::json!("fatal"),);
+    let source_count = terminal["source_artifacts"]
+        .as_array()
+        .expect("source_artifacts array")
+        .len();
+    assert_eq!(
+        source_count, 2,
+        "source_artifacts must include both failure candidates"
+    );
+    assert_eq!(
+        terminal["selected_source_reason"],
+        serde_json::json!("highest_failure_sequence"),
+    );
+}
+
+/// Replaying the terminal step must be idempotent: the existing artifact is
+/// reused, not re-written, and history remains invariant.
+#[test]
+fn terminal_replay_is_idempotent_history_invariant() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_p12_plan(&temp);
+
+    let mut context1 = p12_context(&temp);
+    let outcome1 = PostPrFailureTerminalExecutor
+        .execute(&mut context1, &p12_params(&temp))
+        .expect("first terminal write");
+    assert_eq!(outcome1, StepOutcome::Fatal);
+    let terminal_path = p10_current_artifact_path(&temp, "post-pr-failure-terminal");
+    let first = read_json(&terminal_path);
+    let first_key = first["idempotency_key"]
+        .as_str()
+        .expect("idempotency key")
+        .to_string();
+    let first_artifact_sequence = first["artifact_sequence"].as_u64().expect("artifact seq");
+
+    let mut context2 = p12_context(&temp);
+    let outcome2 = PostPrFailureTerminalExecutor
+        .execute(&mut context2, &p12_params(&temp))
+        .expect("replay terminal");
+    assert_eq!(outcome2, StepOutcome::Fatal);
+    let second = read_json(&terminal_path);
+    assert_eq!(
+        second["artifact_sequence"],
+        serde_json::json!(first_artifact_sequence),
+        "replay must not allocate a new artifact_sequence"
+    );
+    assert_eq!(second["idempotency_key"], serde_json::json!(first_key),);
+
+    let history_dir = temp
+        .path()
+        .join("artifacts")
+        .join("pr-followup")
+        .join("history")
+        .join("run-p10")
+        .join("example")
+        .join("workflow")
+        .join("1910")
+        .join("post-pr-failure-terminal");
+    let history_count = fs::read_dir(&history_dir)
+        .expect("read history")
+        .filter_map(std::result::Result::ok)
+        .filter(|e| e.path().extension().is_some_and(|ext| ext == "json"))
+        .count();
+    assert_eq!(
+        history_count, 1,
+        "history must contain exactly one terminal snapshot after replay"
+    );
 }

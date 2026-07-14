@@ -401,7 +401,6 @@
         "remediation_plan_path": "{artifact_dir}/pr-followup/current/pr-remediation-plan.json",
         "remediation_prompt_path": "{artifact_dir}/pr-followup/current/pr-remediation-prompt.md",
         "remediation_result_path": "{artifact_dir}/pr-followup/current/pr-remediation-result.json",
-        "remediation_retry_state_path": "{artifact_dir}/pr-followup/current/pr-remediation-retry-state.json",
         "remediation_invocation_result_path": "{artifact_dir}/pr-followup/current/pr-remediation-llxprt-run.json",
         "success_file": "{artifact_dir}/pr-followup/current/pr-remediation-result.json",
         "input_head_sha_param": "head_sha"
@@ -421,8 +420,7 @@
         "pr_number": "{pr_number}",
         "max_remediation_attempts": 2,
         "remediation_plan_path": "{artifact_dir}/pr-followup/current/pr-remediation-plan.json",
-        "remediation_result_path": "{artifact_dir}/pr-followup/current/pr-remediation-result.json",
-        "remediation_retry_state_path": "{artifact_dir}/pr-followup/current/pr-remediation-retry-state.json"
+        "remediation_result_path": "{artifact_dir}/pr-followup/current/pr-remediation-result.json"
       }
     },
     {
@@ -495,8 +493,7 @@
       "parameters": {
         "artifact_root": "{artifact_dir}",
         "step_order_index": 13,
-        "post_pr_failure_terminal_result_path": "{artifact_dir}/pr-followup/current/post-pr-failure-terminal.json",
-        "remediation_retry_state_path": "{artifact_dir}/pr-followup/current/pr-remediation-retry-state.json"
+        "post_pr_failure_terminal_result_path": "{artifact_dir}/pr-followup/current/post-pr-failure-terminal.json"
       }
     },
     {
