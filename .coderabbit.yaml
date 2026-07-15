@@ -1,0 +1,59 @@
+# yaml-language-server: $schema=https://storage.googleapis.com/coderabbit_public_assets/schema.v2.json
+#
+# Authoritative CodeRabbit configuration for llxprt-luther. CodeRabbit only
+# discovers repository YAML at the repository root.
+
+reviews:
+  profile: assertive
+
+  auto_review:
+    enabled: true
+    drafts: false
+    auto_incremental_review: true
+    # See docs/coderabbit-operations.md for the demand and coverage baseline.
+    auto_pause_after_reviewed_commits: 5
+
+  path_instructions:
+    - path: "workflow/**"
+      instructions: &workflow_review_instructions |
+        Review as a senior Rust engineer. Prioritize, in order:
+        1. Correctness — trace workflow state transitions, continuation boundaries,
+           retry accounting, error paths, and concurrent or stale-process behavior.
+        2. Durable-state contracts — verify database, checkpoint, artifact, lease,
+           and external-wait updates remain atomic and resumable after interruption.
+        3. Security — preserve repository trust boundaries, least privilege, secret
+           redaction, safe command construction, and fail-closed behavior.
+        4. Contract consistency — code, workflow TOML, schemas, documentation, and
+           tests must agree on identifiers, outcomes, retry limits, and ownership.
+        5. Maintainability — flag duplication, brittle parsing, dead code, and weak
+           abstractions rather than recommending narrow patches.
+
+        For tests, verify behavior rather than implementation details. Require
+        coverage for failure paths, retries, resume boundaries, stale ownership,
+        malformed persisted data, and relevant concurrency races.
+
+        LINT AND QUALITY GUARDRAIL POLICY (flag every violation):
+        - Do not add suppression directives such as #[allow(...)]. Fix the cause.
+        - Do not downgrade lint severity or increase complexity/size thresholds.
+        - Do not add ignore/exclude rules that hide source from validation.
+        - Do not weaken tests or assertions merely to make a failing check pass.
+
+    # Minimatch excludes dot-prefixed path components by default. Apply the
+    # same guidance to hidden workflow files and files below hidden directories.
+    - path: "workflow/**/.*"
+      instructions: *workflow_review_instructions
+    - path: "workflow/**/.*/**"
+      instructions: *workflow_review_instructions
+
+  tools:
+    clippy:
+      enabled: true
+
+# Retain CodeRabbit issue planning/enrichment, but prohibit automatic labels.
+# In particular, CodeRabbit must never apply "OK for Luther" or
+# "Luther working"; those labels control real workflow scheduling/ownership.
+issue_enrichment:
+  planning:
+    enabled: true
+  labeling:
+    auto_apply_labels: false
