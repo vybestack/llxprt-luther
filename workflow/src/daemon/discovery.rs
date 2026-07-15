@@ -18,6 +18,10 @@ use crate::engine::runner::EngineError;
 use crate::persistence::leases::get_lease_for_issue;
 use crate::workflow::schema::DiscoveryConfig;
 
+mod approval;
+
+use approval::{evaluate_approval_actor, ApprovalStatus};
+
 /// Reason an issue was deemed ineligible.
 /// @plan:PLAN-20260415-DAEMON-DISCOVERY.P04
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -25,7 +29,8 @@ pub enum SkipReason {
     MissingRequiredLabel(String),
     HasExcludedLabel(String),
     WrongState(String),
-    AssigneeMismatch(String),
+    MissingApprovalProvenance,
+    UnauthorizedApprovalActor(String),
     HasActiveLease,
     HasOpenPr,
     ChildOfActiveParent,
@@ -41,7 +46,15 @@ impl std::fmt::Display for SkipReason {
             SkipReason::MissingRequiredLabel(l) => write!(f, "missing required label '{l}'"),
             SkipReason::HasExcludedLabel(l) => write!(f, "has excluded label '{l}'"),
             SkipReason::WrongState(s) => write!(f, "wrong state '{s}'"),
-            SkipReason::AssigneeMismatch(a) => write!(f, "assignee mismatch (wanted '{a}')"),
+            SkipReason::MissingApprovalProvenance => {
+                write!(f, "approval label provenance is missing")
+            }
+            SkipReason::UnauthorizedApprovalActor(actor) => {
+                write!(
+                    f,
+                    "approval label was applied by unauthorized actor '{actor}'"
+                )
+            }
             SkipReason::HasActiveLease => write!(f, "issue already has an in-progress lease"),
             SkipReason::HasOpenPr => write!(f, "issue already has an open PR"),
             SkipReason::ChildOfActiveParent => {
@@ -67,7 +80,8 @@ impl SkipReason {
             SkipReason::HasExcludedLabel(_) => "has_excluded_label",
             SkipReason::WrongState(_) => "wrong_state",
             SkipReason::ChildOfActiveParent => "child_of_active_parent",
-            SkipReason::AssigneeMismatch(_) => "assignee_mismatch",
+            SkipReason::MissingApprovalProvenance => "missing_approval_provenance",
+            SkipReason::UnauthorizedApprovalActor(_) => "unauthorized_approval_actor",
             SkipReason::HasActiveLease => "has_active_lease",
             SkipReason::HasOpenPr => "has_open_pr",
             SkipReason::ConcurrencyLimitReached => "concurrency_limit_reached",
@@ -152,11 +166,6 @@ fn static_filter(cfg: &DiscoveryConfig, issue: &GithubIssue) -> Option<SkipReaso
     {
         return Some(SkipReason::WrongState(issue.state.clone()));
     }
-    if let Some(wanted) = &cfg.assignee_filter {
-        if !assignee_matches(wanted, issue.assignee.as_deref()) {
-            return Some(SkipReason::AssigneeMismatch(wanted.clone()));
-        }
-    }
     None
 }
 
@@ -167,13 +176,27 @@ fn issue_has_label(issue: &GithubIssue, expected: &str) -> bool {
         .any(|label| label.eq_ignore_ascii_case(expected))
 }
 
-/// Whether an issue's assignee satisfies the filter. `""` means unassigned.
-fn assignee_matches(wanted: &str, actual: Option<&str>) -> bool {
-    if wanted.is_empty() {
-        actual.is_none()
-    } else {
-        actual == Some(wanted)
-    }
+fn approval_skip(
+    cfg: &DiscoveryConfig,
+    query: &dyn GithubIssueQuery,
+    repo: &str,
+    issue: &GithubIssue,
+) -> Result<Option<SkipReason>, GithubError> {
+    let (label, expected_actor) = match (&cfg.approval_label, &cfg.approval_actor) {
+        (Some(label), Some(actor)) => (label, actor),
+        (None, None) => return Ok(None),
+        _ => return Ok(Some(SkipReason::MissingApprovalProvenance)),
+    };
+    let actual = query.latest_label_actor(repo, issue.number, label)?;
+    Ok(
+        match evaluate_approval_actor(actual.as_deref(), expected_actor) {
+            ApprovalStatus::Authorized => None,
+            ApprovalStatus::MissingProvenance => Some(SkipReason::MissingApprovalProvenance),
+            ApprovalStatus::UnauthorizedActor { actual } => {
+                Some(SkipReason::UnauthorizedApprovalActor(actual))
+            }
+        },
+    )
 }
 
 /// Parse a milestone title like `v1.2.3` (or `1.2.3`) into a sortable tuple.
@@ -234,6 +257,10 @@ pub fn discover(
 
     for issue in issues {
         if let Some(reason) = static_filter(cfg, &issue) {
+            result.skipped.push((issue, reason));
+            continue;
+        }
+        if let Some(reason) = approval_skip(cfg, q, repo, &issue)? {
             result.skipped.push((issue, reason));
             continue;
         }
@@ -416,7 +443,10 @@ mod tests {
             exclude_labels: vec!["Luther working".to_string()],
             active_parent_label: Some("Luther working".to_string()),
             issue_states: vec!["open".to_string()],
-            assignee_filter: None,
+            approval_label: None,
+            approval_actor: None,
+            claim_assignee: None,
+            claim_label: None,
             milestone_order: Some("semver".to_string()),
             max_concurrent_runs: Some(2),
             poll_interval_secs: Some(300),
@@ -436,7 +466,7 @@ mod tests {
             title: format!("Issue {number}"),
             state: "open".to_string(),
             labels: labels.iter().map(|s| (*s).to_string()).collect(),
-            assignee: None,
+            assignees: vec![],
             milestone: None,
             body: None,
         }
@@ -558,9 +588,8 @@ mod tests {
     }
 
     #[test]
-    fn assignee_mismatch_skipped() {
-        let mut c = cfg();
-        c.assignee_filter = Some("acoliver".to_string());
+    fn unassigned_approved_issue_is_eligible() {
+        let c = cfg();
         let q = MockQuery {
             issues: vec![issue(1, &["OK for Luther"])],
             open_pr_for: vec![],
@@ -568,10 +597,7 @@ mod tests {
             active_parent_for: vec![],
         };
         let r = discover(&c, &q, &conn(), 0).unwrap();
-        assert_eq!(
-            *first_skip_reason(&r),
-            SkipReason::AssigneeMismatch("acoliver".to_string())
-        );
+        assert_eq!(r.eligible.len(), 1);
     }
 
     #[test]
@@ -705,13 +731,5 @@ mod tests {
         let order: Vec<u64> = r.eligible.iter().map(|i| i.issue.number).collect();
         // v1.0.0 issues (5, 20) before v2.0.0 (10); within milestone by number.
         assert_eq!(order, vec![5, 20, 10]);
-    }
-
-    #[test]
-    fn unassigned_filter_matches_none() {
-        assert!(assignee_matches("", None));
-        assert!(!assignee_matches("", Some("x")));
-        assert!(assignee_matches("x", Some("x")));
-        assert!(!assignee_matches("x", None));
     }
 }

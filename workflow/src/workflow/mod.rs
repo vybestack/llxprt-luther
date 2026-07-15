@@ -2,6 +2,7 @@
 /// Workflow module - schema definitions and config loading.
 pub mod command_manifest;
 pub mod config_loader;
+mod discovery_config;
 pub mod schema;
 pub mod target_paths;
 pub mod target_profile;

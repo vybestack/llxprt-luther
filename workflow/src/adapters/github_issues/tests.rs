@@ -47,9 +47,9 @@ fn parse_issue_list_maps_fields() {
     assert_eq!(issues[0].number, 12);
     assert_eq!(issues[0].state, "open");
     assert_eq!(issues[0].labels, vec!["OK for Luther"]);
-    assert_eq!(issues[0].assignee.as_deref(), Some("acoliver"));
+    assert_eq!(issues[0].assignees, vec!["acoliver"]);
     assert_eq!(issues[0].milestone.as_deref(), Some("v1.2.0"));
-    assert_eq!(issues[1].assignee, None);
+    assert_eq!(issues[1].assignees, Vec::<String>::new());
     assert_eq!(issues[1].milestone, None);
 }
 
@@ -176,7 +176,7 @@ fn parse_parent_issue_response_accepts_parent_only_query_shape() {
         parent.issue.labels,
         vec!["OK for Luther".to_string(), "Luther working".to_string()]
     );
-    assert_eq!(parent.issue.assignee.as_deref(), Some("acoliver"));
+    assert_eq!(parent.issue.assignees, vec!["acoliver"]);
     assert_eq!(parent.issue.milestone.as_deref(), Some("v1.0.0"));
 }
 
@@ -682,7 +682,7 @@ fn parse_issue_list_maps_state_and_labels() {
     assert_eq!(issues.len(), 1);
     assert_eq!(issues[0].state, "open");
     assert_eq!(issues[0].labels, vec!["bug".to_string()]);
-    assert_eq!(issues[0].assignee.as_deref(), Some("me"));
+    assert_eq!(issues[0].assignees, vec!["me"]);
     assert_eq!(issues[0].milestone.as_deref(), Some("m1"));
 }
 

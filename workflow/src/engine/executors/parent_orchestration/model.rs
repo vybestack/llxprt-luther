@@ -123,7 +123,7 @@ mod tests {
             title: format!("Issue {number}"),
             state: state.to_string(),
             labels: Vec::new(),
-            assignee: None,
+            assignees: vec![],
             milestone: None,
             body: None,
         }

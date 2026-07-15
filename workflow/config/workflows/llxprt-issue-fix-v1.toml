@@ -38,7 +38,9 @@ if [ -n "{primary_issue_number}" ] && [ "{primary_issue_number}" != "0" ]; then
   if [ -n "$ISSUE_JSON" ]; then
     ISSUE_NUMBER=$(echo "$ISSUE_JSON" | jq -r '.number')
     ISSUE_TITLE=$(echo "$ISSUE_JSON" | jq -r '.title')
-    gh issue edit "$ISSUE_NUMBER" --repo {target_repo} --add-assignee {assignee} --add-label "{luther_label}" > /dev/null
+    if [ "{daemon_managed_claim}" != "true" ]; then
+      gh issue edit "$ISSUE_NUMBER" --repo {target_repo} --add-assignee {assignee} --add-label "{luther_label}" > /dev/null
+    fi
     jq -n --argjson num "$ISSUE_NUMBER" --arg title "$ISSUE_TITLE" '{number: $num, title: $title}'
     exit 0
   fi
@@ -782,8 +784,12 @@ ABANDON_BODY_FILE="$(mktemp "${TMPDIR:-/tmp}/luther-abandon.XXXXXX")"
 trap 'rm -f "$ABANDON_BODY_FILE"' EXIT
 printf '%s\n' "Luther abandoning this issue: workflow failed at step {current_step_id}." > "$ABANDON_BODY_FILE"
 gh issue comment "$ISSUE_NUM" --repo {target_repo} --body-file "$ABANDON_BODY_FILE"
-gh issue edit "$ISSUE_NUM" --repo {target_repo} --remove-label "{luther_label}"
-gh issue edit "$ISSUE_NUM" --repo {target_repo} --remove-assignee {assignee}
+if [ "{daemon_managed_claim}" != "true" ] || [ "{claim_label_added}" = "true" ]; then
+  gh issue edit "$ISSUE_NUM" --repo {target_repo} --remove-label "{luther_label}"
+fi
+if [ "{daemon_managed_claim}" != "true" ] || [ "{claim_assignment_added}" = "true" ]; then
+  gh issue edit "$ISSUE_NUM" --repo {target_repo} --remove-assignee {assignee}
+fi
 """
 
 [[steps]]

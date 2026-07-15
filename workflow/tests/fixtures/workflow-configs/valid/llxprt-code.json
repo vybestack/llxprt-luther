@@ -18,6 +18,10 @@
   },
   "discovery": {
     "enabled": false,
+    "approval_label": "OK for Luther",
+    "approval_actor": "acoliver",
+    "claim_assignee": "acoliver",
+    "claim_label": "Luther working",
     "include_labels": [
       "OK for Luther"
     ],
@@ -27,15 +31,18 @@
     "issue_states": [
       "open"
     ],
+    "active_parent_label": "Luther working",
     "max_concurrent_runs": 1,
     "poll_interval_secs": 300,
     "route_parent_issues": true,
     "parent_workflow_type_id": "parent-issue-orchestrator-v1",
     "parent_config_id": "parent-orchestrator-code",
-    "skip_children_of_active_parents": true,
-    "active_parent_label": "Luther working"
+    "skip_children_of_active_parents": true
   },
   "variables": {
+    "daemon_managed_claim": "false",
+    "claim_assignment_added": "true",
+    "claim_label_added": "true",
     "primary_issue_number": "0",
     "issue_number": "0",
     "profile_planning": "gpt55high",

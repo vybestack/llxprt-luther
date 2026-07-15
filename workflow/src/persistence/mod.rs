@@ -2,6 +2,7 @@
 /// Persistence module - durable storage for run metadata and state.
 pub mod artifacts;
 pub mod checkpoint;
+pub(crate) mod claim_metadata;
 pub mod leases;
 pub mod run_metadata;
 pub mod sqlite;
@@ -88,6 +89,11 @@ pub fn init_database(db_path: &Path) -> Result<(), checkpoint::PersistenceError>
     // @plan:PLAN-20260415-DAEMON-DISCOVERY.P02
     leases::init_leases_table(&tx).map_err(|e| {
         checkpoint::PersistenceError::Database(format!("Failed to initialize leases schema: {e}"))
+    })?;
+    claim_metadata::init_claim_metadata_table(&tx).map_err(|e| {
+        checkpoint::PersistenceError::Database(format!(
+            "Failed to initialize claim metadata schema: {e}"
+        ))
     })?;
 
     wait_state::init_wait_states_table(&tx).map_err(|e| {

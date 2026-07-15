@@ -27,7 +27,10 @@ fn cfg(max: u32) -> DiscoveryConfig {
         exclude_labels: vec![],
         active_parent_label: None,
         issue_states: vec!["open".to_string()],
-        assignee_filter: None,
+        approval_label: None,
+        approval_actor: None,
+        claim_assignee: None,
+        claim_label: None,
         milestone_order: Some("none".to_string()),
         max_concurrent_runs: Some(max),
         poll_interval_secs: Some(300),
@@ -47,7 +50,7 @@ fn issue(number: u64) -> GithubIssue {
         title: format!("Issue {number}"),
         state: "open".to_string(),
         labels: vec!["ok".to_string()],
-        assignee: None,
+        assignees: vec![],
         milestone: None,
         body: None,
     }
@@ -258,6 +261,96 @@ fn simulate_replacement_wait_row(
     record.issue_number = issue_number;
     record.resume_step = "watch_pr_checks".to_string();
     crate::persistence::persist_external_wait(conn, &record).unwrap();
+}
+
+struct InterruptedClaimQuery {
+    issue: Mutex<GithubIssue>,
+}
+
+impl GithubIssueQuery for InterruptedClaimQuery {
+    fn list_issues(
+        &self,
+        _repo: &str,
+        _labels: &[String],
+        _states: &[String],
+    ) -> Result<Vec<GithubIssue>, GithubError> {
+        Ok(Vec::new())
+    }
+
+    fn has_open_pr_for_issue(&self, _repo: &str, _number: u64) -> Result<bool, GithubError> {
+        Ok(false)
+    }
+
+    fn list_milestones(&self, _repo: &str) -> Result<Vec<String>, GithubError> {
+        Ok(Vec::new())
+    }
+
+    fn get_issue(&self, _repo: &str, _number: u64) -> Result<Option<GithubIssue>, GithubError> {
+        Ok(Some(self.issue.lock().unwrap().clone()))
+    }
+
+    fn remove_assignee(&self, _repo: &str, _number: u64, login: &str) -> Result<(), GithubError> {
+        self.issue
+            .lock()
+            .unwrap()
+            .assignees
+            .retain(|value| !value.eq_ignore_ascii_case(login));
+        Ok(())
+    }
+}
+
+#[test]
+fn scheduler_reconciles_interrupted_claim_and_makes_issue_reclaimable() {
+    use crate::persistence::claim_metadata::{
+        get_claim_metadata, upsert_claim_metadata, ClaimMetadataReceipt,
+    };
+
+    let c = conn();
+    let lease = try_claim(&c, "o/r", 136, "cfg").unwrap().unwrap();
+    upsert_claim_metadata(
+        &c,
+        &ClaimMetadataReceipt {
+            lease_id: lease.lease_id,
+            assignee: "acoliver".to_owned(),
+            label: "Luther working".to_owned(),
+            assignment_added: true,
+            label_added: false,
+            cleanup_pending: true,
+        },
+    )
+    .unwrap();
+    let query = InterruptedClaimQuery {
+        issue: Mutex::new(GithubIssue {
+            number: 136,
+            title: "interrupted claim".to_owned(),
+            state: "open".to_owned(),
+            labels: vec!["OK for Luther".to_owned()],
+            assignees: vec!["reviewer".to_owned(), "acoliver".to_owned()],
+            milestone: None,
+            body: None,
+        }),
+    };
+    let launcher = MockLauncher {
+        launched: Mutex::new(Vec::new()),
+    };
+    let target = pollable_target();
+    let poller = ScriptedPoller::new(Vec::new());
+
+    run_single_target_once(&target, &query, &c, &launcher, &poller);
+
+    assert_eq!(
+        query.issue.lock().unwrap().assignees,
+        ["reviewer".to_owned()]
+    );
+    let lease = get_lease_for_issue(&c, "o/r", 136).unwrap().unwrap();
+    assert_eq!(lease.status, LeaseStatus::Abandoned);
+    assert!(
+        !get_claim_metadata(&c, &lease.lease_id)
+            .unwrap()
+            .unwrap()
+            .cleanup_pending
+    );
+    assert!(try_claim(&c, "o/r", 136, "cfg").unwrap().is_some());
 }
 
 #[test]

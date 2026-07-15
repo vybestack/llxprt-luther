@@ -17,6 +17,9 @@
     "max_cost": 50.0
   },
   "variables": {
+    "daemon_managed_claim": "false",
+    "claim_assignment_added": "true",
+    "claim_label_added": "true",
     "primary_issue_number": "0",
     "issue_number": "0",
     "profile_planning": "gpt55high",

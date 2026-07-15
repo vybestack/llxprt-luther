@@ -13,7 +13,7 @@ fn issue(
         title: title.to_string(),
         state: "open".to_string(),
         labels: labels.iter().map(|l| l.to_string()).collect(),
-        assignee: None,
+        assignees: vec![],
         milestone: None,
         body: None,
     }

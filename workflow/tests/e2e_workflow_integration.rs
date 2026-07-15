@@ -1889,6 +1889,44 @@ fn primary_issue_selection_allows_already_claimed_primary_issue() {
     );
 }
 
+/// @plan:issue-136
+#[test]
+fn daemon_managed_primary_selection_does_not_repeat_claim_mutations() {
+    let workflow_type = post_pr_workflow();
+    let command = workflow_type
+        .steps
+        .iter()
+        .find(|step| step.step_id == "select_issue")
+        .and_then(|step| step.parameters.as_ref())
+        .and_then(|params| params.get("command"))
+        .and_then(serde_json::Value::as_str)
+        .expect("select_issue command exists");
+
+    assert!(command.contains("if [ \"{daemon_managed_claim}\" != \"true\" ]; then"));
+    assert!(command.contains("--add-assignee {assignee} --add-label \"{luther_label}\""));
+}
+
+/// @plan:issue-136
+#[test]
+fn abandonment_cleanup_is_claim_ownership_aware() {
+    let workflow_type = post_pr_workflow();
+    let command = workflow_type
+        .steps
+        .iter()
+        .find(|step| step.step_id == "abandon_and_log")
+        .and_then(|step| step.parameters.as_ref())
+        .and_then(|params| params.get("command"))
+        .and_then(serde_json::Value::as_str)
+        .expect("abandon command exists");
+
+    assert!(command.contains(
+        "[ \"{daemon_managed_claim}\" != \"true\" ] || [ \"{claim_label_added}\" = \"true\" ]"
+    ));
+    assert!(command.contains(
+        "[ \"{daemon_managed_claim}\" != \"true\" ] || [ \"{claim_assignment_added}\" = \"true\" ]"
+    ));
+}
+
 /// @plan:PLAN-20260408-LLXPRT-FIRST.P17
 /// @requirement:REQ-LF-FAIL-001
 #[test]
