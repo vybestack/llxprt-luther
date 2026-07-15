@@ -12,6 +12,8 @@ use crate::engine::transition::StepOutcome;
 use crate::workflow::command_manifest::{CommandEntry, CommandManifest, FailureOutcome};
 use crate::workflow::config_loader::validate_command_manifest;
 use parse::{build_summary, parse_check_output};
+#[cfg(unix)]
+use rustix::process::{getpgid, kill_process, kill_process_group, Pid, Signal};
 use std::io::{BufReader, Read};
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
@@ -564,7 +566,7 @@ fn run_command_with_timeout(
             }
 
             if start.elapsed() >= timeout {
-                terminate_command(command, child.id());
+                terminate_command(&child);
                 let _ = child.kill();
                 let _ = child.wait();
                 let _ = join_output_reader(stdout_reader);
@@ -604,19 +606,23 @@ fn join_output_reader(reader: Option<thread::JoinHandle<Vec<u8>>>) -> Option<Vec
     reader.and_then(|handle| handle.join().ok())
 }
 
-fn terminate_command(_command: &str, shell_pid: u32) {
+fn terminate_command(child: &std::process::Child) {
     #[cfg(unix)]
     {
-        let pgid = format!("-{}", shell_pid);
-        let _ = Command::new("kill").args(["-TERM", &pgid]).status();
+        let pid = Pid::from_child(child);
+        let owns_process_group = getpgid(Some(pid)).is_ok_and(|pgid| pgid == pid);
+        let send_signal: fn(Pid, Signal) -> rustix::io::Result<()> = if owns_process_group {
+            kill_process_group
+        } else {
+            kill_process
+        };
+        let _ = send_signal(pid, Signal::TERM);
         thread::sleep(Duration::from_millis(250));
-        let _ = Command::new("kill").args(["-KILL", &pgid]).status();
+        let _ = send_signal(pid, Signal::KILL);
     }
 
     #[cfg(not(unix))]
-    {
-        let _ = shell_pid;
-    }
+    let _ = child;
 }
 
 fn cap_output(output: &str) -> String {
