@@ -432,14 +432,27 @@ fn ocr_pr_review_workflow_content() -> String {
 /// semver pin, keeping the guardrails strict without re-hardcoding the version.
 fn ocr_version_from_workflow() -> String {
     let content = ocr_pr_review_workflow_content();
-    let raw_value = content
+    let declarations: Vec<&str> = content
         .lines()
         .map(str::trim)
-        .find_map(|line| line.strip_prefix("OCR_VERSION:"))
-        .map(|rest| rest.trim())
-        .unwrap_or_else(|| {
-            panic!("Workflow must declare OCR_VERSION as the single source of truth for the pinned OCR version")
-        });
+        .filter_map(|line| line.strip_prefix("OCR_VERSION:"))
+        .map(str::trim)
+        .collect();
+    assert_eq!(
+        declarations.len(),
+        1,
+        "Workflow must declare OCR_VERSION exactly once"
+    );
+    let code_review_job = job_yaml_block(&content, "code-review");
+    assert!(
+        code_review_job.lines().any(|line| {
+            line.trim()
+                .strip_prefix("OCR_VERSION:")
+                .is_some_and(|value| value.trim() == declarations[0])
+        }),
+        "The single OCR_VERSION declaration must belong to the code-review job"
+    );
+    let raw_value = declarations[0];
     let unquoted = if (raw_value.starts_with('"') && raw_value.ends_with('"'))
         || (raw_value.starts_with('\'') && raw_value.ends_with('\''))
     {
@@ -1260,8 +1273,9 @@ fn test_ocr_pr_review_sets_ocr_no_update_env() {
 #[test]
 fn test_ocr_pr_review_installs_locally_pinned_version() {
     let content = ocr_pr_review_workflow_content();
-    // Single source of truth: OCR_VERSION must be an exact pinned semver.
+    // Single source of truth: OCR_VERSION must be the reviewed exact release.
     let pinned_version = ocr_version_from_workflow();
+    assert_eq!(pinned_version, "1.7.9");
     assert!(
         content
             .contains(r#"OCR_PREFIX="${RUNNER_TEMP}/ocr-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}""#),
@@ -1292,6 +1306,11 @@ fn test_ocr_pr_review_installs_locally_pinned_version() {
     assert!(
         content.contains("OCR_BIN=${OCR_BIN}") && content.contains(r#""$OCR_BIN" version"#),
         "Install must export OCR_BIN and invoke it directly in later steps"
+    );
+    assert!(
+        content.contains(r#"printf 'expected=%s\n' "$OCR_VERSION" > ocr-version.txt"#)
+            && content.contains(r#""$OCR_BIN" version >> ocr-version.txt"#),
+        "Version diagnostics must record the expected version through OCR_VERSION before the installed version"
     );
     assert!(
         !content.contains("npm install -g"),
@@ -1837,6 +1856,62 @@ fn test_ocr_pr_review_test_scope_guard_fails_closed() {
             && content.contains("echo \"changed test files were excluded from OCR reviewed set\" > ocr-policy-failure.txt")
             && content.contains("phase=preview; reason=OCR preview command failed"),
         "Changed-test scope guard must record a blocking policy failure on a genuine breach and an infrastructure failure when the preview command itself fails"
+    );
+}
+
+/// Contract-only scope check: no LLM or provider call is needed to prove the
+/// trusted OCR rules continue to re-include Rust test paths before preview.
+#[test]
+fn test_ocr_pr_review_no_llm_contract_includes_rust_test_patterns() {
+    let content = ocr_pr_review_workflow_content();
+    let configure_header = "      - name: Configure OCR review rules";
+    let configure_start = content
+        .find(configure_header)
+        .expect("Workflow must contain the named trusted OCR rules step");
+    let configure_tail = &content[configure_start..];
+    let configure_end = configure_tail[configure_header.len()..]
+        .find("\n      - name:")
+        .map(|offset| configure_header.len() + offset)
+        .unwrap_or(configure_tail.len());
+    let configure_step = &configure_tail[..configure_end];
+    assert_eq!(
+        configure_step.matches("OCR_RULES_JSON: |").count(),
+        1,
+        "The trusted OCR rules step must define exactly one OCR_RULES_JSON block"
+    );
+    let rules_tail = configure_step
+        .split_once("OCR_RULES_JSON: |")
+        .map(|(_, tail)| tail)
+        .expect("Trusted rules step must define OCR_RULES_JSON");
+    let json_start = rules_tail
+        .find('{')
+        .expect("OCR_RULES_JSON must contain a JSON object");
+    let json_end = rules_tail
+        .find("\n        shell: bash")
+        .expect("OCR_RULES_JSON must end before the trusted shell step");
+    let rules: serde_json::Value = serde_json::from_str(&rules_tail[json_start..json_end])
+        .expect("OCR_RULES_JSON must be valid JSON");
+    let includes = rules["include"]
+        .as_array()
+        .expect("OCR_RULES_JSON must define an include array");
+    for pattern in ["**/tests/**", "**/test/**", "**/*_test.rs", "**/*_tests.rs"] {
+        assert!(
+            includes.iter().any(|value| value.as_str() == Some(pattern)),
+            "Trusted OCR include rules must contain Rust test pattern {pattern}"
+        );
+    }
+
+    assert!(
+        configure_step
+            .contains(r#"printf '%s' "$OCR_RULES_JSON" > "${HOME}/.opencodereview/rule.json""#,),
+        "The trusted OCR rules step must write its JSON to the OCR configuration"
+    );
+    let preview = content
+        .find("      - name: Verify review scope includes changed tests")
+        .expect("Workflow must contain the no-LLM preview scope step");
+    assert!(
+        configure_start < preview,
+        "Trusted Rust include rules must be installed before the no-LLM preview scope step"
     );
 }
 

@@ -7,11 +7,11 @@ Luther owns a local OCR entrypoint so contributors and automation do not need to
 Install the OpenCodeReview CLI that the PR workflow uses and make it available as `ocr`, or pass an explicit path:
 
 ```bash
-npm install -g @alibaba-group/open-code-review@1.7.7
+npm install -g @alibaba-group/open-code-review@1.7.9
 cargo xtask ocr-review --ocr-path /path/to/ocr --preview
 ```
 
-The PR workflow (`.github/workflows/ocr-pr-review.yml`) installs the same pinned `1.7.7` release into an isolated per-run local prefix rather than globally; the global install above is only a convenience for local runs.
+The PR workflow (`.github/workflows/ocr-pr-review.yml`) installs the same pinned `1.7.9` release into an isolated per-run local prefix rather than globally; the global install above is only a convenience for local runs.
 
 The wrapper also honors `OCR_BIN=/path/to/ocr`. Local runs use your local OCR LLM configuration, keyring, and provider credentials. GitHub Actions uses repository secrets and the separate repository-root `.github/workflows/ocr-pr-review.yml` publication workflow.
 

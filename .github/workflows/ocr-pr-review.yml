@@ -108,10 +108,10 @@ jobs:
     # concurrency key once so skip/run decisions cannot drift.
     if: needs.gate.outputs.should_run == 'true'
     env:
-      # Single source of truth for the pinned OCR package version. The cache
-      # key and the install command both reference this so a version bump can
-      # never leave a stale cache key pointing at the old version.
-      OCR_VERSION: "1.7.7"
+      # Single source of truth for the pinned OCR package version. The cache,
+      # install, diagnostics, and guardrails all reference this value so a bump
+      # cannot leave any workflow behavior pointing at the old version.
+      OCR_VERSION: "1.7.9"
     # Infrastructure failures are intentionally non-blocking for PR checks, but
     # these outputs let the notification job distinguish a completed OCR review
     # from a review that could not run because of provider, install, or script
@@ -264,7 +264,8 @@ jobs:
             echo "phase=install; reason=OpenCodeReview command was not found after install" > ocr-infrastructure-failure.txt
             exit 0
           fi
-          if ! "$OCR_BIN" version > ocr-version.txt 2>> ocr-stderr.log; then
+          printf 'expected=%s\n' "$OCR_VERSION" > ocr-version.txt
+          if ! "$OCR_BIN" version >> ocr-version.txt 2>> ocr-stderr.log; then
             echo "::warning::OpenCodeReview version check failed."
             echo "70" > ocr-exit-code.txt
             echo "phase=install; reason=OpenCodeReview version check failed" > ocr-infrastructure-failure.txt
