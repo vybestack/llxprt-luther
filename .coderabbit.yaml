@@ -1,8 +1,7 @@
 # yaml-language-server: $schema=https://storage.googleapis.com/coderabbit_public_assets/schema.v2.json
 #
-# CodeRabbit configuration for llxprt-luther.
-# Keep issue planning enabled, but never allow CodeRabbit to apply workflow
-# ownership or approval labels automatically.
+# Authoritative CodeRabbit configuration for llxprt-luther. CodeRabbit only
+# discovers repository YAML at the repository root.
 
 reviews:
   profile: assertive
@@ -10,10 +9,9 @@ reviews:
   auto_review:
     enabled: true
     drafts: false
-    base_branches:
-      - main
     auto_incremental_review: true
-    auto_pause_after_reviewed_commits: 3
+    # See docs/coderabbit-operations.md for the demand and coverage baseline.
+    auto_pause_after_reviewed_commits: 5
 
   instructions: |
     Review as a senior Rust engineer. Prioritize, in order:
