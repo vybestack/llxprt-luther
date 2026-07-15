@@ -1,0 +1,34 @@
+{
+  "schema_version": 1,
+  "repository": "vybestack/llxprt-luther",
+  "pull_request_number": 143,
+  "observed_at": "2026-07-15T11:58:06Z",
+  "configuration_response": {
+    "event_kind": "configuration_resolution",
+    "database_id": 4980198709,
+    "url": "https://github.com/vybestack/llxprt-luther/pull/143#issuecomment-4980198709",
+    "created_at": "2026-07-15T11:51:10Z",
+    "updated_at": "2026-07-15T11:51:10Z",
+    "payload_sha256": "aada3d022f647760c9a3eefa99e0d71d750dfcc97c147a30803c39ead52b2a4e",
+    "resolved_path": ".coderabbit.yaml",
+    "repository_yaml_values": {
+      "reviews.profile": "assertive",
+      "reviews.auto_review.enabled": true,
+      "reviews.auto_review.auto_incremental_review": true,
+      "reviews.auto_review.auto_pause_after_reviewed_commits": 5,
+      "reviews.auto_review.drafts": false,
+      "reviews.tools.clippy.enabled": true,
+      "issue_enrichment.planning.enabled": true,
+      "issue_enrichment.labeling.auto_apply_labels": false
+    }
+  },
+  "completed_review": {
+    "event_kind": "completion",
+    "database_id": 4703812969,
+    "url": "https://github.com/vybestack/llxprt-luther/pull/143#pullrequestreview-4703812969",
+    "submitted_at": "2026-07-15T11:58:06Z",
+    "state": "COMMENTED",
+    "reviewed_head_sha": "297386ae54ca87a78b93630b04321b04813b61a8",
+    "payload_sha256": "7ffc59e9f3a9559f8a0138a13a385fb77cda1d735becda74a35cf4ff64a63ccd"
+  }
+}

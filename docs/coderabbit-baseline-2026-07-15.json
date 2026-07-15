@@ -1,0 +1,1246 @@
+{
+  "schema_version": 1,
+  "repository": "vybestack/llxprt-luther",
+  "observed_at": "2026-07-15T11:47:12Z",
+  "selection": {
+    "kind": "20 most recently updated merged pull requests",
+    "pull_request_numbers": [
+      141,
+      130,
+      134,
+      133,
+      128,
+      126,
+      120,
+      124,
+      116,
+      110,
+      114,
+      112,
+      111,
+      98,
+      106,
+      100,
+      105,
+      104,
+      103,
+      102
+    ]
+  },
+  "payload_hash_algorithm": "sha256",
+  "records": [
+    {
+      "event_kind": "coverage",
+      "number": 141,
+      "url": "https://github.com/vybestack/llxprt-luther/pull/141",
+      "merged_at": "2026-07-15T11:31:37Z",
+      "commit_count": 7,
+      "commit_shas": [
+        "ab5511de78a82dc7f4580eab23a3b71b449ac988",
+        "31c5b4db2a9b24c669c783beb2738cfc2878d776",
+        "0bdbb90a973590bdb47a95ca48eff18c12677424",
+        "98e5968af0b18add77bae55aa126bb510a63198e",
+        "a0a86340b6b5cf3b29b05cda6950b821af112184",
+        "d6e50744b1242dccc7656460faa8bf8a7d7dc9d8",
+        "c9124b593d71b84e148304b6bb488cd2239a5e58"
+      ],
+      "final_head_sha": "c9124b593d71b84e148304b6bb488cd2239a5e58",
+      "coderabbit_reviews": [
+        {
+          "event_kind": "completion",
+          "database_id": 4700832943,
+          "url": "https://github.com/vybestack/llxprt-luther/pull/141#pullrequestreview-4700832943",
+          "author": "coderabbitai",
+          "state": "COMMENTED",
+          "submitted_at": "2026-07-15T04:32:00Z",
+          "reviewed_head_sha": "a0a86340b6b5cf3b29b05cda6950b821af112184",
+          "payload_sha256": "40589058e292e7719f3eacb135e64d6acb4357c50ef163ab56fc611f2e649995"
+        }
+      ],
+      "distinct_reviewed_head_shas": [
+        "a0a86340b6b5cf3b29b05cda6950b821af112184"
+      ],
+      "final_head_reviewed": false,
+      "coderabbit_comments": [
+        {
+          "event_kinds": [
+            "status_snapshot",
+            "throttle"
+          ],
+          "database_id": 4976828165,
+          "url": "https://github.com/vybestack/llxprt-luther/pull/141#issuecomment-4976828165",
+          "author": "coderabbitai",
+          "created_at": "2026-07-15T04:21:00Z",
+          "updated_at": "2026-07-15T06:15:58Z",
+          "throttle_marker_present": true,
+          "payload_sha256": "e6fd4ade94dfcad6e5b11b9f0c28f14f0ac371268f746b7c016cf64d8b680b31"
+        }
+      ]
+    },
+    {
+      "event_kind": "coverage",
+      "number": 130,
+      "url": "https://github.com/vybestack/llxprt-luther/pull/130",
+      "merged_at": "2026-07-13T04:07:12Z",
+      "commit_count": 9,
+      "commit_shas": [
+        "ef3040bda335e6bb93352e48cd0a4d64d09b41db",
+        "6aa8d6fe96052c86d11acc36cd207faeebb4e169",
+        "ff13914cd030dfef2db9b92cd798999895f0d42c",
+        "d83891a5afaae7cc41142087a4bdbce8d0048b21",
+        "bc20749ae1ee6fa9b37fa47d3e7f499e8697b4ba",
+        "7542834997d9c9159b1f2a7ce14ba885d892cb96",
+        "b0bfdab6f4bd0f1c5999a2e79ef7f727f5cb8c6a",
+        "259d4a30f3ef9e7ece974c9abbfebec22ef7fee3",
+        "e96e1cdd03bb5893cf4761c8485341fa88b81185"
+      ],
+      "final_head_sha": "e96e1cdd03bb5893cf4761c8485341fa88b81185",
+      "coderabbit_reviews": [
+        {
+          "event_kind": "completion",
+          "database_id": 4681303339,
+          "url": "https://github.com/vybestack/llxprt-luther/pull/130#pullrequestreview-4681303339",
+          "author": "coderabbitai",
+          "state": "COMMENTED",
+          "submitted_at": "2026-07-13T02:03:56Z",
+          "reviewed_head_sha": "d83891a5afaae7cc41142087a4bdbce8d0048b21",
+          "payload_sha256": "e2c8f18966d3fedbd317fdfe2577c69a28331fb0857e44d9dd10af563b58eb4b"
+        },
+        {
+          "event_kind": "completion",
+          "database_id": 4681360733,
+          "url": "https://github.com/vybestack/llxprt-luther/pull/130#pullrequestreview-4681360733",
+          "author": "coderabbitai",
+          "state": "COMMENTED",
+          "submitted_at": "2026-07-13T02:27:38Z",
+          "reviewed_head_sha": "bc20749ae1ee6fa9b37fa47d3e7f499e8697b4ba",
+          "payload_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "event_kind": "completion",
+          "database_id": 4681360974,
+          "url": "https://github.com/vybestack/llxprt-luther/pull/130#pullrequestreview-4681360974",
+          "author": "coderabbitai",
+          "state": "COMMENTED",
+          "submitted_at": "2026-07-13T02:27:44Z",
+          "reviewed_head_sha": "bc20749ae1ee6fa9b37fa47d3e7f499e8697b4ba",
+          "payload_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "event_kind": "completion",
+          "database_id": 4681361011,
+          "url": "https://github.com/vybestack/llxprt-luther/pull/130#pullrequestreview-4681361011",
+          "author": "coderabbitai",
+          "state": "COMMENTED",
+          "submitted_at": "2026-07-13T02:27:45Z",
+          "reviewed_head_sha": "bc20749ae1ee6fa9b37fa47d3e7f499e8697b4ba",
+          "payload_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "event_kind": "completion",
+          "database_id": 4681361036,
+          "url": "https://github.com/vybestack/llxprt-luther/pull/130#pullrequestreview-4681361036",
+          "author": "coderabbitai",
+          "state": "COMMENTED",
+          "submitted_at": "2026-07-13T02:27:46Z",
+          "reviewed_head_sha": "bc20749ae1ee6fa9b37fa47d3e7f499e8697b4ba",
+          "payload_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "event_kind": "completion",
+          "database_id": 4681361048,
+          "url": "https://github.com/vybestack/llxprt-luther/pull/130#pullrequestreview-4681361048",
+          "author": "coderabbitai",
+          "state": "COMMENTED",
+          "submitted_at": "2026-07-13T02:27:46Z",
+          "reviewed_head_sha": "bc20749ae1ee6fa9b37fa47d3e7f499e8697b4ba",
+          "payload_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      ],
+      "distinct_reviewed_head_shas": [
+        "bc20749ae1ee6fa9b37fa47d3e7f499e8697b4ba",
+        "d83891a5afaae7cc41142087a4bdbce8d0048b21"
+      ],
+      "final_head_reviewed": false,
+      "coderabbit_comments": [
+        {
+          "event_kinds": [
+            "status_snapshot",
+            "throttle"
+          ],
+          "database_id": 4948885225,
+          "url": "https://github.com/vybestack/llxprt-luther/pull/130#issuecomment-4948885225",
+          "author": "coderabbitai",
+          "created_at": "2026-07-11T21:50:58Z",
+          "updated_at": "2026-07-13T04:00:58Z",
+          "throttle_marker_present": true,
+          "payload_sha256": "5d13006cca1566cd10da41086f3f855ac78dd62212dede2145e64e9138967386"
+        }
+      ]
+    },
+    {
+      "event_kind": "coverage",
+      "number": 134,
+      "url": "https://github.com/vybestack/llxprt-luther/pull/134",
+      "merged_at": "2026-07-13T01:08:19Z",
+      "commit_count": 1,
+      "commit_shas": [
+        "0fdd788bf6fff2ec3b6c8aec1ed6ab289961695b"
+      ],
+      "final_head_sha": "0fdd788bf6fff2ec3b6c8aec1ed6ab289961695b",
+      "coderabbit_reviews": [
+        {
+          "event_kind": "completion",
+          "database_id": 4681034086,
+          "url": "https://github.com/vybestack/llxprt-luther/pull/134#pullrequestreview-4681034086",
+          "author": "coderabbitai",
+          "state": "COMMENTED",
+          "submitted_at": "2026-07-12T23:54:50Z",
+          "reviewed_head_sha": "4bfafc610e5df6fb3b580bb3de41be4330c1beab",
+          "payload_sha256": "ec019447a104a805284989a591995d9b57e649e5489f383f8e269202bcd5acac"
+        }
+      ],
+      "distinct_reviewed_head_shas": [
+        "4bfafc610e5df6fb3b580bb3de41be4330c1beab"
+      ],
+      "final_head_reviewed": false,
+      "coderabbit_comments": [
+        {
+          "event_kinds": [
+            "status_snapshot",
+            "throttle"
+          ],
+          "database_id": 4953247513,
+          "url": "https://github.com/vybestack/llxprt-luther/pull/134#issuecomment-4953247513",
+          "author": "coderabbitai",
+          "created_at": "2026-07-12T23:42:59Z",
+          "updated_at": "2026-07-13T00:56:26Z",
+          "throttle_marker_present": true,
+          "payload_sha256": "9e9ef6ba8d272df0777d3b83e48302d283185c36e28475794fa1fa9873e91378"
+        }
+      ]
+    },
+    {
+      "event_kind": "coverage",
+      "number": 133,
+      "url": "https://github.com/vybestack/llxprt-luther/pull/133",
+      "merged_at": "2026-07-12T18:47:22Z",
+      "commit_count": 1,
+      "commit_shas": [
+        "ebdd3168674178573a49aab7799bfd0fb324dd1b"
+      ],
+      "final_head_sha": "ebdd3168674178573a49aab7799bfd0fb324dd1b",
+      "coderabbit_reviews": [
+        {
+          "event_kind": "completion",
+          "database_id": 4679624901,
+          "url": "https://github.com/vybestack/llxprt-luther/pull/133#pullrequestreview-4679624901",
+          "author": "coderabbitai",
+          "state": "COMMENTED",
+          "submitted_at": "2026-07-12T07:30:51Z",
+          "reviewed_head_sha": "2b7d7576c057f955d92aa21cd02c2a34e8c04db0",
+          "payload_sha256": "861b096f4e6a9832209c57aeef54b3ea7bea409a77470450a5fe32cd9dbd928f"
+        },
+        {
+          "event_kind": "completion",
+          "database_id": 4680361200,
+          "url": "https://github.com/vybestack/llxprt-luther/pull/133#pullrequestreview-4680361200",
+          "author": "coderabbitai",
+          "state": "COMMENTED",
+          "submitted_at": "2026-07-12T16:16:59Z",
+          "reviewed_head_sha": "5eff9ac1f382fd370a4f6a5f2040f7a37fb45a08",
+          "payload_sha256": "ccb8e489e880efceab14baca97f69be3f8cc131c26805fa4817e56aa614a185c"
+        }
+      ],
+      "distinct_reviewed_head_shas": [
+        "2b7d7576c057f955d92aa21cd02c2a34e8c04db0",
+        "5eff9ac1f382fd370a4f6a5f2040f7a37fb45a08"
+      ],
+      "final_head_reviewed": false,
+      "coderabbit_comments": [
+        {
+          "event_kinds": [
+            "status_snapshot",
+            "throttle"
+          ],
+          "database_id": 4949785176,
+          "url": "https://github.com/vybestack/llxprt-luther/pull/133#issuecomment-4949785176",
+          "author": "coderabbitai",
+          "created_at": "2026-07-12T03:26:03Z",
+          "updated_at": "2026-07-12T18:35:15Z",
+          "throttle_marker_present": true,
+          "payload_sha256": "8d8796f2f3e9adbf2ea82163c7e1e369b9f1401863fda976254d4a30a165c32e"
+        }
+      ]
+    },
+    {
+      "event_kind": "coverage",
+      "number": 128,
+      "url": "https://github.com/vybestack/llxprt-luther/pull/128",
+      "merged_at": "2026-07-11T19:00:09Z",
+      "commit_count": 1,
+      "commit_shas": [
+        "853e70f253e66ebc2d1fda0472be425dc54a94d1"
+      ],
+      "final_head_sha": "853e70f253e66ebc2d1fda0472be425dc54a94d1",
+      "coderabbit_reviews": [],
+      "distinct_reviewed_head_shas": [],
+      "final_head_reviewed": false,
+      "coderabbit_comments": [
+        {
+          "event_kinds": [
+            "status_snapshot",
+            "throttle"
+          ],
+          "database_id": 4948150145,
+          "url": "https://github.com/vybestack/llxprt-luther/pull/128#issuecomment-4948150145",
+          "author": "coderabbitai",
+          "created_at": "2026-07-11T17:49:14Z",
+          "updated_at": "2026-07-11T17:49:14Z",
+          "throttle_marker_present": true,
+          "payload_sha256": "0521239a37f34ced0dcecc5cb9f1f21b6e29fc4f884a0dca6a9733f2a5811718"
+        }
+      ]
+    },
+    {
+      "event_kind": "coverage",
+      "number": 126,
+      "url": "https://github.com/vybestack/llxprt-luther/pull/126",
+      "merged_at": "2026-07-11T17:30:19Z",
+      "commit_count": 11,
+      "commit_shas": [
+        "200e7a3602910a11379b8caba0923820ae43e192",
+        "5eb227c40b71891769f07f675c81babe174b627b",
+        "42e44f570965466860147a7d9354cc490b2e5262",
+        "f9ccd7ed7e597893ffb639797ca7ad3ac4d50baa",
+        "50f0a3f76f04dbc3e3160410292a95892e0e00fc",
+        "8df31238da9e5df8402d7812c13a900bb2ae37e4",
+        "47e490fb2555d952442ccf6238650abbfba82ecb",
+        "5e027bf8d8b110c34eeba559685b3fec2ea2d9c0",
+        "fe8e852f3f026262e7c5154c083e7d67e6f48dd4",
+        "6cbc3a5c27fdde7bb99b1f3971d9a648529fe005",
+        "46117bb778d8b8dec56622adcd548c6fc2330683"
+      ],
+      "final_head_sha": "46117bb778d8b8dec56622adcd548c6fc2330683",
+      "coderabbit_reviews": [
+        {
+          "event_kind": "completion",
+          "database_id": 4673491327,
+          "url": "https://github.com/vybestack/llxprt-luther/pull/126#pullrequestreview-4673491327",
+          "author": "coderabbitai",
+          "state": "COMMENTED",
+          "submitted_at": "2026-07-10T17:12:09Z",
+          "reviewed_head_sha": "5eb227c40b71891769f07f675c81babe174b627b",
+          "payload_sha256": "1da1c471a81551a57f0cee7f23019bba15eebd11ba06afecf8959e0a19be679a"
+        }
+      ],
+      "distinct_reviewed_head_shas": [
+        "5eb227c40b71891769f07f675c81babe174b627b"
+      ],
+      "final_head_reviewed": false,
+      "coderabbit_comments": [
+        {
+          "event_kinds": [
+            "status_snapshot",
+            "throttle"
+          ],
+          "database_id": 4937529338,
+          "url": "https://github.com/vybestack/llxprt-luther/pull/126#issuecomment-4937529338",
+          "author": "coderabbitai",
+          "created_at": "2026-07-10T16:45:13Z",
+          "updated_at": "2026-07-11T01:33:29Z",
+          "throttle_marker_present": true,
+          "payload_sha256": "7cf997023ce1eefe878b9d8f05d9707405b4ef25ee75c8d71053507a905ff1c3"
+        }
+      ]
+    },
+    {
+      "event_kind": "coverage",
+      "number": 120,
+      "url": "https://github.com/vybestack/llxprt-luther/pull/120",
+      "merged_at": "2026-07-09T19:11:45Z",
+      "commit_count": 23,
+      "commit_shas": [
+        "22074942d453d78e58e34df97e4dc90f57a6a876",
+        "0c9fc9d36f8e6f84a3ec0cfa2c8d71a2d14dd5cd",
+        "cf677d33ad407443f42e3de6be170e1e24b1c0a7",
+        "4b0779f8ff91b27f5e40c4d081b43634faf7bf8d",
+        "72dd46766de169c0d5875b4916acd453e9ed4b72",
+        "7396d5181f86e4aee3a6f0eb0fa98548a3d73397",
+        "7ec9bd4d193ea38ac47a8581453af3517727211a",
+        "1324a4ab3e872bcbae72a5d2f4f08f86f0859cfe",
+        "01540c2e502cfb2ee5a2cf52216e018d2e61102e",
+        "08b7fe6e94b5c859447a094e66d8072fbd56678f",
+        "852ac18800f447eaef9114677c417a7f0b799d1c",
+        "e216f48e6bae6e068d451647c2688beab834c70a",
+        "208911707e625cf429b413763df65fed5d53bc29",
+        "90a73506f653893da0ea570bc76f45d3281f5211",
+        "b3db9c81f912542095fa6777e28b117ab17ebdd0",
+        "336930641642363e31c82660c32f05a02e95e17a",
+        "42faf2ae01ac15d68adab2fd51a844cb55d515d2",
+        "06b5e06ead61de530815d4149d4178def2939066",
+        "695fec160d4dbf67f6acadc681de89f564ac5ce4",
+        "23fb589f7325fd9963d5ba11ca94dc84236b685a",
+        "6d8dbdd1ebe047953d3de24d5bd2081e98428779",
+        "978136254d228f2acc23c2f60c5cbef48cc7c08f",
+        "d488fb310e02c5330edfeb7cde75cec7ce8ea83e"
+      ],
+      "final_head_sha": "d488fb310e02c5330edfeb7cde75cec7ce8ea83e",
+      "coderabbit_reviews": [
+        {
+          "event_kind": "completion",
+          "database_id": 4656324258,
+          "url": "https://github.com/vybestack/llxprt-luther/pull/120#pullrequestreview-4656324258",
+          "author": "coderabbitai",
+          "state": "COMMENTED",
+          "submitted_at": "2026-07-08T16:58:54Z",
+          "reviewed_head_sha": "0c9fc9d36f8e6f84a3ec0cfa2c8d71a2d14dd5cd",
+          "payload_sha256": "f543394cbd99abab79d86900ba1096c0d55c27b70ebd8b0ddbc46b4d5a51dc95"
+        },
+        {
+          "event_kind": "completion",
+          "database_id": 4657535399,
+          "url": "https://github.com/vybestack/llxprt-luther/pull/120#pullrequestreview-4657535399",
+          "author": "coderabbitai",
+          "state": "COMMENTED",
+          "submitted_at": "2026-07-08T20:02:41Z",
+          "reviewed_head_sha": "7ec9bd4d193ea38ac47a8581453af3517727211a",
+          "payload_sha256": "971ce588a4c009d73dc2c8981360199310666a7dd0877416ec14d2e7efba80cc"
+        },
+        {
+          "event_kind": "completion",
+          "database_id": 4658319524,
+          "url": "https://github.com/vybestack/llxprt-luther/pull/120#pullrequestreview-4658319524",
+          "author": "coderabbitai",
+          "state": "COMMENTED",
+          "submitted_at": "2026-07-08T22:16:26Z",
+          "reviewed_head_sha": "852ac18800f447eaef9114677c417a7f0b799d1c",
+          "payload_sha256": "f8db24c3b489063fe291a99a43332a72801be291b542d76b5f25a9f1c80c8112"
+        },
+        {
+          "event_kind": "completion",
+          "database_id": 4659625566,
+          "url": "https://github.com/vybestack/llxprt-luther/pull/120#pullrequestreview-4659625566",
+          "author": "coderabbitai",
+          "state": "COMMENTED",
+          "submitted_at": "2026-07-09T03:53:40Z",
+          "reviewed_head_sha": "336930641642363e31c82660c32f05a02e95e17a",
+          "payload_sha256": "3ad0c378a216f84ed97eac75428922bb2813bdce8fa427dd6b61a518a9af7d29"
+        }
+      ],
+      "distinct_reviewed_head_shas": [
+        "0c9fc9d36f8e6f84a3ec0cfa2c8d71a2d14dd5cd",
+        "336930641642363e31c82660c32f05a02e95e17a",
+        "7ec9bd4d193ea38ac47a8581453af3517727211a",
+        "852ac18800f447eaef9114677c417a7f0b799d1c"
+      ],
+      "final_head_reviewed": false,
+      "coderabbit_comments": [
+        {
+          "event_kinds": [
+            "status_snapshot",
+            "throttle"
+          ],
+          "database_id": 4916741082,
+          "url": "https://github.com/vybestack/llxprt-luther/pull/120#issuecomment-4916741082",
+          "author": "coderabbitai",
+          "created_at": "2026-07-08T16:02:22Z",
+          "updated_at": "2026-07-09T18:35:37Z",
+          "throttle_marker_present": true,
+          "payload_sha256": "45ec05b81cc45957a95faf7e9ec2ddd639be69329a5a9d20260c7491d3048f09"
+        }
+      ]
+    },
+    {
+      "event_kind": "coverage",
+      "number": 124,
+      "url": "https://github.com/vybestack/llxprt-luther/pull/124",
+      "merged_at": "2026-07-09T12:14:14Z",
+      "commit_count": 1,
+      "commit_shas": [
+        "23d87cd764d4181cc2076633f374e72ee675725c"
+      ],
+      "final_head_sha": "23d87cd764d4181cc2076633f374e72ee675725c",
+      "coderabbit_reviews": [],
+      "distinct_reviewed_head_shas": [],
+      "final_head_reviewed": false,
+      "coderabbit_comments": [
+        {
+          "event_kinds": [
+            "status_snapshot",
+            "throttle"
+          ],
+          "database_id": 4921894508,
+          "url": "https://github.com/vybestack/llxprt-luther/pull/124#issuecomment-4921894508",
+          "author": "coderabbitai",
+          "created_at": "2026-07-09T05:35:45Z",
+          "updated_at": "2026-07-09T06:46:07Z",
+          "throttle_marker_present": true,
+          "payload_sha256": "24bb5c53a0e1ddbc803f80c1efaad3c412c235b57a78b9549758b3008d263f06"
+        }
+      ]
+    },
+    {
+      "event_kind": "coverage",
+      "number": 116,
+      "url": "https://github.com/vybestack/llxprt-luther/pull/116",
+      "merged_at": "2026-07-08T04:21:46Z",
+      "commit_count": 18,
+      "commit_shas": [
+        "2e2aff482fc8203575310d49567bb9bd0a9a039c",
+        "f803bd4e2eb6e36e9a2f1a3d5c013c33d657cb25",
+        "1ab58fc235c49e1cfd09fb6033aad637ff027be9",
+        "823e3ed82aa2b24bcea04e5959fd1df272a7c509",
+        "99004820de506c380290a2b4b2fcd4a621d04413",
+        "57d3a5cd1af633ee1692e8247094013aa4168f57",
+        "59ed6f2671082f68d9fdd61622d9acc7ab77900d",
+        "7fd8a5b1c620c9130548d0156d925b15c3f9fd94",
+        "18eda8d2e19fa949b09fbd49dc16868ec0cf2727",
+        "ac203773193505cb83e5b67ff07c31ea397e45ff",
+        "ffae9a13ac2ceeb64ca1cf701839a3d6b65f3ae5",
+        "c7231825e5b1809097f57fdff3f78bd6ee7aac45",
+        "b9e6581765c9a32e783b5f1855b188769b7ce30b",
+        "5c93bdf5ddd1339a60df5e32f25ff8a4fd1cb207",
+        "09f9697429df7861b46d15cfff7324af499dbeca",
+        "f72ed6ab6cb04223376da7b28baf9aaf699eda9f",
+        "af6ff2268ea892d757dce63e1f7bc951e852c381",
+        "f70a766cabe7714b562b38baa6e91086e88bf429"
+      ],
+      "final_head_sha": "f70a766cabe7714b562b38baa6e91086e88bf429",
+      "coderabbit_reviews": [
+        {
+          "event_kind": "completion",
+          "database_id": 4650322038,
+          "url": "https://github.com/vybestack/llxprt-luther/pull/116#pullrequestreview-4650322038",
+          "author": "coderabbitai",
+          "state": "COMMENTED",
+          "submitted_at": "2026-07-08T01:59:07Z",
+          "reviewed_head_sha": "09f9697429df7861b46d15cfff7324af499dbeca",
+          "payload_sha256": "7e2ba41718dc09ceb9486e2d85df65844103eb2b3d550fbb7c7da11a6d0c542a"
+        }
+      ],
+      "distinct_reviewed_head_shas": [
+        "09f9697429df7861b46d15cfff7324af499dbeca"
+      ],
+      "final_head_reviewed": false,
+      "coderabbit_comments": [
+        {
+          "event_kinds": [
+            "status_snapshot",
+            "throttle"
+          ],
+          "database_id": 4909446159,
+          "url": "https://github.com/vybestack/llxprt-luther/pull/116#issuecomment-4909446159",
+          "author": "coderabbitai",
+          "created_at": "2026-07-07T22:02:28Z",
+          "updated_at": "2026-07-08T03:34:31Z",
+          "throttle_marker_present": true,
+          "payload_sha256": "9ad8ea98a5d3809773937e7d4199a1602bcb6daa44e6158863c79279a6449e94"
+        }
+      ]
+    },
+    {
+      "event_kind": "coverage",
+      "number": 110,
+      "url": "https://github.com/vybestack/llxprt-luther/pull/110",
+      "merged_at": "2026-07-07T19:44:58Z",
+      "commit_count": 23,
+      "commit_shas": [
+        "af9922e648900e2b557c93fe80ae47fa59d9c98b",
+        "4f65910952e777cc51988f78b26be87ef884a029",
+        "b672f22c697d0b3d9564ac0a81db4f946d741149",
+        "a870e7f5154caccdfb44e88ce30047251776f54f",
+        "3caeabdf9e96af8af7b08c14617fa4f2af420bd9",
+        "5d478b5c54902276b62e64c90d3ec6471e5aa086",
+        "98e8190aa600c97798a234e98353c3880fbb961d",
+        "eda30c87536ddb7f05f0c5a03d4264b8536e2f6d",
+        "28301af5bda58713f811974b83ddcb3b3a1373df",
+        "910644bbac236f78a9ee3772e2e620fd25bdb1cd",
+        "15438bf9ceb590ff12ff7460c9ea9da91cb51b6a",
+        "90249d129e3bc77dfa2df3bc94d7f29dfade0121",
+        "2451faebcfa8ef28f27a9526aa14d947459a8616",
+        "229f76f7e26649397063c65980347fda3dfb12a6",
+        "a31ed0d0f085bf0287e0da2734b8e97622f99f99",
+        "737e97fd0e73cd13802e01cbbf09fdb65bb313c6",
+        "c26759d56b651b74f16510d9f59dcac7d6e4d3f3",
+        "31b2f8e01a7943ce8e409e1851683b94197a242c",
+        "938a4d66d67a8b617cedc0a89d02c44c7a3f20e3",
+        "63130168b47e01b713c54ff6112b5292fd9ab64d",
+        "28972f433bbfc83ed0ac3dbcd24cdb5a9cbde3c8",
+        "dc8052b1983cf705c36c0e9408088c84b5c6554d",
+        "429c3fbfe1bfb531def8ac6ef407ba05f1c3c403"
+      ],
+      "final_head_sha": "429c3fbfe1bfb531def8ac6ef407ba05f1c3c403",
+      "coderabbit_reviews": [
+        {
+          "event_kind": "completion",
+          "database_id": 4631625792,
+          "url": "https://github.com/vybestack/llxprt-luther/pull/110#pullrequestreview-4631625792",
+          "author": "coderabbitai",
+          "state": "COMMENTED",
+          "submitted_at": "2026-07-05T16:36:15Z",
+          "reviewed_head_sha": "af9922e648900e2b557c93fe80ae47fa59d9c98b",
+          "payload_sha256": "7ffe47088d5d719a708d2b61e6206a0271ab5c936e4b16d0a56e082015549e10"
+        },
+        {
+          "event_kind": "completion",
+          "database_id": 4632228671,
+          "url": "https://github.com/vybestack/llxprt-luther/pull/110#pullrequestreview-4632228671",
+          "author": "coderabbitai",
+          "state": "COMMENTED",
+          "submitted_at": "2026-07-05T23:58:49Z",
+          "reviewed_head_sha": "a870e7f5154caccdfb44e88ce30047251776f54f",
+          "payload_sha256": "2287fcab6b54a4e09d1e477738e97c99b4cfe0d6cf62c9b5ae3ba4524c5eac5b"
+        },
+        {
+          "event_kind": "completion",
+          "database_id": 4632350270,
+          "url": "https://github.com/vybestack/llxprt-luther/pull/110#pullrequestreview-4632350270",
+          "author": "coderabbitai",
+          "state": "COMMENTED",
+          "submitted_at": "2026-07-06T01:01:52Z",
+          "reviewed_head_sha": "a870e7f5154caccdfb44e88ce30047251776f54f",
+          "payload_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "event_kind": "completion",
+          "database_id": 4632350337,
+          "url": "https://github.com/vybestack/llxprt-luther/pull/110#pullrequestreview-4632350337",
+          "author": "coderabbitai",
+          "state": "COMMENTED",
+          "submitted_at": "2026-07-06T01:01:54Z",
+          "reviewed_head_sha": "a870e7f5154caccdfb44e88ce30047251776f54f",
+          "payload_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "event_kind": "completion",
+          "database_id": 4632353313,
+          "url": "https://github.com/vybestack/llxprt-luther/pull/110#pullrequestreview-4632353313",
+          "author": "coderabbitai",
+          "state": "COMMENTED",
+          "submitted_at": "2026-07-06T01:03:38Z",
+          "reviewed_head_sha": "a870e7f5154caccdfb44e88ce30047251776f54f",
+          "payload_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "event_kind": "completion",
+          "database_id": 4632353467,
+          "url": "https://github.com/vybestack/llxprt-luther/pull/110#pullrequestreview-4632353467",
+          "author": "coderabbitai",
+          "state": "COMMENTED",
+          "submitted_at": "2026-07-06T01:03:43Z",
+          "reviewed_head_sha": "a870e7f5154caccdfb44e88ce30047251776f54f",
+          "payload_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "event_kind": "completion",
+          "database_id": 4632353529,
+          "url": "https://github.com/vybestack/llxprt-luther/pull/110#pullrequestreview-4632353529",
+          "author": "coderabbitai",
+          "state": "COMMENTED",
+          "submitted_at": "2026-07-06T01:03:45Z",
+          "reviewed_head_sha": "a870e7f5154caccdfb44e88ce30047251776f54f",
+          "payload_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "event_kind": "completion",
+          "database_id": 4632353532,
+          "url": "https://github.com/vybestack/llxprt-luther/pull/110#pullrequestreview-4632353532",
+          "author": "coderabbitai",
+          "state": "COMMENTED",
+          "submitted_at": "2026-07-06T01:03:45Z",
+          "reviewed_head_sha": "a870e7f5154caccdfb44e88ce30047251776f54f",
+          "payload_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "event_kind": "completion",
+          "database_id": 4632353554,
+          "url": "https://github.com/vybestack/llxprt-luther/pull/110#pullrequestreview-4632353554",
+          "author": "coderabbitai",
+          "state": "COMMENTED",
+          "submitted_at": "2026-07-06T01:03:46Z",
+          "reviewed_head_sha": "a870e7f5154caccdfb44e88ce30047251776f54f",
+          "payload_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "event_kind": "completion",
+          "database_id": 4632353569,
+          "url": "https://github.com/vybestack/llxprt-luther/pull/110#pullrequestreview-4632353569",
+          "author": "coderabbitai",
+          "state": "COMMENTED",
+          "submitted_at": "2026-07-06T01:03:46Z",
+          "reviewed_head_sha": "a870e7f5154caccdfb44e88ce30047251776f54f",
+          "payload_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "event_kind": "completion",
+          "database_id": 4632353582,
+          "url": "https://github.com/vybestack/llxprt-luther/pull/110#pullrequestreview-4632353582",
+          "author": "coderabbitai",
+          "state": "COMMENTED",
+          "submitted_at": "2026-07-06T01:03:47Z",
+          "reviewed_head_sha": "a870e7f5154caccdfb44e88ce30047251776f54f",
+          "payload_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "event_kind": "completion",
+          "database_id": 4632353643,
+          "url": "https://github.com/vybestack/llxprt-luther/pull/110#pullrequestreview-4632353643",
+          "author": "coderabbitai",
+          "state": "COMMENTED",
+          "submitted_at": "2026-07-06T01:03:49Z",
+          "reviewed_head_sha": "a870e7f5154caccdfb44e88ce30047251776f54f",
+          "payload_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "event_kind": "completion",
+          "database_id": 4632353650,
+          "url": "https://github.com/vybestack/llxprt-luther/pull/110#pullrequestreview-4632353650",
+          "author": "coderabbitai",
+          "state": "COMMENTED",
+          "submitted_at": "2026-07-06T01:03:49Z",
+          "reviewed_head_sha": "a870e7f5154caccdfb44e88ce30047251776f54f",
+          "payload_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "event_kind": "completion",
+          "database_id": 4632353937,
+          "url": "https://github.com/vybestack/llxprt-luther/pull/110#pullrequestreview-4632353937",
+          "author": "coderabbitai",
+          "state": "COMMENTED",
+          "submitted_at": "2026-07-06T01:03:58Z",
+          "reviewed_head_sha": "a870e7f5154caccdfb44e88ce30047251776f54f",
+          "payload_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      ],
+      "distinct_reviewed_head_shas": [
+        "a870e7f5154caccdfb44e88ce30047251776f54f",
+        "af9922e648900e2b557c93fe80ae47fa59d9c98b"
+      ],
+      "final_head_reviewed": false,
+      "coderabbit_comments": [
+        {
+          "event_kinds": [
+            "status_snapshot",
+            "throttle"
+          ],
+          "database_id": 4886708289,
+          "url": "https://github.com/vybestack/llxprt-luther/pull/110#issuecomment-4886708289",
+          "author": "coderabbitai",
+          "created_at": "2026-07-05T16:18:35Z",
+          "updated_at": "2026-07-07T16:31:14Z",
+          "throttle_marker_present": true,
+          "payload_sha256": "7849c6e2d9b25f4bfc3ec92af085eed3b7045ab6ece1ca96fcdd50d7c2dd0463"
+        }
+      ]
+    },
+    {
+      "event_kind": "coverage",
+      "number": 114,
+      "url": "https://github.com/vybestack/llxprt-luther/pull/114",
+      "merged_at": "2026-07-07T19:36:27Z",
+      "commit_count": 3,
+      "commit_shas": [
+        "42e76cc62456621b2b072c8c4eaf177c7a1f4100",
+        "8df5908eaeb99196116f54798389954d3db01025",
+        "9e7665664fc94dc80be4a7ca81505989ab296b15"
+      ],
+      "final_head_sha": "9e7665664fc94dc80be4a7ca81505989ab296b15",
+      "coderabbit_reviews": [
+        {
+          "event_kind": "completion",
+          "database_id": 4641462416,
+          "url": "https://github.com/vybestack/llxprt-luther/pull/114#pullrequestreview-4641462416",
+          "author": "coderabbitai",
+          "state": "COMMENTED",
+          "submitted_at": "2026-07-07T03:47:52Z",
+          "reviewed_head_sha": "42e76cc62456621b2b072c8c4eaf177c7a1f4100",
+          "payload_sha256": "d79fadc2441d0f8469a4c39b0a3b5cc16f2a06c3bbd773bca26937bcbb2a552a"
+        },
+        {
+          "event_kind": "completion",
+          "database_id": 4648188714,
+          "url": "https://github.com/vybestack/llxprt-luther/pull/114#pullrequestreview-4648188714",
+          "author": "coderabbitai",
+          "state": "COMMENTED",
+          "submitted_at": "2026-07-07T19:12:45Z",
+          "reviewed_head_sha": "9e7665664fc94dc80be4a7ca81505989ab296b15",
+          "payload_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "event_kind": "completion",
+          "database_id": 4648189927,
+          "url": "https://github.com/vybestack/llxprt-luther/pull/114#pullrequestreview-4648189927",
+          "author": "coderabbitai",
+          "state": "COMMENTED",
+          "submitted_at": "2026-07-07T19:12:56Z",
+          "reviewed_head_sha": "9e7665664fc94dc80be4a7ca81505989ab296b15",
+          "payload_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      ],
+      "distinct_reviewed_head_shas": [
+        "42e76cc62456621b2b072c8c4eaf177c7a1f4100",
+        "9e7665664fc94dc80be4a7ca81505989ab296b15"
+      ],
+      "final_head_reviewed": true,
+      "coderabbit_comments": [
+        {
+          "event_kinds": [
+            "status_snapshot",
+            "throttle"
+          ],
+          "database_id": 4899910961,
+          "url": "https://github.com/vybestack/llxprt-luther/pull/114#issuecomment-4899910961",
+          "author": "coderabbitai",
+          "created_at": "2026-07-07T03:45:57Z",
+          "updated_at": "2026-07-07T19:05:44Z",
+          "throttle_marker_present": true,
+          "payload_sha256": "fd6a1b56096ba96be82aaf55f133583125d7d00bd8b81ec46ca3e711bdaee8e2"
+        }
+      ]
+    },
+    {
+      "event_kind": "coverage",
+      "number": 112,
+      "url": "https://github.com/vybestack/llxprt-luther/pull/112",
+      "merged_at": "2026-07-07T01:18:16Z",
+      "commit_count": 10,
+      "commit_shas": [
+        "4294832c1cd9ea0967ccde19feefb3de689d74e8",
+        "482bff80596c222f7cb80b21a74c25de37c2c802",
+        "b0bb329486e02591dbf70c3ebb8d71bd1dbe688f",
+        "a814de2bc66fc7228481d6cdd75bb3d95248a09c",
+        "c18571fe3f699cb00d0754354bafd16258bd6296",
+        "b9a740a791c6427a64e52c08d1134e0d260cd8a5",
+        "c7a18c044848935b8ee1031142fdd0ae4ca79f70",
+        "cc4e52c943e5ea55e29a9242269b9befe313d804",
+        "3e01012781d006936eefa874a217a2b90d4bcf38",
+        "dd4e0eb8edce4456512e29a28a2bf36fc4651ce6"
+      ],
+      "final_head_sha": "dd4e0eb8edce4456512e29a28a2bf36fc4651ce6",
+      "coderabbit_reviews": [
+        {
+          "event_kind": "completion",
+          "database_id": 4632701683,
+          "url": "https://github.com/vybestack/llxprt-luther/pull/112#pullrequestreview-4632701683",
+          "author": "coderabbitai",
+          "state": "COMMENTED",
+          "submitted_at": "2026-07-06T03:39:07Z",
+          "reviewed_head_sha": "b0bb329486e02591dbf70c3ebb8d71bd1dbe688f",
+          "payload_sha256": "b6f7e9acd0dbab8bf84c79616c7f1ebff88b6716e04078a5a8105323ba5b2ab5"
+        },
+        {
+          "event_kind": "completion",
+          "database_id": 4632713447,
+          "url": "https://github.com/vybestack/llxprt-luther/pull/112#pullrequestreview-4632713447",
+          "author": "coderabbitai",
+          "state": "COMMENTED",
+          "submitted_at": "2026-07-06T03:44:09Z",
+          "reviewed_head_sha": "a814de2bc66fc7228481d6cdd75bb3d95248a09c",
+          "payload_sha256": "ad489334e02a44ed6172c37ea6d38079e5530b4d751eda74b517827ab77c1738"
+        },
+        {
+          "event_kind": "completion",
+          "database_id": 4633140974,
+          "url": "https://github.com/vybestack/llxprt-luther/pull/112#pullrequestreview-4633140974",
+          "author": "coderabbitai",
+          "state": "COMMENTED",
+          "submitted_at": "2026-07-06T05:42:34Z",
+          "reviewed_head_sha": "c7a18c044848935b8ee1031142fdd0ae4ca79f70",
+          "payload_sha256": "506c25e65e6585044e1fe2e41ea8a0a8967d33867c25d5c3ea83ba06f43f6e3b"
+        },
+        {
+          "event_kind": "completion",
+          "database_id": 4634263808,
+          "url": "https://github.com/vybestack/llxprt-luther/pull/112#pullrequestreview-4634263808",
+          "author": "coderabbitai",
+          "state": "COMMENTED",
+          "submitted_at": "2026-07-06T08:52:23Z",
+          "reviewed_head_sha": "3e01012781d006936eefa874a217a2b90d4bcf38",
+          "payload_sha256": "f0ea71189e5b5d6f4d0ac2da178a0e9a2d2d26eda3e05609e024af20af0a4c82"
+        },
+        {
+          "event_kind": "completion",
+          "database_id": 4639964262,
+          "url": "https://github.com/vybestack/llxprt-luther/pull/112#pullrequestreview-4639964262",
+          "author": "coderabbitai",
+          "state": "COMMENTED",
+          "submitted_at": "2026-07-06T21:47:23Z",
+          "reviewed_head_sha": "b2d643b222690c4ae36961f08d28d0af65505e45",
+          "payload_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "event_kind": "completion",
+          "database_id": 4639965978,
+          "url": "https://github.com/vybestack/llxprt-luther/pull/112#pullrequestreview-4639965978",
+          "author": "coderabbitai",
+          "state": "COMMENTED",
+          "submitted_at": "2026-07-06T21:47:44Z",
+          "reviewed_head_sha": "b2d643b222690c4ae36961f08d28d0af65505e45",
+          "payload_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "event_kind": "completion",
+          "database_id": 4639966793,
+          "url": "https://github.com/vybestack/llxprt-luther/pull/112#pullrequestreview-4639966793",
+          "author": "coderabbitai",
+          "state": "COMMENTED",
+          "submitted_at": "2026-07-06T21:47:52Z",
+          "reviewed_head_sha": "b2d643b222690c4ae36961f08d28d0af65505e45",
+          "payload_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "event_kind": "completion",
+          "database_id": 4639997473,
+          "url": "https://github.com/vybestack/llxprt-luther/pull/112#pullrequestreview-4639997473",
+          "author": "coderabbitai",
+          "state": "COMMENTED",
+          "submitted_at": "2026-07-06T21:53:38Z",
+          "reviewed_head_sha": "b2d643b222690c4ae36961f08d28d0af65505e45",
+          "payload_sha256": "aa27da7f0f5566d4d46269e721e82d68e602d1f068644214d44c8549dc4e99b3"
+        },
+        {
+          "event_kind": "completion",
+          "database_id": 4640380002,
+          "url": "https://github.com/vybestack/llxprt-luther/pull/112#pullrequestreview-4640380002",
+          "author": "coderabbitai",
+          "state": "COMMENTED",
+          "submitted_at": "2026-07-06T23:09:43Z",
+          "reviewed_head_sha": "5b4a8417b85bf911cd1180853e8229015c4050c9",
+          "payload_sha256": "41180cbfdae99e0b48e23929911ffdf22b8e0599c34f584e8f59084515b9bb41"
+        },
+        {
+          "event_kind": "completion",
+          "database_id": 4640431105,
+          "url": "https://github.com/vybestack/llxprt-luther/pull/112#pullrequestreview-4640431105",
+          "author": "coderabbitai",
+          "state": "COMMENTED",
+          "submitted_at": "2026-07-06T23:21:41Z",
+          "reviewed_head_sha": "512dc509ee7412c624edb5389f8d93fbd1e09c61",
+          "payload_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "event_kind": "completion",
+          "database_id": 4640470972,
+          "url": "https://github.com/vybestack/llxprt-luther/pull/112#pullrequestreview-4640470972",
+          "author": "coderabbitai",
+          "state": "COMMENTED",
+          "submitted_at": "2026-07-06T23:30:57Z",
+          "reviewed_head_sha": "512dc509ee7412c624edb5389f8d93fbd1e09c61",
+          "payload_sha256": "300972a2fbaf829c346663c37589943f71e4d83e1b40a3e40864c003fa5b7983"
+        }
+      ],
+      "distinct_reviewed_head_shas": [
+        "3e01012781d006936eefa874a217a2b90d4bcf38",
+        "512dc509ee7412c624edb5389f8d93fbd1e09c61",
+        "5b4a8417b85bf911cd1180853e8229015c4050c9",
+        "a814de2bc66fc7228481d6cdd75bb3d95248a09c",
+        "b0bb329486e02591dbf70c3ebb8d71bd1dbe688f",
+        "b2d643b222690c4ae36961f08d28d0af65505e45",
+        "c7a18c044848935b8ee1031142fdd0ae4ca79f70"
+      ],
+      "final_head_reviewed": false,
+      "coderabbit_comments": [
+        {
+          "event_kinds": [
+            "status_snapshot",
+            "throttle"
+          ],
+          "database_id": 4888390644,
+          "url": "https://github.com/vybestack/llxprt-luther/pull/112#issuecomment-4888390644",
+          "author": "coderabbitai",
+          "created_at": "2026-07-06T01:33:21Z",
+          "updated_at": "2026-07-07T00:31:58Z",
+          "throttle_marker_present": true,
+          "payload_sha256": "b80919975f769917b6ab1e261869d6766978a6286c50b85895370fd3e8d415f9"
+        }
+      ]
+    },
+    {
+      "event_kind": "coverage",
+      "number": 111,
+      "url": "https://github.com/vybestack/llxprt-luther/pull/111",
+      "merged_at": "2026-07-05T20:36:08Z",
+      "commit_count": 2,
+      "commit_shas": [
+        "0d5ea48943c6151890c841d4850cdf3ec13a951d",
+        "7b1637618fc8be730cf323a63763d0ea0827c344"
+      ],
+      "final_head_sha": "7b1637618fc8be730cf323a63763d0ea0827c344",
+      "coderabbit_reviews": [],
+      "distinct_reviewed_head_shas": [],
+      "final_head_reviewed": false,
+      "coderabbit_comments": [
+        {
+          "event_kinds": [
+            "status_snapshot",
+            "throttle"
+          ],
+          "database_id": 4887467403,
+          "url": "https://github.com/vybestack/llxprt-luther/pull/111#issuecomment-4887467403",
+          "author": "coderabbitai",
+          "created_at": "2026-07-05T20:20:16Z",
+          "updated_at": "2026-07-05T20:27:43Z",
+          "throttle_marker_present": true,
+          "payload_sha256": "2b129cfbfbc286699e6af4c52a6c5e39e11ec7fcc4f34d05b1bc62b8ed3c1672"
+        }
+      ]
+    },
+    {
+      "event_kind": "coverage",
+      "number": 98,
+      "url": "https://github.com/vybestack/llxprt-luther/pull/98",
+      "merged_at": "2026-07-03T08:42:05Z",
+      "commit_count": 7,
+      "commit_shas": [
+        "72975d48ab004d504c3302f32925f8cc062fa6d9",
+        "6ba85f683fb039fb8fff7b44d9f815cff68a0837",
+        "d9ff1f31c8699a287beec583dbc341452ea13d5c",
+        "b8e9796afa41e5b7391ab4d60e6e116a4eb3f655",
+        "d4dff7a2ee6a3bfaca2ab35ef1b3ad238e8de988",
+        "daf01e6d6b0203636dfd3620a692603057edd124",
+        "37fefae15a1beb62bbbcf191c43994a4faf08747"
+      ],
+      "final_head_sha": "37fefae15a1beb62bbbcf191c43994a4faf08747",
+      "coderabbit_reviews": [
+        {
+          "event_kind": "completion",
+          "database_id": 4623922636,
+          "url": "https://github.com/vybestack/llxprt-luther/pull/98#pullrequestreview-4623922636",
+          "author": "coderabbitai",
+          "state": "COMMENTED",
+          "submitted_at": "2026-07-03T07:51:00Z",
+          "reviewed_head_sha": "daf01e6d6b0203636dfd3620a692603057edd124",
+          "payload_sha256": "7ca437d72f3e631db9ca39ad4fe5ce124a3374528df045c7b69de94f3dc3fdd4"
+        }
+      ],
+      "distinct_reviewed_head_shas": [
+        "daf01e6d6b0203636dfd3620a692603057edd124"
+      ],
+      "final_head_reviewed": false,
+      "coderabbit_comments": [
+        {
+          "event_kinds": [
+            "status_snapshot",
+            "throttle"
+          ],
+          "database_id": 4866122851,
+          "url": "https://github.com/vybestack/llxprt-luther/pull/98#issuecomment-4866122851",
+          "author": "coderabbitai",
+          "created_at": "2026-07-02T13:15:45Z",
+          "updated_at": "2026-07-03T08:27:13Z",
+          "throttle_marker_present": true,
+          "payload_sha256": "1a9348e00e78a0fd6d0eb2f1dbec8175b3827e11b7f1a50237d67086d8104e0e"
+        }
+      ]
+    },
+    {
+      "event_kind": "coverage",
+      "number": 106,
+      "url": "https://github.com/vybestack/llxprt-luther/pull/106",
+      "merged_at": "2026-07-03T07:00:08Z",
+      "commit_count": 3,
+      "commit_shas": [
+        "579dc12191422e316e1dd4cad6a28cfd40586bca",
+        "fc8e9dd20609c8792223ce50bd221beb4508fb7d",
+        "d55be67608b17b798b32eefab10c542ec8025d0c"
+      ],
+      "final_head_sha": "d55be67608b17b798b32eefab10c542ec8025d0c",
+      "coderabbit_reviews": [
+        {
+          "event_kind": "completion",
+          "database_id": 4623500790,
+          "url": "https://github.com/vybestack/llxprt-luther/pull/106#pullrequestreview-4623500790",
+          "author": "coderabbitai",
+          "state": "COMMENTED",
+          "submitted_at": "2026-07-03T06:49:55Z",
+          "reviewed_head_sha": "fc8e9dd20609c8792223ce50bd221beb4508fb7d",
+          "payload_sha256": "90dcb303926959c521d26950ec3ba716bcf2a530fea4441ec4543f6ac7e52822"
+        }
+      ],
+      "distinct_reviewed_head_shas": [
+        "fc8e9dd20609c8792223ce50bd221beb4508fb7d"
+      ],
+      "final_head_reviewed": false,
+      "coderabbit_comments": [
+        {
+          "event_kinds": [
+            "status_snapshot",
+            "throttle"
+          ],
+          "database_id": 4873354866,
+          "url": "https://github.com/vybestack/llxprt-luther/pull/106#issuecomment-4873354866",
+          "author": "coderabbitai",
+          "created_at": "2026-07-03T06:44:59Z",
+          "updated_at": "2026-07-03T06:51:01Z",
+          "throttle_marker_present": true,
+          "payload_sha256": "9a02e57d0f26b227cf656ffa8951e4106ec2786c27e1fc98214bf79f5714d305"
+        }
+      ]
+    },
+    {
+      "event_kind": "coverage",
+      "number": 100,
+      "url": "https://github.com/vybestack/llxprt-luther/pull/100",
+      "merged_at": "2026-07-03T02:49:42Z",
+      "commit_count": 1,
+      "commit_shas": [
+        "b720b5320d1178638a7d5cb983965cb6052c7262"
+      ],
+      "final_head_sha": "b720b5320d1178638a7d5cb983965cb6052c7262",
+      "coderabbit_reviews": [],
+      "distinct_reviewed_head_shas": [],
+      "final_head_reviewed": false,
+      "coderabbit_comments": [
+        {
+          "event_kinds": [
+            "status_snapshot",
+            "throttle"
+          ],
+          "database_id": 4870757305,
+          "url": "https://github.com/vybestack/llxprt-luther/pull/100#issuecomment-4870757305",
+          "author": "coderabbitai",
+          "created_at": "2026-07-02T21:50:38Z",
+          "updated_at": "2026-07-03T02:43:06Z",
+          "throttle_marker_present": true,
+          "payload_sha256": "faf29033ab81679bef823c3360a324414e7201d3414bbe4a72f40b8215673cf3"
+        }
+      ]
+    },
+    {
+      "event_kind": "coverage",
+      "number": 105,
+      "url": "https://github.com/vybestack/llxprt-luther/pull/105",
+      "merged_at": "2026-07-03T02:42:43Z",
+      "commit_count": 3,
+      "commit_shas": [
+        "b0ce9539b405e6df72312e3cdb445f6335879c13",
+        "1323f08267a796886127faecc3a96e094fffc539",
+        "d76a91a0147f3d9f1fd8489f19431787fac38e45"
+      ],
+      "final_head_sha": "d76a91a0147f3d9f1fd8489f19431787fac38e45",
+      "coderabbit_reviews": [
+        {
+          "event_kind": "completion",
+          "database_id": 4622337300,
+          "url": "https://github.com/vybestack/llxprt-luther/pull/105#pullrequestreview-4622337300",
+          "author": "coderabbitai",
+          "state": "COMMENTED",
+          "submitted_at": "2026-07-03T02:29:19Z",
+          "reviewed_head_sha": "b0ce9539b405e6df72312e3cdb445f6335879c13",
+          "payload_sha256": "6f17d872aae2f2c3a94749cf2b450a1787dfb6f12fec8f42dd834be884977988"
+        }
+      ],
+      "distinct_reviewed_head_shas": [
+        "b0ce9539b405e6df72312e3cdb445f6335879c13"
+      ],
+      "final_head_reviewed": false,
+      "coderabbit_comments": [
+        {
+          "event_kinds": [
+            "status_snapshot",
+            "throttle"
+          ],
+          "database_id": 4872043662,
+          "url": "https://github.com/vybestack/llxprt-luther/pull/105#issuecomment-4872043662",
+          "author": "coderabbitai",
+          "created_at": "2026-07-03T02:24:12Z",
+          "updated_at": "2026-07-03T02:33:54Z",
+          "throttle_marker_present": true,
+          "payload_sha256": "af355513b05c296bb7e3cc79b85a16961c909da545658bff441e93873aca544e"
+        }
+      ]
+    },
+    {
+      "event_kind": "coverage",
+      "number": 104,
+      "url": "https://github.com/vybestack/llxprt-luther/pull/104",
+      "merged_at": "2026-07-03T02:05:25Z",
+      "commit_count": 1,
+      "commit_shas": [
+        "97a1a58832eb91bba0745e4ee4d92051be6dbcb5"
+      ],
+      "final_head_sha": "97a1a58832eb91bba0745e4ee4d92051be6dbcb5",
+      "coderabbit_reviews": [],
+      "distinct_reviewed_head_shas": [],
+      "final_head_reviewed": false,
+      "coderabbit_comments": [
+        {
+          "event_kinds": [
+            "status_snapshot",
+            "throttle"
+          ],
+          "database_id": 4871908692,
+          "url": "https://github.com/vybestack/llxprt-luther/pull/104#issuecomment-4871908692",
+          "author": "coderabbitai",
+          "created_at": "2026-07-03T01:54:15Z",
+          "updated_at": "2026-07-03T01:54:15Z",
+          "throttle_marker_present": true,
+          "payload_sha256": "388dced0655f9f0302c91c93fd8de46c2ee06ac62fef1eafeea0191c6d4c3206"
+        }
+      ]
+    },
+    {
+      "event_kind": "coverage",
+      "number": 103,
+      "url": "https://github.com/vybestack/llxprt-luther/pull/103",
+      "merged_at": "2026-07-03T01:47:05Z",
+      "commit_count": 2,
+      "commit_shas": [
+        "5823905ab15e6066e1dee111bf2408c4e82da63a",
+        "a4e354acf7e71a4dc9d59e0d4eea33588b03ccb7"
+      ],
+      "final_head_sha": "a4e354acf7e71a4dc9d59e0d4eea33588b03ccb7",
+      "coderabbit_reviews": [],
+      "distinct_reviewed_head_shas": [],
+      "final_head_reviewed": false,
+      "coderabbit_comments": [
+        {
+          "event_kinds": [
+            "status_snapshot",
+            "throttle"
+          ],
+          "database_id": 4871315677,
+          "url": "https://github.com/vybestack/llxprt-luther/pull/103#issuecomment-4871315677",
+          "author": "coderabbitai",
+          "created_at": "2026-07-02T23:36:18Z",
+          "updated_at": "2026-07-02T23:39:03Z",
+          "throttle_marker_present": true,
+          "payload_sha256": "00db7571143f02b858b0c0e20cab857edbf0bf77f7a78d37e600a79a1c7570e5"
+        }
+      ]
+    },
+    {
+      "event_kind": "coverage",
+      "number": 102,
+      "url": "https://github.com/vybestack/llxprt-luther/pull/102",
+      "merged_at": "2026-07-02T23:31:09Z",
+      "commit_count": 4,
+      "commit_shas": [
+        "731e536243f04445556d6281cb3c8f81bf4cdaec",
+        "4526f1ed9c846f0677ffe26e1e5881b9582315b8",
+        "0a6e8c4f0868e86c2585306166bcd04196332c54",
+        "02f5054a28b8a500f79318f93d7364734fc3a1cc"
+      ],
+      "final_head_sha": "02f5054a28b8a500f79318f93d7364734fc3a1cc",
+      "coderabbit_reviews": [],
+      "distinct_reviewed_head_shas": [],
+      "final_head_reviewed": false,
+      "coderabbit_comments": [
+        {
+          "event_kinds": [
+            "status_snapshot",
+            "throttle"
+          ],
+          "database_id": 4871207396,
+          "url": "https://github.com/vybestack/llxprt-luther/pull/102#issuecomment-4871207396",
+          "author": "coderabbitai",
+          "created_at": "2026-07-02T23:11:59Z",
+          "updated_at": "2026-07-02T23:23:56Z",
+          "throttle_marker_present": true,
+          "payload_sha256": "15bab835d3b074b071a5b9d341f999cd109a9b70631f6570eb389164bbb329f2"
+        }
+      ]
+    }
+  ]
+}

@@ -23,24 +23,29 @@ only signal.
 The baseline queried merged PRs 141, 130, 134, 133, 128, 126, 120, 124, 116,
 110, 114, 112, 111, 98, 106, 100, 105, 104, 103, and 102 at
 `2026-07-15T11:47:12Z`. These were the 20 most recently updated merged PRs when
-the sample was selected. The immutable source records are each PR's GitHub
-commits, reviews, and issue comments, available at
-`https://github.com/vybestack/llxprt-luther/pull/NUMBER`.
+the sample was selected. The append-only
+[baseline snapshot](coderabbit-baseline-2026-07-15.json) retains PR and record
+IDs, event kinds, source URLs, timestamps, commit and reviewed-head SHAs, and
+SHA-256 hashes of mutable comment/review payloads at observation time.
 
 The query selected `number`, `commits(first: 100) { totalCount, commit.oid }`,
-`reviews(first: 100) { author.login, state, submittedAt, commit.oid }`, and
-`comments(first: 100) { author.login, createdAt, body }`, using
-`pullRequests(first: 20, states: MERGED, orderBy: {field: UPDATED_AT, direction: DESC})`.
-Bot records were classified case-insensitively when the author login contained
-`coderabbit`; reviewed heads required a non-null review commit OID. PR commit
-count is the available demand proxy. A CodeRabbit review submission attached
-to a commit records a completed reviewed head. The mutable CodeRabbit
-walkthrough comment records the currently visible throttle marker, not a count
-of discrete throttle events.
+`reviews(first: 100) { databaseId, url, author.login, state, submittedAt,
+commit.oid, body }`, and `comments(first: 100) { databaseId, url, author.login,
+createdAt, updatedAt, body }`, using `pullRequests(first: 20, states: MERGED,
+orderBy: {field: UPDATED_AT, direction: DESC})`. Bot records were classified
+case-insensitively when the author login contained `coderabbit`; reviewed heads
+required a non-null review commit OID. Payload hashes cover the UTF-8 comment or
+review body, so the standard SHA-256 empty-input value is valid for reviews with
+an empty body. A reviewed head may be absent from the PR's current commit list
+after a force-push or rebase; the review's immutable commit association remains
+the authoritative completion record. PR commit count is the available demand
+proxy. A CodeRabbit review submission attached to a commit records a completed
+reviewed head. The mutable CodeRabbit walkthrough comment records the currently
+visible throttle marker, not a count of discrete throttle events.
 
 | Event or measure | Observed value |
 | --- | ---: |
-| PR request/status observations (walkthrough comments) | 20 |
+| PR status observations (walkthrough comments) | 20 |
 | Total commits across sampled PRs | 131 |
 | Median commits per PR | 3 |
 | PRs with at most 3 commits | 11/20 |
@@ -67,29 +72,43 @@ all affect historical observations.
 
 ## Ingestion verification
 
-File placement and schema validation are necessary but not sufficient. On the
-PR that changes this configuration:
+File placement and schema validation are necessary but not sufficient. PR 143
+provides observable vendor evidence:
 
-1. Comment `@coderabbitai configuration`.
-2. Confirm the resolved configuration identifies repository YAML as the source
-   of the assertive profile, cap of 5, Rust review instructions, enabled Clippy
-   tool, issue planning, and disabled issue-label application.
-3. Record the comment URL and reviewed head in the PR evidence.
-4. After a review completes, confirm that its submitted review is attached to
-   the expected PR head.
+- The [resolved-configuration response](https://github.com/vybestack/llxprt-luther/pull/143#issuecomment-4980198709)
+  reported `Path: .coderabbit.yaml` and identified repository YAML as the source
+  of the assertive profile, cap of 5, automatic review controls, enabled Clippy,
+  issue planning, and disabled issue-label application.
+- The [completed review](https://github.com/vybestack/llxprt-luther/pull/143#pullrequestreview-4703812969)
+  was submitted for head `297386ae54ca87a78b93630b04321b04813b61a8`.
+- The append-only [ingestion snapshot](coderabbit-ingestion-pr143.json) retains
+  those record IDs, timestamps, URLs, resolved values, head SHA, and payload
+  hashes.
 
-The configuration command is the vendor-supported observable ingestion check;
-it reports both resolved values and their sources.
+The resolved output did not contain the former unsupported
+`reviews.instructions` key. The configuration now expresses that preserved
+Rust/workflow guidance through the documented `reviews.path_instructions`
+field for `workflow/**`. After the updated head is reviewed, the PR evidence
+must likewise show that the path instruction resolves from repository YAML and
+that the submitted review is attached to that exact head.
+
+For subsequent changes, comment `@coderabbitai configuration`, retain the actual
+response and source annotations, and verify the completed review's commit ID
+against the then-current PR head. A review request alone is not ingestion
+evidence.
 
 ## Event ledger
 
-No durable CodeRabbit measurement ledger was present when this baseline was
-created. Until one is available, retain request/status, completion, throttle,
-and reviewed-head evidence in the relevant PR. When a ledger becomes
-available, append one immutable record per observed event with:
+No pre-existing durable CodeRabbit measurement ledger was present when this
+baseline was created. The committed snapshots retain this study's observable
+status, completion, throttle, and reviewed-head/coverage evidence. The sample
+does not claim request events because bot-authored walkthroughs do not identify
+the request source, mode, or requested head. For future observations, append one
+immutable record per event to a durable ledger or commit a content-hashed
+snapshot with:
 
 - repository and PR number;
-- event kind: `request`, `completion`, `throttle`, or `coverage`;
+- event kind: `request`, `status_snapshot`, `completion`, `throttle`, or `coverage`;
 - observation timestamp and source URL;
 - requested head SHA and reviewed head SHA when known;
 - request mode (`automatic`, `incremental`, or `full`) when known;
@@ -102,10 +121,11 @@ append-only event stream.
 
 ## Rollback
 
-If root-level ingestion changes review scope unexpectedly, revert the
-configuration-move commit. That restores the exact prior repository state while
-the unexpected behavior is investigated. Do not keep root and nested copies in
-parallel: duplicate files create ambiguous human ownership even though only the
-root path is documented as vendor authority. Before reapplying the root file,
-use `@coderabbitai configuration` to identify any repository, organization, or
-workspace settings that override or extend it.
+If root-level ingestion changes review scope unexpectedly, revert the PR 143
+merge or squash commit as one rollback unit. If the PR is merged without
+squashing, revert its complete commit range together; reverting only the first
+configuration-move commit does not restore the exact prior state. Do not keep
+root and nested copies in parallel: duplicate files create ambiguous human
+ownership even though only the root path is documented as vendor authority.
+After rollback, use `@coderabbitai configuration` to verify the effective source
+and values before reapplying a root file.
