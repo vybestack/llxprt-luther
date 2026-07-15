@@ -373,15 +373,17 @@ fn carried_forward_returns_prior_head_artifact_for_same_pr() {
         "updated_at": "2026-07-12T00:00:00Z"
     });
     store
-        .write_json_artifact(
-            &prior,
-            "pending-feedback-marker-actions",
-            "github_feedback_marker",
-            12,
+        .write_json_artifact(JsonArtifactWriteRequest::new(
+            ArtifactWriteContext::new(
+                &prior,
+                "pending-feedback-marker-actions",
+                "github_feedback_marker",
+                12,
+                &clock,
+            ),
             &payload,
             None,
-            &clock,
-        )
+        ))
         .expect("write pending actions");
 
     let result = store
@@ -418,15 +420,17 @@ fn carried_forward_errors_for_different_pr() {
         "updated_at": null
     });
     store
-        .write_json_artifact(
-            &writer_binding,
-            "pending-feedback-marker-actions",
-            "github_feedback_marker",
-            12,
+        .write_json_artifact(JsonArtifactWriteRequest::new(
+            ArtifactWriteContext::new(
+                &writer_binding,
+                "pending-feedback-marker-actions",
+                "github_feedback_marker",
+                12,
+                &clock,
+            ),
             &payload,
             None,
-            &clock,
-        )
+        ))
         .expect("write pending actions");
 
     // Corrupt the canonical file to carry a different PR identity.

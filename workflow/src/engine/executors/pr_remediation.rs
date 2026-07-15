@@ -14,10 +14,15 @@ mod push_porcelain;
 mod push_stages;
 mod push_support;
 mod result_freshness;
+mod retry_history;
+mod retry_lease;
 mod retry_state;
+mod retry_validation_transitions;
 mod stale_scope;
 mod validation_retry;
-pub use self::failure_terminal::PostPrFailureTerminalExecutor;
+pub use self::failure_terminal::{
+    PostPrFailureTerminalExecutor, PostPrFailureTerminalExecutorWithClock,
+};
 use self::post_pr_plan_inputs::{
     append_pending_ci_judgment, append_post_pr_test_failures, read_plan_inputs,
     remediation_plan_covers_current_post_pr_test_result, remediation_plan_source_artifacts,
@@ -37,13 +42,11 @@ use self::result_freshness::{
     remediation_result_state, result_file_non_empty, PreviousResultSnapshot, RemediationResultState,
 };
 use self::retry_state::{
-    load_current_state, record_launch_phase, reserve_launch, LaunchPhase, RetryScopeKey, RetryState,
+    promote_launch_result, record_launch_phase, reserve_launch_with_baseline, LaunchPhase,
+    LaunchReservationOutcome, LaunchReservationRequest, RetryState,
 };
 use self::stale_scope::{classify_stale_remediation_scope, retry_scope_json, retry_scope_u64};
-use self::validation_retry::{
-    fatal_validation_failure, project_engine_retry_state, record_validation_transition,
-    remediation_validation_source_id, ValidationRetryContext,
-};
+use self::validation_retry::{project_engine_retry_state, validate_remediation_result};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
 #[cfg(unix)]
@@ -59,12 +62,15 @@ use serde_json::{json, Value};
 use crate::engine::executor::{interpolate_string, StepContext, StepExecutor};
 use crate::engine::executors::github_feedback::normalize_legacy_pending_marker_artifact;
 use crate::engine::executors::pr_followup_artifacts::{
-    ArtifactWriter, ClockSleeper, PrFollowupArtifactStore, SystemClockSleeper,
-    SystemPrFollowupFilesystem,
+    ArtifactWriteContext, ArtifactWriter, ClockSleeper, JsonArtifactWriteRequest,
+    PrFollowupArtifactStore, SystemClockSleeper, SystemPrFollowupFilesystem,
 };
 use crate::engine::executors::pr_followup_types::{
     value_has_summary_marker_key, ArtifactSequenceMetadata, PlanState, PrFollowupBinding,
     ValidationState, PR_FOLLOWUP_SCHEMA_VERSION,
+};
+use crate::engine::executors::pr_identity_params::{
+    explicit_pr_number, string_identity_is_explicit,
 };
 use crate::engine::runner::EngineError;
 use crate::engine::transition::StepOutcome;
@@ -126,12 +132,7 @@ fn build_remediation_plan(
     params: &Value,
     clock: &dyn ClockSleeper,
 ) -> Result<StepOutcome, EngineError> {
-    let artifact_root = artifact_root(context, params)?;
-    let store =
-        PrFollowupArtifactStore::with_filesystem(&artifact_root, &SystemPrFollowupFilesystem)?;
-    let step_id = current_step_id(context, "build_remediation_plan");
-    let step_order = u64_param(params, "step_order_index", 7);
-    let fallback = binding_from_params(context, params);
+    let (store, step_id, step_order, fallback) = remediation_plan_setup(context, params)?;
     let binding = match binding_for_context(context, params, &store, clock) {
         Ok(binding) => binding,
         Err(err) => {
@@ -372,6 +373,19 @@ fn build_remediation_plan(
     })
 }
 
+fn remediation_plan_setup(
+    context: &StepContext,
+    params: &Value,
+) -> Result<(PrFollowupArtifactStore, String, u64, PrFollowupBinding), EngineError> {
+    let artifact_root = artifact_root(context, params)?;
+    let store =
+        PrFollowupArtifactStore::with_filesystem(&artifact_root, &SystemPrFollowupFilesystem)?;
+    let step_id = current_step_id(context, "build_remediation_plan");
+    let step_order = u64_param(params, "step_order_index", 7);
+    let fallback = binding_from_params(context, params)?;
+    Ok((store, step_id, step_order, fallback))
+}
+
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P10
 /// @requirement:REQ-PRFU-013
 /// @pseudocode lines 5-8
@@ -493,15 +507,11 @@ fn write_plan_artifact(
     clock: &dyn ClockSleeper,
     failure: Option<(&str, &str, Value)>,
 ) -> Result<(), EngineError> {
-    store.write_json_artifact(
-        binding,
-        "pr-remediation-plan",
-        step_id,
-        step_order,
+    store.write_json_artifact(JsonArtifactWriteRequest::new(
+        ArtifactWriteContext::new(binding, "pr-remediation-plan", step_id, step_order, clock),
         payload,
         failure,
-        clock,
-    )?;
+    ))?;
     Ok(())
 }
 
@@ -549,15 +559,19 @@ fn artifact_root(context: &StepContext, params: &Value) -> Result<PathBuf, Engin
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P10
 /// @requirement:REQ-PRFU-013
 /// @pseudocode lines 1-3
-fn binding_from_params(context: &StepContext, params: &Value) -> PrFollowupBinding {
-    PrFollowupBinding {
+fn binding_from_params(
+    context: &StepContext,
+    params: &Value,
+) -> Result<PrFollowupBinding, EngineError> {
+    let pr_number = explicit_pr_number(context, params)
+        .map_err(pr_remediation_error)?
+        .unwrap_or(1910);
+    Ok(PrFollowupBinding {
         schema_version: PR_FOLLOWUP_SCHEMA_VERSION,
         run_id: context.run_id().to_string(),
         repository_owner: string_param(context, params, "repository_owner", "example"),
         repository_name: string_param(context, params, "repository_name", "workflow"),
-        pr_number: string_param(context, params, "pr_number", "1910")
-            .parse()
-            .unwrap_or(1910),
+        pr_number,
         head_ref: string_param(context, params, "head_ref", "feature"),
         head_sha: string_param(
             context,
@@ -567,7 +581,7 @@ fn binding_from_params(context: &StepContext, params: &Value) -> PrFollowupBindi
         ),
         base_ref: string_param(context, params, "base_ref", "main"),
         base_sha: Some(string_param(context, params, "base_sha", "base-a")),
-    }
+    })
 }
 
 fn binding_for_context(
@@ -576,8 +590,13 @@ fn binding_for_context(
     store: &PrFollowupArtifactStore,
     clock: &dyn ClockSleeper,
 ) -> Result<PrFollowupBinding, EngineError> {
-    let requested = binding_from_params(context, params);
-    if let Some(value) = store.find_current_pr_artifact_for_run(context.run_id(), &requested)? {
+    let requested = binding_from_params(context, params)?;
+    let explicit_pr = explicit_pr_number(context, params).map_err(pr_remediation_error)?;
+    let mut lookup = requested.clone();
+    if !requested_pr_identity_is_explicit(context, params, explicit_pr) {
+        lookup.pr_number = 0;
+    }
+    if let Some(value) = store.find_current_pr_artifact_for_run(context.run_id(), &lookup)? {
         return binding_from_value(&value);
     }
     ensure_legacy_harness_inputs(store, &requested, clock)?;
@@ -598,11 +617,8 @@ fn ensure_legacy_harness_inputs(
     if store.canonical_path(binding, "pr").exists() {
         return Ok(());
     }
-    store.write_json_artifact(
-        binding,
-        "pr",
-        "capture_pr_identity",
-        1,
+    store.write_json_artifact(JsonArtifactWriteRequest::new(
+        ArtifactWriteContext::new(binding, "pr", "capture_pr_identity", 1, clock),
         &json!({
             "pr_url": "https://github.com/example/workflow/pull/1910",
             "capture_state": "captured",
@@ -613,13 +629,9 @@ fn ensure_legacy_harness_inputs(
             "source_head_repository_name": Value::Null
         }),
         None,
-        clock,
-    )?;
-    store.write_json_artifact(
-        binding,
-        "ci-failures",
-        "collect_ci_failures",
-        4,
+    ))?;
+    store.write_json_artifact(JsonArtifactWriteRequest::new(
+        ArtifactWriteContext::new(binding, "ci-failures", "collect_ci_failures", 4, clock),
         &json!({
             "collection_state": "collected",
             "failures": [{
@@ -644,13 +656,15 @@ fn ensure_legacy_harness_inputs(
             "source_check_status_artifact_sequence": 1
         }),
         None,
-        clock,
-    )?;
-    store.write_json_artifact(
-        binding,
-        "coderabbit-feedback",
-        "collect_coderabbit_feedback",
-        5,
+    ))?;
+    store.write_json_artifact(JsonArtifactWriteRequest::new(
+        ArtifactWriteContext::new(
+            binding,
+            "coderabbit-feedback",
+            "collect_coderabbit_feedback",
+            5,
+            clock,
+        ),
         &json!({
             "readiness_state": "ready",
             "stable_observation_count": 2,
@@ -668,13 +682,15 @@ fn ensure_legacy_harness_inputs(
             "feedback_item_set_hash": "fnv64:p10-legacy"
         }),
         None,
-        clock,
-    )?;
-    store.write_json_artifact(
-        binding,
-        "feedback-evaluations",
-        "evaluate_coderabbit_feedback",
-        6,
+    ))?;
+    store.write_json_artifact(JsonArtifactWriteRequest::new(
+        ArtifactWriteContext::new(
+            binding,
+            "feedback-evaluations",
+            "evaluate_coderabbit_feedback",
+            6,
+            clock,
+        ),
         &json!({
             "evaluation_state": "complete",
             "items_seen": 1,
@@ -698,8 +714,7 @@ fn ensure_legacy_harness_inputs(
             "reused_results_count": 0
         }),
         None,
-        clock,
-    )?;
+    ))?;
     Ok(())
 }
 
@@ -789,6 +804,17 @@ fn require_u64(value: &Value, field: &str) -> Result<u64, EngineError> {
         .get(field)
         .and_then(Value::as_u64)
         .ok_or_else(|| pr_remediation_error(format!("missing integer field {field}")))
+}
+
+fn requested_pr_identity_is_explicit(
+    context: &StepContext,
+    params: &Value,
+    explicit_pr: Option<u64>,
+) -> bool {
+    explicit_pr.is_some()
+        && ["repository_owner", "repository_name"]
+            .iter()
+            .all(|key| string_identity_is_explicit(context, params, key))
 }
 
 fn string_param(context: &StepContext, params: &Value, key: &str, default: &str) -> String {
@@ -957,12 +983,26 @@ fn remediate_pr_followup(
     clock: &dyn ClockSleeper,
     runner: &dyn PrFollowupLlxprtCommandRunner,
 ) -> Result<StepOutcome, EngineError> {
-    let mut run = RemediationRun::prepare(context, params, clock)?;
-    run.invoke(context, params, runner);
-    run.handle_result_state(clock)?;
-    run.write_llxprt_run_artifact(clock)?;
-    run.complete_launch(clock)?;
+    let RemediationPreparation::Launch(mut run) = RemediationRun::prepare(context, params, clock)?
+    else {
+        return Ok(StepOutcome::Success);
+    };
+    let request = run.invocation_request(context, params);
+    run.mark_launched(clock)?;
+    run.invoke(request, context, runner);
+    let work_result = run
+        .handle_result_state(clock)
+        .and_then(|()| run.promote_result(clock))
+        .and_then(|()| run.write_llxprt_run_artifact(clock));
+    let completion_result = run.complete_launch(clock);
+    work_result?;
+    completion_result?;
     Ok(run.outcome())
+}
+
+enum RemediationPreparation {
+    Recovered,
+    Launch(Box<RemediationRun>),
 }
 
 struct RemediationRun {
@@ -972,6 +1012,7 @@ struct RemediationRun {
     step_id: String,
     step_order: u64,
     result_path: PathBuf,
+    launch_result_path: PathBuf,
     previous_result: Option<Value>,
     previous_result_snapshot: PreviousResultSnapshot,
     retry_state: RetryState,
@@ -984,7 +1025,7 @@ impl RemediationRun {
         context: &StepContext,
         params: &Value,
         clock: &dyn ClockSleeper,
-    ) -> Result<Self, EngineError> {
+    ) -> Result<RemediationPreparation, EngineError> {
         let artifact_root = artifact_root(context, params)?;
         let store =
             PrFollowupArtifactStore::with_filesystem(&artifact_root, &SystemPrFollowupFilesystem)?;
@@ -993,55 +1034,81 @@ impl RemediationRun {
         let result_path = store.canonical_path(&binding, "pr-remediation-result");
         let step_id = current_step_id(context, "remediate_pr_followup");
         let step_order = u64_param(params, "step_order_index", 8);
-        let mut retry_state =
-            reserve_launch(&store, &binding, &plan, params, &step_id, step_order, clock)?;
-        record_launch_phase(
-            &store,
-            &binding,
-            &step_id,
-            step_order,
-            &mut retry_state,
-            LaunchPhase::Launched,
-            clock,
+        let reservation = reserve_launch_with_baseline(
+            LaunchReservationRequest {
+                store: &store,
+                binding: &binding,
+                plan: &plan,
+                params,
+                producer_step_id: &step_id,
+                step_order,
+                clock,
+            },
+            |state| {
+                let previous_result = store
+                    .read_untrusted_current_json(&binding, "pr-remediation-result")?
+                    .unwrap_or_else(|| json!({}));
+                let launch_result_path = store.remediation_launch_result_path(
+                    &binding,
+                    state.launch_ordinal,
+                    &state.owner_token,
+                );
+                let snapshot = PreviousResultSnapshot::capture(&launch_result_path);
+                Ok((previous_result, snapshot, launch_result_path))
+            },
         )?;
-        let previous_result = store
-            .read_current_raw_json(&binding, "pr-remediation-result")
-            .ok()
-            .unwrap_or_else(|| json!({}));
-        let previous_result = Some(project_engine_retry_state(previous_result, &retry_state));
-        let previous_result_snapshot = PreviousResultSnapshot::capture(&result_path);
+        let LaunchReservationOutcome::Reserved(
+            retry_state,
+            (previous_result, previous_result_snapshot, launch_result_path),
+        ) = reservation
+        else {
+            return Ok(RemediationPreparation::Recovered);
+        };
+        let retry_state = *retry_state;
         let prompt =
-            render_remediation_prompt(&binding, &plan, &result_path, previous_result.as_ref());
-        Ok(Self {
+            render_remediation_prompt(&binding, &plan, &launch_result_path, Some(&previous_result));
+        let argv = remediation_argv(params, &prompt, context);
+        let previous_result = Some(project_engine_retry_state(previous_result, &retry_state));
+        Ok(RemediationPreparation::Launch(Box::new(Self {
             store,
             binding,
             plan,
             step_id,
             step_order,
             result_path,
+            launch_result_path,
             previous_result,
             previous_result_snapshot,
             retry_state,
-            argv: remediation_argv(params, &prompt, context),
+            argv,
             invocation: None,
-        })
+        })))
+    }
+
+    fn mark_launched(&mut self, clock: &dyn ClockSleeper) -> Result<(), EngineError> {
+        record_launch_phase(
+            &self.store,
+            &self.binding,
+            &self.step_id,
+            self.step_order,
+            &mut self.retry_state,
+            LaunchPhase::Launched,
+            clock,
+        )
     }
 
     fn invoke(
         &mut self,
+        request: LlxprtInvocationRequest,
         context: &StepContext,
-        params: &Value,
         runner: &dyn PrFollowupLlxprtCommandRunner,
     ) {
-        let mut invocation = runner.invoke(self.invocation_request(context, params));
+        let mut invocation = runner.invoke(request);
         if invocation.argv.is_empty() {
             invocation.argv.clone_from(&self.argv);
         }
         if invocation.working_directory.as_os_str().is_empty() {
             invocation.working_directory = context.work_dir().clone();
-        }
-        if let Some(path) = &invocation.result_file_path {
-            self.result_path = path.clone();
         }
         self.invocation = Some(invocation);
     }
@@ -1059,12 +1126,24 @@ impl RemediationRun {
             remediation_plan_path: self
                 .store
                 .canonical_path(&self.binding, "pr-remediation-plan"),
-            remediation_result_path: self.result_path.clone(),
+            remediation_result_path: self.launch_result_path.clone(),
             success_file_path: params
                 .get("success_file")
                 .and_then(Value::as_str)
                 .map(|path| resolve_path(context.work_dir(), path)),
         }
+    }
+
+    fn promote_result(&mut self, clock: &dyn ClockSleeper) -> Result<(), EngineError> {
+        promote_launch_result(
+            &self.store,
+            &self.binding,
+            &self.step_id,
+            self.step_order,
+            &mut self.retry_state,
+            clock,
+        )?;
+        Ok(())
     }
 
     fn handle_result_state(&mut self, clock: &dyn ClockSleeper) -> Result<(), EngineError> {
@@ -1092,40 +1171,38 @@ impl RemediationRun {
     fn result_state(&self) -> RemediationResultState {
         remediation_result_state(
             self.invocation(),
-            &self.result_path,
+            &self.launch_result_path,
             &self.previous_result_snapshot,
         )
     }
 
     fn write_failure_result(&self, clock: &dyn ClockSleeper) -> Result<(), EngineError> {
-        write_validator_readable_remediation_failure_result(
-            &self.store,
-            &self.binding,
-            &self.step_id,
-            self.step_order,
-            &self.plan,
-            self.invocation(),
-            &self.result_path,
-            self.previous_result.as_ref(),
+        write_validator_readable_remediation_failure_result(&FailureResultContext {
+            store: &self.store,
+            binding: &self.binding,
+            plan: &self.plan,
+            invocation: self.invocation(),
+            result_path: &self.launch_result_path,
+            previous_result: self.previous_result.as_ref(),
+            retry_state: &self.retry_state,
             clock,
-        )
+        })
     }
 
     fn repair_timeout_wrapper_failure_result(
         &self,
         clock: &dyn ClockSleeper,
     ) -> Result<(), EngineError> {
-        repair_timeout_wrapper_failure_result_if_needed(
-            &self.store,
-            &self.binding,
-            &self.step_id,
-            self.step_order,
-            &self.plan,
-            self.invocation(),
-            &self.result_path,
-            self.previous_result.as_ref(),
+        repair_timeout_wrapper_failure_result_if_needed(&FailureResultContext {
+            store: &self.store,
+            binding: &self.binding,
+            plan: &self.plan,
+            invocation: self.invocation(),
+            result_path: &self.launch_result_path,
+            previous_result: self.previous_result.as_ref(),
+            retry_state: &self.retry_state,
             clock,
-        )
+        })
     }
 
     fn write_llxprt_run_artifact(&self, clock: &dyn ClockSleeper) -> Result<(), EngineError> {
@@ -1187,7 +1264,16 @@ fn read_or_build_remediation_plan(
                 rebuild_and_read_remediation_plan(context, params, clock, store, binding)
             }
         }
-        Err(_) => rebuild_and_read_remediation_plan(context, params, clock, store, binding),
+        Err(error) => {
+            if store
+                .canonical_path(binding, "pr-remediation-plan")
+                .exists()
+            {
+                Err(error)
+            } else {
+                rebuild_and_read_remediation_plan(context, params, clock, store, binding)
+            }
+        }
     }
 }
 
@@ -1273,46 +1359,26 @@ fn render_remediation_prompt(
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P12
 /// @requirement:REQ-PRFU-013
 /// @pseudocode lines 15-17
-// Pre-existing artifact writer shape shared by remediation executors.
-#[allow(clippy::too_many_arguments)]
 fn write_validator_readable_remediation_failure_result(
-    store: &PrFollowupArtifactStore,
-    binding: &PrFollowupBinding,
-    step_id: &str,
-    step_order: u64,
-    plan: &Value,
-    invocation: &LlxprtInvocationResult,
-    result_path: &Path,
-    previous_result: Option<&Value>,
-    clock: &dyn ClockSleeper,
+    context: &FailureResultContext<'_>,
 ) -> Result<(), EngineError> {
-    let context = FailureResultContext {
-        binding,
-        plan,
-        invocation,
-        result_path,
-        previous_result,
-        clock,
-    };
-    let payload = wrapper_failure_payload(&context);
-    store.write_json_artifact(
-        binding,
-        "pr-remediation-result",
-        step_id,
-        step_order,
+    let payload = wrapper_failure_payload(context);
+    context.store.write_remediation_launch_result(
+        context.binding,
+        context.retry_state.launch_ordinal,
+        &context.retry_state.owner_token,
         &payload,
-        None,
-        clock,
-    )?;
-    Ok(())
+    )
 }
 
 struct FailureResultContext<'a> {
+    store: &'a PrFollowupArtifactStore,
     binding: &'a PrFollowupBinding,
     plan: &'a Value,
     invocation: &'a LlxprtInvocationResult,
     result_path: &'a Path,
     previous_result: Option<&'a Value>,
+    retry_state: &'a RetryState,
     clock: &'a dyn ClockSleeper,
 }
 
@@ -1330,6 +1396,9 @@ fn wrapper_failure_payload(context: &FailureResultContext<'_>) -> Value {
         "verification_commands": [],
         "success_file_path": Value::Null,
         "validation_state": ValidationState::Unvalidated.as_str(),
+        "retry_launch_transition_id": retry_state::durable_launch_transition_id(context.retry_state),
+        "retry_launch_ordinal": context.retry_state.launch_ordinal,
+        "retry_launch_owner_token": context.retry_state.owner_token,
         "validation_retry_index": normal_counters.validation_retry_index,
         "max_validation_retries": normal_counters.max_validation_retries,
         "remediation_attempt_index": normal_counters.remediation_attempt_index,
@@ -1489,15 +1558,17 @@ fn write_llxprt_run_artifact(
             json!({ "process_class": invocation.process_class, "validator_readable_result_written": validator_readable }),
         ))
     };
-    store.write_json_artifact(
-        binding,
-        "pr-remediation-llxprt-run",
-        step_id,
-        step_order,
+    store.write_json_artifact(JsonArtifactWriteRequest::new(
+        ArtifactWriteContext::new(
+            binding,
+            "pr-remediation-llxprt-run",
+            step_id,
+            step_order,
+            clock,
+        ),
         &payload,
         failure,
-        clock,
-    )?;
+    ))?;
     Ok(())
 }
 
@@ -1511,19 +1582,10 @@ fn read_json_file(path: &Path) -> Result<Value, EngineError> {
         .map_err(|err| pr_remediation_error(format!("parse artifact {}: {err}", path.display())))
 }
 
-#[allow(clippy::too_many_arguments)]
 fn repair_timeout_wrapper_failure_result_if_needed(
-    store: &PrFollowupArtifactStore,
-    binding: &PrFollowupBinding,
-    step_id: &str,
-    step_order: u64,
-    plan: &Value,
-    invocation: &LlxprtInvocationResult,
-    result_path: &Path,
-    previous_result: Option<&Value>,
-    clock: &dyn ClockSleeper,
+    context: &FailureResultContext<'_>,
 ) -> Result<(), EngineError> {
-    let Ok(result) = read_json_file(result_path) else {
+    let Ok(result) = read_json_file(context.result_path) else {
         return Ok(());
     };
     let wrapper_failure_only =
@@ -1541,17 +1603,7 @@ fn repair_timeout_wrapper_failure_result_if_needed(
         return Ok(());
     }
 
-    write_validator_readable_remediation_failure_result(
-        store,
-        binding,
-        step_id,
-        step_order,
-        plan,
-        invocation,
-        result_path,
-        previous_result,
-        clock,
-    )
+    write_validator_readable_remediation_failure_result(context)
 }
 
 fn invocation_state(invocation: &LlxprtInvocationResult, validator_readable: bool) -> String {
@@ -2044,7 +2096,7 @@ pub(super) struct StaleScopeClassification {
     pub(super) max_stale_artifact_retries: u64,
 }
 
-#[derive(Clone, Debug, serde::Serialize)]
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 struct RemediationResultValidationArtifact {
     input_head_sha: String,
     output_head_sha: String,
@@ -2070,6 +2122,9 @@ struct RemediationResultValidationArtifact {
     max_stale_artifact_retries: u64,
     classified_as: Option<String>,
     validation_source_id: String,
+    agent_result_source_identity: String,
+    retry_launch_transition_id: Option<String>,
+    retry_launch_ordinal: Option<u64>,
     validated_at: String,
 }
 
@@ -2088,87 +2143,61 @@ pub(super) struct RemediationResultValidation {
     pub(super) stale_scope: Option<StaleScopeClassification>,
 }
 
-fn validate_remediation_result(
-    context: &StepContext,
-    params: &Value,
-    clock: &dyn ClockSleeper,
-) -> Result<StepOutcome, EngineError> {
-    let artifact_root = artifact_root(context, params)?;
-    let store =
-        PrFollowupArtifactStore::with_filesystem(&artifact_root, &SystemPrFollowupFilesystem)?;
-    let binding = binding_for_context(context, params, &store, clock)?;
-    let plan = store.read_current_json(&binding, "pr-remediation-plan")?;
-    let mut result = read_remediation_result_for_validation(&store, &binding, &plan)?;
-    let validation_source_id = remediation_validation_source_id(&result)?;
-    let retry_scope = RetryScopeKey::new(&binding, &plan)?;
-    let mut retry_state = load_current_state(&store, &binding, &retry_scope)?;
-    let advance_validation = retry_state
-        .as_ref()
-        .is_none_or(|state| state.validation_source_id.as_deref() != Some(&validation_source_id));
-    if let Some(retry_state) = &retry_state {
-        result = project_engine_retry_state(result, retry_state);
-    }
-    let step_id = current_step_id(context, "validate_remediation_result");
-    let step_order = u64_param(params, "step_order_index", 9);
-
-    let expected_scope = remediation_retry_scope(&binding, &plan, &result, params);
-    let validation = evaluate_remediation_result(
-        &binding,
-        &plan,
-        &result,
-        &expected_scope,
-        retry_state.is_some(),
-        advance_validation,
-    );
-    if let Some(state) = &mut retry_state {
-        record_validation_transition(ValidationRetryContext {
-            store: &store,
-            binding: &binding,
-            step_id: &step_id,
-            step_order,
-            state,
-            validation: &validation,
-            validation_source_id: &validation_source_id,
-            clock,
-        })?;
-    }
-    let payload =
-        remediation_result_payload(&binding, &result, &validation, &validation_source_id, clock);
-    let failure = fatal_validation_failure(&validation);
-    let result_write_record = store.write_json_artifact(
-        &binding,
-        "pr-remediation-result",
-        &step_id,
-        step_order,
-        &payload,
-        failure,
-        clock,
-    )?;
-    if validation.outcome == StepOutcome::Success {
-        write_pending_marker_actions_for_fixed_feedback(&FixedFeedbackMarkerContext {
-            store: &store,
-            binding: &binding,
-            step_id: &step_id,
-            step_order,
-            plan: &plan,
-            validation_payload: &payload,
-            result_sequence: &result_write_record.sequence,
-            clock,
-        })?;
-    }
-
-    Ok(validation.outcome)
+struct RemediationResultRead {
+    result: Value,
+    replay_error: Option<String>,
 }
 
 fn read_remediation_result_for_validation(
     store: &PrFollowupArtifactStore,
     binding: &PrFollowupBinding,
     plan: &Value,
-) -> Result<Value, EngineError> {
-    let result = store.read_current_raw_json(binding, "pr-remediation-result")?;
-    Ok(normalize_remediation_result_for_validation(
-        binding, plan, result,
-    ))
+    retry_state: Option<&retry_state::RetryState>,
+    remediation_step_order: u64,
+    clock: &dyn ClockSleeper,
+) -> Result<RemediationResultRead, EngineError> {
+    let expected_launch = retry_state.map(|state| {
+        crate::engine::executors::pr_followup_artifacts::ArtifactLaunchBinding {
+            transition_id: retry_state::durable_launch_transition_id(state),
+            ordinal: state.launch_ordinal,
+        }
+    });
+    let captured = store.capture_immutable_receipt(
+        crate::engine::executors::pr_followup_artifacts::ImmutableReceiptRequest {
+            binding,
+            source_family: "pr-remediation-result",
+            receipt_family: "pr-remediation-agent-result",
+            producer_step_id: "remediate_pr_followup",
+            step_order_index: remediation_step_order,
+            clock,
+            expected_launch,
+        },
+    )?;
+    let receipt = captured.receipt;
+    let mut result = receipt
+        .get("agent_result_payload")
+        .cloned()
+        .ok_or_else(|| {
+            EngineError::InvalidState("agent-result receipt is missing payload".to_string())
+        })?;
+    if let Some(object) = result.as_object_mut() {
+        for field in [
+            "artifact_sequence",
+            "write_sequence",
+            "producer_step_id",
+            "step_order_index",
+            "history_metadata",
+            "agent_result_source_identity",
+        ] {
+            if let Some(value) = receipt.get(field) {
+                object.insert(field.to_string(), value.clone());
+            }
+        }
+    }
+    Ok(RemediationResultRead {
+        result: normalize_remediation_result_for_validation(binding, plan, result),
+        replay_error: captured.replay_error,
+    })
 }
 
 fn normalize_remediation_result_for_validation(
@@ -2384,23 +2413,61 @@ fn evaluate_remediation_result(
     expected_scope: &RemediationRetryScope,
     engine_retry_state_present: bool,
     advance_validation: bool,
-) -> RemediationResultValidation {
-    if let Some(stale_scope) =
-        classify_stale_remediation_scope(result, expected_scope, advance_validation)
-    {
-        return stale_scope_validation(stale_scope, expected_scope);
+) -> Result<RemediationResultValidation, EngineError> {
+    let counter_errors = retry_counter_errors(expected_scope);
+    let counters_valid = counter_errors.is_empty();
+    if counters_valid {
+        if let Some(stale_scope) =
+            classify_stale_remediation_scope(result, expected_scope, advance_validation)?
+        {
+            return Ok(stale_scope_validation(stale_scope, expected_scope));
+        }
     }
 
-    let semantic = semantic_remediation_validation(binding, plan, result);
+    let mut semantic = semantic_remediation_validation(binding, plan, result);
+    semantic.validation_retry_index = expected_scope.validation_retry_index;
+    semantic.max_validation_retries = expected_scope.max_validation_retries;
+    semantic.remediation_attempt_index = expected_scope.remediation_attempt_index;
+    semantic.max_remediation_attempts = expected_scope.max_remediation_attempts;
+    semantic.errors.extend(counter_errors);
     if !semantic.errors.is_empty() {
-        return malformed_remediation_validation(semantic, advance_validation);
+        return malformed_remediation_validation(semantic, advance_validation && counters_valid);
     }
     if !semantic.unsuccessful_statuses.is_empty()
         || semantic.successful_count != semantic.result_count
     {
         return unsuccessful_remediation_validation(semantic, engine_retry_state_present);
     }
-    successful_remediation_validation(semantic)
+    Ok(successful_remediation_validation(semantic))
+}
+
+fn retry_counter_errors(scope: &RemediationRetryScope) -> Vec<String> {
+    [
+        (
+            "remediation_attempt_index",
+            scope.remediation_attempt_index,
+            "max_remediation_attempts",
+            scope.max_remediation_attempts,
+        ),
+        (
+            "validation_retry_index",
+            scope.validation_retry_index,
+            "max_validation_retries",
+            scope.max_validation_retries,
+        ),
+        (
+            "stale_artifact_retry_index",
+            scope.stale_artifact_retry_index,
+            "max_stale_artifact_retries",
+            scope.max_stale_artifact_retries,
+        ),
+    ]
+    .into_iter()
+    .filter(|(_, counter, _, maximum)| counter > maximum)
+    .map(|(counter_name, counter, maximum_name, maximum)| {
+        format!("{counter_name} {counter} exceeds {maximum_name} {maximum}")
+    })
+    .collect()
 }
 
 #[derive(Clone, Debug)]
@@ -2528,6 +2595,12 @@ fn top_level_remediation_errors(
     if results.is_empty() {
         errors.push("missing remediation results".to_string());
     }
+    if let Some(error) = result
+        .get("engine_validated_replay_error")
+        .and_then(Value::as_str)
+    {
+        errors.push(error.to_string());
+    }
     errors
 }
 
@@ -2642,10 +2715,15 @@ fn validate_success_evidence(
 fn malformed_remediation_validation(
     semantic: SemanticRemediationValidation,
     advance_validation: bool,
-) -> RemediationResultValidation {
-    let validation_retry_index = semantic.validation_retry_index + u64::from(advance_validation);
+) -> Result<RemediationResultValidation, EngineError> {
+    let validation_retry_index = semantic
+        .validation_retry_index
+        .checked_add(u64::from(advance_validation))
+        .ok_or_else(|| {
+            EngineError::InvalidState("validation retry counter overflowed".to_string())
+        })?;
     let exhausted = validation_retry_index >= semantic.max_validation_retries;
-    RemediationResultValidation {
+    Ok(RemediationResultValidation {
         outcome: if exhausted {
             StepOutcome::Fatal
         } else {
@@ -2665,18 +2743,23 @@ fn malformed_remediation_validation(
         remediation_attempt_index: semantic.remediation_attempt_index,
         max_remediation_attempts: semantic.max_remediation_attempts,
         stale_scope: None,
-    }
+    })
 }
 
 fn unsuccessful_remediation_validation(
     mut semantic: SemanticRemediationValidation,
     engine_retry_state_present: bool,
-) -> RemediationResultValidation {
+) -> Result<RemediationResultValidation, EngineError> {
     if !engine_retry_state_present {
-        semantic.remediation_attempt_index += 1;
+        semantic.remediation_attempt_index = semantic
+            .remediation_attempt_index
+            .checked_add(1)
+            .ok_or_else(|| {
+                EngineError::InvalidState("remediation attempt counter overflowed".to_string())
+            })?;
     }
     let exhausted = semantic.remediation_attempt_index >= semantic.max_remediation_attempts;
-    RemediationResultValidation {
+    Ok(RemediationResultValidation {
         outcome: if exhausted {
             StepOutcome::Fatal
         } else {
@@ -2696,7 +2779,7 @@ fn unsuccessful_remediation_validation(
         remediation_attempt_index: semantic.remediation_attempt_index,
         max_remediation_attempts: semantic.max_remediation_attempts,
         stale_scope: None,
-    }
+    })
 }
 
 fn successful_remediation_validation(
@@ -2905,6 +2988,7 @@ fn remediation_result_payload(
     result: &Value,
     validation: &RemediationResultValidation,
     validation_source_id: &str,
+    retry_state: Option<&retry_state::RetryState>,
     clock: &dyn ClockSleeper,
 ) -> RemediationResultValidationArtifact {
     RemediationResultValidationArtifact {
@@ -2969,6 +3053,11 @@ fn remediation_result_payload(
             }
         }),
         validation_source_id: validation_source_id.to_string(),
+        agent_result_source_identity: string_field(result, "agent_result_source_identity", ""),
+        retry_launch_transition_id: retry_state
+            .map(retry_state::durable_launch_transition_id)
+            .map(ToString::to_string),
+        retry_launch_ordinal: retry_state.map(|state| state.launch_ordinal),
         validated_at: clock.now_rfc3339(),
     }
 }

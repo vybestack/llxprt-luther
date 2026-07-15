@@ -21,7 +21,8 @@ use crate::engine::executors::feedback_eval_policy::{
     FeedbackEvaluationAdapter,
 };
 use crate::engine::executors::pr_followup_artifacts::{
-    ArtifactWriter, ClockSleeper, PrFollowupArtifactStore, SystemPrFollowupFilesystem,
+    ArtifactWriteContext, ArtifactWriter, ClockSleeper, JsonArtifactWriteRequest,
+    PrFollowupArtifactStore, RawTextArtifactWriteRequest, SystemPrFollowupFilesystem,
 };
 use crate::engine::executors::pr_followup_types::{
     EvaluationState, PrFollowupBinding, PR_FOLLOWUP_SCHEMA_VERSION, SUMMARY_MARKER_KEY_PREFIX,

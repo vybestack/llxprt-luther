@@ -3,25 +3,34 @@
 use serde_json::{json, Value};
 
 use super::{RemediationRetryScope, StaleScopeClassification};
+use crate::engine::runner::EngineError;
 
 pub(super) fn classify_stale_remediation_scope(
     result: &Value,
     expected: &RemediationRetryScope,
     advance_validation: bool,
-) -> Option<StaleScopeClassification> {
+) -> Result<Option<StaleScopeClassification>, EngineError> {
     if is_stale_scope_validation_result(result) {
-        return None;
+        return Ok(None);
     }
     let observed = observed_retry_scope(result);
     let errors = stale_scope_errors(result, &observed, expected);
-    (!errors.is_empty()).then(|| StaleScopeClassification {
+    if errors.is_empty() {
+        return Ok(None);
+    }
+    let stale_artifact_retry_index = expected
+        .stale_artifact_retry_index
+        .checked_add(u64::from(advance_validation))
+        .ok_or_else(|| {
+            EngineError::InvalidState("stale artifact retry counter overflowed".to_string())
+        })?;
+    Ok(Some(StaleScopeClassification {
         expected_scope: expected.clone(),
         observed_scope: observed,
         errors,
-        stale_artifact_retry_index: expected.stale_artifact_retry_index
-            + u64::from(advance_validation),
+        stale_artifact_retry_index,
         max_stale_artifact_retries: expected.max_stale_artifact_retries,
-    })
+    }))
 }
 
 fn is_stale_scope_validation_result(result: &Value) -> bool {

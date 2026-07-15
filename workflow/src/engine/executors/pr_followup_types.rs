@@ -611,21 +611,95 @@ pub struct PostPrIterationGuard {
     pub guard_state: String,
 }
 
-/// Post-PR failure terminal artifact schema contract for `post-pr-failure-terminal.json`.
+/// Immutable source provenance recorded by a post-PR failure terminal.
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PostPrFailureTerminalSource {
+    pub artifact_family: String,
+    pub artifact_sequence: u64,
+    pub write_sequence: u64,
+    pub failure_sequence: u64,
+    pub producer_step_id: String,
+    pub step_order_index: u64,
+    pub path: String,
+    pub history_path: String,
+    pub failure_reason: Option<String>,
+}
+
+/// Store-owned history metadata embedded in a post-PR failure terminal.
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PostPrFailureTerminalHistory {
+    pub canonical_path: String,
+    pub history_path: String,
+    pub artifact_family: String,
+    pub is_canonical: bool,
+    pub history_written_at: String,
+}
+
+/// Validated on-disk schema for `post-pr-failure-terminal.json`.
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P03
 /// @requirement:REQ-PRFU-002
 /// @pseudocode lines 50-53
-#[derive(Clone, Debug, Default, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct PostPrFailureTerminal {
-    pub binding: PrFollowupBinding,
-    pub sequence: ArtifactSequenceMetadata,
+    pub schema_version: u32,
+    pub run_id: String,
+    pub repository_owner: String,
+    pub repository_name: String,
+    pub pr_number: u64,
+    pub head_ref: String,
+    pub head_sha: String,
+    pub base_ref: String,
+    pub base_sha: Option<String>,
+    pub artifact_sequence: u64,
+    pub write_sequence: u64,
+    pub producer_step_id: String,
+    pub step_order_index: u64,
+    pub history_metadata: PostPrFailureTerminalHistory,
     pub terminal_state: String,
-    pub terminal_reason: Option<String>,
+    pub terminal_reason: String,
+    pub failure_reason: String,
+    pub failed_step: String,
+    pub source_artifacts: Vec<PostPrFailureTerminalSource>,
+    pub selected_source_reason: String,
+    pub idempotency_key: String,
+    pub logged_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_failure_sequence: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_artifact_sequence: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_write_sequence: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_step_order_index: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_producer_step_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_artifact_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_history_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_failure_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_artifact_family: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exhausted_budget: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remediation_attempt_index: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_remediation_attempts: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub validation_retry_index: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_validation_retries: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stale_artifact_retry_index: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_stale_artifact_retries: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_transition_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_launch_phase: Option<String>,
 }

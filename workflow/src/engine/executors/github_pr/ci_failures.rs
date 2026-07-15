@@ -9,7 +9,9 @@ use std::path::PathBuf;
 use serde_json::{json, Value};
 
 use crate::engine::executor::StepContext;
-use crate::engine::executors::pr_followup_artifacts::{ClockSleeper, PrFollowupArtifactStore};
+use crate::engine::executors::pr_followup_artifacts::{
+    ArtifactWriteContext, ClockSleeper, JsonArtifactWriteRequest, PrFollowupArtifactStore,
+};
 use crate::engine::executors::pr_followup_types::{
     CollectionState, OverallState, PrCheckStatus, PrFollowupBinding,
 };
@@ -149,15 +151,17 @@ pub(super) fn collect_ci_failures(
         )
     });
 
-    store.write_json_artifact(
-        &binding,
-        "ci-failures",
-        "collect_ci_failures",
-        step_order_index(params, 4),
+    store.write_json_artifact(JsonArtifactWriteRequest::new(
+        ArtifactWriteContext::new(
+            &binding,
+            "ci-failures",
+            "collect_ci_failures",
+            step_order_index(params, 4),
+            clock,
+        ),
         &payload,
         failure_ref,
-        clock,
-    )?;
+    ))?;
 
     if is_fatal {
         Ok(StepOutcome::Fatal)

@@ -1,4 +1,5 @@
 use super::*;
+use crate::engine::executors::{ArtifactWriteContext, JsonArtifactWriteRequest};
 
 fn issue132_binding(head_sha: &str) -> PrFollowupBinding {
     PrFollowupBinding {

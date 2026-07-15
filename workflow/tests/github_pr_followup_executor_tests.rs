@@ -7,7 +7,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
 use luther_workflow::engine::executor::{
@@ -15,18 +15,21 @@ use luther_workflow::engine::executor::{
 };
 use luther_workflow::engine::executors::SystemPrFollowupFilesystem;
 use luther_workflow::engine::executors::{
+    ArtifactPublicationHook, ArtifactPublicationStage, ArtifactReplayKey, ArtifactWriteContext,
     ArtifactWriter, CiFailures, ClockSleeper, CollectionState, CommandFeedbackEvaluationAdapter,
     FeedbackEvaluationAdapter, FeedbackEvaluationRequest, FeedbackEvaluatorCommandRunner,
     FeedbackEvaluatorExecutor, GithubCheckFailuresExecutorWithRunner,
     GithubCodeRabbitFeedbackExecutorWithRunner, GithubFeedbackMarkerExecutorWithRunner,
     GithubPrChecksExecutorWithRunner, GithubPrCommandRunner, GithubPrIdentityExecutorWithRunner,
-    LlxprtInvocationRequest, LlxprtInvocationResult, OverallState, PostPrFailureTerminalExecutor,
+    JsonArtifactWriteRequest, LlxprtInvocationRequest, LlxprtInvocationResult, OverallState,
+    PostPrFailureTerminal, PostPrFailureTerminalExecutor, PostPrFailureTerminalExecutorWithClock,
     PostPrIterationGuardExecutor, PostPrTestCommandRequest, PostPrTestCommandResult,
     PostPrTestCommandRunner, PrCheckStatus, PrFollowupArtifactStore, PrFollowupBinding,
     PrFollowupLlxprtCommandRunner, PrFollowupRemediationExecutorWithRunner,
     PrRemediationPlanExecutor, PrRemediationResultExecutor, ProcessFeedbackEvaluatorCommandRunner,
     PushRemediationChangesExecutorWithRunner, PushRemediationCommandRequest,
     PushRemediationCommandResult, PushRemediationCommandRunner, RunPostPrTestsExecutorWithRunner,
+    MAX_ARTIFACT_FILE_BYTES, MAX_ARTIFACT_READ_BYTES,
 };
 
 static LEGACY_ARTIFACT_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -63,6 +66,17 @@ struct FixedClock;
 impl ClockSleeper for FixedClock {
     fn now_rfc3339(&self) -> String {
         "2026-04-30T00:00:00Z".to_string()
+    }
+
+    fn sleep(&self, _duration: std::time::Duration) {}
+}
+
+#[derive(Clone)]
+struct TimestampClock(&'static str);
+
+impl ClockSleeper for TimestampClock {
+    fn now_rfc3339(&self) -> String {
+        self.0.to_string()
     }
 
     fn sleep(&self, _duration: std::time::Duration) {}
@@ -486,6 +500,17 @@ fn read_json(path: &std::path::Path) -> serde_json::Value {
         .expect("parse json artifact")
 }
 
+fn rewrite_canonical_and_history(path: &std::path::Path, value: &serde_json::Value) {
+    let history_path = PathBuf::from(
+        value["history_metadata"]["history_path"]
+            .as_str()
+            .expect("artifact history path"),
+    );
+    let bytes = serde_json::to_vec_pretty(value).expect("artifact json");
+    std::fs::write(history_path, &bytes).expect("rewrite artifact history");
+    std::fs::write(path, bytes).expect("rewrite artifact canonical");
+}
+
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P04
 /// @requirement:REQ-PRFU-001
 /// @pseudocode lines 1-53
@@ -568,11 +593,14 @@ fn set_p07_ignored_check_ids(temp: &tempfile::TempDir, ids: &[&str]) {
     let check_status_path = p07_pr_check_status_path(temp);
     let mut check_status = read_json(&check_status_path);
     check_status["ignored_check_ids"] = serde_json::json!(ids);
-    std::fs::write(
-        &check_status_path,
-        serde_json::to_string_pretty(&check_status).expect("serialize check status"),
-    )
-    .expect("write check status");
+    let history_path = PathBuf::from(
+        check_status["history_metadata"]["history_path"]
+            .as_str()
+            .expect("check status history path"),
+    );
+    let bytes = serde_json::to_string_pretty(&check_status).expect("serialize check status");
+    std::fs::write(history_path, &bytes).expect("write check status history");
+    std::fs::write(&check_status_path, bytes).expect("write check status");
 }
 
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P07
@@ -588,11 +616,8 @@ fn write_p07_check_status(
     let store = PrFollowupArtifactStore::new(temp.path().join("artifacts"));
     let binding = p07_binding();
     store
-        .write_json_artifact(
-            &binding,
-            "pr",
-            "capture_pr_identity",
-            1,
+        .write_json_artifact(JsonArtifactWriteRequest::new(
+            ArtifactWriteContext::new(&binding, "pr", "capture_pr_identity", 1, &FixedClock),
             &serde_json::json!({
                 "pr_url": "https://github.com/example/workflow/pull/1910",
                 "capture_state": "captured",
@@ -603,8 +628,7 @@ fn write_p07_check_status(
                 "source_head_repository_name": null
             }),
             None,
-            &FixedClock,
-        )
+        ))
         .expect("write pr");
     let failure = if overall_state == "passed" {
         None
@@ -615,12 +639,7 @@ fn write_p07_check_status(
             serde_json::json!({ "fatal_source": fatal_source }),
         ))
     };
-    store.write_json_artifact(
-        &binding,
-        "pr-check-status",
-        "watch_pr_checks",
-        3,
-        &serde_json::json!({
+    store.write_json_artifact(JsonArtifactWriteRequest::new(ArtifactWriteContext::new(&binding, "pr-check-status", "watch_pr_checks", 3, &FixedClock), &serde_json::json!({
             "pr_url": "https://github.com/example/workflow/pull/1910",
             "poll_attempts": 1,
             "max_attempts": 12,
@@ -633,10 +652,7 @@ fn write_p07_check_status(
             "observed_at": "2026-04-30T00:00:00Z",
             "fatal_source": fatal_source,
             "terminal_counts": { "passed": 0, "failed": 0, "pending": 0, "unknown": 0, "stale": 0 }
-        }),
-        failure,
-        &FixedClock,
-    ).expect("write pr-check-status");
+        }), failure)).expect("write pr-check-status");
 }
 
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P08
@@ -973,43 +989,31 @@ fn artifact_store_allocates_global_artifact_and_failure_sequences_with_per_famil
     let clock = FixedClock;
 
     let first = store
-        .write_json_artifact(
-            &binding,
-            "pr-check-status",
-            "watch_pr_checks",
-            3,
+        .write_json_artifact(JsonArtifactWriteRequest::new(
+            ArtifactWriteContext::new(&binding, "pr-check-status", "watch_pr_checks", 3, &clock),
             &TestArtifactPayload {
                 payload_state: "failed".to_string(),
             },
             Some(("failed", "first_failure", serde_json::json!({ "n": 1 }))),
-            &clock,
-        )
+        ))
         .expect("first write");
     let second = store
-        .write_json_artifact(
-            &binding,
-            "ci-failures",
-            "collect_ci_failures",
-            4,
+        .write_json_artifact(JsonArtifactWriteRequest::new(
+            ArtifactWriteContext::new(&binding, "ci-failures", "collect_ci_failures", 4, &clock),
             &TestArtifactPayload {
                 payload_state: "fatal".to_string(),
             },
             Some(("fatal", "second_failure", serde_json::json!({ "n": 2 }))),
-            &clock,
-        )
+        ))
         .expect("second write");
     let third = store
-        .write_json_artifact(
-            &binding,
-            "pr-check-status",
-            "watch_pr_checks",
-            3,
+        .write_json_artifact(JsonArtifactWriteRequest::new(
+            ArtifactWriteContext::new(&binding, "pr-check-status", "watch_pr_checks", 3, &clock),
             &TestArtifactPayload {
                 payload_state: "passed".to_string(),
             },
             None,
-            &clock,
-        )
+        ))
         .expect("third write");
 
     assert!(
@@ -1030,6 +1034,69 @@ fn artifact_store_allocates_global_artifact_and_failure_sequences_with_per_famil
     );
 }
 
+#[test]
+fn artifact_store_rejects_oversized_serialized_artifact_before_publication() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let store = PrFollowupArtifactStore::new(temp.path().to_path_buf());
+    let binding = sample_binding();
+    let family = "oversized-artifact";
+    let payload = serde_json::json!({
+        "body": "x".repeat(usize::try_from(MAX_ARTIFACT_FILE_BYTES).expect("test size"))
+    });
+
+    let error = store
+        .write_json_artifact(JsonArtifactWriteRequest::new(
+            ArtifactWriteContext::new(&binding, family, "oversized_producer", 1, &FixedClock),
+            &payload,
+            None,
+        ))
+        .expect_err("oversized serialized artifact");
+
+    assert!(error.to_string().contains("serialized artifact exceeds"));
+    assert!(!store.canonical_path(&binding, family).exists());
+    assert!(!store.history_root_for_family(&binding, family).exists());
+}
+
+#[test]
+fn sequence_recovery_accepts_history_larger_than_aggregate_read_budget() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let store = PrFollowupArtifactStore::new(temp.path().to_path_buf());
+    let binding = sample_binding();
+    let family = "large-sequence-history";
+    let payload = serde_json::json!({
+        "body": "x".repeat(
+            usize::try_from(MAX_ARTIFACT_FILE_BYTES - 16 * 1024).expect("test size")
+        )
+    });
+
+    for _ in 0..9 {
+        store
+            .write_json_artifact(JsonArtifactWriteRequest::new(
+                ArtifactWriteContext::new(&binding, family, "bulk_producer", 1, &FixedClock),
+                &payload,
+                None,
+            ))
+            .expect("bounded per-file history write");
+    }
+    let history_bytes = fs::read_dir(store.history_root_for_family(&binding, family))
+        .expect("history directory")
+        .map(|entry| {
+            entry
+                .expect("history entry")
+                .metadata()
+                .expect("metadata")
+                .len()
+        })
+        .sum::<u64>();
+    assert!(history_bytes > MAX_ARTIFACT_READ_BYTES);
+
+    let next = store
+        .next_sequence(&binding, family)
+        .expect("sequence recovery must have no lifetime aggregate byte cap");
+    assert_eq!(next.artifact_sequence, 10);
+    assert_eq!(next.write_sequence, 10);
+}
+
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P05
 /// @requirement:REQ-PRFU-002
 /// @pseudocode lines 5-7
@@ -1040,17 +1107,19 @@ fn artifact_store_recovers_sequence_allocation_from_history_when_canonical_curre
     let binding = sample_binding();
     let clock = FixedClock;
     let written = store
-        .write_json_artifact(
-            &binding,
-            "coderabbit-feedback",
-            "collect_coderabbit_feedback",
-            5,
+        .write_json_artifact(JsonArtifactWriteRequest::new(
+            ArtifactWriteContext::new(
+                &binding,
+                "coderabbit-feedback",
+                "collect_coderabbit_feedback",
+                5,
+                &clock,
+            ),
             &TestArtifactPayload {
                 payload_state: "ready".to_string(),
             },
             None,
-            &clock,
-        )
+        ))
         .expect("initial write");
     std::fs::remove_file(&written.canonical_path).expect("remove canonical");
 
@@ -1068,44 +1137,152 @@ fn artifact_store_recovers_sequence_allocation_from_history_when_canonical_curre
 /// @requirement:REQ-PRFU-002
 /// @pseudocode lines 5-7
 #[test]
-fn artifact_store_recovers_sequence_allocation_from_current_when_history_is_missing() {
+fn artifact_store_backfills_canonical_only_history_before_two_subsequent_writes() {
     let temp = tempfile::tempdir().expect("tempdir");
     let store = PrFollowupArtifactStore::new(temp.path().to_path_buf());
     let binding = sample_binding();
     let clock = FixedClock;
     let written = store
-        .write_json_artifact(
-            &binding,
-            "pr-check-status",
-            "watch_pr_checks",
-            3,
+        .write_json_artifact(JsonArtifactWriteRequest::new(
+            ArtifactWriteContext::new(&binding, "pr-check-status", "watch_pr_checks", 3, &clock),
             &TestArtifactPayload {
                 payload_state: "failed".to_string(),
             },
             Some(("failed", "failure", serde_json::json!({}))),
-            &clock,
-        )
+        ))
         .expect("initial write");
     std::fs::remove_file(&written.history_path).expect("remove history");
 
+    let second = store
+        .write_json_artifact(JsonArtifactWriteRequest::new(
+            ArtifactWriteContext::new(&binding, "pr-check-status", "watch_pr_checks", 3, &clock),
+            &TestArtifactPayload {
+                payload_state: "failed-again".to_string(),
+            },
+            Some(("failed", "failure", serde_json::json!({}))),
+        ))
+        .expect("first write after canonical-only recovery");
+    let third = store
+        .write_json_artifact(JsonArtifactWriteRequest::new(
+            ArtifactWriteContext::new(&binding, "pr-check-status", "watch_pr_checks", 3, &clock),
+            &TestArtifactPayload {
+                payload_state: "failed-third".to_string(),
+            },
+            Some(("failed", "failure", serde_json::json!({}))),
+        ))
+        .expect("second write after canonical-only recovery");
+
+    assert!(
+        written.history_path.exists(),
+        "recovery must backfill immutable history"
+    );
+    assert_eq!(second.sequence.artifact_sequence, 2);
+    assert_eq!(second.sequence.write_sequence, 2);
+    assert_eq!(second.failure_sequence, Some(2));
+    assert_eq!(third.sequence.artifact_sequence, 3);
+    assert_eq!(third.sequence.write_sequence, 3);
+    assert_eq!(third.failure_sequence, Some(3));
+}
+
+#[test]
+fn sequence_recovery_reconciles_canonical_high_water_when_family_history_is_partial() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let store = PrFollowupArtifactStore::new(temp.path().to_path_buf());
+    let binding = sample_binding();
+    let first = store
+        .write_json_artifact(JsonArtifactWriteRequest::new(
+            ArtifactWriteContext::new(
+                &binding,
+                "pr-check-status",
+                "watch_pr_checks",
+                3,
+                &FixedClock,
+            ),
+            &TestArtifactPayload {
+                payload_state: "first".to_string(),
+            },
+            None,
+        ))
+        .expect("first write");
+    let second = store
+        .write_json_artifact(JsonArtifactWriteRequest::new(
+            ArtifactWriteContext::new(
+                &binding,
+                "pr-check-status",
+                "watch_pr_checks",
+                3,
+                &FixedClock,
+            ),
+            &TestArtifactPayload {
+                payload_state: "second".to_string(),
+            },
+            None,
+        ))
+        .expect("second write");
+    assert!(first.history_path.exists());
+    fs::remove_file(&second.history_path).expect("remove latest immutable snapshot");
+
     let next = store
         .next_sequence(&binding, "pr-check-status")
-        .expect("sequence");
-    let failure = store
-        .next_failure_sequence(&binding)
-        .expect("failure sequence");
+        .expect("canonical high water must reserve the missing latest history identity");
+    assert_eq!(next.artifact_sequence, 3);
+    assert_eq!(next.write_sequence, 3);
+}
 
-    assert_eq!(
-        next.artifact_sequence, 2,
-        "history-only loss must recover global sequence from canonical current"
+#[test]
+fn sequence_recovery_fails_closed_when_canonical_high_water_skips_missing_history() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let store = PrFollowupArtifactStore::new(temp.path().to_path_buf());
+    let binding = sample_binding();
+    let first = store
+        .write_json_artifact(JsonArtifactWriteRequest::new(
+            ArtifactWriteContext::new(
+                &binding,
+                "pr-check-status",
+                "watch_pr_checks",
+                3,
+                &FixedClock,
+            ),
+            &TestArtifactPayload {
+                payload_state: "first".to_string(),
+            },
+            None,
+        ))
+        .expect("first write");
+    let second = store
+        .write_json_artifact(JsonArtifactWriteRequest::new(
+            ArtifactWriteContext::new(
+                &binding,
+                "pr-check-status",
+                "watch_pr_checks",
+                3,
+                &FixedClock,
+            ),
+            &TestArtifactPayload {
+                payload_state: "second".to_string(),
+            },
+            None,
+        ))
+        .expect("second write");
+    fs::remove_file(&second.history_path).expect("remove latest immutable snapshot");
+    rewrite_json_field(
+        &second.canonical_path,
+        "artifact_sequence",
+        serde_json::json!(3),
     );
-    assert_eq!(
-        next.write_sequence, 2,
-        "history-only loss must recover per-family write sequence from canonical current"
+    rewrite_json_field(
+        &second.canonical_path,
+        "write_sequence",
+        serde_json::json!(3),
     );
-    assert_eq!(
-        failure, 2,
-        "history-only loss must recover failure sequence from canonical current"
+    assert!(first.history_path.exists());
+
+    let error = store
+        .next_sequence(&binding, "pr-check-status")
+        .expect_err("a canonical gap must fail closed instead of reusing a sequence");
+    assert!(
+        error.to_string().contains("history filename mismatch"),
+        "canonical-only recovery must authenticate the immutable filename before reporting a sequence gap: {error}"
     );
 }
 
@@ -1183,30 +1360,22 @@ fn artifact_store_rejects_non_monotonic_global_artifact_sequence_for_consumed_fa
     let binding = sample_binding();
     let clock = FixedClock;
     store
-        .write_json_artifact(
-            &binding,
-            "pr-check-status",
-            "watch_pr_checks",
-            3,
+        .write_json_artifact(JsonArtifactWriteRequest::new(
+            ArtifactWriteContext::new(&binding, "pr-check-status", "watch_pr_checks", 3, &clock),
             &TestArtifactPayload {
                 payload_state: "first".to_string(),
             },
             None,
-            &clock,
-        )
+        ))
         .expect("first write");
     let second = store
-        .write_json_artifact(
-            &binding,
-            "ci-failures",
-            "collect_ci_failures",
-            4,
+        .write_json_artifact(JsonArtifactWriteRequest::new(
+            ArtifactWriteContext::new(&binding, "ci-failures", "collect_ci_failures", 4, &clock),
             &TestArtifactPayload {
                 payload_state: "second".to_string(),
             },
             None,
-            &clock,
-        )
+        ))
         .expect("second write");
     rewrite_history_sequence_field(
         &second.history_path,
@@ -1234,30 +1403,22 @@ fn artifact_store_rejects_duplicate_global_artifact_sequence_for_consumed_family
     let binding = sample_binding();
     let clock = FixedClock;
     store
-        .write_json_artifact(
-            &binding,
-            "pr-check-status",
-            "watch_pr_checks",
-            3,
+        .write_json_artifact(JsonArtifactWriteRequest::new(
+            ArtifactWriteContext::new(&binding, "pr-check-status", "watch_pr_checks", 3, &clock),
             &TestArtifactPayload {
                 payload_state: "first".to_string(),
             },
             None,
-            &clock,
-        )
+        ))
         .expect("first write");
     let second = store
-        .write_json_artifact(
-            &binding,
-            "ci-failures",
-            "collect_ci_failures",
-            4,
+        .write_json_artifact(JsonArtifactWriteRequest::new(
+            ArtifactWriteContext::new(&binding, "ci-failures", "collect_ci_failures", 4, &clock),
             &TestArtifactPayload {
                 payload_state: "second".to_string(),
             },
             None,
-            &clock,
-        )
+        ))
         .expect("second write");
     rewrite_history_sequence_field(
         &second.history_path,
@@ -1285,30 +1446,22 @@ fn artifact_store_rejects_non_monotonic_per_family_write_sequence_for_consumed_f
     let binding = sample_binding();
     let clock = FixedClock;
     store
-        .write_json_artifact(
-            &binding,
-            "pr-check-status",
-            "watch_pr_checks",
-            3,
+        .write_json_artifact(JsonArtifactWriteRequest::new(
+            ArtifactWriteContext::new(&binding, "pr-check-status", "watch_pr_checks", 3, &clock),
             &TestArtifactPayload {
                 payload_state: "first".to_string(),
             },
             None,
-            &clock,
-        )
+        ))
         .expect("first write");
     let second = store
-        .write_json_artifact(
-            &binding,
-            "pr-check-status",
-            "watch_pr_checks",
-            3,
+        .write_json_artifact(JsonArtifactWriteRequest::new(
+            ArtifactWriteContext::new(&binding, "pr-check-status", "watch_pr_checks", 3, &clock),
             &TestArtifactPayload {
                 payload_state: "second".to_string(),
             },
             None,
-            &clock,
-        )
+        ))
         .expect("second write");
     rewrite_history_sequence_field(&second.history_path, "write_sequence", serde_json::json!(3));
 
@@ -1332,17 +1485,13 @@ fn artifact_store_rejects_unbound_current_run_sequence_data_for_consumed_family(
     let binding = sample_binding();
     let clock = FixedClock;
     let written = store
-        .write_json_artifact(
-            &binding,
-            "pr-check-status",
-            "watch_pr_checks",
-            3,
+        .write_json_artifact(JsonArtifactWriteRequest::new(
+            ArtifactWriteContext::new(&binding, "pr-check-status", "watch_pr_checks", 3, &clock),
             &TestArtifactPayload {
                 payload_state: "first".to_string(),
             },
             None,
-            &clock,
-        )
+        ))
         .expect("write");
     rewrite_json_field(
         &written.history_path,
@@ -1373,17 +1522,13 @@ fn artifact_sequence_recovery_allows_same_pr_run_history_after_head_or_base_chan
     second_binding.base_sha = Some("base-b".to_string());
     let clock = FixedClock;
     store
-        .write_json_artifact(
-            &first_binding,
-            "pr",
-            "capture_pr_identity",
-            1,
+        .write_json_artifact(JsonArtifactWriteRequest::new(
+            ArtifactWriteContext::new(&first_binding, "pr", "capture_pr_identity", 1, &clock),
             &TestArtifactPayload {
                 payload_state: "first-head".to_string(),
             },
             None,
-            &clock,
-        )
+        ))
         .expect("write first head artifact");
 
     let sequence = store
@@ -1412,30 +1557,22 @@ fn artifact_store_rejects_non_monotonic_failure_sequence_when_allocating_failure
     let binding = sample_binding();
     let clock = FixedClock;
     store
-        .write_json_artifact(
-            &binding,
-            "pr-check-status",
-            "watch_pr_checks",
-            3,
+        .write_json_artifact(JsonArtifactWriteRequest::new(
+            ArtifactWriteContext::new(&binding, "pr-check-status", "watch_pr_checks", 3, &clock),
             &TestArtifactPayload {
                 payload_state: "failed".to_string(),
             },
             Some(("failed", "first_failure", serde_json::json!({}))),
-            &clock,
-        )
+        ))
         .expect("first failure write");
     let second = store
-        .write_json_artifact(
-            &binding,
-            "ci-failures",
-            "collect_ci_failures",
-            4,
+        .write_json_artifact(JsonArtifactWriteRequest::new(
+            ArtifactWriteContext::new(&binding, "ci-failures", "collect_ci_failures", 4, &clock),
             &TestArtifactPayload {
                 payload_state: "fatal".to_string(),
             },
             Some(("fatal", "second_failure", serde_json::json!({}))),
-            &clock,
-        )
+        ))
         .expect("second failure write");
     rewrite_json_field(
         &second.history_path,
@@ -1707,6 +1844,46 @@ fn pr_check_status_deserializes_from_existing_fixture() {
 /// @requirement:REQ-PRFU-007
 /// @pseudocode lines 1-21
 #[test]
+fn terminal_current_and_history_fixtures_match_public_schema() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let current = root.join("tests/fixtures/github_pr/current/post-pr-failure-terminal.json");
+    let history = root.join(
+        "tests/fixtures/github_pr/history/post-pr-failure-terminal/11-1-post_pr_failure_terminal.json",
+    );
+    let current_text = std::fs::read_to_string(current).expect("read terminal current fixture");
+    let history_text = std::fs::read_to_string(history).expect("read terminal history fixture");
+    let current_typed: PostPrFailureTerminal =
+        serde_json::from_str(&current_text).expect("current fixture must match public schema");
+    let history_typed: PostPrFailureTerminal =
+        serde_json::from_str(&history_text).expect("history fixture must match public schema");
+    assert_eq!(current_typed, history_typed);
+
+    let current: serde_json::Value =
+        serde_json::from_str(&current_text).expect("parse current fixture");
+    let expected_idempotency = format!(
+        "terminal:{}:{}:{}:{}:{}:{}",
+        current["run_id"].as_str().expect("run id"),
+        current["pr_number"].as_u64().expect("PR number"),
+        current["head_sha"].as_str().expect("head SHA"),
+        current["terminal_reason"]
+            .as_str()
+            .expect("terminal reason"),
+        current["source_failure_sequence"]
+            .as_u64()
+            .expect("failure sequence"),
+        current["source_artifact_sequence"]
+            .as_u64()
+            .expect("artifact sequence")
+    );
+    assert_eq!(current["step_order_index"], serde_json::json!(13));
+    assert_eq!(
+        current["idempotency_key"],
+        serde_json::json!(expected_idempotency),
+        "fixture idempotency must match the terminal producer derivation"
+    );
+}
+
+#[test]
 fn ci_failures_deserializes_from_existing_fixture() {
     let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/github_pr/current/ci-failures.json");
@@ -1956,11 +2133,8 @@ fn write_p06_pr_identity(
     source: &str,
 ) {
     store
-        .write_json_artifact(
-            binding,
-            "pr",
-            "capture_pr_identity",
-            1,
+        .write_json_artifact(JsonArtifactWriteRequest::new(
+            ArtifactWriteContext::new(binding, "pr", "capture_pr_identity", 1, &FixedClock),
             &serde_json::json!({
                 "pr_url": format!("https://github.com/vybestack/llxprt-luther/pull/{pr_number}"),
                 "capture_state": "captured",
@@ -1968,8 +2142,7 @@ fn write_p06_pr_identity(
                 "source": source
             }),
             None,
-            &FixedClock,
-        )
+        ))
         .expect("write PR identity");
 }
 
@@ -3156,11 +3329,8 @@ fn coderabbit_feedback_discovers_existing_pr_identity_when_params_are_defaults()
         base_sha: Some("base-b".to_string()),
     };
     store
-        .write_json_artifact(
-            &binding,
-            "pr",
-            "capture_pr_identity",
-            1,
+        .write_json_artifact(JsonArtifactWriteRequest::new(
+            ArtifactWriteContext::new(&binding, "pr", "capture_pr_identity", 1, &FixedClock),
             &serde_json::json!({
                 "pr_url": "https://github.com/vybestack/llxprt-code/pull/1911",
                 "capture_state": "captured",
@@ -3168,8 +3338,7 @@ fn coderabbit_feedback_discovers_existing_pr_identity_when_params_are_defaults()
                 "source": "gh_pr_view"
             }),
             None,
-            &FixedClock,
-        )
+        ))
         .expect("write pr identity artifact");
 
     let runner = P08FeedbackRunner::with_pages(
@@ -3256,11 +3425,8 @@ fn coderabbit_feedback_ignores_unresolved_identity_params_and_uses_captured_pr()
         base_sha: Some("base-b".to_string()),
     };
     store
-        .write_json_artifact(
-            &binding,
-            "pr",
-            "capture_pr_identity",
-            1,
+        .write_json_artifact(JsonArtifactWriteRequest::new(
+            ArtifactWriteContext::new(&binding, "pr", "capture_pr_identity", 1, &FixedClock),
             &serde_json::json!({
                 "pr_url": "https://github.com/vybestack/llxprt-code/pull/1911",
                 "capture_state": "captured",
@@ -3268,8 +3434,7 @@ fn coderabbit_feedback_ignores_unresolved_identity_params_and_uses_captured_pr()
                 "source": "gh_pr_view"
             }),
             None,
-            &FixedClock,
-        )
+        ))
         .expect("write pr identity artifact");
 
     let runner = P08FeedbackRunner::with_pages(
@@ -3398,11 +3563,8 @@ fn write_p09_feedback(
     let store = PrFollowupArtifactStore::new(temp.path().join("artifacts"));
     let binding = p09_binding();
     store
-        .write_json_artifact(
-            &binding,
-            "pr",
-            "capture_pr_identity",
-            1,
+        .write_json_artifact(JsonArtifactWriteRequest::new(
+            ArtifactWriteContext::new(&binding, "pr", "capture_pr_identity", 1, &FixedClock),
             &serde_json::json!({
                 "pr_url": "https://github.com/example/workflow/pull/1910",
                 "capture_state": "captured",
@@ -3413,15 +3575,17 @@ fn write_p09_feedback(
                 "source_head_repository_name": null
             }),
             None,
-            &FixedClock,
-        )
+        ))
         .expect("write p09 pr");
     store
-        .write_json_artifact(
-            &binding,
-            "coderabbit-feedback",
-            "collect_coderabbit_feedback",
-            5,
+        .write_json_artifact(JsonArtifactWriteRequest::new(
+            ArtifactWriteContext::new(
+                &binding,
+                "coderabbit-feedback",
+                "collect_coderabbit_feedback",
+                5,
+                &FixedClock,
+            ),
             &serde_json::json!({
                 "readiness_state": "ready",
                 "stable_observation_count": 2,
@@ -3434,23 +3598,24 @@ fn write_p09_feedback(
                 "feedback_item_set_hash": "fnv64:p09"
             }),
             None,
-            &FixedClock,
-        )
+        ))
         .expect("write p09 feedback");
     store
-        .write_json_artifact(
-            &binding,
-            "coderabbit-feedback-state",
-            "collect_coderabbit_feedback",
-            5,
+        .write_json_artifact(JsonArtifactWriteRequest::new(
+            ArtifactWriteContext::new(
+                &binding,
+                "coderabbit-feedback-state",
+                "collect_coderabbit_feedback",
+                5,
+                &FixedClock,
+            ),
             &serde_json::json!({
                 "state_entries": state_entries,
                 "state_index_hash": "fnv64:p09-state",
                 "superseded_entries": []
             }),
             None,
-            &FixedClock,
-        )
+        ))
         .expect("write p09 state");
 }
 
@@ -3759,11 +3924,8 @@ fn write_pr_identity_artifact(
     source: &str,
 ) {
     store
-        .write_json_artifact(
-            binding,
-            "pr",
-            "capture_pr_identity",
-            1,
+        .write_json_artifact(JsonArtifactWriteRequest::new(
+            ArtifactWriteContext::new(binding, "pr", "capture_pr_identity", 1, &FixedClock),
             &serde_json::json!({
                 "pr_url": format!("https://github.com/{repository}/pull/{pr_number}"),
                 "capture_state": "captured",
@@ -3771,8 +3933,7 @@ fn write_pr_identity_artifact(
                 "source": source
             }),
             None,
-            &FixedClock,
-        )
+        ))
         .expect("write p09 pr identity");
 }
 
@@ -3781,11 +3942,14 @@ fn write_p09_recovered_feedback_inputs(temp: &tempfile::TempDir, binding: &PrFol
     let mut item = p09_feedback_item("item-1", "thread-1", "hash-a");
     item["commit_sha"] = serde_json::json!("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
     store
-        .write_json_artifact(
-            binding,
-            "coderabbit-feedback",
-            "collect_coderabbit_feedback",
-            5,
+        .write_json_artifact(JsonArtifactWriteRequest::new(
+            ArtifactWriteContext::new(
+                binding,
+                "coderabbit-feedback",
+                "collect_coderabbit_feedback",
+                5,
+                &FixedClock,
+            ),
             &serde_json::json!({
                 "readiness_state": "ready",
                 "stable_observation_count": 2,
@@ -3798,23 +3962,24 @@ fn write_p09_recovered_feedback_inputs(temp: &tempfile::TempDir, binding: &PrFol
                 "feedback_item_set_hash": "fnv64:p09"
             }),
             None,
-            &FixedClock,
-        )
+        ))
         .expect("write feedback");
     store
-        .write_json_artifact(
-            binding,
-            "coderabbit-feedback-state",
-            "collect_coderabbit_feedback",
-            5,
+        .write_json_artifact(JsonArtifactWriteRequest::new(
+            ArtifactWriteContext::new(
+                binding,
+                "coderabbit-feedback-state",
+                "collect_coderabbit_feedback",
+                5,
+                &FixedClock,
+            ),
             &serde_json::json!({
                 "state_entries": [],
                 "state_index_hash": "fnv64:p09-state",
                 "superseded_entries": []
             }),
             None,
-            &FixedClock,
-        )
+        ))
         .expect("write feedback state");
 }
 
@@ -4393,11 +4558,8 @@ fn write_p10_inputs(
     let store = PrFollowupArtifactStore::new(temp.path().join("artifacts"));
     let binding = p10_binding();
     store
-        .write_json_artifact(
-            &binding,
-            "pr",
-            "capture_pr_identity",
-            1,
+        .write_json_artifact(JsonArtifactWriteRequest::new(
+            ArtifactWriteContext::new(&binding, "pr", "capture_pr_identity", 1, &FixedClock),
             &serde_json::json!({
                 "pr_url": "https://github.com/example/workflow/pull/1910",
                 "capture_state": "captured",
@@ -4408,16 +4570,10 @@ fn write_p10_inputs(
                 "source_head_repository_name": null
             }),
             None,
-            &FixedClock,
-        )
+        ))
         .expect("write p10 pr");
     store
-        .write_json_artifact(
-            &binding,
-            "ci-failures",
-            "collect_ci_failures",
-            4,
-            &serde_json::json!({
+        .write_json_artifact(JsonArtifactWriteRequest::new(ArtifactWriteContext::new(&binding, "ci-failures", "collect_ci_failures", 4, &FixedClock), &serde_json::json!({
                 "collection_state": if pending_or_unknown.as_array().is_some_and(std::vec::Vec::is_empty) { "collected" } else { "fatal" },
                 "failures": ci_failures,
                 "pending_or_unknown": pending_or_unknown,
@@ -4425,18 +4581,10 @@ fn write_p10_inputs(
                 "fatal_source": null,
                 "log_artifacts": [],
                 "source_check_status_artifact_sequence": 2
-            }),
-            None,
-            &FixedClock,
-        )
+            }), None))
         .expect("write p10 ci failures");
     store
-        .write_json_artifact(
-            &binding,
-            "coderabbit-feedback",
-            "collect_coderabbit_feedback",
-            5,
-            &serde_json::json!({
+        .write_json_artifact(JsonArtifactWriteRequest::new(ArtifactWriteContext::new(&binding, "coderabbit-feedback", "collect_coderabbit_feedback", 5, &FixedClock), &serde_json::json!({
                 "readiness_state": "ready",
                 "stable_observation_count": 2,
                 "required_stable_observations": 2,
@@ -4458,18 +4606,10 @@ fn write_p10_inputs(
                     .collect::<Vec<_>>(),
                 "included_bot_identities": ["coderabbitai[bot]"],
                 "feedback_item_set_hash": "fnv64:p10"
-            }),
-            None,
-            &FixedClock,
-        )
+            }), None))
         .expect("write p10 feedback");
     store
-        .write_json_artifact(
-            &binding,
-            "feedback-evaluations",
-            "evaluate_coderabbit_feedback",
-            6,
-            &serde_json::json!({
+        .write_json_artifact(JsonArtifactWriteRequest::new(ArtifactWriteContext::new(&binding, "feedback-evaluations", "evaluate_coderabbit_feedback", 6, &FixedClock), &serde_json::json!({
                 "evaluation_state": if unevaluated_items.as_array().is_some_and(std::vec::Vec::is_empty) && budget_exhausted_items.as_array().is_some_and(std::vec::Vec::is_empty) { "complete" } else { "budget_exhausted" },
                 "items_seen": accepted_results.as_array().map_or(0, Vec::len),
                 "accepted_results": accepted_results,
@@ -4478,11 +4618,42 @@ fn write_p10_inputs(
                 "budget_exhausted_items": budget_exhausted_items,
                 "max_attempts_per_item": 3,
                 "reused_results_count": 0
-            }),
-            None,
-            &FixedClock,
-        )
+            }), None))
         .expect("write p10 evaluations");
+}
+
+#[test]
+fn remediation_plan_routes_numeric_pr_parameter_directly() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_p10_inputs(
+        &temp,
+        serde_json::json!([]),
+        serde_json::json!([]),
+        serde_json::json!([]),
+        serde_json::json!([]),
+        serde_json::json!([]),
+    );
+    let mut params = p10_params(&temp);
+    params["pr_number"] = serde_json::json!(1910);
+
+    let outcome = PrRemediationPlanExecutor
+        .execute(&mut p10_context(&temp), &params)
+        .expect("numeric remediation PR parameter");
+
+    assert_eq!(outcome, StepOutcome::Success);
+    assert!(p10_plan_path(&temp).exists());
+}
+
+#[test]
+fn remediation_plan_rejects_invalid_pr_parameter() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut params = p10_params(&temp);
+    params["pr_number"] = serde_json::json!(false);
+
+    let error = PrRemediationPlanExecutor
+        .execute(&mut p10_context(&temp), &params)
+        .expect_err("invalid remediation PR parameter must fail");
+    assert!(error.to_string().contains("invalid pr_number"));
 }
 
 #[test]
@@ -4561,15 +4732,11 @@ fn write_p10_recovered_json(
     payload: serde_json::Value,
 ) {
     store
-        .write_json_artifact(
-            binding,
-            family,
-            "recovered_test_input",
-            6,
+        .write_json_artifact(JsonArtifactWriteRequest::new(
+            ArtifactWriteContext::new(binding, family, "recovered_test_input", 6, &FixedClock),
             &payload,
             None,
-            &FixedClock,
-        )
+        ))
         .expect("write recovered p10 input");
 }
 
@@ -5201,11 +5368,8 @@ fn write_p11_plan_and_result(temp: &tempfile::TempDir, results: serde_json::Valu
     let store = PrFollowupArtifactStore::new(temp.path().join("artifacts"));
     let binding = p11_binding();
     store
-        .write_json_artifact(
-            &binding,
-            "pr",
-            "capture_pr_identity",
-            1,
+        .write_json_artifact(JsonArtifactWriteRequest::new(
+            ArtifactWriteContext::new(&binding, "pr", "capture_pr_identity", 1, &FixedClock),
             &serde_json::json!({
                 "pr_url": "https://github.com/example/workflow/pull/1910",
                 "capture_state": "captured",
@@ -5216,15 +5380,17 @@ fn write_p11_plan_and_result(temp: &tempfile::TempDir, results: serde_json::Valu
                 "source_head_repository_name": null
             }),
             None,
-            &FixedClock,
-        )
+        ))
         .expect("write p11 pr");
     store
-        .write_json_artifact(
-            &binding,
-            "pr-remediation-plan",
-            "build_remediation_plan",
-            7,
+        .write_json_artifact(JsonArtifactWriteRequest::new(
+            ArtifactWriteContext::new(
+                &binding,
+                "pr-remediation-plan",
+                "build_remediation_plan",
+                7,
+                &FixedClock,
+            ),
             &serde_json::json!({
                 "plan_state": "needs_remediation",
                 "must_fix": p11_plan_items(),
@@ -5235,11 +5401,10 @@ fn write_p11_plan_and_result(temp: &tempfile::TempDir, results: serde_json::Valu
                 "built_at": "2026-04-30T00:00:00Z"
             }),
             None,
-            &FixedClock,
-        )
+        ))
         .expect("write p11 plan");
     let plan = read_json(&p11_current_artifact_path(temp, "pr-remediation-plan"));
-    store.write_json_artifact(&binding, "pr-remediation-result", "remediate_pr_followup", 8, &serde_json::json!({
+    store.write_json_artifact(JsonArtifactWriteRequest::new(ArtifactWriteContext::new(&binding, "pr-remediation-result", "remediate_pr_followup", 8, &FixedClock), &serde_json::json!({
         "input_head_sha": binding.head_sha,
         "output_head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
         "head_sha": binding.head_sha,
@@ -5257,18 +5422,21 @@ fn write_p11_plan_and_result(temp: &tempfile::TempDir, results: serde_json::Valu
         "plan_artifact_sequence": plan.get("artifact_sequence"),
         "unsuccessful_statuses": [],
         "no_change_after_remediation": false
-    }), None, &FixedClock).expect("write p11 result");
+    }), None)).expect("write p11 result");
 }
 
 fn rewrite_p11_result(temp: &tempfile::TempDir, mut update: impl FnMut(&mut serde_json::Value)) {
     let path = p11_result_path(temp);
     let mut result = read_json(&path);
     update(&mut result);
-    std::fs::write(
-        path,
-        serde_json::to_vec_pretty(&result).expect("result json"),
-    )
-    .expect("rewrite p11 result");
+    let history_path = PathBuf::from(
+        result["history_metadata"]["history_path"]
+            .as_str()
+            .expect("p11 result history path"),
+    );
+    let bytes = serde_json::to_vec_pretty(&result).expect("result json");
+    std::fs::write(history_path, &bytes).expect("rewrite p11 result history");
+    std::fs::write(path, bytes).expect("rewrite p11 result");
 }
 
 fn assert_stale_artifact_without_attempt_burn(temp: &tempfile::TempDir, outcome: StepOutcome) {
@@ -5308,16 +5476,21 @@ fn assert_stale_artifact_without_attempt_burn(temp: &tempfile::TempDir, outcome:
 fn remediation_validator_rejects_missing_top_level_identity_without_backfill() {
     let temp = tempfile::tempdir().expect("tempdir");
     write_p11_plan_and_result(&temp, serde_json::json!([]));
-    rewrite_p11_result(&temp, |result| {
-        let object = result.as_object_mut().expect("result object");
-        object.remove("run_id");
-        object.remove("repository_owner");
-        object.remove("repository_name");
-        object.remove("pr_number");
-        result["remediation_attempt_index"] = serde_json::json!(1);
-        result["stale_artifact_retry_index"] = serde_json::json!(0);
-        result["max_stale_artifact_retries"] = serde_json::json!(2);
-    });
+    let path = p11_result_path(&temp);
+    let mut result = read_json(&path);
+    let object = result.as_object_mut().expect("result object");
+    object.remove("run_id");
+    object.remove("repository_owner");
+    object.remove("repository_name");
+    object.remove("pr_number");
+    result["remediation_attempt_index"] = serde_json::json!(1);
+    result["stale_artifact_retry_index"] = serde_json::json!(0);
+    result["max_stale_artifact_retries"] = serde_json::json!(2);
+    std::fs::write(
+        path,
+        serde_json::to_vec_pretty(&result).expect("result without identity"),
+    )
+    .expect("write raw agent result without identity");
     let mut context = p11_context(&temp);
     let outcome = PrRemediationResultExecutor
         .execute(&mut context, &p11_params(&temp))
@@ -5422,7 +5595,7 @@ fn remediation_validator_prefers_retry_scope_attempt_metadata() {
     );
     assert_eq!(
         artifact.get("remediation_attempt_index"),
-        Some(&serde_json::json!(1))
+        Some(&serde_json::json!(0))
     );
 }
 
@@ -6343,6 +6516,43 @@ fn p12_params(temp: &tempfile::TempDir) -> serde_json::Value {
     p10_params(temp)
 }
 
+fn p12_unsuccessful_payload(temp: &tempfile::TempDir) -> serde_json::Value {
+    let plan = read_json(&p11_current_artifact_path(temp, "pr-remediation-plan"));
+    let items = plan["must_fix"].as_array().expect("remediation plan items");
+    let results = items
+        .iter()
+        .map(|item| {
+            serde_json::json!({
+                "source_type": item["source_type"],
+                "source_id": item["source_id"],
+                "stable_marker_key": item["stable_marker_key"],
+                "body_hash": item["body_hash"],
+                "status": "not_fixed",
+                "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "action": "attempted",
+                "evidence": {
+                    "kind": "test",
+                    "current_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "commands": [{ "id": "cargo-test", "status": "failed" }]
+                },
+                "response_text": "The remediation attempt did not resolve the finding.",
+                "evidence_paths": []
+            })
+        })
+        .collect::<Vec<_>>();
+    serde_json::json!({
+        "run_id": "run-p11",
+        "repository_owner": "example",
+        "repository_name": "workflow",
+        "pr_number": 1910,
+        "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "output_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "overall_status": "failed",
+        "plan_artifact_sequence": plan["artifact_sequence"],
+        "results": results
+    })
+}
+
 fn write_p12_plan(temp: &tempfile::TempDir) {
     write_p10_inputs(
         temp,
@@ -6367,12 +6577,7 @@ fn write_p10_failed_post_pr_test_result(temp: &tempfile::TempDir) {
     let store = PrFollowupArtifactStore::new(temp.path().join("artifacts"));
     let binding = p10_binding();
     store
-        .write_json_artifact(
-            &binding,
-            "post-pr-test-result",
-            "run_post_pr_tests",
-            11,
-            &serde_json::json!({
+        .write_json_artifact(JsonArtifactWriteRequest::new(ArtifactWriteContext::new(&binding, "post-pr-test-result", "run_post_pr_tests", 11, &FixedClock), &serde_json::json!({
                 "test_state": "failed",
                 "verification_retry_index": 0,
                 "max_verification_retries": 2,
@@ -6386,21 +6591,21 @@ fn write_p10_failed_post_pr_test_result(temp: &tempfile::TempDir) {
                     "bounded_stdout": "test_ocr_pr_review_concurrency_cancels_duplicates --- FAILED",
                     "bounded_stderr": "error: test failed, to rerun pass --test quality_release_guardrails"
                 }]
-            }),
-            None,
-            &FixedClock,
-        )
+            }), None))
         .expect("write failed post-pr test result");
 }
 fn write_p10_mixed_post_pr_test_result(temp: &tempfile::TempDir) {
     let store = PrFollowupArtifactStore::new(temp.path().join("artifacts"));
     let binding = p10_binding();
     store
-        .write_json_artifact(
-            &binding,
-            "post-pr-test-result",
-            "run_post_pr_tests",
-            11,
+        .write_json_artifact(JsonArtifactWriteRequest::new(
+            ArtifactWriteContext::new(
+                &binding,
+                "post-pr-test-result",
+                "run_post_pr_tests",
+                11,
+                &FixedClock,
+            ),
             &serde_json::json!({
                 "test_state": "failed",
                 "commands": [
@@ -6427,8 +6632,7 @@ fn write_p10_mixed_post_pr_test_result(temp: &tempfile::TempDir) {
                 ]
             }),
             None,
-            &FixedClock,
-        )
+        ))
         .expect("write mixed post-pr test result");
 }
 
@@ -6561,12 +6765,235 @@ fn pr_followup_remediation_only_promotes_failed_post_pr_commands() {
 }
 
 #[test]
+fn first_unsuccessful_validation_does_not_double_count_reserved_attempt() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_p11_plan_and_result(&temp, serde_json::json!([]));
+    let payload = p12_unsuccessful_payload(&temp);
+    let mut invocation = p12_result("failed");
+    invocation.result_file_present = true;
+    invocation.result_file_size = Some(1);
+    let runner = P12FakeLlxprtRunner::with_result_payload(invocation, payload);
+    let mut params = p11_params(&temp);
+    params["max_remediation_attempts"] = serde_json::json!(2);
+    params["step_order_index"] = serde_json::json!(8);
+
+    let remediation = PrFollowupRemediationExecutorWithRunner::new(runner, FixedClock)
+        .execute(&mut p11_context(&temp), &params)
+        .expect("reserve and complete first remediation attempt");
+    assert_eq!(remediation, StepOutcome::Success);
+    params["step_order_index"] = serde_json::json!(9);
+    let validation = PrRemediationResultExecutor
+        .execute(&mut p11_context(&temp), &params)
+        .expect("validate first unsuccessful result");
+    assert_eq!(validation, StepOutcome::Fixable);
+
+    let result = read_json(&p11_result_path(&temp));
+    let receipt = read_json(&p11_current_artifact_path(
+        &temp,
+        "pr-remediation-agent-result",
+    ));
+    assert_eq!(
+        receipt["step_order_index"],
+        serde_json::json!(8),
+        "receipt provenance must retain the durable remediation step order"
+    );
+    assert_eq!(result["step_order_index"], serde_json::json!(9));
+    assert_eq!(
+        result["validation_state"],
+        serde_json::json!("valid_but_unsuccessful"),
+        "validation errors: {}",
+        result["validation_errors"]
+    );
+    assert_eq!(result["remediation_attempt_index"], serde_json::json!(1));
+    let retry = read_json(&p11_current_artifact_path(
+        &temp,
+        "pr-remediation-retry-state",
+    ));
+    assert_eq!(
+        retry["counters"]["remediation_attempt_index"],
+        serde_json::json!(1)
+    );
+}
+
+fn p11_successful_payload(temp: &tempfile::TempDir) -> serde_json::Value {
+    let plan = read_json(&p11_current_artifact_path(temp, "pr-remediation-plan"));
+    let results = plan["must_fix"]
+        .as_array()
+        .expect("remediation plan items")
+        .iter()
+        .map(|item| {
+            serde_json::json!({
+                "source_type": item["source_type"],
+                "source_id": item["source_id"],
+                "stable_marker_key": item["stable_marker_key"],
+                "body_hash": item["body_hash"],
+                "status": "fixed",
+                "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "action": "fixed",
+                "evidence": {
+                    "kind": "change",
+                    "current_head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                    "paths": ["src/lib.rs"]
+                },
+                "response_text": "The remediation attempt fixed this finding.",
+                "evidence_paths": ["src/lib.rs"]
+            })
+        })
+        .collect::<Vec<_>>();
+    serde_json::json!({
+        "run_id": "run-p11",
+        "repository_owner": "example",
+        "repository_name": "workflow",
+        "pr_number": 1910,
+        "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "output_head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "overall_status": "changed",
+        "plan_artifact_sequence": plan["artifact_sequence"],
+        "results": results,
+        "verification_commands": [{ "id": "cargo-test", "status": "passed" }]
+    })
+}
+
+fn execute_single_attempt_remediation(
+    temp: &tempfile::TempDir,
+    payload: serde_json::Value,
+) -> serde_json::Value {
+    let mut invocation = p12_result("success");
+    invocation.result_file_present = true;
+    invocation.result_file_size = Some(1);
+    let runner = P12FakeLlxprtRunner::with_result_payload(invocation, payload);
+    let mut params = p11_params(temp);
+    params["max_remediation_attempts"] = serde_json::json!(1);
+    params["step_order_index"] = serde_json::json!(8);
+    assert_eq!(
+        PrFollowupRemediationExecutorWithRunner::new(runner, FixedClock)
+            .execute(&mut p11_context(temp), &params)
+            .expect("single permitted remediation launch"),
+        StepOutcome::Success
+    );
+    params["step_order_index"] = serde_json::json!(9);
+    params
+}
+
+#[test]
+fn final_permitted_launch_can_publish_successful_validation() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_p11_plan_and_result(&temp, serde_json::json!([]));
+    let payload = p11_successful_payload(&temp);
+    let params = execute_single_attempt_remediation(&temp, payload);
+
+    assert_eq!(
+        PrRemediationResultExecutor
+            .execute(&mut p11_context(&temp), &params)
+            .expect("validate final permitted successful result"),
+        StepOutcome::Success
+    );
+    let retry = read_json(&p11_current_artifact_path(
+        &temp,
+        "pr-remediation-retry-state",
+    ));
+    assert!(retry.get("exhaustion_reason").is_none());
+}
+
+#[test]
+fn validated_bytes_from_prior_launch_publish_distinct_current_failure() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_p11_plan_and_result(&temp, serde_json::json!([]));
+    let mut params = p11_params(&temp);
+    params["max_remediation_attempts"] = serde_json::json!(2);
+    params["max_validation_retries"] = serde_json::json!(2);
+    params["step_order_index"] = serde_json::json!(8);
+
+    let first_payload = p11_successful_payload(&temp);
+    let mut first_invocation = p12_result("success");
+    first_invocation.result_file_present = true;
+    first_invocation.result_file_size = Some(1);
+    PrFollowupRemediationExecutorWithRunner::new(
+        P12FakeLlxprtRunner::with_result_payload(first_invocation, first_payload),
+        FixedClock,
+    )
+    .execute(&mut p11_context(&temp), &params)
+    .expect("first launch");
+    params["step_order_index"] = serde_json::json!(9);
+    PrRemediationResultExecutor
+        .execute(&mut p11_context(&temp), &params)
+        .expect("first validation");
+    let result_path = p11_result_path(&temp);
+    let prior_validated = fs::read(&result_path).expect("prior validated bytes");
+    let first = read_json(&result_path);
+    let first_source = first["validation_source_id"]
+        .as_str()
+        .expect("first validation source")
+        .to_string();
+
+    params["step_order_index"] = serde_json::json!(8);
+    let mut second_invocation = p12_result("success");
+    second_invocation.result_file_present = true;
+    second_invocation.result_file_size = Some(prior_validated.len() as u64);
+    PrFollowupRemediationExecutorWithRunner::new(
+        P12FakeLlxprtRunner::with_result_payload(
+            second_invocation,
+            serde_json::from_slice(&prior_validated).expect("prior validated json"),
+        ),
+        FixedClock,
+    )
+    .execute(&mut p11_context(&temp), &params)
+    .expect("fresh launch rewrites prior validated bytes");
+    params["step_order_index"] = serde_json::json!(9);
+    assert_eq!(
+        PrRemediationResultExecutor
+            .execute(&mut p11_context(&temp), &params)
+            .expect("publish current launch rejection"),
+        StepOutcome::Fixable
+    );
+
+    let current = read_json(&result_path);
+    assert_ne!(current["validation_source_id"], first_source);
+    assert_eq!(current["retry_launch_ordinal"], serde_json::json!(2));
+    assert_eq!(
+        current["validation_state"],
+        serde_json::json!("fixable_malformed")
+    );
+    assert!(current["validation_errors"]
+        .as_array()
+        .expect("validation errors")
+        .iter()
+        .any(|error| error
+            .as_str()
+            .is_some_and(|error| error.contains("belongs to launch transition"))));
+}
+
+#[test]
+fn final_permitted_launch_exhausts_only_after_unsuccessful_validation() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_p11_plan_and_result(&temp, serde_json::json!([]));
+    let payload = p12_unsuccessful_payload(&temp);
+    let params = execute_single_attempt_remediation(&temp, payload);
+
+    assert_eq!(
+        PrRemediationResultExecutor
+            .execute(&mut p11_context(&temp), &params)
+            .expect("classify final permitted unsuccessful result"),
+        StepOutcome::Fatal
+    );
+    let retry = read_json(&p11_current_artifact_path(
+        &temp,
+        "pr-remediation-retry-state",
+    ));
+    assert_eq!(
+        retry["exhaustion_reason"],
+        serde_json::json!("remediation_attempts")
+    );
+}
+
+#[test]
 fn remediation_provider_failures_are_bounded_across_executor_reconstruction() {
     let temp = tempfile::tempdir().expect("tempdir");
     write_p12_plan(&temp);
     let runner = P12FakeLlxprtRunner::new(p12_result("timeout"));
     let mut params = p12_params(&temp);
     params["max_remediation_attempts"] = serde_json::json!(2);
+    params["max_validation_retries"] = serde_json::json!(3);
 
     for _ in 0..2 {
         let mut context = p12_context(&temp);
@@ -6574,6 +7001,12 @@ fn remediation_provider_failures_are_bounded_across_executor_reconstruction() {
             .execute(&mut context, &params)
             .expect("budgeted remediation provider failure");
         assert_eq!(outcome, StepOutcome::Success);
+        assert_ne!(
+            PrRemediationResultExecutor
+                .execute(&mut context, &params)
+                .expect("classify provider failure wrapper"),
+            StepOutcome::Success
+        );
     }
 
     let mut resumed_context = p12_context(&temp);
@@ -6618,6 +7051,123 @@ fn remediation_provider_failures_are_bounded_across_executor_reconstruction() {
     assert_eq!(terminal["max_remediation_attempts"], serde_json::json!(2));
 }
 
+#[derive(Clone)]
+struct CrashAfterRawResultRunner {
+    payload: serde_json::Value,
+}
+
+impl PrFollowupLlxprtCommandRunner for CrashAfterRawResultRunner {
+    fn invoke(&self, request: LlxprtInvocationRequest) -> LlxprtInvocationResult {
+        fs::write(
+            request.remediation_result_path,
+            serde_json::to_vec_pretty(&self.payload).expect("raw crash result"),
+        )
+        .expect("write raw result before crash");
+        panic!("simulated crash after raw result publication");
+    }
+}
+
+#[test]
+fn raw_agent_result_is_recovered_before_reserving_another_launch() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_p11_plan_and_result(&temp, serde_json::json!([]));
+    let payload = p11_successful_payload(&temp);
+    let mut params = p11_params(&temp);
+    params["max_remediation_attempts"] = serde_json::json!(2);
+    params["step_order_index"] = serde_json::json!(8);
+    let crashed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _ = PrFollowupRemediationExecutorWithRunner::new(
+            CrashAfterRawResultRunner {
+                payload: payload.clone(),
+            },
+            FixedClock,
+        )
+        .execute(&mut p11_context(&temp), &params);
+    }));
+    assert!(crashed.is_err());
+
+    let retry_path = p11_current_artifact_path(&temp, "pr-remediation-retry-state");
+    let mut retry = read_json(&retry_path);
+    assert_eq!(retry["launch_phase"], serde_json::json!("launched"));
+    let first_launch_path = p11_result_path(&temp).with_file_name(format!(
+        "pr-remediation-result-1-{}.json",
+        retry["owner_token"].as_str().expect("first owner token")
+    ));
+    assert_eq!(read_json(&first_launch_path), payload);
+    retry["lease_expiry"] = serde_json::json!("2026-04-29T00:00:00Z");
+    let history_path = PathBuf::from(
+        retry["history_metadata"]["history_path"]
+            .as_str()
+            .expect("retry history path"),
+    );
+    let retry_bytes = serde_json::to_vec_pretty(&retry).expect("expired crash state");
+    fs::write(history_path, &retry_bytes).expect("rewrite retry history");
+    fs::write(&retry_path, retry_bytes).expect("rewrite retry canonical");
+
+    let runner = P12FakeLlxprtRunner::new(p12_result("success"));
+    assert_eq!(
+        PrFollowupRemediationExecutorWithRunner::new(runner.clone(), FixedClock)
+            .execute(&mut p11_context(&temp), &params)
+            .expect("recover raw agent result"),
+        StepOutcome::Success
+    );
+    assert!(runner.requests().is_empty());
+    let recovered = read_json(&retry_path);
+    assert_eq!(recovered["launch_ordinal"], serde_json::json!(1));
+    assert_eq!(recovered["launch_phase"], serde_json::json!("completed"));
+    assert_eq!(
+        recovered["transition_type"],
+        serde_json::json!("launch_recovered_from_agent_result")
+    );
+    assert_eq!(read_json(&p11_result_path(&temp)), payload);
+    assert_eq!(read_json(&first_launch_path), payload);
+
+    let mut completed = recovered;
+    completed["transition_type"] = serde_json::json!("launch_completed");
+    let completed_history_path = PathBuf::from(
+        completed["history_metadata"]["history_path"]
+            .as_str()
+            .expect("completed history path"),
+    );
+    let completed_bytes = serde_json::to_vec_pretty(&completed).expect("completed raw state");
+    fs::write(completed_history_path, &completed_bytes).expect("rewrite completed history");
+    fs::write(&retry_path, completed_bytes).expect("rewrite completed canonical");
+
+    let completed_runner = P12FakeLlxprtRunner::new(p12_result("success"));
+    assert_eq!(
+        PrFollowupRemediationExecutorWithRunner::new(completed_runner.clone(), FixedClock)
+            .execute(&mut p11_context(&temp), &params)
+            .expect("recover completed raw result"),
+        StepOutcome::Success
+    );
+    assert!(completed_runner.requests().is_empty());
+    let completed_recovery = read_json(&retry_path);
+    assert_eq!(
+        completed_recovery["transition_type"],
+        serde_json::json!("launch_completed_result_recovered")
+    );
+    assert_eq!(read_json(&first_launch_path), payload);
+
+    let second_payload = p11_successful_payload(&temp);
+    let mut invocation = p12_result("success");
+    invocation.result_file_present = true;
+    invocation.result_file_size = Some(1);
+    let second_runner =
+        P12FakeLlxprtRunner::with_result_payload(invocation, second_payload.clone());
+    assert_eq!(
+        PrFollowupRemediationExecutorWithRunner::new(second_runner.clone(), FixedClock)
+            .execute(&mut p11_context(&temp), &params)
+            .expect("reserve launch after completed raw recovery"),
+        StepOutcome::Success
+    );
+    let requests = second_runner.requests();
+    assert_eq!(requests.len(), 1);
+    let second_launch_path = &requests[0].remediation_result_path;
+    assert_ne!(second_launch_path, &first_launch_path);
+    assert_eq!(read_json(second_launch_path), second_payload);
+    assert_eq!(read_json(&first_launch_path), payload);
+}
+
 #[test]
 fn remediation_recovered_launch_consumes_ordinal_after_interruption() {
     let temp = tempfile::tempdir().expect("tempdir");
@@ -6632,6 +7182,9 @@ fn remediation_recovered_launch_consumes_ordinal_after_interruption() {
         .execute(&mut context, &params)
         .expect("first remediation");
     assert_eq!(outcome, StepOutcome::Success);
+    PrRemediationResultExecutor
+        .execute(&mut context, &params)
+        .expect("classify first launch result");
 
     // Simulate a crash mid-launch: rewrite the persisted retry state so the
     // launch phase is `launched` (never reached `completed`). The engine must
@@ -6700,7 +7253,10 @@ fn terminal_degrades_gracefully_when_retry_state_is_corrupt() {
         "post-pr-failure-terminal",
     ));
     assert_eq!(terminal["terminal_state"], serde_json::json!("fatal"));
-    assert!(terminal.get("exhausted_budget").is_none_or(|v| v.is_null()),);
+    assert_eq!(
+        terminal["exhausted_budget"],
+        serde_json::json!("remediation_attempts_exhausted")
+    );
     // Corrupt retry state with no recoverable history writes a durable
     // tombstone that prevents continuation from gaining new launches.
     let tombstone_path = p10_current_artifact_path(&temp, "pr-remediation-retry-state");
@@ -6813,7 +7369,7 @@ fn pr_followup_remediation_wrapper_replaces_agent_retry_counters_on_failure() {
     let temp = tempfile::tempdir().expect("tempdir");
     write_p12_plan(&temp);
     let previous_path = p10_current_artifact_path(&temp, "pr-remediation-result");
-    write_previous_p12_stale_retry_result(&previous_path);
+    write_previous_p12_stale_retry_result(&temp);
 
     let runner = P12FakeLlxprtRunner::new(p12_result("timeout"));
     let mut context = p12_context(&temp);
@@ -6832,37 +7388,51 @@ fn pr_followup_remediation_wrapper_replaces_agent_retry_counters_on_failure() {
     assert_p12_stale_retry_scope_heads(&artifact);
     assert_p12_normal_retry_counters(&artifact);
 }
-fn write_previous_p12_stale_retry_result(previous_path: &std::path::Path) {
-    std::fs::write(
-        previous_path,
-        serde_json::to_vec_pretty(&serde_json::json!({
-            "validation_errors": ["stale scope"],
-            "stale_artifact_retry_index": 0,
-            "max_stale_artifact_retries": 9,
-            "validation_retry_index": 3,
-            "max_validation_retries": 5,
-            "remediation_attempt_index": 4,
-            "max_remediation_attempts": 6,
-            "retry_scope": {
-                "scope_kind": "remediation_result_validation",
-                "run_id": "run-p10",
-                "repository_owner": "example",
-                "repository_name": "workflow",
-                "pr_number": 1910,
-                "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-                "output_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-                "plan_artifact_sequence": 5,
-                "stale_artifact_retry_index": 1,
-                "max_stale_artifact_retries": 2,
-                "validation_retry_index": 7,
-                "max_validation_retries": 8,
-                "remediation_attempt_index": 9,
-                "max_remediation_attempts": 10
-            }
-        }))
-        .expect("previous result json"),
-    )
-    .expect("write previous result");
+fn write_previous_p12_stale_retry_result(temp: &tempfile::TempDir) {
+    let store = PrFollowupArtifactStore::new(temp.path().join("artifacts"));
+    let binding = p10_binding();
+    store
+        .write_json_artifact(JsonArtifactWriteRequest::new(
+            ArtifactWriteContext::new(
+                &binding,
+                "pr-remediation-result",
+                "validate_remediation_result",
+                9,
+                &FixedClock,
+            ),
+            &serde_json::json!({
+                "input_head_sha": binding.head_sha,
+                "output_head_sha": binding.head_sha,
+                "overall_status": "failed",
+                "results": [],
+                "validation_state": "retryable",
+                "validation_errors": ["stale scope"],
+                "stale_artifact_retry_index": 0,
+                "max_stale_artifact_retries": 9,
+                "validation_retry_index": 3,
+                "max_validation_retries": 5,
+                "remediation_attempt_index": 4,
+                "max_remediation_attempts": 6,
+                "retry_scope": {
+                    "scope_kind": "remediation_result_validation",
+                    "run_id": "run-p10",
+                    "repository_owner": "example",
+                    "repository_name": "workflow",
+                    "pr_number": 1910,
+                    "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "output_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "plan_artifact_sequence": 5,
+                    "stale_artifact_retry_index": 1,
+                    "max_stale_artifact_retries": 2,
+                    "validation_retry_index": 7,
+                    "max_validation_retries": 8,
+                    "remediation_attempt_index": 9,
+                    "max_remediation_attempts": 10
+                }
+            }),
+            None,
+        ))
+        .expect("write previous result");
 }
 
 fn assert_p12_stale_retry_counters(artifact: &serde_json::Value) {
@@ -7087,20 +7657,29 @@ fn pr_followup_remediation_timeout_accepts_identical_rewritten_result() {
             "evidence": { "summary": "identical result rewritten before timeout" }
         }]
     });
+    write_p12_plan(&temp);
+    let store = PrFollowupArtifactStore::new(temp.path().join("artifacts"));
+    store
+        .write_json_artifact(JsonArtifactWriteRequest::new(
+            ArtifactWriteContext::new(
+                &binding,
+                "pr-remediation-result",
+                "remediate_pr_followup",
+                8,
+                &FixedClock,
+            ),
+            &payload,
+            None,
+        ))
+        .expect("seed previous result");
     let result_path = p10_current_artifact_path(&temp, "pr-remediation-result");
-    std::fs::create_dir_all(result_path.parent().expect("result parent"))
-        .expect("create result parent");
-    std::fs::write(
-        &result_path,
-        serde_json::to_vec_pretty(&payload).expect("seed result json"),
-    )
-    .expect("seed previous result");
+    let exact_payload = read_json(&result_path);
     std::thread::sleep(Duration::from_secs(1));
 
     let mut owned = p12_result("timeout");
     owned.result_file_present = true;
     owned.result_file_size = Some(256);
-    let runner = P12FakeLlxprtRunner::with_result_payload(owned, payload);
+    let runner = P12FakeLlxprtRunner::with_result_payload(owned, exact_payload);
     let mut context = p12_context(&temp);
 
     let outcome = PrFollowupRemediationExecutorWithRunner::new(runner, FixedClock)
@@ -7132,11 +7711,14 @@ fn pr_followup_remediation_timeout_repairs_stale_wrapper_failure_result() {
     let binding = p10_binding();
     let store = PrFollowupArtifactStore::new(temp.path().join("artifacts"));
     store
-        .write_json_artifact(
-            &binding,
-            "pr-remediation-result",
-            "remediate_pr_followup",
-            8,
+        .write_json_artifact(JsonArtifactWriteRequest::new(
+            ArtifactWriteContext::new(
+                &binding,
+                "pr-remediation-result",
+                "remediate_pr_followup",
+                8,
+                &FixedClock,
+            ),
             &serde_json::json!({
                 "input_head_sha": binding.head_sha,
                 "output_head_sha": binding.head_sha,
@@ -7150,8 +7732,7 @@ fn pr_followup_remediation_timeout_repairs_stale_wrapper_failure_result() {
                 }]
             }),
             None,
-            &FixedClock,
-        )
+        ))
         .expect("seed stale wrapper failure artifact");
 
     PrFollowupRemediationExecutorWithRunner::new(runner, FixedClock)
@@ -7188,11 +7769,14 @@ fn pr_followup_remediation_timeout_does_not_reuse_stale_success_result() {
     let binding = p10_binding();
     let store = PrFollowupArtifactStore::new(temp.path().join("artifacts"));
     store
-        .write_json_artifact(
-            &binding,
-            "pr-remediation-result",
-            "validate_remediation_result",
-            10,
+        .write_json_artifact(JsonArtifactWriteRequest::new(
+            ArtifactWriteContext::new(
+                &binding,
+                "pr-remediation-result",
+                "validate_remediation_result",
+                10,
+                &FixedClock,
+            ),
             &serde_json::json!({
                 "input_head_sha": "old-head",
                 "output_head_sha": "old-head",
@@ -7208,8 +7792,7 @@ fn pr_followup_remediation_timeout_does_not_reuse_stale_success_result() {
                 }]
             }),
             None,
-            &FixedClock,
-        )
+        ))
         .expect("seed stale success artifact");
 
     let outcome = PrFollowupRemediationExecutorWithRunner::new(runner, FixedClock)
@@ -7305,21 +7888,13 @@ fn remediate_pr_followup_prompt_contract() {
     let mut context = p12_context(&temp);
     let binding = p10_binding();
     PrFollowupArtifactStore::new(temp.path().join("artifacts"))
-        .write_json_artifact(
-            &binding,
-            "pr-remediation-result",
-            "validate_remediation_result",
-            9,
-            &serde_json::json!({
+        .write_json_artifact(JsonArtifactWriteRequest::new(ArtifactWriteContext::new(&binding, "pr-remediation-result", "validate_remediation_result", 9, &FixedClock), &serde_json::json!({
                 "validation_state": "fixable_malformed",
                 "validation_errors": [
                     "fixed evidence for coderabbit_feedback:cr-valid is not tied to current head",
                     "already_satisfied result coderabbit_feedback:summary lacks deterministic passed command evidence"
                 ]
-            }),
-            None,
-            &FixedClock,
-        )
+            }), None))
         .expect("write previous validation feedback");
 
     PrFollowupRemediationExecutorWithRunner::new(runner.clone(), FixedClock)
@@ -7355,6 +7930,9 @@ fn remediate_pr_followup_interpolates_profile_and_omits_unresolved_profile() {
         .windows(2)
         .any(|window| window[0] == "--profile-load" && window[1] == "gpt55high"));
 
+    PrRemediationResultExecutor
+        .execute(&mut context, &params)
+        .expect("classify first profile launch result");
     let unresolved_runner = P12FakeLlxprtRunner::new(p12_result("success"));
     let mut unresolved_context = p12_context(&temp);
     PrFollowupRemediationExecutorWithRunner::new(unresolved_runner.clone(), FixedClock)
@@ -7773,11 +8351,14 @@ fn write_p14_post_pr_test_result(temp: &tempfile::TempDir, test_state: &str) {
     let plan = read_json(&p11_current_artifact_path(temp, "pr-remediation-plan"));
     let result = read_json(&p11_current_artifact_path(temp, "pr-remediation-result"));
     store
-        .write_json_artifact(
-            &binding,
-            "post-pr-test-result",
-            "run_post_pr_tests",
-            10,
+        .write_json_artifact(JsonArtifactWriteRequest::new(
+            ArtifactWriteContext::new(
+                &binding,
+                "post-pr-test-result",
+                "run_post_pr_tests",
+                10,
+                &FixedClock,
+            ),
             &serde_json::json!({
                 "test_state": test_state,
                 "commands": [{ "command_id": "unit", "status": test_state }],
@@ -7797,8 +8378,7 @@ fn write_p14_post_pr_test_result(temp: &tempfile::TempDir, test_state: &str) {
                 "verification_retry_exhausted": false
             }),
             None,
-            &FixedClock,
-        )
+        ))
         .expect("write post-pr test result");
 }
 
@@ -8004,11 +8584,14 @@ fn write_prior_p11_push_retry_artifact_for_head(
     let binding = p11_binding();
     let store = PrFollowupArtifactStore::new(temp.path().join("artifacts"));
     store
-        .write_json_artifact(
-            &binding,
-            "push-remediation-result",
-            "push_remediation_changes",
-            9,
+        .write_json_artifact(JsonArtifactWriteRequest::new(
+            ArtifactWriteContext::new(
+                &binding,
+                "push-remediation-result",
+                "push_remediation_changes",
+                9,
+                &FixedClock,
+            ),
             &serde_json::json!({
                 "push_state": "retryable_failed",
                 "push_retry_index": push_retry_index,
@@ -8025,8 +8608,7 @@ fn write_prior_p11_push_retry_artifact_for_head(
                 }
             }),
             None,
-            &FixedClock,
-        )
+        ))
         .expect("write prior push remediation result");
 }
 
@@ -8684,12 +9266,7 @@ fn write_p15_validated_fixed_pending(temp: &tempfile::TempDir) {
         let store = PrFollowupArtifactStore::new(temp.path().join("artifacts"));
         let binding = p11_binding();
         store
-            .write_json_artifact(
-                &binding,
-                "pending-feedback-marker-actions",
-                "validate_remediation_result",
-                9,
-                &serde_json::json!({
+            .write_json_artifact(JsonArtifactWriteRequest::new(ArtifactWriteContext::new(&binding, "pending-feedback-marker-actions", "validate_remediation_result", 9, &FixedClock), &serde_json::json!({
                     "pending_actions": [{
                         "action_id": "comment_fixed:PRRT_thread_valid:hash-valid:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
                         "action_kind": "comment_fixed",
@@ -8713,17 +9290,21 @@ fn write_p15_validated_fixed_pending(temp: &tempfile::TempDir) {
                     "carry_forward_from_artifact_sequence": null,
                     "marker_policy": {},
                     "updated_at": "2026-04-30T00:00:00Z"
-                }),
-                None,
-                &FixedClock,
-            )
+                }), None))
             .expect("write p15 fallback pending fixed marker");
     }
     let mut result = read_json(&p11_current_artifact_path(temp, "pr-remediation-result"));
     result["validation_state"] = serde_json::json!("valid");
+    let history_path = PathBuf::from(
+        result["history_metadata"]["history_path"]
+            .as_str()
+            .expect("validated result history path"),
+    );
+    let bytes = serde_json::to_vec_pretty(&result).expect("validated result json");
+    std::fs::write(history_path, &bytes).expect("write validated result history");
     std::fs::write(
         p11_current_artifact_path(temp, "pr-remediation-result"),
-        serde_json::to_vec_pretty(&result).expect("validated result json"),
+        bytes,
     )
     .expect("write validated result");
 }
@@ -9064,12 +9645,7 @@ fn write_stale_summary_pending_action(temp: &tempfile::TempDir) {
     let store = PrFollowupArtifactStore::new(temp.path().join("artifacts"));
     let binding = p10_binding();
     store
-        .write_json_artifact(
-            &binding,
-            "pending-feedback-marker-actions",
-            "build_remediation_plan",
-            7,
-            &serde_json::json!({
+        .write_json_artifact(JsonArtifactWriteRequest::new(ArtifactWriteContext::new(&binding, "pending-feedback-marker-actions", "build_remediation_plan", 7, &FixedClock), &serde_json::json!({
                 "pending_actions": [{
                     "action_id": "comment_invalid:summary:IC_summarynode:hash-summary:hash-summary:none",
                     "action_kind": "comment_invalid",
@@ -9099,10 +9675,7 @@ fn write_stale_summary_pending_action(temp: &tempfile::TempDir) {
                 "carry_forward_from_artifact_sequence": serde_json::Value::Null,
                 "marker_policy": {},
                 "updated_at": "2026-04-30T00:00:00Z"
-            }),
-            None,
-            &FixedClock,
-        )
+            }), None))
         .expect("write stale summary pending action");
 }
 
@@ -9187,11 +9760,7 @@ fn marker_blocks_all_github_calls_when_response_text_missing() {
         .as_object_mut()
         .expect("pending action object")
         .remove("response_text");
-    std::fs::write(
-        &path,
-        serde_json::to_vec_pretty(&pending).expect("pending without response_text"),
-    )
-    .expect("write pending without response_text");
+    rewrite_canonical_and_history(&path, &pending);
     let runner = P15MarkerRunner::default();
     let mut context = p11_context(&temp);
     let outcome = GithubFeedbackMarkerExecutorWithRunner::new(runner.clone(), FixedClock)
@@ -9253,11 +9822,7 @@ fn marker_blocks_malformed_review_thread_identity_before_mutation() {
     );
     action.remove("thread_id");
     action.remove("comment_database_id");
-    std::fs::write(
-        &path,
-        serde_json::to_vec_pretty(&pending).expect("pending malformed thread identity"),
-    )
-    .expect("write malformed thread identity");
+    rewrite_canonical_and_history(&path, &pending);
 
     let runner = P15MarkerRunner::default();
     let mut context = p11_context(&temp);
@@ -9298,11 +9863,10 @@ fn marker_rejects_fixed_action_without_validator_success_evidence() {
         "pending-feedback-marker-actions",
     ));
     pending["pending_actions"][0]["remediation_result_evidence"] = serde_json::Value::Null;
-    std::fs::write(
-        p11_current_artifact_path(&temp, "pending-feedback-marker-actions"),
-        serde_json::to_vec_pretty(&pending).expect("stale pending json"),
-    )
-    .expect("write stale pending evidence");
+    rewrite_canonical_and_history(
+        &p11_current_artifact_path(&temp, "pending-feedback-marker-actions"),
+        &pending,
+    );
     let runner = P15MarkerRunner::default();
     let mut context = p11_context(&temp);
     let mut params = p11_params(&temp);
@@ -9452,11 +10016,7 @@ fn write_p15_validated_fixed_pending_with_database_id(temp: &tempfile::TempDir, 
     pending["pending_actions"][0]["comment_database_id"] = serde_json::json!(database_id);
     pending["pending_actions"][0]["original_feedback_identity"]["comment_database_id"] =
         serde_json::json!(database_id);
-    std::fs::write(
-        &path,
-        serde_json::to_vec_pretty(&pending).expect("pending json with database id"),
-    )
-    .expect("write pending with comment_database_id");
+    rewrite_canonical_and_history(&path, &pending);
 }
 
 /// Find the single audit entry for the validated fixed thread in the report.
@@ -9843,11 +10403,7 @@ fn write_p15_validated_rest_review_comment_only_pending(temp: &tempfile::TempDir
     );
     identity.remove("thread_id");
     identity.remove("comment_database_id");
-    std::fs::write(
-        &pending_path,
-        serde_json::to_vec_pretty(&pending).expect("rest review pending json"),
-    )
-    .expect("write rest review pending action");
+    rewrite_canonical_and_history(&pending_path, &pending);
 
     let result_path = p11_result_path(temp);
     let mut result = read_json(&result_path);
@@ -9871,11 +10427,7 @@ fn write_p15_validated_rest_review_comment_only_pending(temp: &tempfile::TempDir
     );
     result_item.remove("thread_id");
     result_item.remove("comment_database_id");
-    std::fs::write(
-        result_path,
-        serde_json::to_vec_pretty(&result).expect("rest review result json"),
-    )
-    .expect("write rest review remediation result");
+    rewrite_canonical_and_history(&result_path, &result);
 }
 
 /// REST review comments collected without GraphQL review-thread identity can be
@@ -9973,11 +10525,7 @@ fn marker_posts_graphql_thread_reply_when_database_id_missing() {
         .as_object_mut()
         .expect("original feedback identity object")
         .remove("comment_database_id");
-    std::fs::write(
-        &path,
-        serde_json::to_vec_pretty(&pending).expect("pending without database id"),
-    )
-    .expect("write pending without comment_database_id");
+    rewrite_canonical_and_history(&path, &pending);
     let runner = P15MarkerRunner::default();
     let mut context = p11_context(&temp);
     let outcome = GithubFeedbackMarkerExecutorWithRunner::new(runner.clone(), FixedClock)
@@ -10061,11 +10609,7 @@ fn marker_records_graphql_thread_reply_when_response_has_comment_and_errors() {
         .as_object_mut()
         .expect("original feedback identity object")
         .remove("comment_database_id");
-    std::fs::write(
-        &path,
-        serde_json::to_vec_pretty(&pending).expect("pending without database id"),
-    )
-    .expect("write pending without comment_database_id");
+    rewrite_canonical_and_history(&path, &pending);
 
     let runner = P15MarkerRunner::graphql_reply_errors_with_comment();
     let mut context = p11_context(&temp);
@@ -10142,11 +10686,7 @@ fn marker_uses_fallback_direct_thread_id_when_primary_candidate_is_invalid() {
         .and_then(serde_json::Value::as_object_mut)
         .expect("original feedback identity object");
     identity.remove("comment_database_id");
-    std::fs::write(
-        &path,
-        serde_json::to_vec_pretty(&pending).expect("pending with fallback thread id"),
-    )
-    .expect("write pending with fallback thread id");
+    rewrite_canonical_and_history(&path, &pending);
 
     let runner = P15MarkerRunner::default();
     let mut context = p11_context(&temp);
@@ -10183,11 +10723,7 @@ fn marker_records_graphql_thread_reply_when_response_has_no_comment() {
         .as_object_mut()
         .expect("original feedback identity object")
         .remove("comment_database_id");
-    std::fs::write(
-        &path,
-        serde_json::to_vec_pretty(&pending).expect("pending without database id"),
-    )
-    .expect("write pending without comment_database_id");
+    rewrite_canonical_and_history(&path, &pending);
 
     let runner = P15MarkerRunner::graphql_reply_without_comment();
     let mut context = p11_context(&temp);
@@ -10267,11 +10803,7 @@ fn marker_derives_thread_id_from_thread_stable_marker_key() {
     );
     identity.remove("thread_id");
     identity.remove("comment_database_id");
-    std::fs::write(
-        &path,
-        serde_json::to_vec_pretty(&pending).expect("pending without explicit thread id"),
-    )
-    .expect("write pending without explicit thread id");
+    rewrite_canonical_and_history(&path, &pending);
     let result_path = p11_current_artifact_path(&temp, "pr-remediation-result");
     let mut result = read_json(&result_path);
     let result_item = result["results"]
@@ -10289,11 +10821,7 @@ fn marker_derives_thread_id_from_thread_stable_marker_key() {
         serde_json::json!("thread:PRRT_thread_node:sha256:body"),
     );
     result_item.remove("thread_id");
-    std::fs::write(
-        result_path,
-        serde_json::to_vec_pretty(&result).expect("result with thread marker key"),
-    )
-    .expect("write result with thread marker key");
+    rewrite_canonical_and_history(&result_path, &result);
 
     let runner = P15MarkerRunner::default();
     let mut context = p11_context(&temp);
@@ -10348,11 +10876,7 @@ fn marker_derives_thread_id_from_later_graphql_identity_candidate() {
     );
     identity.remove("thread_id");
     identity.remove("comment_database_id");
-    std::fs::write(
-        &path,
-        serde_json::to_vec_pretty(&pending).expect("pending with source thread id"),
-    )
-    .expect("write pending with source thread id");
+    rewrite_canonical_and_history(&path, &pending);
 
     let result_path = p11_current_artifact_path(&temp, "pr-remediation-result");
     let mut result = read_json(&result_path);
@@ -10371,11 +10895,7 @@ fn marker_derives_thread_id_from_later_graphql_identity_candidate() {
         serde_json::json!("threadless"),
     );
     result_item.remove("thread_id");
-    std::fs::write(
-        result_path,
-        serde_json::to_vec_pretty(&result).expect("result with threadless marker key"),
-    )
-    .expect("write result with threadless marker key");
+    rewrite_canonical_and_history(&result_path, &result);
 
     let runner = P15MarkerRunner::default();
     let mut context = p11_context(&temp);
@@ -11399,19 +11919,21 @@ fn write_json_artifact_rejects_contradictory_passed_with_fatal_source() {
     let store = PrFollowupArtifactStore::new(temp.path().join("artifacts"));
     let binding = p07_binding();
     let err = store
-        .write_json_artifact(
-            &binding,
-            "pr-check-status",
-            "watch_pr_checks",
-            3,
+        .write_json_artifact(JsonArtifactWriteRequest::new(
+            ArtifactWriteContext::new(
+                &binding,
+                "pr-check-status",
+                "watch_pr_checks",
+                3,
+                &FixedClock,
+            ),
             &serde_json::json!({
                 "pr_url": "https://github.com/example/workflow/pull/1910",
                 "overall_state": "passed",
                 "fatal_source": "api"
             }),
             None,
-            &FixedClock,
-        )
+        ))
         .expect_err("contradictory passed+fatal_source must be rejected on write");
     assert!(
         format!("{err}").contains("fatal_source"),
@@ -11433,11 +11955,14 @@ fn write_json_artifact_rejects_contradictory_collected_with_watcher_fatal_source
     let store = PrFollowupArtifactStore::new(temp.path().join("artifacts"));
     let binding = p07_binding();
     let err = store
-        .write_json_artifact(
-            &binding,
-            "ci-failures",
-            "collect_ci_failures",
-            4,
+        .write_json_artifact(JsonArtifactWriteRequest::new(
+            ArtifactWriteContext::new(
+                &binding,
+                "ci-failures",
+                "collect_ci_failures",
+                4,
+                &FixedClock,
+            ),
             &serde_json::json!({
                 "collection_state": "collected",
                 "failures": [],
@@ -11446,8 +11971,7 @@ fn write_json_artifact_rejects_contradictory_collected_with_watcher_fatal_source
                 "watcher_fatal_source": { "class": "api_error" }
             }),
             None,
-            &FixedClock,
-        )
+        ))
         .expect_err("collected + non-null watcher_fatal_source must be rejected on write");
     assert!(
         format!("{err}").contains("watcher_fatal_source"),
@@ -11469,25 +11993,30 @@ fn write_json_artifact_accepts_valid_routing_states() {
     let store = PrFollowupArtifactStore::new(temp.path().join("artifacts"));
     let binding = p07_binding();
     store
-        .write_json_artifact(
-            &binding,
-            "pr-check-status",
-            "watch_pr_checks",
-            3,
+        .write_json_artifact(JsonArtifactWriteRequest::new(
+            ArtifactWriteContext::new(
+                &binding,
+                "pr-check-status",
+                "watch_pr_checks",
+                3,
+                &FixedClock,
+            ),
             &serde_json::json!({
                 "overall_state": "passed",
                 "fatal_source": serde_json::Value::Null
             }),
             None,
-            &FixedClock,
-        )
+        ))
         .expect("valid passed + null fatal_source must persist");
     store
-        .write_json_artifact(
-            &binding,
-            "ci-failures",
-            "collect_ci_failures",
-            4,
+        .write_json_artifact(JsonArtifactWriteRequest::new(
+            ArtifactWriteContext::new(
+                &binding,
+                "ci-failures",
+                "collect_ci_failures",
+                4,
+                &FixedClock,
+            ),
             &serde_json::json!({
                 "collection_state": "fatal",
                 "failures": [],
@@ -11496,8 +12025,7 @@ fn write_json_artifact_accepts_valid_routing_states() {
                 "watcher_fatal_source": "api"
             }),
             None,
-            &FixedClock,
-        )
+        ))
         .expect("valid fatal + api watcher_fatal_source must persist");
     assert!(store.canonical_path(&binding, "pr-check-status").exists());
     assert!(store.canonical_path(&binding, "ci-failures").exists());
@@ -11508,6 +12036,97 @@ fn write_json_artifact_accepts_valid_routing_states() {
 // terminal-selection contract tests.
 // ---------------------------------------------------------------------------
 
+#[derive(Default)]
+struct AfterHistoryBarrierState {
+    reached: bool,
+    released: bool,
+}
+
+#[derive(Default)]
+struct AfterHistoryBarrier {
+    state: Mutex<AfterHistoryBarrierState>,
+    changed: Condvar,
+}
+
+impl AfterHistoryBarrier {
+    fn wait_until_reached(&self) {
+        let state = self.state.lock().expect("barrier state");
+        let (state, timeout) = self
+            .changed
+            .wait_timeout_while(state, Duration::from_secs(5), |state| !state.reached)
+            .expect("wait for history publication");
+        assert!(state.reached, "publisher must reach the history barrier");
+        assert!(!timeout.timed_out(), "history barrier wait timed out");
+    }
+
+    fn release(&self) {
+        let mut state = self.state.lock().expect("barrier state");
+        state.released = true;
+        self.changed.notify_all();
+    }
+}
+
+impl ArtifactPublicationHook for AfterHistoryBarrier {
+    fn checkpoint(
+        &self,
+        stage: ArtifactPublicationStage,
+        _history_path: &std::path::Path,
+        _canonical_path: &std::path::Path,
+    ) -> Result<(), luther_workflow::engine::runner::EngineError> {
+        if stage != ArtifactPublicationStage::AfterHistory {
+            return Ok(());
+        }
+        let mut state = self.state.lock().expect("barrier state");
+        state.reached = true;
+        self.changed.notify_all();
+        while !state.released {
+            state = self.changed.wait(state).expect("barrier release");
+        }
+        Ok(())
+    }
+}
+
+struct FailAfterHistoryOnce {
+    remaining_failures: AtomicU64,
+}
+
+impl FailAfterHistoryOnce {
+    fn new() -> Self {
+        Self {
+            remaining_failures: AtomicU64::new(1),
+        }
+    }
+}
+
+impl ArtifactPublicationHook for FailAfterHistoryOnce {
+    fn checkpoint(
+        &self,
+        stage: ArtifactPublicationStage,
+        _history_path: &std::path::Path,
+        _canonical_path: &std::path::Path,
+    ) -> Result<(), luther_workflow::engine::runner::EngineError> {
+        if stage == ArtifactPublicationStage::AfterHistory
+            && self
+                .remaining_failures
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                    remaining.checked_sub(1)
+                })
+                .is_ok()
+        {
+            return Err(luther_workflow::engine::runner::EngineError::InvalidState(
+                "injected failure after immutable history".to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn terminal_history_dir(temp: &tempfile::TempDir) -> PathBuf {
+    temp.path()
+        .join("artifacts/pr-followup/history/run-p10/example/workflow/1910")
+        .join("post-pr-failure-terminal")
+}
+
 fn p12_write_valid_retry_state(temp: &tempfile::TempDir) {
     write_p12_plan(temp);
     let runner = P12FakeLlxprtRunner::new(p12_result("timeout"));
@@ -11517,6 +12136,194 @@ fn p12_write_valid_retry_state(temp: &tempfile::TempDir) {
     PrFollowupRemediationExecutorWithRunner::new(runner, FixedClock)
         .execute(&mut context, &params)
         .expect("seed valid retry state");
+}
+
+#[test]
+fn authenticated_replay_recovers_after_history_persisted_but_canonical_write_faults() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let binding = p10_binding();
+    let hook = Arc::new(FailAfterHistoryOnce::new());
+    let store = PrFollowupArtifactStore::with_publication_hook(temp.path().join("artifacts"), hook);
+    let payload = serde_json::json!({"validation_source_id": "source-a", "state": "complete"});
+    let request = || {
+        JsonArtifactWriteRequest::new(
+            ArtifactWriteContext::new(
+                &binding,
+                "replay-result",
+                "validate_replay_result",
+                10,
+                &FixedClock,
+            ),
+            &payload,
+            None,
+        )
+    };
+
+    let error = store
+        .write_json_artifact_once(
+            request(),
+            ArtifactReplayKey::new("validation_source_id", "source-a"),
+        )
+        .expect_err("injected post-history fault must fail publication");
+    assert!(error.to_string().contains("injected failure"));
+    let canonical = store.canonical_path(&binding, "replay-result");
+    assert!(!canonical.exists());
+
+    let recovered = store
+        .write_json_artifact_once(
+            request(),
+            ArtifactReplayKey::new("validation_source_id", "source-a"),
+        )
+        .expect("replay restores canonical from immutable history");
+    assert_eq!(recovered.sequence.artifact_sequence, 1);
+    assert_eq!(read_json(&canonical)["validation_source_id"], "source-a");
+    assert_eq!(
+        fs::read_dir(store.history_root_for_family(&binding, "replay-result"))
+            .expect("replay history")
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn authenticated_replay_rejects_ambiguous_matching_history() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let binding = p10_binding();
+    let store = PrFollowupArtifactStore::new(temp.path().join("artifacts"));
+    let payload = serde_json::json!({"validation_source_id": "source-a", "state": "complete"});
+    for _ in 0..2 {
+        store
+            .write_json_artifact(JsonArtifactWriteRequest::new(
+                ArtifactWriteContext::new(
+                    &binding,
+                    "replay-result",
+                    "validate_replay_result",
+                    10,
+                    &FixedClock,
+                ),
+                &payload,
+                None,
+            ))
+            .expect("seed matching replay history");
+    }
+    fs::remove_file(store.canonical_path(&binding, "replay-result"))
+        .expect("remove replay canonical");
+
+    let error = store
+        .write_json_artifact_once(
+            JsonArtifactWriteRequest::new(
+                ArtifactWriteContext::new(
+                    &binding,
+                    "replay-result",
+                    "validate_replay_result",
+                    10,
+                    &FixedClock,
+                ),
+                &payload,
+                None,
+            ),
+            ArtifactReplayKey::new("validation_source_id", "source-a"),
+        )
+        .expect_err("ambiguous immutable replay history must fail closed");
+    assert!(error.to_string().contains("ambiguous"));
+}
+
+#[test]
+fn terminal_recovers_after_history_persisted_but_canonical_write_faults() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_p12_plan(&temp);
+    let hook = Arc::new(FailAfterHistoryOnce::new());
+    let mut first_context = p12_context(&temp);
+    let error =
+        PostPrFailureTerminalExecutorWithClock::with_publication_hook(FixedClock, hook.clone())
+            .execute(&mut first_context, &p12_params(&temp))
+            .expect_err("injected post-history fault must fail publication");
+    assert!(error.to_string().contains("injected failure"));
+
+    let canonical = p10_current_artifact_path(&temp, "post-pr-failure-terminal");
+    assert!(!canonical.exists(), "fault must precede canonical publish");
+    assert_eq!(
+        fs::read_dir(terminal_history_dir(&temp))
+            .expect("terminal history")
+            .count(),
+        1,
+        "immutable terminal history must survive the fault"
+    );
+
+    let mut retry_context = p12_context(&temp);
+    let outcome = PostPrFailureTerminalExecutorWithClock::with_publication_hook(FixedClock, hook)
+        .execute(&mut retry_context, &p12_params(&temp))
+        .expect("retry restores canonical from immutable history");
+    assert_eq!(outcome, StepOutcome::Fatal);
+    let recovered = read_json(&canonical);
+    assert_eq!(recovered["terminal_state"], serde_json::json!("fatal"));
+    assert_eq!(
+        fs::read_dir(terminal_history_dir(&temp))
+            .expect("terminal history")
+            .count(),
+        1,
+        "recovery must not create a second terminal history snapshot"
+    );
+}
+
+#[test]
+fn terminal_publication_lock_spans_history_and_canonical_writes() {
+    let temp = Arc::new(tempfile::tempdir().expect("tempdir"));
+    write_p12_plan(&temp);
+    let params = p12_params(&temp);
+    let barrier = Arc::new(AfterHistoryBarrier::default());
+
+    let first_temp = Arc::clone(&temp);
+    let first_params = params.clone();
+    let first_barrier = Arc::clone(&barrier);
+    let first = std::thread::spawn(move || {
+        let mut context = p12_context(&first_temp);
+        PostPrFailureTerminalExecutorWithClock::with_publication_hook(FixedClock, first_barrier)
+            .execute(&mut context, &first_params)
+    });
+    barrier.wait_until_reached();
+    assert!(!p10_current_artifact_path(&temp, "post-pr-failure-terminal").exists());
+
+    let second_temp = Arc::clone(&temp);
+    let second_barrier = Arc::clone(&barrier);
+    let (completed_tx, completed_rx) = std::sync::mpsc::channel();
+    let second = std::thread::spawn(move || {
+        let mut context = p12_context(&second_temp);
+        let result = PostPrFailureTerminalExecutorWithClock::with_publication_hook(
+            FixedClock,
+            second_barrier,
+        )
+        .execute(&mut context, &params);
+        completed_tx.send(result).expect("report second result");
+    });
+    assert!(matches!(
+        completed_rx.recv_timeout(Duration::from_millis(150)),
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+    ));
+
+    barrier.release();
+    assert_eq!(
+        first
+            .join()
+            .expect("first publisher")
+            .expect("first result"),
+        StepOutcome::Fatal
+    );
+    assert_eq!(
+        completed_rx
+            .recv()
+            .expect("second publisher result")
+            .expect("second result"),
+        StepOutcome::Fatal
+    );
+    second.join().expect("second publisher");
+    assert_eq!(
+        fs::read_dir(terminal_history_dir(&temp))
+            .expect("terminal history")
+            .count(),
+        1,
+        "serialized replay must reuse the first terminal snapshot"
+    );
 }
 
 /// Simultaneous executors racing to reserve the first launch ordinal must
@@ -11551,6 +12358,10 @@ fn simultaneous_executors_serialize_launch_allocation() {
         }
     }
     assert_eq!(successes + failures, 2, "both threads must terminate");
+    assert!(
+        successes >= 1,
+        "at least one executor must succeed under contention; got {successes} successes and {failures} failures"
+    );
     // The retry state must be internally consistent after concurrent access.
     let retry_state = read_json(&p10_current_artifact_path(
         &temp,
@@ -11566,6 +12377,473 @@ fn simultaneous_executors_serialize_launch_allocation() {
             .as_str()
             .is_some_and(str::is_empty),
         "owner token must be populated"
+    );
+}
+
+#[test]
+fn active_retry_lease_terminal_fails_closed_instead_of_waiting() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    p12_write_valid_retry_state(&temp);
+    let retry_path = p10_current_artifact_path(&temp, "pr-remediation-retry-state");
+    let mut active = read_json(&retry_path);
+    active["launch_phase"] = serde_json::json!("launched");
+    active["lease_expiry"] = serde_json::json!("2026-04-30T01:00:00Z");
+    let history_path = PathBuf::from(
+        active["history_metadata"]["history_path"]
+            .as_str()
+            .expect("retry history path"),
+    );
+    fs::write(
+        &history_path,
+        serde_json::to_vec_pretty(&active).expect("active retry state"),
+    )
+    .expect("rewrite history as active");
+    fs::write(
+        &retry_path,
+        serde_json::to_vec_pretty(&active).expect("active retry state"),
+    )
+    .expect("rewrite canonical as active");
+
+    let outcome = PostPrFailureTerminalExecutorWithClock::new(FixedClock)
+        .execute(&mut p12_context(&temp), &p12_params(&temp))
+        .expect("conservative active-launch terminal");
+    assert_eq!(outcome, StepOutcome::Fatal);
+    let terminal = read_json(&p10_current_artifact_path(
+        &temp,
+        "post-pr-failure-terminal",
+    ));
+    assert_eq!(
+        terminal["terminal_reason"],
+        serde_json::json!("active_remediation_launch")
+    );
+}
+
+#[test]
+fn expired_crash_lease_automatically_resumes_with_next_ordinal() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    p12_write_valid_retry_state(&temp);
+    let retry_path = p10_current_artifact_path(&temp, "pr-remediation-retry-state");
+    let mut crashed = read_json(&retry_path);
+    crashed["launch_phase"] = serde_json::json!("launched");
+    crashed["lease_expiry"] = serde_json::json!("2026-04-30T00:10:00Z");
+    let history_path = PathBuf::from(
+        crashed["history_metadata"]["history_path"]
+            .as_str()
+            .expect("retry history path"),
+    );
+    fs::write(
+        &history_path,
+        serde_json::to_vec_pretty(&crashed).expect("crashed retry state"),
+    )
+    .expect("persist crashed history snapshot");
+    fs::write(
+        &retry_path,
+        serde_json::to_vec_pretty(&crashed).expect("crashed retry state"),
+    )
+    .expect("persist crashed canonical state");
+
+    fs::remove_file(p10_current_artifact_path(&temp, "pr-remediation-result"))
+        .expect("remove canonical result to model a crash before output publication");
+    let launch_result_path = p10_current_artifact_path(&temp, "pr-remediation-result")
+        .with_file_name(format!(
+            "pr-remediation-result-{}-{}.json",
+            crashed["launch_ordinal"].as_u64().expect("launch ordinal"),
+            crashed["owner_token"].as_str().expect("launch owner token")
+        ));
+    fs::remove_file(launch_result_path)
+        .expect("remove per-launch result to model a crash before output publication");
+    let runner = P12FakeLlxprtRunner::new(p12_result("timeout"));
+    let mut params = p12_params(&temp);
+    params["max_remediation_attempts"] = serde_json::json!(2);
+    let outcome = PrFollowupRemediationExecutorWithRunner::new(
+        runner.clone(),
+        TimestampClock("2026-04-30T00:11:00Z"),
+    )
+    .execute(&mut p12_context(&temp), &params)
+    .expect("resume after durable lease expiry");
+    assert_eq!(outcome, StepOutcome::Success);
+    let resumed = read_json(&retry_path);
+    assert_eq!(resumed["launch_ordinal"], serde_json::json!(2));
+    assert_eq!(resumed["launch_phase"], serde_json::json!("completed"));
+    assert_eq!(runner.requests().len(), 1);
+}
+
+#[test]
+fn malformed_retry_lease_blocks_remediation_side_effect() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    p12_write_valid_retry_state(&temp);
+    let retry_path = p10_current_artifact_path(&temp, "pr-remediation-retry-state");
+    let mut state = read_json(&retry_path);
+    state["launch_phase"] = serde_json::json!("launched");
+    state["lease_expiry"] = serde_json::json!("not-rfc3339");
+    let history_path = PathBuf::from(
+        state["history_metadata"]["history_path"]
+            .as_str()
+            .expect("retry history path"),
+    );
+    let bytes = serde_json::to_vec_pretty(&state).expect("malformed lease state");
+    fs::write(history_path, &bytes).expect("rewrite retry history");
+    fs::write(retry_path, bytes).expect("rewrite retry canonical");
+
+    let runner = P12FakeLlxprtRunner::new(p12_result("timeout"));
+    let error = PrFollowupRemediationExecutorWithRunner::new(runner.clone(), FixedClock)
+        .execute(&mut p12_context(&temp), &p12_params(&temp))
+        .expect_err("malformed lease must fail closed");
+    assert!(error.to_string().contains("RFC3339"));
+    assert!(
+        runner.requests().is_empty(),
+        "malformed lease must block agent invocation"
+    );
+}
+
+#[test]
+fn newer_generic_valid_retry_history_without_scope_blocks_older_canonical() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    p12_write_valid_retry_state(&temp);
+    let retry_path = p10_current_artifact_path(&temp, "pr-remediation-retry-state");
+    let canonical = read_json(&retry_path);
+    let history_path = PathBuf::from(
+        canonical["history_metadata"]["history_path"]
+            .as_str()
+            .expect("retry history path"),
+    );
+    let next_artifact = canonical["artifact_sequence"].as_u64().expect("artifact") + 1;
+    let next_write = canonical["write_sequence"].as_u64().expect("write") + 1;
+    let newer_path = history_path.parent().expect("history parent").join(format!(
+        "{next_artifact}-{next_write}-remediate_pr_followup.json"
+    ));
+    let mut newer = canonical;
+    newer["artifact_sequence"] = serde_json::json!(next_artifact);
+    newer["write_sequence"] = serde_json::json!(next_write);
+    newer["history_metadata"]["history_path"] = serde_json::json!(newer_path.display().to_string());
+    newer.as_object_mut().expect("retry object").remove("scope");
+    fs::write(
+        newer_path,
+        serde_json::to_vec_pretty(&newer).expect("newer generic envelope"),
+    )
+    .expect("write newer unscoped history");
+
+    let runner = P12FakeLlxprtRunner::new(p12_result("timeout"));
+    let error = PrFollowupRemediationExecutorWithRunner::new(runner.clone(), FixedClock)
+        .execute(&mut p12_context(&temp), &p12_params(&temp))
+        .expect_err("newer unscoped history must block older canonical recovery");
+    assert!(error.to_string().contains("missing or corrupt scope"));
+    assert!(runner.requests().is_empty());
+}
+
+#[test]
+fn unreadable_scope_before_later_different_scope_blocks_remediation_side_effect() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    p12_write_valid_retry_state(&temp);
+    let retry_path = p10_current_artifact_path(&temp, "pr-remediation-retry-state");
+    let canonical = read_json(&retry_path);
+    let history_path = PathBuf::from(
+        canonical["history_metadata"]["history_path"]
+            .as_str()
+            .expect("retry history path"),
+    );
+    let history_parent = history_path.parent().expect("history parent");
+    let artifact_sequence = canonical["artifact_sequence"].as_u64().expect("artifact");
+    let write_sequence = canonical["write_sequence"].as_u64().expect("write");
+
+    let unreadable_path = history_parent.join(format!(
+        "{}-{}-remediate_pr_followup.json",
+        artifact_sequence + 1,
+        write_sequence + 1
+    ));
+    let mut unreadable = canonical.clone();
+    unreadable["artifact_sequence"] = serde_json::json!(artifact_sequence + 1);
+    unreadable["write_sequence"] = serde_json::json!(write_sequence + 1);
+    unreadable["history_metadata"]["history_path"] =
+        serde_json::json!(unreadable_path.display().to_string());
+    unreadable
+        .as_object_mut()
+        .expect("retry object")
+        .remove("scope");
+    fs::write(
+        &unreadable_path,
+        serde_json::to_vec_pretty(&unreadable).expect("unreadable scope snapshot"),
+    )
+    .expect("write unreadable scope snapshot");
+
+    let other_scope_path = history_parent.join(format!(
+        "{}-{}-remediate_pr_followup.json",
+        artifact_sequence + 2,
+        write_sequence + 2
+    ));
+    let mut other_scope = canonical;
+    other_scope["artifact_sequence"] = serde_json::json!(artifact_sequence + 2);
+    other_scope["write_sequence"] = serde_json::json!(write_sequence + 2);
+    other_scope["scope"]["remediation_plan_sequence"] = serde_json::json!(999);
+    other_scope["predecessor_artifact_sequence"] = serde_json::Value::Null;
+    other_scope["history_metadata"]["history_path"] =
+        serde_json::json!(other_scope_path.display().to_string());
+    fs::write(
+        other_scope_path,
+        serde_json::to_vec_pretty(&other_scope).expect("different scope snapshot"),
+    )
+    .expect("write different scope snapshot");
+
+    let runner = P12FakeLlxprtRunner::new(p12_result("timeout"));
+    let error = PrFollowupRemediationExecutorWithRunner::new(runner.clone(), FixedClock)
+        .execute(&mut p12_context(&temp), &p12_params(&temp))
+        .expect_err("unreadable scope cannot be hidden by later different-scope history");
+    assert!(error.to_string().contains("missing or corrupt scope"));
+    assert!(
+        runner.requests().is_empty(),
+        "ambiguous retry history must block agent invocation"
+    );
+}
+
+#[test]
+fn malformed_newer_exact_scope_retry_history_blocks_remediation_side_effect() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    p12_write_valid_retry_state(&temp);
+    let retry_path = p10_current_artifact_path(&temp, "pr-remediation-retry-state");
+    let canonical = read_json(&retry_path);
+    let history_path = PathBuf::from(
+        canonical["history_metadata"]["history_path"]
+            .as_str()
+            .expect("retry history path"),
+    );
+    let mut malformed = canonical.clone();
+    let next_artifact = canonical["artifact_sequence"].as_u64().expect("artifact") + 1;
+    let next_write = canonical["write_sequence"].as_u64().expect("write") + 1;
+    let malformed_path = history_path.parent().expect("history parent").join(format!(
+        "{next_artifact}-{next_write}-remediate_pr_followup.json"
+    ));
+    malformed["artifact_sequence"] = serde_json::json!(next_artifact);
+    malformed["write_sequence"] = serde_json::json!(next_write);
+    malformed["launch_ordinal"] = serde_json::json!("not-an-integer");
+    malformed["history_metadata"]["history_path"] =
+        serde_json::json!(malformed_path.display().to_string());
+    fs::write(
+        &malformed_path,
+        serde_json::to_vec_pretty(&malformed).expect("malformed retry history"),
+    )
+    .expect("write malformed retry history");
+
+    let runner = P12FakeLlxprtRunner::new(p12_result("timeout"));
+    let error = PrFollowupRemediationExecutorWithRunner::new(runner.clone(), FixedClock)
+        .execute(&mut p12_context(&temp), &p12_params(&temp))
+        .expect_err("malformed exact-scope history must fail closed");
+    assert!(error
+        .to_string()
+        .contains("invalid exact-scope retry history"));
+    assert!(
+        runner.requests().is_empty(),
+        "malformed retry history must block agent invocation"
+    );
+}
+
+#[test]
+fn terminal_quarantines_and_tombstones_structurally_invalid_exact_scope_retry_history() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    p12_write_valid_retry_state(&temp);
+    let retry_path = p10_current_artifact_path(&temp, "pr-remediation-retry-state");
+    let canonical = read_json(&retry_path);
+    let history_path = PathBuf::from(
+        canonical["history_metadata"]["history_path"]
+            .as_str()
+            .expect("retry history path"),
+    );
+    let next_artifact = canonical["artifact_sequence"].as_u64().expect("artifact") + 1;
+    let next_write = canonical["write_sequence"].as_u64().expect("write") + 1;
+    let malformed_path = history_path.parent().expect("history parent").join(format!(
+        "{next_artifact}-{next_write}-remediate_pr_followup.json"
+    ));
+    let mut malformed = canonical;
+    malformed["artifact_sequence"] = serde_json::json!(next_artifact);
+    malformed["write_sequence"] = serde_json::json!(next_write);
+    malformed["launch_ordinal"] = serde_json::json!("not-an-integer");
+    malformed["history_metadata"]["history_path"] =
+        serde_json::json!(malformed_path.display().to_string());
+    fs::write(
+        malformed_path,
+        serde_json::to_vec_pretty(&malformed).expect("malformed retry history"),
+    )
+    .expect("write malformed retry history");
+
+    let outcome = PostPrFailureTerminalExecutor
+        .execute(&mut p12_context(&temp), &p12_params(&temp))
+        .expect("terminal must fail closed with a durable tombstone");
+    assert_eq!(outcome, StepOutcome::Fatal);
+    let tombstone = read_json(&retry_path);
+    assert_eq!(
+        tombstone["transition_type"],
+        serde_json::json!("terminal_tombstone")
+    );
+    assert_eq!(tombstone["history_chain_reset"], serde_json::json!(true));
+    assert!(tombstone["predecessor_artifact_sequence"].is_null());
+    let terminal = read_json(&p10_current_artifact_path(
+        &temp,
+        "post-pr-failure-terminal",
+    ));
+    assert_eq!(
+        terminal["remediation_attempt_index"], tombstone["counters"]["remediation_attempt_index"],
+        "terminal payload must use the tombstone persisted in the same lock"
+    );
+
+    fs::remove_file(&retry_path).expect("remove tombstone canonical");
+    let runner = P12FakeLlxprtRunner::new(p12_result("timeout"));
+    let error = PrFollowupRemediationExecutorWithRunner::new(runner.clone(), FixedClock)
+        .execute(&mut p12_context(&temp), &p12_params(&temp))
+        .expect_err("reconstructed tombstone must prevent continuation");
+    assert!(error.to_string().contains("retry budget exhausted"));
+    assert!(runner.requests().is_empty());
+
+    let quarantined = fs::read_dir(retry_path.parent().expect("retry parent"))
+        .expect("retry parent")
+        .filter_map(std::result::Result::ok)
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("pr-remediation-retry-state.corrupt.")
+        })
+        .count();
+    assert_eq!(quarantined, 1, "canonical retry state must be quarantined");
+}
+
+#[test]
+fn terminal_tombstones_when_canonical_scope_is_corrupt_and_history_is_missing() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    p12_write_valid_retry_state(&temp);
+    let retry_path = p10_current_artifact_path(&temp, "pr-remediation-retry-state");
+    let canonical = read_json(&retry_path);
+    let history_path = PathBuf::from(
+        canonical["history_metadata"]["history_path"]
+            .as_str()
+            .expect("retry history path"),
+    );
+    fs::remove_file(history_path).expect("remove latest retry history");
+    let mut corrupt = canonical;
+    corrupt
+        .as_object_mut()
+        .expect("retry object")
+        .remove("scope");
+    fs::write(
+        &retry_path,
+        serde_json::to_vec_pretty(&corrupt).expect("corrupt canonical bytes"),
+    )
+    .expect("corrupt canonical scope");
+
+    assert_eq!(
+        PostPrFailureTerminalExecutor
+            .execute(&mut p12_context(&temp), &p12_params(&temp))
+            .expect("terminal must tombstone unrecoverable canonical scope"),
+        StepOutcome::Fatal
+    );
+    assert_eq!(
+        read_json(&retry_path)["transition_type"],
+        serde_json::json!("terminal_tombstone")
+    );
+}
+
+#[test]
+fn terminal_tombstones_when_latest_retry_history_scope_is_missing() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    p12_write_valid_retry_state(&temp);
+    let retry_path = p10_current_artifact_path(&temp, "pr-remediation-retry-state");
+    let canonical = read_json(&retry_path);
+    let history_dir = PathBuf::from(
+        canonical["history_metadata"]["history_path"]
+            .as_str()
+            .expect("retry history path"),
+    )
+    .parent()
+    .expect("retry history parent")
+    .to_path_buf();
+    for entry in fs::read_dir(history_dir).expect("retry history directory") {
+        let path = entry.expect("retry history entry").path();
+        if path.extension().is_none_or(|extension| extension != "json") {
+            continue;
+        }
+        let mut corrupt_history = read_json(&path);
+        corrupt_history
+            .as_object_mut()
+            .expect("retry history object")
+            .remove("scope");
+        fs::write(
+            &path,
+            serde_json::to_vec_pretty(&corrupt_history).expect("corrupt history bytes"),
+        )
+        .expect("remove history scope");
+    }
+    fs::remove_file(&retry_path).expect("remove canonical retry state");
+
+    assert_eq!(
+        PostPrFailureTerminalExecutor
+            .execute(&mut p12_context(&temp), &p12_params(&temp))
+            .expect("terminal must tombstone unscoped retry history"),
+        StepOutcome::Fatal
+    );
+    assert_eq!(
+        read_json(&retry_path)["transition_type"],
+        serde_json::json!("terminal_tombstone")
+    );
+}
+
+#[test]
+fn broken_newer_exact_scope_retry_history_blocks_remediation_side_effect() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    p12_write_valid_retry_state(&temp);
+    let retry_path = p10_current_artifact_path(&temp, "pr-remediation-retry-state");
+    let canonical = read_json(&retry_path);
+    let history_path = PathBuf::from(
+        canonical["history_metadata"]["history_path"]
+            .as_str()
+            .expect("retry history path"),
+    );
+    let mut broken = canonical.clone();
+    let next_artifact = canonical["artifact_sequence"].as_u64().expect("artifact") + 1;
+    let next_write = canonical["write_sequence"].as_u64().expect("write") + 1;
+    let broken_path = history_path.parent().expect("history parent").join(format!(
+        "{next_artifact}-{next_write}-remediate_pr_followup.json"
+    ));
+    broken["artifact_sequence"] = serde_json::json!(next_artifact);
+    broken["write_sequence"] = serde_json::json!(next_write);
+    broken["predecessor_artifact_sequence"] = serde_json::json!(1);
+    broken["history_metadata"]["history_path"] =
+        serde_json::json!(broken_path.display().to_string());
+    fs::write(
+        &broken_path,
+        serde_json::to_vec_pretty(&broken).expect("broken retry history"),
+    )
+    .expect("write broken retry history");
+
+    let runner = P12FakeLlxprtRunner::new(p12_result("timeout"));
+    let error = PrFollowupRemediationExecutorWithRunner::new(runner.clone(), FixedClock)
+        .execute(&mut p12_context(&temp), &p12_params(&temp))
+        .expect_err("broken exact-scope chain must fail closed");
+    assert!(error
+        .to_string()
+        .contains("broken exact-scope retry history chain"));
+    assert!(
+        runner.requests().is_empty(),
+        "broken retry history must block agent invocation"
+    );
+}
+
+#[test]
+fn oversized_remediation_plan_blocks_remediation_side_effect() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_p12_plan(&temp);
+    let plan_path = p10_current_artifact_path(&temp, "pr-remediation-plan");
+    fs::write(
+        &plan_path,
+        vec![b' '; usize::try_from(MAX_ARTIFACT_FILE_BYTES + 1).expect("test limit")],
+    )
+    .expect("oversized plan");
+
+    let runner = P12FakeLlxprtRunner::new(p12_result("timeout"));
+    let error = PrFollowupRemediationExecutorWithRunner::new(runner.clone(), FixedClock)
+        .execute(&mut p12_context(&temp), &p12_params(&temp))
+        .expect_err("oversized plan must fail before agent invocation");
+    assert!(error.to_string().contains("artifact file exceeds"));
+    assert!(
+        runner.requests().is_empty(),
+        "oversized canonical artifact must block agent invocation"
     );
 }
 
@@ -11596,6 +12874,8 @@ fn stale_owner_token_prevents_token_reuse() {
 
     // A new executor invocation reserves the next ordinal and must mint its
     // own fresh token — the stale tampered token is never inherited.
+    fs::remove_file(p10_current_artifact_path(&temp, "pr-remediation-result"))
+        .expect("remove validated result before the next launch");
     let runner = P12FakeLlxprtRunner::new(p12_result("timeout"));
     let mut context = p12_context(&temp);
     let mut params = p12_params(&temp);
@@ -11708,6 +12988,14 @@ fn corrupt_canonical_recovers_from_valid_history() {
         terminal.get("remediation_attempt_index").is_some(),
         "terminal must include retry metadata from recovered state"
     );
+    assert_eq!(
+        terminal["remediation_attempt_index"],
+        recovered["counters"]["remediation_attempt_index"]
+    );
+    assert_eq!(
+        terminal["max_remediation_attempts"],
+        recovered["budget"]["max_remediation_attempts"]
+    );
 }
 
 /// Corrupt canonical retry state with corrupt history must fail closed via a
@@ -11789,6 +13077,9 @@ fn retry_budget_persists_across_reconstruction_no_reset() {
     PrFollowupRemediationExecutorWithRunner::new(runner.clone(), FixedClock)
         .execute(&mut context, &params)
         .expect("first launch");
+    PrRemediationResultExecutor
+        .execute(&mut context, &params)
+        .expect("classify first launch");
     let retry_state = read_json(&p10_current_artifact_path(
         &temp,
         "pr-remediation-retry-state",
@@ -11833,6 +13124,17 @@ fn unequal_policy_values_tighten_but_do_not_expand() {
     PrFollowupRemediationExecutorWithRunner::new(runner.clone(), FixedClock)
         .execute(&mut context, &params_high)
         .expect("initial launch with high budget");
+    let first_request = runner
+        .requests()
+        .into_iter()
+        .next()
+        .expect("first wrapper launch request");
+    let first_wrapper = read_json(&first_request.remediation_result_path);
+    assert_eq!(first_wrapper["retry_launch_ordinal"], serde_json::json!(1));
+    assert_eq!(
+        first_wrapper["wrapper_failure_result_path"],
+        serde_json::json!(first_request.remediation_result_path.display().to_string())
+    );
 
     let mut params_low = p12_params(&temp);
     params_low["max_remediation_attempts"] = serde_json::json!(2);
@@ -11849,6 +13151,19 @@ fn unequal_policy_values_tighten_but_do_not_expand() {
         serde_json::json!(2),
         "budget must tighten to the lower configured value"
     );
+    assert_eq!(
+        after_tighten["transition_type"],
+        serde_json::json!("launch_completed_result_recovered")
+    );
+    assert_eq!(
+        runner.requests().len(),
+        1,
+        "completed wrapper recovery must not launch the agent"
+    );
+    assert_eq!(
+        read_json(&first_request.remediation_result_path),
+        first_wrapper
+    );
 
     let mut params_expand = p12_params(&temp);
     params_expand["max_remediation_attempts"] = serde_json::json!(4);
@@ -11862,6 +13177,162 @@ fn unequal_policy_values_tighten_but_do_not_expand() {
     );
 }
 
+#[test]
+fn terminal_history_skips_corrupt_and_prior_head_candidates() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_p12_plan(&temp);
+    let store = PrFollowupArtifactStore::new(temp.path().join("artifacts"));
+    let binding = p10_binding();
+    store
+        .write_json_artifact(JsonArtifactWriteRequest::new(
+            ArtifactWriteContext::new(&binding, "active-failure", "active_step", 3, &FixedClock),
+            &serde_json::json!({"state": "failed"}),
+            Some(("failed", "active_failure", serde_json::json!({}))),
+        ))
+        .expect("active failure");
+    let mut prior = binding.clone();
+    prior.head_sha = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string();
+    store
+        .write_json_artifact(JsonArtifactWriteRequest::new(
+            ArtifactWriteContext::new(&prior, "prior-failure", "prior_step", 4, &FixedClock),
+            &serde_json::json!({"state": "failed"}),
+            Some(("failed", "prior_failure", serde_json::json!({}))),
+        ))
+        .expect("prior-head failure");
+    let corrupt_dir = store.history_root_for_family(&binding, "corrupt-failure");
+    fs::create_dir_all(&corrupt_dir).expect("corrupt history directory");
+    fs::write(corrupt_dir.join("999-1-corrupt.json"), b"not-json").expect("corrupt candidate");
+
+    let outcome = PostPrFailureTerminalExecutor
+        .execute(&mut p12_context(&temp), &p12_params(&temp))
+        .expect("terminal skips isolated stale/corrupt candidates");
+    assert_eq!(outcome, StepOutcome::Fatal);
+    let terminal = read_json(&p10_current_artifact_path(
+        &temp,
+        "post-pr-failure-terminal",
+    ));
+    assert_eq!(
+        terminal["source_artifact_family"],
+        serde_json::json!("active-failure")
+    );
+    assert_eq!(
+        terminal["source_artifacts"].as_array().map(Vec::len),
+        Some(1)
+    );
+}
+
+#[test]
+fn terminal_history_rejects_different_pr_contamination() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_p12_plan(&temp);
+    let store = PrFollowupArtifactStore::new(temp.path().join("artifacts"));
+    let binding = p10_binding();
+    let record = store
+        .write_json_artifact(JsonArtifactWriteRequest::new(
+            ArtifactWriteContext::new(
+                &binding,
+                "contaminated-failure",
+                "foreign_step",
+                5,
+                &FixedClock,
+            ),
+            &serde_json::json!({"state": "failed"}),
+            Some(("failed", "foreign_failure", serde_json::json!({}))),
+        ))
+        .expect("seed candidate");
+    let mut foreign = read_json(&record.history_path);
+    foreign["pr_number"] = serde_json::json!(9999);
+    fs::write(
+        &record.history_path,
+        serde_json::to_vec_pretty(&foreign).expect("foreign artifact"),
+    )
+    .expect("contaminate history");
+
+    let error = PostPrFailureTerminalExecutor
+        .execute(&mut p12_context(&temp), &p12_params(&temp))
+        .expect_err("different PR contamination must remain fatal");
+    assert!(error.to_string().contains("different PR identity"));
+}
+
+#[cfg(unix)]
+#[test]
+fn terminal_history_propagates_candidate_io_failure() {
+    use std::os::unix::fs::symlink;
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_p12_plan(&temp);
+    let store = PrFollowupArtifactStore::new(temp.path().join("artifacts"));
+    let binding = p10_binding();
+    let family_dir = store.history_root_for_family(&binding, "io-failure");
+    fs::create_dir_all(&family_dir).expect("history directory");
+    let outside = temp.path().join("outside.json");
+    fs::write(&outside, b"{}").expect("outside file");
+    symlink(&outside, family_dir.join("1-1-io.json")).expect("symlink candidate");
+
+    let outcome = PostPrFailureTerminalExecutor
+        .execute(&mut p12_context(&temp), &p12_params(&temp))
+        .expect("terminal executor skips symlink candidates without following them");
+    assert_eq!(outcome, StepOutcome::Fatal);
+    assert_eq!(
+        read_json(&p10_current_artifact_path(
+            &temp,
+            "post-pr-failure-terminal"
+        ))["source_artifacts"],
+        serde_json::json!([])
+    );
+}
+
+#[test]
+fn terminal_skips_higher_sequence_candidate_without_nonempty_failure_reason() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_p12_plan(&temp);
+    let store = PrFollowupArtifactStore::new(temp.path().join("artifacts"));
+    let binding = p10_binding();
+    store
+        .write_json_artifact(JsonArtifactWriteRequest::new(
+            ArtifactWriteContext::new(&binding, "valid-failure", "valid_step", 3, &FixedClock),
+            &serde_json::json!({"state": "failed"}),
+            Some(("failed", "valid_failure", serde_json::json!({}))),
+        ))
+        .expect("valid failure");
+    let malformed = store
+        .write_json_artifact(JsonArtifactWriteRequest::new(
+            ArtifactWriteContext::new(
+                &binding,
+                "missing-reason-failure",
+                "malformed_step",
+                4,
+                &FixedClock,
+            ),
+            &serde_json::json!({"state": "failed"}),
+            Some(("failed", "temporary_reason", serde_json::json!({}))),
+        ))
+        .expect("candidate to corrupt");
+    let mut malformed_value = read_json(&malformed.history_path);
+    malformed_value["failure_reason"] = serde_json::json!("   ");
+    fs::write(
+        &malformed.history_path,
+        serde_json::to_vec_pretty(&malformed_value).expect("malformed candidate"),
+    )
+    .expect("remove semantic reason");
+
+    assert_eq!(
+        PostPrFailureTerminalExecutor
+            .execute(&mut p12_context(&temp), &p12_params(&temp))
+            .expect("terminal skips candidate without reason"),
+        StepOutcome::Fatal
+    );
+    let terminal = read_json(&p10_current_artifact_path(
+        &temp,
+        "post-pr-failure-terminal",
+    ));
+    assert_eq!(terminal["source_artifact_family"], "valid-failure");
+    assert_eq!(terminal["source_failure_reason"], "valid_failure");
+    assert_eq!(
+        terminal["source_artifacts"].as_array().map(Vec::len),
+        Some(1)
+    );
+}
+
 /// The terminal must deterministically select the highest-sequence failure
 /// candidate from the active binding's candidate set.
 #[test]
@@ -11872,11 +13343,14 @@ fn terminal_selects_highest_sequence_failure_candidate() {
     let binding = p10_binding();
 
     store
-        .write_json_artifact(
-            &binding,
-            "post-pr-test-result",
-            "run_post_pr_tests",
-            11,
+        .write_json_artifact(JsonArtifactWriteRequest::new(
+            ArtifactWriteContext::new(
+                &binding,
+                "post-pr-test-result",
+                "run_post_pr_tests",
+                11,
+                &FixedClock,
+            ),
             &serde_json::json!({
                 "test_state": "failed",
                 "commands": [{
@@ -11890,23 +13364,24 @@ fn terminal_selects_highest_sequence_failure_candidate() {
                 }]
             }),
             Some(("failed", "post_pr_test_failed", serde_json::json!({}))),
-            &FixedClock,
-        )
+        ))
         .expect("write first failure");
 
     store
-        .write_json_artifact(
-            &binding,
-            "pr-remediation-result",
-            "validate_remediation_result",
-            9,
+        .write_json_artifact(JsonArtifactWriteRequest::new(
+            ArtifactWriteContext::new(
+                &binding,
+                "pr-remediation-result",
+                "validate_remediation_result",
+                9,
+                &FixedClock,
+            ),
             &serde_json::json!({
                 "status": "failed",
                 "remediation_attempt_index": 1
             }),
             Some(("failed", "remediation_failed", serde_json::json!({}))),
-            &FixedClock,
-        )
+        ))
         .expect("write second failure");
 
     let mut context = p12_context(&temp);
@@ -11918,9 +13393,10 @@ fn terminal_selects_highest_sequence_failure_candidate() {
         &temp,
         "post-pr-failure-terminal",
     ));
-    assert!(
-        terminal.get("source_failure_sequence").is_some(),
-        "terminal must record the selected source failure_sequence"
+    assert_eq!(
+        terminal["source_failure_sequence"],
+        serde_json::json!(3),
+        "terminal must record the highest failure_sequence"
     );
     assert_eq!(terminal["terminal_state"], serde_json::json!("fatal"),);
     let source_count = terminal["source_artifacts"]
@@ -11929,7 +13405,14 @@ fn terminal_selects_highest_sequence_failure_candidate() {
         .len();
     assert_eq!(
         source_count, 2,
-        "source_artifacts must include both failure candidates"
+        "source_artifacts must retain every eligible failure candidate"
+    );
+    let exported: PostPrFailureTerminal =
+        serde_json::from_value(terminal.clone()).expect("exported terminal schema");
+    assert_eq!(
+        serde_json::to_value(exported).expect("roundtrip terminal schema"),
+        terminal,
+        "exported terminal schema must roundtrip the validated on-disk artifact"
     );
     assert_eq!(
         terminal["selected_source_reason"],
@@ -11969,6 +13452,10 @@ fn terminal_replay_is_idempotent_history_invariant() {
         "replay must not allocate a new artifact_sequence"
     );
     assert_eq!(second["idempotency_key"], serde_json::json!(first_key),);
+    assert_eq!(
+        second, first,
+        "terminal replay must preserve the full artifact"
+    );
 
     let history_dir = temp
         .path()
@@ -11989,4 +13476,1026 @@ fn terminal_replay_is_idempotent_history_invariant() {
         history_count, 1,
         "history must contain exactly one terminal snapshot after replay"
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn artifact_store_accepts_root_symlink_alias_but_rejects_descendant_symlink() {
+    use std::os::unix::fs::symlink;
+    let temp = tempfile::tempdir().expect("tempdir");
+    let real_root = temp.path().join("real-artifacts");
+    fs::create_dir_all(&real_root).expect("real root");
+    let alias = temp.path().join("artifact-alias");
+    symlink(&real_root, &alias).expect("root alias");
+    let binding = p10_binding();
+    let store = PrFollowupArtifactStore::new(alias);
+    store
+        .write_json_artifact(JsonArtifactWriteRequest::new(
+            ArtifactWriteContext::new(&binding, "alias-proof", "test", 1, &FixedClock),
+            &serde_json::json!({"value": true}),
+            None,
+        ))
+        .expect("canonical root alias");
+    assert_eq!(
+        fs::canonicalize(store.canonical_path(&binding, "alias-proof"))
+            .expect("canonical artifact"),
+        fs::canonicalize(&real_root)
+            .expect("canonical root")
+            .join("pr-followup/current/run-p10/example/workflow/1910/alias-proof.json")
+    );
+    let current_run = real_root.join("pr-followup/current/run-p10");
+    fs::remove_dir_all(&current_run).expect("remove descendant");
+    let outside = temp.path().join("outside");
+    fs::create_dir_all(&outside).expect("outside");
+    symlink(&outside, &current_run).expect("descendant symlink");
+    let error = store
+        .write_json_artifact(JsonArtifactWriteRequest::new(
+            ArtifactWriteContext::new(&binding, "must-not-escape", "test", 1, &FixedClock),
+            &serde_json::json!({"value": false}),
+            None,
+        ))
+        .expect_err("reject descendant symlink");
+    assert!(
+        error.to_string().contains("symbolic link")
+            || error.to_string().contains("Not a directory")
+    );
+    assert!(!outside
+        .join("example/workflow/1910/must-not-escape.json")
+        .exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn current_raw_and_history_reads_reject_symlinked_regular_files() {
+    use std::os::unix::fs::symlink;
+    let temp = tempfile::tempdir().expect("tempdir");
+    let store = PrFollowupArtifactStore::new(temp.path().join("artifacts"));
+    let binding = p10_binding();
+    let record = store
+        .write_json_artifact(JsonArtifactWriteRequest::new(
+            ArtifactWriteContext::new(&binding, "no-follow-proof", "test", 1, &FixedClock),
+            &serde_json::json!({"value": true}),
+            None,
+        ))
+        .expect("seed");
+    let outside = temp.path().join("outside.json");
+    fs::write(&outside, b"{}").expect("outside");
+    fs::remove_file(&record.canonical_path).expect("remove canonical");
+    symlink(&outside, &record.canonical_path).expect("canonical symlink");
+    assert!(store
+        .read_current_json(&binding, "no-follow-proof")
+        .is_err());
+    fs::remove_file(&record.history_path).expect("remove history");
+    symlink(&outside, &record.history_path).expect("history symlink");
+    assert!(store
+        .read_history_json_by_head(&binding, "no-follow-proof", &binding.head_sha, None)
+        .is_err());
+}
+
+#[cfg(unix)]
+#[test]
+fn marker_body_sidecar_symlink_cannot_modify_outside_target() {
+    use std::os::unix::fs::symlink;
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let store = PrFollowupArtifactStore::new(temp.path().join("artifacts"));
+    let binding = p10_binding();
+    let record = store
+        .write_json_artifact(JsonArtifactWriteRequest::new(
+            ArtifactWriteContext::new(
+                &binding,
+                "feedback-marker-comment-body",
+                "post_feedback_markers",
+                12,
+                &FixedClock,
+            ),
+            &serde_json::json!({"raw_text": "safe body"}),
+            None,
+        ))
+        .expect("body descriptor");
+    let outside = temp.path().join("outside-body.md");
+    fs::write(&outside, "outside sentinel").expect("outside sentinel");
+    let sidecar = record.history_path.with_extension("body.md");
+    symlink(&outside, &sidecar).expect("hostile body sidecar");
+
+    let error = store
+        .publish_immutable_sidecar(&binding, &record, "body.md", b"new body")
+        .expect_err("immutable no-follow publication must reject existing symlink");
+    assert!(error.to_string().contains("without replacement"));
+    assert_eq!(
+        fs::read_to_string(outside).expect("outside body"),
+        "outside sentinel"
+    );
+}
+
+#[test]
+fn immutable_sidecar_accepts_multi_suffix_and_rejects_unsafe_extensions_and_parent() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let store = PrFollowupArtifactStore::new(temp.path().join("artifacts"));
+    let binding = p10_binding();
+    let record = store
+        .write_json_artifact(JsonArtifactWriteRequest::new(
+            ArtifactWriteContext::new(
+                &binding,
+                "feedback-marker-comment-body",
+                "post_feedback_markers",
+                12,
+                &FixedClock,
+            ),
+            &serde_json::json!({"raw_text": "safe body"}),
+            None,
+        ))
+        .expect("body descriptor");
+
+    let sidecar = store
+        .publish_immutable_sidecar(&binding, &record, "body.md", b"body")
+        .expect("safe multi-suffix sidecar");
+    assert!(sidecar
+        .file_name()
+        .and_then(|value| value.to_str())
+        .is_some_and(|name| name.ends_with(".body.md")));
+    assert_eq!(fs::read(&sidecar).expect("sidecar bytes"), b"body");
+
+    for extension in ["", ".", "..", "/absolute", "nested/body.md"] {
+        let error = store
+            .publish_immutable_sidecar(&binding, &record, extension, b"unsafe")
+            .expect_err("unsafe extension must fail without panic");
+        assert!(error.to_string().contains("safe filename component"));
+    }
+
+    let mut nested = record.clone();
+    nested.history_path = record
+        .history_path
+        .parent()
+        .expect("family root")
+        .join("nested")
+        .join(record.history_path.file_name().expect("history filename"));
+    fs::create_dir_all(nested.history_path.parent().expect("nested parent"))
+        .expect("nested directory");
+    fs::copy(&record.history_path, &nested.history_path).expect("nested source");
+    let error = store
+        .publish_immutable_sidecar(&binding, &nested, "body.md", b"unsafe")
+        .expect_err("nested source parent must fail closed");
+    assert!(error
+        .to_string()
+        .contains("exact binding history family root"));
+}
+
+#[cfg(unix)]
+#[test]
+fn pr_identity_discovery_skips_descendant_symlink_without_reading_outside() {
+    use std::os::unix::fs::symlink;
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let store = PrFollowupArtifactStore::new(temp.path().join("artifacts"));
+    let binding = p10_binding();
+    write_p06_pr_identity(&store, &binding, binding.pr_number, "gh_pr_view");
+    let run_root = temp.path().join("artifacts/pr-followup/current/run-p10");
+    let outside = temp.path().join("outside-identity");
+    fs::create_dir_all(&outside).expect("outside identity");
+    let outside_pr = outside.join("pr.json");
+    fs::write(&outside_pr, "outside sentinel").expect("outside identity sentinel");
+    symlink(&outside, run_root.join("hostile-descendant")).expect("hostile descendant");
+    let mut discovery = binding.clone();
+    discovery.pr_number = 0;
+
+    let found = store
+        .find_current_pr_artifact_for_run(&binding.run_id, &discovery)
+        .expect("discovery skips descendant symlinks")
+        .expect("contained identity remains discoverable");
+    assert_eq!(found["pr_number"], serde_json::json!(binding.pr_number));
+    assert_eq!(
+        fs::read_to_string(outside_pr).expect("outside identity unchanged"),
+        "outside sentinel"
+    );
+}
+
+#[test]
+fn pr_identity_discovery_enforces_aggregate_read_budget() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let store = PrFollowupArtifactStore::new(temp.path().join("artifacts"));
+    let mut requested = p10_binding();
+    requested.pr_number = 0;
+    let run_root = temp.path().join("artifacts/pr-followup/current/run-p10");
+    let file_bytes = usize::try_from(MAX_ARTIFACT_FILE_BYTES).expect("test file limit");
+    let file_count = usize::try_from(MAX_ARTIFACT_READ_BYTES / MAX_ARTIFACT_FILE_BYTES + 1)
+        .expect("test file count");
+    for index in 0..file_count {
+        let path = run_root
+            .join(format!("owner-{index}/repo-{index}/{index}"))
+            .join("pr.json");
+        fs::create_dir_all(path.parent().expect("identity parent")).expect("identity parent");
+        fs::write(path, vec![b' '; file_bytes]).expect("bounded identity candidate");
+    }
+
+    let error = store
+        .find_current_pr_artifact_for_run(&requested.run_id, &requested)
+        .expect_err("discovery aggregate byte limit must fail closed");
+    assert!(error.to_string().contains("aggregate reads exceed"));
+}
+
+#[test]
+fn direct_pr_identity_requires_requested_binding_identity() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let store = PrFollowupArtifactStore::new(temp.path().join("artifacts"));
+    let requested = p10_binding();
+    let mut foreign = requested.clone();
+    foreign.pr_number = 9999;
+    let record = store
+        .write_json_artifact(JsonArtifactWriteRequest::new(
+            ArtifactWriteContext::new(&foreign, "pr", "capture_pr_identity", 1, &FixedClock),
+            &serde_json::json!({
+                "pr_url": "https://github.com/example/workflow/pull/9999",
+                "capture_state": "captured",
+                "captured_at": FixedClock.now_rfc3339(),
+                "source": "gh_pr_view"
+            }),
+            None,
+        ))
+        .expect("foreign identity");
+    let requested_path = store.canonical_path(&requested, "pr");
+    fs::create_dir_all(requested_path.parent().expect("requested parent"))
+        .expect("requested parent");
+    let mut forged = read_json(&record.history_path);
+    forged["history_metadata"]["canonical_path"] =
+        serde_json::json!(requested_path.display().to_string());
+    let bytes = serde_json::to_vec_pretty(&forged).expect("forged identity bytes");
+    fs::write(&record.history_path, &bytes).expect("matching immutable snapshot");
+    fs::write(&requested_path, bytes).expect("direct foreign identity");
+
+    let error = store
+        .find_current_pr_artifact_for_run(&requested.run_id, &requested)
+        .expect_err("direct lookup must require requested PR identity equality");
+    assert!(error.to_string().contains("requested PR binding identity"));
+}
+
+#[test]
+fn legacy_agent_counters_above_maxima_are_rejected_without_wrapping() {
+    for (counter, maximum) in [
+        ("remediation_attempt_index", "max_remediation_attempts"),
+        ("validation_retry_index", "max_validation_retries"),
+        ("stale_artifact_retry_index", "max_stale_artifact_retries"),
+    ] {
+        let temp = tempfile::tempdir().expect("tempdir");
+        write_p11_plan_and_result(
+            &temp,
+            serde_json::json!([
+                { "source_type": "ci_failure", "source_id": "ci-build", "status": "fixed", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "fixed", "evidence": { "kind": "change", "current_head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "paths": ["src/lib.rs"] }, "response_text": "fixed", "evidence_paths": ["src/lib.rs"] },
+                { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "PRRT_thread_valid", "body_hash": "hash-valid", "status": "fixed", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "fixed", "evidence": { "kind": "change", "current_head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "paths": ["src/lib.rs"] }, "response_text": "fixed", "evidence_paths": ["src/lib.rs"] }
+            ]),
+        );
+        rewrite_p11_result(&temp, |result| {
+            result[counter] = serde_json::json!(u64::MAX);
+            result[maximum] = serde_json::json!(u64::MAX - 1);
+            result["retry_scope"][counter] = serde_json::json!(u64::MAX);
+            result["retry_scope"][maximum] = serde_json::json!(u64::MAX - 1);
+        });
+
+        let outcome = PrRemediationResultExecutor
+            .execute(&mut p11_context(&temp), &p11_params(&temp))
+            .expect("out-of-range legacy counter must classify without arithmetic panic");
+        assert_ne!(outcome, StepOutcome::Success);
+        let artifact = read_json(&p11_result_path(&temp));
+        assert!(artifact["validation_errors"]
+            .as_array()
+            .expect("validation errors")
+            .iter()
+            .any(|error| error
+                .as_str()
+                .is_some_and(|error| { error.contains(counter) && error.contains(maximum) })));
+    }
+}
+
+#[test]
+fn legacy_agent_counter_increments_reject_u64_max_overflow() {
+    for (counter, maximum, mutate_result) in [
+        ("validation_retry_index", "max_validation_retries", false),
+        (
+            "stale_artifact_retry_index",
+            "max_stale_artifact_retries",
+            false,
+        ),
+        (
+            "remediation_attempt_index",
+            "max_remediation_attempts",
+            true,
+        ),
+    ] {
+        let temp = tempfile::tempdir().expect("tempdir");
+        write_p11_plan_and_result(
+            &temp,
+            serde_json::json!([
+                { "source_type": "ci_failure", "source_id": "ci-build", "status": "fixed", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "fixed", "evidence": { "kind": "change", "current_head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "paths": ["src/lib.rs"] }, "response_text": "fixed", "evidence_paths": ["src/lib.rs"] },
+                { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "PRRT_thread_valid", "body_hash": "hash-valid", "status": "fixed", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "fixed", "evidence": { "kind": "change", "current_head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "paths": ["src/lib.rs"] }, "response_text": "fixed", "evidence_paths": ["src/lib.rs"] }
+            ]),
+        );
+        rewrite_p11_result(&temp, |result| {
+            result[counter] = serde_json::json!(u64::MAX);
+            result[maximum] = serde_json::json!(u64::MAX);
+            result["retry_scope"][counter] = serde_json::json!(u64::MAX);
+            result["retry_scope"][maximum] = serde_json::json!(u64::MAX);
+            if counter == "stale_artifact_retry_index" {
+                result["retry_scope"]["input_head_sha"] = serde_json::json!("stale-head");
+            } else if mutate_result {
+                result["results"][0]["status"] = serde_json::json!("not_fixed");
+            } else {
+                result["results"] = serde_json::json!([]);
+            }
+        });
+
+        let error = PrRemediationResultExecutor
+            .execute(&mut p11_context(&temp), &p11_params(&temp))
+            .expect_err("u64::MAX increment must fail closed");
+        assert!(
+            error.to_string().contains("counter overflowed"),
+            "unexpected overflow error for {counter}: {error}"
+        );
+    }
+}
+
+#[test]
+fn remediation_validator_replay_reuses_receipt_and_validated_history() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_p11_plan_and_result(
+        &temp,
+        serde_json::json!([
+            { "source_type": "ci_failure", "source_id": "ci-build", "status": "fixed", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "fixed", "evidence": { "kind": "change", "current_head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "paths": ["src/lib.rs"] }, "response_text": "fixed", "evidence_paths": ["src/lib.rs"] },
+            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "PRRT_thread_valid", "body_hash": "hash-valid", "status": "fixed", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "fixed", "evidence": { "kind": "change", "current_head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "paths": ["src/lib.rs"] }, "response_text": "fixed", "evidence_paths": ["src/lib.rs"] }
+        ]),
+    );
+    let mut first_context = p11_context(&temp);
+    assert_eq!(
+        PrRemediationResultExecutor
+            .execute(&mut first_context, &p11_params(&temp))
+            .expect("first"),
+        StepOutcome::Success
+    );
+    let first = read_json(&p11_result_path(&temp));
+    let history_root = temp
+        .path()
+        .join("artifacts/pr-followup/history/run-p11/example/workflow/1910");
+    let receipt_dir = history_root.join("pr-remediation-agent-result");
+    let validated_dir = history_root.join("pr-remediation-result");
+    let receipt_count = fs::read_dir(&receipt_dir).expect("receipts").count();
+    let receipt = fs::read_dir(&receipt_dir)
+        .expect("receipts")
+        .next()
+        .expect("receipt entry")
+        .expect("receipt")
+        .path();
+    assert!(
+        read_json(&receipt)["agent_result_source_identity"]
+            .as_str()
+            .is_some_and(|identity| identity.len() == 71 && identity.starts_with("sha256:")),
+        "receipt identity must be collision-resistant SHA-256 over the exact payload bytes"
+    );
+    let validated_count = fs::read_dir(&validated_dir).expect("validated").count();
+    let mut replay_context = p11_context(&temp);
+    assert_eq!(
+        PrRemediationResultExecutor
+            .execute(&mut replay_context, &p11_params(&temp))
+            .expect("replay"),
+        StepOutcome::Success
+    );
+    assert_eq!(read_json(&p11_result_path(&temp)), first);
+    assert_eq!(
+        fs::read_dir(receipt_dir).expect("receipts").count(),
+        receipt_count
+    );
+    assert_eq!(
+        fs::read_dir(validated_dir).expect("validated").count(),
+        validated_count
+    );
+}
+
+#[test]
+fn remediation_validator_rejects_canonical_replay_mismatched_from_immutable_history() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_p11_plan_and_result(
+        &temp,
+        serde_json::json!([
+            { "source_type": "ci_failure", "source_id": "ci-build", "status": "fixed", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "fixed", "evidence": { "kind": "change", "current_head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "paths": ["src/lib.rs"] }, "response_text": "fixed", "evidence_paths": ["src/lib.rs"] },
+            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "PRRT_thread_valid", "body_hash": "hash-valid", "status": "fixed", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "fixed", "evidence": { "kind": "change", "current_head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "paths": ["src/lib.rs"] }, "response_text": "fixed", "evidence_paths": ["src/lib.rs"] }
+        ]),
+    );
+    PrRemediationResultExecutor
+        .execute(&mut p11_context(&temp), &p11_params(&temp))
+        .expect("initial validation");
+    let path = p11_result_path(&temp);
+    let mut canonical = read_json(&path);
+    canonical["validation_errors"] = serde_json::json!(["forged replay"]);
+    fs::write(
+        &path,
+        serde_json::to_vec_pretty(&canonical).expect("canonical bytes"),
+    )
+    .expect("tamper canonical only");
+
+    let error = PrRemediationResultExecutor
+        .execute(&mut p11_context(&temp), &p11_params(&temp))
+        .expect_err("replay must authenticate against immutable history");
+    assert!(
+        error
+            .to_string()
+            .contains("differs from its immutable history snapshot"),
+        "unexpected replay error: {error}"
+    );
+}
+
+#[test]
+fn concurrent_remediation_validators_publish_one_authenticated_history() {
+    let temp = Arc::new(tempfile::tempdir().expect("tempdir"));
+    write_p11_plan_and_result(
+        &temp,
+        serde_json::json!([
+            { "source_type": "ci_failure", "source_id": "ci-build", "status": "fixed", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "fixed", "evidence": { "kind": "change", "current_head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "paths": ["src/lib.rs"] }, "response_text": "fixed", "evidence_paths": ["src/lib.rs"] },
+            { "source_type": "coderabbit_feedback", "source_id": "cr-valid", "stable_marker_key": "PRRT_thread_valid", "body_hash": "hash-valid", "status": "fixed", "input_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "action": "fixed", "evidence": { "kind": "change", "current_head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "paths": ["src/lib.rs"] }, "response_text": "fixed", "evidence_paths": ["src/lib.rs"] }
+        ]),
+    );
+    let mut handles = Vec::new();
+    for _ in 0..2 {
+        let temp = Arc::clone(&temp);
+        handles.push(std::thread::spawn(move || {
+            PrRemediationResultExecutor.execute(&mut p11_context(&temp), &p11_params(&temp))
+        }));
+    }
+    for handle in handles {
+        assert_eq!(
+            handle
+                .join()
+                .expect("validator thread")
+                .expect("validation"),
+            StepOutcome::Success
+        );
+    }
+    let validated_dir = temp
+        .path()
+        .join("artifacts/pr-followup/history/run-p11/example/workflow/1910/pr-remediation-result");
+    let validator_histories = fs::read_dir(validated_dir)
+        .expect("validated history")
+        .filter_map(std::result::Result::ok)
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .contains("validate_remediation_result")
+        })
+        .count();
+    assert_eq!(
+        validator_histories, 1,
+        "conditional replay and publication must be atomic under one binding lock"
+    );
+}
+
+#[test]
+fn retry_budget_and_lease_overflow_are_rejected_before_publication() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_p12_plan(&temp);
+    let runner = P12FakeLlxprtRunner::new(p12_result("timeout"));
+    let mut zero = p12_params(&temp);
+    zero["max_validation_retries"] = serde_json::json!(0);
+    let error = PrFollowupRemediationExecutorWithRunner::new(runner.clone(), FixedClock)
+        .execute(&mut p12_context(&temp), &zero)
+        .expect_err("zero budget");
+    assert!(error.to_string().contains("greater than zero"));
+
+    let retry_path = p10_current_artifact_path(&temp, "pr-remediation-retry-state");
+    let mut zero_timeout = p12_params(&temp);
+    zero_timeout["timeout_seconds"] = serde_json::json!(0);
+    let error = PrFollowupRemediationExecutorWithRunner::new(runner.clone(), FixedClock)
+        .execute(&mut p12_context(&temp), &zero_timeout)
+        .expect_err("zero timeout");
+    assert!(error
+        .to_string()
+        .contains("timeout_seconds must be greater than zero"));
+    assert!(runner.requests().is_empty());
+    assert!(
+        !retry_path.exists(),
+        "zero timeout must fail before reservation"
+    );
+
+    let mut overflow = p12_params(&temp);
+    overflow["timeout_seconds"] = serde_json::json!(u64::MAX);
+    let error = PrFollowupRemediationExecutorWithRunner::new(runner, FixedClock)
+        .execute(&mut p12_context(&temp), &overflow)
+        .expect_err("lease overflow");
+    assert!(error.to_string().contains("lease duration overflowed"));
+}
+
+#[test]
+fn terminal_uses_failure_history_even_when_current_family_is_successful() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_p12_plan(&temp);
+    let store = PrFollowupArtifactStore::new(temp.path().join("artifacts"));
+    let binding = p10_binding();
+    store
+        .write_json_artifact(JsonArtifactWriteRequest::new(
+            ArtifactWriteContext::new(&binding, "history-source", "test", 1, &FixedClock),
+            &serde_json::json!({"state": "failed"}),
+            Some(("failed", "historical_failure", serde_json::json!({}))),
+        ))
+        .expect("failure");
+    store
+        .write_json_artifact(JsonArtifactWriteRequest::new(
+            ArtifactWriteContext::new(&binding, "history-source", "test", 1, &FixedClock),
+            &serde_json::json!({"state": "passed"}),
+            None,
+        ))
+        .expect("success");
+    let mut context = p12_context(&temp);
+    assert_eq!(
+        PostPrFailureTerminalExecutor
+            .execute(&mut context, &p12_params(&temp))
+            .expect("terminal"),
+        StepOutcome::Fatal
+    );
+    let terminal = read_json(&p10_current_artifact_path(
+        &temp,
+        "post-pr-failure-terminal",
+    ));
+    assert_eq!(
+        terminal["source_artifact_family"],
+        serde_json::json!("history-source")
+    );
+    assert_eq!(
+        terminal["source_failure_reason"],
+        serde_json::json!("historical_failure")
+    );
+}
+
+#[test]
+fn terminal_schema_rejects_no_source_fields_and_selected_reason_mismatch() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let store = PrFollowupArtifactStore::new(temp.path().join("artifacts"));
+    let binding = p10_binding();
+    let invalid_no_source = serde_json::json!({
+        "terminal_state": "fatal",
+        "terminal_reason": "post_pr_failure",
+        "failure_reason": "post_pr_failure",
+        "failed_step": "post_pr_failure_terminal",
+        "source_artifacts": [],
+        "source_failure_sequence": 1,
+        "source_artifact_sequence": null,
+        "source_write_sequence": null,
+        "source_step_order_index": null,
+        "source_producer_step_id": null,
+        "source_artifact_path": null,
+        "source_history_path": null,
+        "source_failure_reason": null,
+        "source_artifact_family": null,
+        "selected_source_reason": "no_failure_candidates",
+        "idempotency_key": "terminal:test",
+        "logged_at": "2026-04-30T00:00:00Z"
+    });
+    let error = store
+        .write_json_artifact(JsonArtifactWriteRequest::new(
+            ArtifactWriteContext::new(
+                &binding,
+                "post-pr-failure-terminal",
+                "test",
+                13,
+                &FixedClock,
+            ),
+            &invalid_no_source,
+            None,
+        ))
+        .expect_err("no-source selected fields must be rejected");
+    assert!(error.to_string().contains("must not populate"));
+
+    let source = serde_json::json!({
+        "artifact_family": "source",
+        "artifact_sequence": 2,
+        "write_sequence": 1,
+        "failure_sequence": 1,
+        "producer_step_id": "source_step",
+        "step_order_index": 2,
+        "path": "/tmp/current.json",
+        "history_path": "/tmp/history.json",
+        "failure_reason": "source_failed"
+    });
+    let invalid_selected = serde_json::json!({
+        "terminal_state": "fatal",
+        "terminal_reason": "selected_source_failure",
+        "failure_reason": "source_failed",
+        "failed_step": "source_step",
+        "source_artifacts": [source],
+        "source_failure_sequence": 1,
+        "source_artifact_sequence": 2,
+        "source_write_sequence": 1,
+        "source_step_order_index": 2,
+        "source_producer_step_id": "source_step",
+        "source_artifact_path": "/tmp/current.json",
+        "source_history_path": "/tmp/history.json",
+        "source_failure_reason": "source_failed",
+        "source_artifact_family": "source",
+        "selected_source_reason": "no_failure_candidates",
+        "idempotency_key": "terminal:test:source",
+        "logged_at": "2026-04-30T00:00:00Z"
+    });
+    let error = store
+        .write_json_artifact(JsonArtifactWriteRequest::new(
+            ArtifactWriteContext::new(
+                &binding,
+                "post-pr-failure-terminal",
+                "test",
+                13,
+                &FixedClock,
+            ),
+            &invalid_selected,
+            None,
+        ))
+        .expect_err("selected source reason must match source mode");
+    assert!(error.to_string().contains("highest_failure_sequence"));
+}
+
+#[test]
+fn retry_tombstones_are_scoped_to_remediation_plan_sequence() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_p12_plan(&temp);
+    let retry_path = p10_current_artifact_path(&temp, "pr-remediation-retry-state");
+    fs::create_dir_all(retry_path.parent().expect("retry parent")).expect("retry parent");
+    fs::write(&retry_path, b"corrupt-scope-one").expect("corrupt scope one");
+    let mut first_context = p12_context(&temp);
+    PostPrFailureTerminalExecutor
+        .execute(&mut first_context, &p12_params(&temp))
+        .expect("scope one terminal");
+    let first = read_json(&retry_path);
+    let first_plan_sequence = first["scope"]["remediation_plan_sequence"]
+        .as_u64()
+        .expect("first scope");
+
+    write_p12_plan(&temp);
+    let prior_terminal = read_json(&p10_current_artifact_path(
+        &temp,
+        "post-pr-failure-terminal",
+    ));
+    fs::remove_file(p10_current_artifact_path(&temp, "post-pr-failure-terminal"))
+        .expect("remove prior terminal canonical for the new plan scope");
+    fs::remove_file(PathBuf::from(
+        prior_terminal["history_metadata"]["history_path"]
+            .as_str()
+            .expect("prior terminal history path"),
+    ))
+    .expect("remove prior terminal history for the new plan scope");
+    fs::write(&retry_path, b"corrupt-scope-two").expect("corrupt scope two");
+    let mut second_context = p12_context(&temp);
+    PostPrFailureTerminalExecutor
+        .execute(&mut second_context, &p12_params(&temp))
+        .expect("scope two terminal");
+    let second = read_json(&retry_path);
+    let second_plan_sequence = second["scope"]["remediation_plan_sequence"]
+        .as_u64()
+        .expect("second scope");
+    assert!(second_plan_sequence > first_plan_sequence);
+    let history_dir = temp.path().join(
+        "artifacts/pr-followup/history/run-p10/example/workflow/1910/pr-remediation-retry-state",
+    );
+    let tombstones = fs::read_dir(history_dir)
+        .expect("retry history")
+        .filter_map(std::result::Result::ok)
+        .map(|entry| read_json(&entry.path()))
+        .filter(|value| value["transition_type"] == serde_json::json!("terminal_tombstone"))
+        .count();
+    assert_eq!(
+        tombstones, 2,
+        "each plan scope must retain its own tombstone"
+    );
+}
+
+#[cfg(unix)]
+struct ReplaceCanonicalParentAfterHistory {
+    replaced: Mutex<bool>,
+}
+
+#[cfg(unix)]
+impl ArtifactPublicationHook for ReplaceCanonicalParentAfterHistory {
+    fn checkpoint(
+        &self,
+        stage: ArtifactPublicationStage,
+        _history_path: &std::path::Path,
+        canonical_path: &std::path::Path,
+    ) -> Result<(), luther_workflow::engine::runner::EngineError> {
+        if stage != ArtifactPublicationStage::AfterHistory {
+            return Ok(());
+        }
+        let mut replaced = self.replaced.lock().expect("replacement state");
+        if !*replaced {
+            let parent = canonical_path.parent().expect("canonical parent");
+            fs::rename(parent, parent.with_extension("moved-after-history"))
+                .expect("move retained canonical parent");
+            fs::create_dir_all(parent).expect("install real replacement parent");
+            *replaced = true;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn publication_rejects_real_parent_replacement_after_history() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_p12_plan(&temp);
+    let hook = Arc::new(ReplaceCanonicalParentAfterHistory {
+        replaced: Mutex::new(false),
+    });
+    let canonical = p10_current_artifact_path(&temp, "post-pr-failure-terminal");
+    let error = PostPrFailureTerminalExecutorWithClock::with_publication_hook(FixedClock, hook)
+        .execute(&mut p12_context(&temp), &p12_params(&temp))
+        .expect_err("real directory replacement must fail closed");
+    assert!(error
+        .to_string()
+        .contains("publication directory changed during transaction"));
+    assert!(
+        !canonical.exists(),
+        "canonical must not be published into the replacement directory"
+    );
+}
+
+#[cfg(unix)]
+struct SwapCanonicalParentAtBarrier {
+    outside: PathBuf,
+    swapped: Mutex<bool>,
+}
+
+#[cfg(unix)]
+impl ArtifactPublicationHook for SwapCanonicalParentAtBarrier {
+    fn checkpoint(
+        &self,
+        stage: ArtifactPublicationStage,
+        _history_path: &std::path::Path,
+        canonical_path: &std::path::Path,
+    ) -> Result<(), luther_workflow::engine::runner::EngineError> {
+        use std::os::unix::fs::symlink;
+        if stage != ArtifactPublicationStage::BeforeCanonical {
+            return Ok(());
+        }
+        let mut swapped = self.swapped.lock().expect("swap state");
+        if *swapped {
+            return Ok(());
+        }
+        let parent = canonical_path.parent().expect("canonical parent");
+        let moved = parent.with_extension("moved-by-barrier");
+        fs::rename(parent, &moved).expect("move verified canonical parent");
+        symlink(&self.outside, parent).expect("install hostile descendant symlink");
+        *swapped = true;
+        Ok(())
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn descriptor_relative_publication_rejects_parent_swap_at_canonical_barrier() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_p12_plan(&temp);
+    let outside = temp.path().join("outside");
+    fs::create_dir_all(&outside).expect("outside");
+    let hook = Arc::new(SwapCanonicalParentAtBarrier {
+        outside: outside.clone(),
+        swapped: Mutex::new(false),
+    });
+    let mut context = p12_context(&temp);
+    let error = PostPrFailureTerminalExecutorWithClock::with_publication_hook(FixedClock, hook)
+        .execute(&mut context, &p12_params(&temp))
+        .expect_err("parent swap must be rejected");
+    assert!(
+        error.to_string().contains("symbolic link")
+            || error.to_string().contains("Not a directory")
+    );
+    assert!(
+        fs::read_dir(&outside)
+            .expect("outside directory")
+            .next()
+            .is_none(),
+        "descriptor-relative publication must not write through the hostile alias"
+    );
+}
+
+fn rewrite_retry_as_active(temp: &tempfile::TempDir, lease_expiry: &str) {
+    let retry_path = p10_current_artifact_path(temp, "pr-remediation-retry-state");
+    let mut active = read_json(&retry_path);
+    active["launch_phase"] = serde_json::json!("launched");
+    active["lease_expiry"] = serde_json::json!(lease_expiry);
+    let history_path = PathBuf::from(
+        active["history_metadata"]["history_path"]
+            .as_str()
+            .expect("retry history path"),
+    );
+    let bytes = serde_json::to_vec_pretty(&active).expect("active retry state");
+    fs::write(history_path, &bytes).expect("rewrite active retry history");
+    fs::write(retry_path, bytes).expect("rewrite active retry canonical");
+}
+
+fn assert_terminal_replay_after_lease_expiry_preserves_first_artifact(remove_history: bool) {
+    let temp = tempfile::tempdir().expect("tempdir");
+    p12_write_valid_retry_state(&temp);
+    rewrite_retry_as_active(&temp, "2026-04-30T01:00:00Z");
+
+    let mut first_context = p12_context(&temp);
+    assert_eq!(
+        PostPrFailureTerminalExecutorWithClock::new(TimestampClock("2026-04-30T00:30:00Z"))
+            .execute(&mut first_context, &p12_params(&temp))
+            .expect("first active-lease terminal"),
+        StepOutcome::Fatal
+    );
+    let terminal_path = p10_current_artifact_path(&temp, "post-pr-failure-terminal");
+    let first = read_json(&terminal_path);
+    assert_eq!(
+        first["terminal_reason"],
+        serde_json::json!("active_remediation_launch")
+    );
+    if remove_history {
+        let history_path = PathBuf::from(
+            first["history_metadata"]["history_path"]
+                .as_str()
+                .expect("terminal history path"),
+        );
+        fs::remove_file(history_path).expect("remove terminal history");
+    }
+
+    rewrite_retry_as_active(&temp, "2026-04-30T00:40:00Z");
+    let mut replay_context = p12_context(&temp);
+    assert_eq!(
+        PostPrFailureTerminalExecutorWithClock::new(TimestampClock("2026-04-30T01:30:00Z"))
+            .execute(&mut replay_context, &p12_params(&temp))
+            .expect("terminal replay after retry lease expiry"),
+        StepOutcome::Fatal
+    );
+    assert_eq!(
+        read_json(&terminal_path),
+        first,
+        "the first committed terminal artifact must be authoritative"
+    );
+}
+
+#[test]
+fn terminal_replay_with_history_is_authoritative_after_active_lease_expiry() {
+    assert_terminal_replay_after_lease_expiry_preserves_first_artifact(false);
+}
+
+#[test]
+fn terminal_replay_without_history_fails_immutable_authentication() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    p12_write_valid_retry_state(&temp);
+    rewrite_retry_as_active(&temp, "2026-04-30T01:00:00Z");
+    let mut first_context = p12_context(&temp);
+    PostPrFailureTerminalExecutorWithClock::new(TimestampClock("2026-04-30T00:30:00Z"))
+        .execute(&mut first_context, &p12_params(&temp))
+        .expect("first terminal");
+    let terminal_path = p10_current_artifact_path(&temp, "post-pr-failure-terminal");
+    let terminal = read_json(&terminal_path);
+    fs::remove_file(PathBuf::from(
+        terminal["history_metadata"]["history_path"]
+            .as_str()
+            .expect("terminal history path"),
+    ))
+    .expect("remove terminal history");
+
+    let error = PostPrFailureTerminalExecutorWithClock::new(TimestampClock("2026-04-30T01:30:00Z"))
+        .execute(&mut p12_context(&temp), &p12_params(&temp))
+        .expect_err("terminal canonical without immutable history must fail closed");
+    assert!(error.to_string().contains("No such file or directory"));
+    assert_eq!(read_json(&terminal_path), terminal);
+}
+
+#[test]
+fn terminal_failure_selection_accepts_more_than_eight_mib_of_bounded_history() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_p12_plan(&temp);
+    let store = PrFollowupArtifactStore::new(temp.path().join("artifacts"));
+    let binding = p10_binding();
+    let family = "large-terminal-source";
+    let payload = serde_json::json!({
+        "body": "x".repeat(
+            usize::try_from(MAX_ARTIFACT_FILE_BYTES - 16 * 1024).expect("test size")
+        )
+    });
+    for _ in 0..9 {
+        store
+            .write_json_artifact(JsonArtifactWriteRequest::new(
+                ArtifactWriteContext::new(&binding, family, "bulk_failure", 12, &FixedClock),
+                &payload,
+                Some(("failed", "bulk_failure", serde_json::json!({}))),
+            ))
+            .expect("bounded per-file failure history write");
+    }
+    let history_bytes = fs::read_dir(store.history_root_for_family(&binding, family))
+        .expect("failure history directory")
+        .map(|entry| {
+            entry
+                .expect("history entry")
+                .metadata()
+                .expect("metadata")
+                .len()
+        })
+        .sum::<u64>();
+    assert!(history_bytes > MAX_ARTIFACT_READ_BYTES);
+
+    let mut context = p12_context(&temp);
+    assert_eq!(
+        PostPrFailureTerminalExecutor
+            .execute(&mut context, &p12_params(&temp))
+            .expect("terminal selection has no lifetime aggregate byte cap"),
+        StepOutcome::Fatal
+    );
+    let terminal = read_json(&p10_current_artifact_path(
+        &temp,
+        "post-pr-failure-terminal",
+    ));
+    assert_eq!(
+        terminal["source_artifacts"]
+            .as_array()
+            .expect("source artifacts")
+            .len(),
+        9,
+        "terminal payload retains lightweight metadata for every eligible candidate"
+    );
+    assert_eq!(terminal["source_failure_sequence"], serde_json::json!(10));
+    assert_eq!(terminal["source_artifact_family"], family);
+}
+
+#[test]
+fn terminal_reconciles_tightened_validation_budget_under_publication_lock() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    p12_write_valid_retry_state(&temp);
+    let retry_path = p10_current_artifact_path(&temp, "pr-remediation-retry-state");
+    let mut state = read_json(&retry_path);
+    state["budget"] = serde_json::json!({
+        "max_remediation_attempts": 3,
+        "max_validation_retries": 3,
+        "max_stale_artifact_retries": 3
+    });
+    state["counters"]["validation_retry_index"] = serde_json::json!(2);
+    let history_path = PathBuf::from(
+        state["history_metadata"]["history_path"]
+            .as_str()
+            .expect("retry history path"),
+    );
+    let bytes = serde_json::to_vec_pretty(&state).expect("expanded retry state");
+    fs::write(history_path, &bytes).expect("rewrite retry history");
+    fs::write(&retry_path, bytes).expect("rewrite retry canonical");
+
+    let mut params = p12_params(&temp);
+    params["max_remediation_attempts"] = serde_json::json!(2);
+    params["max_validation_retries"] = serde_json::json!(1);
+    params["max_stale_artifact_retries"] = serde_json::json!(2);
+    assert_eq!(
+        PostPrFailureTerminalExecutor
+            .execute(&mut p12_context(&temp), &params)
+            .expect("terminal policy reconciliation"),
+        StepOutcome::Fatal
+    );
+
+    let reconciled = read_json(&retry_path);
+    assert_eq!(
+        reconciled["budget"]["max_validation_retries"],
+        serde_json::json!(2)
+    );
+    assert_eq!(
+        reconciled["counters"]["validation_retry_index"],
+        serde_json::json!(2)
+    );
+    assert_eq!(
+        reconciled["exhaustion_reason"],
+        serde_json::json!("validation_retries")
+    );
+    let terminal = read_json(&p10_current_artifact_path(
+        &temp,
+        "post-pr-failure-terminal",
+    ));
+    assert_eq!(
+        terminal["exhausted_budget"],
+        serde_json::json!("validation_retries_exhausted")
+    );
+    assert_eq!(terminal["max_validation_retries"], serde_json::json!(2));
+}
+
+#[test]
+fn terminal_producer_metadata_matches_derived_contract() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_p12_plan(&temp);
+    let mut params = p12_params(&temp);
+    params
+        .as_object_mut()
+        .expect("terminal params object")
+        .remove("step_order_index");
+    assert_eq!(
+        PostPrFailureTerminalExecutor
+            .execute(&mut p12_context(&temp), &params)
+            .expect("terminal producer"),
+        StepOutcome::Fatal
+    );
+    let terminal = read_json(&p10_current_artifact_path(
+        &temp,
+        "post-pr-failure-terminal",
+    ));
+    let expected = format!(
+        "terminal:{}:{}:{}:{}",
+        terminal["run_id"].as_str().expect("run id"),
+        terminal["pr_number"].as_u64().expect("PR number"),
+        terminal["head_sha"].as_str().expect("head SHA"),
+        terminal["terminal_reason"]
+            .as_str()
+            .expect("terminal reason")
+    );
+    assert_eq!(terminal["step_order_index"], serde_json::json!(13));
+    assert_eq!(terminal["idempotency_key"], serde_json::json!(expected));
 }

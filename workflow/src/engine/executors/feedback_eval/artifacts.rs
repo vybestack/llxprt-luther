@@ -1,6 +1,9 @@
 //! Artifact/state persistence and step-parameter helpers.
 
 use super::*;
+use crate::engine::executors::pr_identity_params::{
+    explicit_pr_number, string_identity_is_explicit,
+};
 
 pub(super) fn empty_artifact(
     state: EvaluationState,
@@ -78,15 +81,11 @@ pub(super) fn write_evaluation_artifact(
     clock: &dyn ClockSleeper,
     failure: Option<(&str, &str, Value)>,
 ) -> Result<(), EngineError> {
-    store.write_json_artifact(
-        binding,
-        "feedback-evaluations",
-        step_id,
-        step_order,
+    store.write_json_artifact(JsonArtifactWriteRequest::new(
+        ArtifactWriteContext::new(binding, "feedback-evaluations", step_id, step_order, clock),
         payload,
         failure,
-        clock,
-    )?;
+    ))?;
     Ok(())
 }
 
@@ -108,15 +107,17 @@ pub(super) fn write_state_artifact(
     });
     let state_index_hash = stable_json_hash(&payload["state_entries"]);
     payload["state_index_hash"] = Value::String(state_index_hash);
-    store.write_json_artifact(
-        binding,
-        "coderabbit-feedback-state",
-        step_id,
-        step_order,
+    store.write_json_artifact(JsonArtifactWriteRequest::new(
+        ArtifactWriteContext::new(
+            binding,
+            "coderabbit-feedback-state",
+            step_id,
+            step_order,
+            clock,
+        ),
         &payload,
         None,
-        clock,
-    )?;
+    ))?;
     Ok(())
 }
 
@@ -148,15 +149,17 @@ pub(super) fn write_raw_response(
     if sanitized_stem_is_blank(&item_stem) {
         item_stem = format!("item-{}", stable_item_id_hash(&item.item_id));
     }
-    let record = store.write_raw_text_artifact(
-        binding,
-        "feedback-evaluator-raw-output",
-        step_id,
-        step_order,
+    let record = store.write_raw_text_artifact(RawTextArtifactWriteRequest::new(
+        ArtifactWriteContext::new(
+            binding,
+            "feedback-evaluator-raw-output",
+            step_id,
+            step_order,
+            clock,
+        ),
         &format!("{item_stem}-attempt-{attempt}-raw-output"),
         bounded,
-        clock,
-    )?;
+    ))?;
     Ok(record.history_path)
 }
 
@@ -190,12 +193,8 @@ pub(super) fn read_or_build_binding(
     params: &Value,
     store: &PrFollowupArtifactStore,
 ) -> Result<PrFollowupBinding, EngineError> {
-    let pr_number_raw = string_param(context, params, "pr_number", "1910");
-    let pr_number = pr_number_raw.parse().map_err(|err| {
-        // Fail explicitly rather than silently defaulting a bad pr_number to a
-        // hardcoded PR, which would route artifacts to the wrong PR.
-        feedback_eval_error(format!("invalid pr_number '{pr_number_raw}': {err}"))
-    })?;
+    let explicit_pr = explicit_pr_number(context, params).map_err(feedback_eval_error)?;
+    let pr_number = explicit_pr.unwrap_or(1910);
     let requested = PrFollowupBinding {
         schema_version: PR_FOLLOWUP_SCHEMA_VERSION,
         run_id: context.run_id().to_string(),
@@ -213,7 +212,11 @@ pub(super) fn read_or_build_binding(
         base_sha: Some(string_param(context, params, "base_sha", "base-a")),
     };
 
-    if let Some(value) = store.find_current_pr_artifact_for_run(context.run_id(), &requested)? {
+    let mut lookup = requested.clone();
+    if !requested_pr_identity_is_explicit(context, params, explicit_pr) {
+        lookup.pr_number = 0;
+    }
+    if let Some(value) = store.find_current_pr_artifact_for_run(context.run_id(), &lookup)? {
         return binding_from_value(&value);
     }
     Ok(requested)
@@ -271,6 +274,17 @@ pub(super) fn require_u64(value: &Value, field: &str) -> Result<u64, EngineError
         .get(field)
         .and_then(Value::as_u64)
         .ok_or_else(|| feedback_eval_error(format!("missing integer field {field}")))
+}
+
+fn requested_pr_identity_is_explicit(
+    context: &StepContext,
+    params: &Value,
+    explicit_pr: Option<u64>,
+) -> bool {
+    explicit_pr.is_some()
+        && ["repository_owner", "repository_name"]
+            .iter()
+            .all(|key| string_identity_is_explicit(context, params, key))
 }
 
 fn string_param(context: &StepContext, params: &Value, key: &str, default: &str) -> String {

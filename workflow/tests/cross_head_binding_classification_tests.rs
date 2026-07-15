@@ -8,8 +8,9 @@
 //! remediation evidence from history by source-head/output-head identity.
 
 use luther_workflow::engine::executors::{
-    ArtifactSequenceMetadata, ArtifactWriter, ClockSleeper, PrFollowupArtifactStore,
-    PrFollowupBinding, PR_FOLLOWUP_SCHEMA_VERSION,
+    ArtifactSequenceMetadata, ArtifactWriteContext, ArtifactWriter, ClockSleeper,
+    JsonArtifactWriteRequest, PrFollowupArtifactStore, PrFollowupBinding,
+    PR_FOLLOWUP_SCHEMA_VERSION,
 };
 use serde_json::{json, Value};
 use std::path::PathBuf;

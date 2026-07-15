@@ -5,15 +5,17 @@ fn legacy_carried_action_recovers_unique_validated_history() {
     let temp = tempfile::tempdir().expect("tempdir");
     let store = PrFollowupArtifactStore::new(temp.path().to_path_buf());
     store
-        .write_json_artifact(
-            &issue132_binding("aaa"),
-            "pr-remediation-result",
-            "pr_remediation_result",
-            9,
+        .write_json_artifact(JsonArtifactWriteRequest::new(
+            ArtifactWriteContext::new(
+                &issue132_binding("aaa"),
+                "pr-remediation-result",
+                "pr_remediation_result",
+                9,
+                &SystemClockSleeper,
+            ),
             &issue132_result_payload(),
             None,
-            &SystemClockSleeper,
-        )
+        ))
         .expect("write evidence");
 
     let current = issue132_binding("bbb");
@@ -43,15 +45,17 @@ fn legacy_carried_action_fails_when_history_is_ambiguous() {
     let store = PrFollowupArtifactStore::new(temp.path().to_path_buf());
     for _ in 0..2 {
         store
-            .write_json_artifact(
-                &issue132_binding("aaa"),
-                "pr-remediation-result",
-                "pr_remediation_result",
-                9,
+            .write_json_artifact(JsonArtifactWriteRequest::new(
+                ArtifactWriteContext::new(
+                    &issue132_binding("aaa"),
+                    "pr-remediation-result",
+                    "pr_remediation_result",
+                    9,
+                    &SystemClockSleeper,
+                ),
                 &issue132_result_payload(),
                 None,
-                &SystemClockSleeper,
-            )
+            ))
             .expect("write evidence");
     }
 
@@ -81,15 +85,17 @@ fn fixed_action_rejects_incomplete_retry_scope_and_producer_provenance() {
     let temp = tempfile::tempdir().expect("tempdir");
     let store = PrFollowupArtifactStore::new(temp.path().to_path_buf());
     let record = store
-        .write_json_artifact(
-            &issue132_binding("aaa"),
-            "pr-remediation-result",
-            "pr_remediation_result",
-            9,
+        .write_json_artifact(JsonArtifactWriteRequest::new(
+            ArtifactWriteContext::new(
+                &issue132_binding("aaa"),
+                "pr-remediation-result",
+                "pr_remediation_result",
+                9,
+                &SystemClockSleeper,
+            ),
             &issue132_result_payload(),
             None,
-            &SystemClockSleeper,
-        )
+        ))
         .expect("write evidence");
     let mut result = store
         .read_history_evidence_by_sequence(

@@ -28,6 +28,7 @@ pub mod parent_orchestration;
 pub mod pr_check_wait;
 pub mod pr_followup_artifacts;
 pub mod pr_followup_types;
+mod pr_identity_params;
 pub mod pr_remediation;
 pub mod shell;
 pub mod verify;
@@ -66,22 +67,25 @@ pub use parent_orchestration::{
     missing_ordered_child_states, ParentOrchestrationExecutor, ParentOrchestrationExecutorWithQuery,
 };
 pub use pr_followup_artifacts::{
-    ArtifactWriter, ClockSleeper, PrFollowupArtifactStore, PrFollowupFilesystem,
-    SystemClockSleeper, SystemPrFollowupFilesystem,
+    ArtifactPublicationHook, ArtifactPublicationStage, ArtifactReplayKey, ArtifactWriteContext,
+    ArtifactWriter, ClockSleeper, JsonArtifactWriteRequest, PrFollowupArtifactStore,
+    PrFollowupFilesystem, RawTextArtifactWriteRequest, SystemClockSleeper,
+    SystemPrFollowupFilesystem, MAX_ARTIFACT_FILE_BYTES, MAX_ARTIFACT_READ_BYTES,
 };
 pub use pr_followup_types::{
     ArtifactSequenceMetadata, CiFailures, CodeRabbitFeedback, CollectionState, EvaluationState,
     FeedbackEvaluations, FeedbackMarkerReport, FeedbackState, FixedActionEvidenceRef, OverallState,
-    PlanState, PostPrFailureTerminal, PostPrIterationGuard, PostPrTestResult, PrCheckStatus,
-    PrFollowupBinding, PrIdentity, PrRemediationPlan, PrRemediationResult, PushRemediationResult,
-    ValidationState, PR_FOLLOWUP_SCHEMA_VERSION,
+    PlanState, PostPrFailureTerminal, PostPrFailureTerminalHistory, PostPrFailureTerminalSource,
+    PostPrIterationGuard, PostPrTestResult, PrCheckStatus, PrFollowupBinding, PrIdentity,
+    PrRemediationPlan, PrRemediationResult, PushRemediationResult, ValidationState,
+    PR_FOLLOWUP_SCHEMA_VERSION,
 };
 pub use pr_remediation::{
     LlxprtInvocationRequest, LlxprtInvocationResult, PostPrFailureTerminalExecutor,
-    PostPrIterationGuardExecutor, PostPrTestCommandRequest, PostPrTestCommandResult,
-    PostPrTestCommandRunner, PrFollowupLlxprtCommandRunner, PrFollowupRemediationExecutor,
-    PrFollowupRemediationExecutorWithRunner, PrRemediationPlanExecutor,
-    PrRemediationResultExecutor, PushRemediationChangesExecutor,
+    PostPrFailureTerminalExecutorWithClock, PostPrIterationGuardExecutor, PostPrTestCommandRequest,
+    PostPrTestCommandResult, PostPrTestCommandRunner, PrFollowupLlxprtCommandRunner,
+    PrFollowupRemediationExecutor, PrFollowupRemediationExecutorWithRunner,
+    PrRemediationPlanExecutor, PrRemediationResultExecutor, PushRemediationChangesExecutor,
     PushRemediationChangesExecutorWithRunner, PushRemediationCommandRequest,
     PushRemediationCommandResult, PushRemediationCommandRunner, RunPostPrTestsExecutor,
     RunPostPrTestsExecutorWithRunner, SystemPrFollowupLlxprtCommandRunner,

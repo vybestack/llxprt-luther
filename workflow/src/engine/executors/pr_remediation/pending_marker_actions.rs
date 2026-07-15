@@ -45,15 +45,17 @@ pub(super) fn write_pending_marker_actions(
         marker_policy: pending_marker_policy(remediation_output_head_sha),
         updated_at: clock.now_rfc3339(),
     };
-    store.write_json_artifact(
-        binding,
-        "pending-feedback-marker-actions",
-        step_id,
-        step_order,
+    store.write_json_artifact(JsonArtifactWriteRequest::new(
+        ArtifactWriteContext::new(
+            binding,
+            "pending-feedback-marker-actions",
+            step_id,
+            step_order,
+            clock,
+        ),
         &payload,
         None,
-        clock,
-    )?;
+    ))?;
     Ok(())
 }
 

@@ -1584,14 +1584,15 @@ fn post_pr_exact_p17_routing_contract_is_present() {
         "validate_remediation_result",
         "post_pr_failure_terminal",
     ] {
-        let params = workflow_type
+        let step = workflow_type
             .steps
             .iter()
             .find(|step| step.step_id == step_id)
-            .and_then(|step| step.parameters.as_ref())
-            .unwrap_or_else(|| panic!("{step_id} params"));
+            .unwrap_or_else(|| panic!("missing {step_id} step"));
         assert!(
-            params.get("remediation_retry_state_path").is_none(),
+            step.parameters
+                .as_ref()
+                .is_none_or(|params| { params.get("remediation_retry_state_path").is_none() }),
             "{step_id} must not carry a dead remediation_retry_state_path parameter"
         );
     }
@@ -3356,6 +3357,67 @@ fn production_and_fixture_llxprt_issue_fix_v1_are_equivalent() {
     );
     load_workflow_toml("config/workflows/llxprt-issue-fix-v1.toml");
     load_workflow_toml("tests/fixtures/workflows/valid/llxprt-issue-fix-v1.toml");
+}
+
+#[test]
+fn remediation_retry_maxima_are_authoritative_and_consistent_in_shipped_workflows() {
+    let fixture_json =
+        std::fs::read_to_string("tests/fixtures/workflows/valid/llxprt-issue-fix-v1.json")
+            .expect("read fixture workflow JSON");
+    let fixture_json = luther_workflow::workflow::parse_workflow_type_json(&fixture_json)
+        .expect("parse fixture workflow JSON");
+    let workflows = [
+        load_workflow_toml("config/workflows/llxprt-issue-fix-v1.toml"),
+        load_workflow_toml("config/workflows/llxprt-luther-dogfood-v1.toml"),
+        load_workflow_toml("tests/fixtures/workflows/valid/llxprt-issue-fix-v1.toml"),
+        fixture_json,
+    ];
+
+    for workflow in &workflows {
+        let validation_parameters = workflow
+            .steps
+            .iter()
+            .find(|step| step.step_id == "validate_remediation_result")
+            .and_then(|step| step.parameters.as_ref())
+            .expect("shipped workflow validation parameters");
+        assert_eq!(
+            validation_parameters
+                .get("remediation_step_order_index")
+                .and_then(serde_json::Value::as_u64),
+            Some(9),
+            "{} must preserve remediation receipt provenance at step 9",
+            workflow.workflow_type_id
+        );
+        for step_id in [
+            "remediate_pr_followup",
+            "validate_remediation_result",
+            "post_pr_failure_terminal",
+        ] {
+            let parameters = workflow
+                .steps
+                .iter()
+                .find(|step| step.step_id == step_id)
+                .and_then(|step| step.parameters.as_ref())
+                .unwrap_or_else(|| {
+                    panic!(
+                        "{} is missing {step_id} parameters",
+                        workflow.workflow_type_id
+                    )
+                });
+            for maximum in [
+                "max_remediation_attempts",
+                "max_validation_retries",
+                "max_stale_artifact_retries",
+            ] {
+                assert_eq!(
+                    parameters.get(maximum).and_then(serde_json::Value::as_u64),
+                    Some(2),
+                    "{} {step_id} must declare authoritative {maximum}",
+                    workflow.workflow_type_id,
+                );
+            }
+        }
+    }
 }
 
 // ============================================================================

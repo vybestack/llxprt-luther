@@ -328,15 +328,19 @@ fn write_post_pr_test_completion(
     } else {
         None
     };
-    setup.store.write_json_artifact(
-        &setup.binding,
-        "post-pr-test-result",
-        &setup.step_id,
-        setup.step_order,
-        &payload,
-        failure,
-        clock,
-    )?;
+    setup
+        .store
+        .write_json_artifact(JsonArtifactWriteRequest::new(
+            ArtifactWriteContext::new(
+                &setup.binding,
+                "post-pr-test-result",
+                &setup.step_id,
+                setup.step_order,
+                clock,
+            ),
+            &payload,
+            failure,
+        ))?;
 
     Ok(if !summary.any_failed {
         StepOutcome::Success
@@ -723,15 +727,11 @@ fn write_post_pr_test_fatal(
             clock,
         ),
     };
-    store.write_json_artifact(
-        binding,
-        "post-pr-test-result",
-        step_id,
-        step_order,
+    store.write_json_artifact(JsonArtifactWriteRequest::new(
+        ArtifactWriteContext::new(binding, "post-pr-test-result", step_id, step_order, clock),
         &payload,
         Some(("fatal", reason, json!({ "errors": errors }))),
-        clock,
-    )?;
+    ))?;
     Ok(StepOutcome::Fatal)
 }
 
@@ -862,6 +862,10 @@ impl StepExecutor for PostPrIterationGuardExecutor {
         let binding = binding_for_context(context, params, &store, &SystemClockSleeper)?;
         let max_iterations = u64_param(params, "max_post_pr_remediation_iterations", 3);
         let previous = latest_guard_for_current_run(&store, &binding)?;
+        let predecessor_artifact_sequence = previous
+            .as_ref()
+            .and_then(|guard| guard.get("artifact_sequence"))
+            .and_then(Value::as_u64);
         let (iteration_index, previous_head_sha, reason) = match previous.as_ref() {
             None => (0, Value::Null, "initial_entry"),
             Some(guard)
@@ -893,6 +897,7 @@ impl StepExecutor for PostPrIterationGuardExecutor {
             "iteration_index": iteration_index,
             "max_post_pr_remediation_iterations": max_iterations,
             "previous_head_sha": previous_head_sha,
+            "predecessor_artifact_sequence": predecessor_artifact_sequence,
             "reason": if exceeded { "max_iterations_exceeded" } else { reason },
             "ignored_stale_artifacts": [],
             "updated_at": SystemClockSleeper.now_rfc3339()
@@ -907,15 +912,17 @@ impl StepExecutor for PostPrIterationGuardExecutor {
                 }),
             )
         });
-        store.write_json_artifact(
-            &binding,
-            "post-pr-iteration-guard",
-            "post_pr_iteration_guard",
-            u64_param(params, "step_order_index", 2),
+        store.write_json_artifact(JsonArtifactWriteRequest::new(
+            ArtifactWriteContext::new(
+                &binding,
+                "post-pr-iteration-guard",
+                "post_pr_iteration_guard",
+                u64_param(params, "step_order_index", 2),
+                &SystemClockSleeper,
+            ),
             &payload,
             failure,
-            &SystemClockSleeper,
-        )?;
+        ))?;
         if exceeded {
             Ok(StepOutcome::Fatal)
         } else {
@@ -928,48 +935,88 @@ fn latest_guard_for_current_run(
     store: &PrFollowupArtifactStore,
     binding: &PrFollowupBinding,
 ) -> Result<Option<Value>, EngineError> {
-    let root = store
-        .root()
-        .join("pr-followup")
-        .join("history")
-        .join(&binding.run_id)
-        .join(&binding.repository_owner)
-        .join(&binding.repository_name)
-        .join(binding.pr_number.to_string())
-        .join("post-pr-iteration-guard");
-    if !root.exists() {
-        return Ok(None);
-    }
-    let mut values = Vec::new();
-    for entry in std::fs::read_dir(&root)
-        .map_err(|err| pr_remediation_error(format!("read guard history: {err}")))?
-    {
-        let path = entry
-            .map_err(|err| pr_remediation_error(format!("read guard history entry: {err}")))?
-            .path();
-        if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
-            continue;
-        }
-        let content = std::fs::read_to_string(&path).map_err(|err| {
-            pr_remediation_error(format!("read guard artifact {}: {err}", path.display()))
+    let mut candidates =
+        store.read_pr_identity_history_candidates(binding, "post-pr-iteration-guard")?;
+    candidates.sort_by_key(|candidate| {
+        candidate
+            .value
+            .as_ref()
+            .and_then(|value| value.get("artifact_sequence"))
+            .and_then(Value::as_u64)
+            .unwrap_or_default()
+    });
+    let mut latest = None;
+    let mut sequences = BTreeSet::new();
+    for candidate in candidates {
+        let value = candidate.value.ok_or_else(|| {
+            EngineError::InvalidState(format!(
+                "malformed post-PR iteration guard history {}: {}",
+                candidate.path.display(),
+                candidate
+                    .validation_error
+                    .as_deref()
+                    .unwrap_or("JSON payload unavailable")
+            ))
         })?;
-        let value: Value = serde_json::from_str(&content).map_err(|err| {
-            pr_remediation_error(format!("parse guard artifact {}: {err}", path.display()))
-        })?;
-        if binding_from_value(&value).is_ok_and(|actual| {
-            actual.run_id == binding.run_id
-                && actual.repository_owner == binding.repository_owner
-                && actual.repository_name == binding.repository_name
-                && actual.pr_number == binding.pr_number
-        }) {
-            values.push(value);
+        if let Some(error) = candidate.validation_error {
+            return Err(EngineError::InvalidState(format!(
+                "invalid post-PR iteration guard history {}: {error}",
+                candidate.path.display()
+            )));
         }
-    }
-    values.sort_by_key(|value| {
-        value
+        let sequence = value
             .get("artifact_sequence")
             .and_then(Value::as_u64)
-            .unwrap_or(0)
-    });
-    Ok(values.pop())
+            .filter(|sequence| *sequence > 0)
+            .ok_or_else(|| {
+                EngineError::InvalidState(format!(
+                    "post-PR iteration guard history {} has no positive artifact_sequence",
+                    candidate.path.display()
+                ))
+            })?;
+        if !sequences.insert(sequence) {
+            return Err(EngineError::InvalidState(format!(
+                "duplicate post-PR iteration guard history sequence {sequence}"
+            )));
+        }
+        validate_guard_snapshot(&value, &candidate.path)?;
+        let expected_predecessor = latest
+            .as_ref()
+            .and_then(|previous: &Value| previous.get("artifact_sequence"))
+            .and_then(Value::as_u64);
+        let actual_predecessor = value
+            .get("predecessor_artifact_sequence")
+            .and_then(Value::as_u64);
+        if expected_predecessor.is_some() && actual_predecessor != expected_predecessor {
+            return Err(EngineError::InvalidState(format!(
+                "broken post-PR iteration guard history chain at {}: expected predecessor {:?}, found {:?}",
+                candidate.path.display(),
+                expected_predecessor,
+                actual_predecessor
+            )));
+        }
+        latest = Some(value);
+    }
+    Ok(latest)
+}
+
+fn validate_guard_snapshot(value: &Value, path: &Path) -> Result<(), EngineError> {
+    let guard_state = value.get("guard_state").and_then(Value::as_str);
+    if !matches!(guard_state, Some("proceed" | "max_iterations_exceeded"))
+        || value
+            .get("iteration_index")
+            .and_then(Value::as_u64)
+            .is_none()
+        || value
+            .get("max_post_pr_remediation_iterations")
+            .and_then(Value::as_u64)
+            .is_none()
+        || value.get("head_sha").and_then(Value::as_str).is_none()
+    {
+        return Err(EngineError::InvalidState(format!(
+            "malformed post-PR iteration guard snapshot {}",
+            path.display()
+        )));
+    }
+    Ok(())
 }
