@@ -1,5 +1,13 @@
 # PR Follow-Through Architecture
 
+## Engine-owned remediation retry state
+
+Remediation retry counters and maxima are owned by the workflow engine and persisted in the `pr-remediation-retry-state` artifact family. Agent-authored result counters are evidence only and are replaced with the active engine state before validation. The immutable retry scope is the run, repository, PR, input head SHA, and remediation-plan artifact sequence; changing the head or plan starts a fresh scope while preserving old history.
+
+A launch ordinal is reserved durably before invoking LLxprt and marked launched immediately before the runner call. A launched ordinal is conservatively treated as consumed after interruption, which may sacrifice an invocation that had not started but prevents continuation from exceeding the configured launch budget. An unexpired active lease makes a terminal projection fail closed as `active_remediation_launch`; after the persisted timeout-derived lease expires, continuation automatically reserves the next ordinal. Reconfigured maxima can tighten an existing scope but cannot expand it. Exhausted terminal artifacts and status projections expose the exhausted budget and authoritative counters only when they match the active scope.
+
+Retry-state mutation, failure-source selection, and artifact publication share one advisory `flock` on `.publication-lock` in the current binding directory. The lock is scoped to the run/repository/PR binding, is held across immutable-history and canonical publication, and is released automatically when the owning process exits. It is not a SQLite transaction, lease, or service-health signal; the durable retry artifact and its immutable predecessor chain provide crash recovery.
+
 @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P20
 @requirement:REQ-PRFU-001,REQ-PRFU-002,REQ-PRFU-003,REQ-PRFU-004,REQ-PRFU-009,REQ-PRFU-011,REQ-PRFU-014,REQ-PRFU-015,REQ-PRFU-016,REQ-PRFU-018,REQ-PRFU-020,REQ-PRFU-020A,REQ-PRFU-033,REQ-PRFU-034,REQ-PRFU-035
 

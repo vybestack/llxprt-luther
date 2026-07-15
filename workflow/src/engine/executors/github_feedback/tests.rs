@@ -303,6 +303,19 @@ fn required_string_param_errors_when_empty() {
 }
 
 #[test]
+fn fallback_binding_accepts_numeric_pr_parameter() {
+    let context = StepContext::new(std::path::PathBuf::from("/tmp"), "run-xyz".to_string());
+    let binding = fallback_binding(&context, &json!({"pr_number": 42})).unwrap();
+    assert_eq!(binding.pr_number, 42);
+}
+
+#[test]
+fn fallback_binding_rejects_invalid_pr_parameter() {
+    let context = StepContext::new(std::path::PathBuf::from("/tmp"), "run-xyz".to_string());
+    assert!(fallback_binding(&context, &json!({"pr_number": false})).is_err());
+}
+
+#[test]
 fn fallback_binding_uses_documented_defaults() {
     let context = StepContext::new(std::path::PathBuf::from("/tmp"), "run-xyz".to_string());
     let binding = fallback_binding(&context, &json!({})).unwrap();

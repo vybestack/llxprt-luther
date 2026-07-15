@@ -1,6 +1,7 @@
 use super::*;
 use crate::engine::executors::pr_followup_artifacts::{
-    ClockSleeper, PrFollowupArtifactStore, ValidatedHistoryLedger,
+    ArtifactWriteContext, ClockSleeper, JsonArtifactWriteRequest, PrFollowupArtifactStore,
+    RawTextArtifactWriteRequest, ValidatedHistoryLedger,
 };
 use crate::engine::executors::pr_followup_types::{
     FixedActionEvidenceRef, PrFollowupBinding, NO_REMEDIATION_OUTPUT_HEAD,
@@ -274,27 +275,22 @@ pub(super) fn write_marker_comment_body_file(
     body: &str,
     clock: &dyn ClockSleeper,
 ) -> Result<PathBuf, EngineError> {
-    let record = store.write_raw_text_artifact(
-        binding,
-        "feedback-marker-comment-body",
-        step_id,
-        step_order,
+    let record = store.write_raw_text_artifact(RawTextArtifactWriteRequest::new(
+        ArtifactWriteContext::new(
+            binding,
+            "feedback-marker-comment-body",
+            step_id,
+            step_order,
+            clock,
+        ),
         &format!(
             "{}-{}",
             action.action_kind,
             stable_hash(&action.stable_marker_key)
         ),
         body,
-        clock,
-    )?;
-    let body_path = record.history_path.with_extension("body.md");
-    std::fs::write(&body_path, body).map_err(|err| {
-        github_feedback_error(format!(
-            "write marker comment body file {}: {err}",
-            body_path.display()
-        ))
-    })?;
-    Ok(body_path)
+    ))?;
+    store.publish_immutable_sidecar(binding, &record, "body.md", body.as_bytes())
 }
 
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P15
@@ -475,15 +471,17 @@ pub(super) fn write_updated_pending_actions(
         "marker_policy": pending_artifact.get("marker_policy").cloned().unwrap_or_else(|| json!({})),
         "updated_at": clock.now_rfc3339()
     });
-    store.write_json_artifact(
-        binding,
-        PENDING_MARKER_ACTIONS_FAMILY,
-        step_id,
-        step_order,
+    store.write_json_artifact(JsonArtifactWriteRequest::new(
+        ArtifactWriteContext::new(
+            binding,
+            PENDING_MARKER_ACTIONS_FAMILY,
+            step_id,
+            step_order,
+            clock,
+        ),
         &payload,
         None,
-        clock,
-    )?;
+    ))?;
     Ok(())
 }
 
@@ -508,15 +506,11 @@ pub(super) fn write_feedback_artifacts(
     clock: &dyn ClockSleeper,
     failure: Option<(&str, &str, Value)>,
 ) -> Result<(), EngineError> {
-    store.write_json_artifact(
-        binding,
-        "coderabbit-feedback",
-        step_id,
-        step_order,
+    store.write_json_artifact(JsonArtifactWriteRequest::new(
+        ArtifactWriteContext::new(binding, "coderabbit-feedback", step_id, step_order, clock),
         payload,
         failure,
-        clock,
-    )?;
+    ))?;
     let state_entries = payload
         .get("items")
         .and_then(Value::as_array)
@@ -542,11 +536,11 @@ pub(super) fn write_feedback_artifacts(
             })
         })
         .collect::<Vec<_>>();
-    store.write_json_artifact(binding, "coderabbit-feedback-state", step_id, step_order, &json!({
+    store.write_json_artifact(JsonArtifactWriteRequest::new(ArtifactWriteContext::new(binding, "coderabbit-feedback-state", step_id, step_order, clock), &json!({
         "state_entries": state_entries,
         "state_index_hash": stable_hash(&serde_json::to_string(payload.get("items").unwrap_or(&Value::Null)).unwrap_or_default()),
         "superseded_entries": []
-    }), None, clock)?;
+    }), None))?;
     Ok(())
 }
 

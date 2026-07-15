@@ -50,15 +50,17 @@ pub(crate) fn write_result_and_get_sequence(
         }
     });
     let record = store
-        .write_json_artifact(
-            b,
-            "pr-remediation-result",
-            "pr_remediation_result",
-            9,
+        .write_json_artifact(JsonArtifactWriteRequest::new(
+            ArtifactWriteContext::new(
+                b,
+                "pr-remediation-result",
+                "pr_remediation_result",
+                9,
+                clock,
+            ),
             &payload,
             None,
-            clock,
-        )
+        ))
         .expect("write remediation result");
     record.sequence
 }

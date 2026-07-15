@@ -265,6 +265,24 @@ fn stable_json_hash_is_deterministic_and_prefixed() {
 }
 
 #[test]
+fn read_or_build_binding_routes_numeric_pr_parameter_directly() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let context = StepContext::new(temp.path().to_path_buf(), "run-numeric".to_string());
+    let store = PrFollowupArtifactStore::new(temp.path().join("artifacts"));
+    let binding = read_or_build_binding(
+        &context,
+        &json!({
+            "repository_owner": "owner",
+            "repository_name": "repo",
+            "pr_number": 42
+        }),
+        &store,
+    )
+    .expect("numeric PR parameter");
+    assert_eq!(binding.pr_number, 42);
+}
+
+#[test]
 fn binding_from_value_roundtrip() {
     let value = json!({
         "schema_version": PR_FOLLOWUP_SCHEMA_VERSION,

@@ -13,7 +13,7 @@ use crate::engine::executors::pr_check_wait::{
     counters_from_value, status_payload, PrCheckObservation, PrCheckWaitClassification,
 };
 use crate::engine::executors::pr_followup_artifacts::{
-    ArtifactWriter, ClockSleeper, PrFollowupArtifactStore,
+    ArtifactWriteContext, ClockSleeper, JsonArtifactWriteRequest, PrFollowupArtifactStore,
 };
 use crate::engine::executors::pr_followup_types::{
     OverallState, PrFollowupBinding, PR_FOLLOWUP_SCHEMA_VERSION,
@@ -283,15 +283,17 @@ fn capture_pr_identity_via_gh(
         "source_head_repository_owner": identity.source_head_repository_owner,
         "source_head_repository_name": identity.source_head_repository_name
     });
-    store.write_json_artifact(
-        &identity.binding,
-        "pr",
-        current_step_id(context, "capture_pr_identity").as_str(),
-        step_order_index(params, 1),
+    store.write_json_artifact(JsonArtifactWriteRequest::new(
+        ArtifactWriteContext::new(
+            &identity.binding,
+            "pr",
+            current_step_id(context, "capture_pr_identity").as_str(),
+            step_order_index(params, 1),
+            clock,
+        ),
         &payload,
         None,
-        clock,
-    )?;
+    ))?;
     Ok(identity)
 }
 
@@ -416,7 +418,7 @@ fn read_or_capture_pr_identity(
     }
 
     let identity = capture_pr_identity_via_gh(&target, context, params, runner, clock, store)?;
-    read_json_without_store_validation(&store.canonical_path(&identity.binding, "pr"))
+    store.read_current_json(&identity.binding, "pr")
 }
 
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P06
@@ -749,15 +751,19 @@ fn write_check_status_artifact(write: CheckStatusArtifactWrite<'_>) -> Result<()
             json!({ "terminal_counts": write.classification.terminal_counts }),
         )),
     };
-    write.store.write_json_artifact(
-        write.binding,
-        "pr-check-status",
-        "watch_pr_checks",
-        write.step_order_index,
-        &payload,
-        failure,
-        write.clock,
-    )?;
+    write
+        .store
+        .write_json_artifact(JsonArtifactWriteRequest::new(
+            ArtifactWriteContext::new(
+                write.binding,
+                "pr-check-status",
+                "watch_pr_checks",
+                write.step_order_index,
+                write.clock,
+            ),
+            &payload,
+            failure,
+        ))?;
     Ok(())
 }
 
@@ -883,16 +889,6 @@ fn require_u64(value: &Value, field: &str) -> Result<u64, EngineError> {
         .get(field)
         .and_then(Value::as_u64)
         .ok_or_else(|| github_pr_error(format!("missing or invalid integer field {field}")))
-}
-
-/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P06
-/// @requirement:REQ-PRFU-001,REQ-PRFU-004
-/// @pseudocode lines 6,16
-fn read_json_without_store_validation(path: &std::path::Path) -> Result<Value, EngineError> {
-    let content = std::fs::read_to_string(path)
-        .map_err(|err| github_pr_error(format!("read {}: {err}", path.display())))?;
-    serde_json::from_str(&content)
-        .map_err(|err| github_pr_error(format!("parse {}: {err}", path.display())))
 }
 
 /// @requirement:REQ-PRFU-004

@@ -654,6 +654,9 @@ artifact_root = "{artifact_dir}"
 step_order_index = 9
 profile = "{profile_remediating}"
 timeout_seconds = 1800
+max_remediation_attempts = 2
+max_validation_retries = 2
+max_stale_artifact_retries = 2
 remediation_plan_path = "{artifact_dir}/pr-followup/current/pr-remediation-plan.json"
 remediation_prompt_path = "{artifact_dir}/pr-followup/current/pr-remediation-prompt.md"
 remediation_result_path = "{artifact_dir}/pr-followup/current/pr-remediation-result.json"
@@ -671,6 +674,7 @@ description = "Validate structured remediation result and artifact-backed retry 
 [steps.parameters]
 artifact_root = "{artifact_dir}"
 step_order_index = 10
+remediation_step_order_index = 9
 max_validation_retries = 2
 max_stale_artifact_retries = 2
 repository_owner = "{repository_owner}"
@@ -750,7 +754,9 @@ description = "Write terminal PR follow-up failure artifact and fail the run"
 [steps.parameters]
 artifact_root = "{artifact_dir}"
 step_order_index = 13
-post_pr_failure_terminal_result_path = "{artifact_dir}/pr-followup/current/post-pr-failure-terminal.json"
+max_remediation_attempts = 2
+max_validation_retries = 2
+max_stale_artifact_retries = 2
 
 [[steps]]
 step_id = "abandon_and_log"

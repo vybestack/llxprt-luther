@@ -3,51 +3,40 @@
 //! @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P05
 //! @requirement:REQ-PRFU-002,REQ-PRFU-004,REQ-PRFU-020
 //! @pseudocode lines 5-7
-mod identity_discovery;
 
+mod artifact_envelope;
 mod history;
+mod identity_discovery;
+mod path_safety;
+pub use path_safety::{
+    sanitize_path_segment, PrFollowupFilesystem, SystemPrFollowupFilesystem,
+    MAX_ARTIFACT_FILE_BYTES, MAX_ARTIFACT_READ_BYTES,
+};
+mod sequence_recovery;
+mod terminal_validation;
+mod terminal_write;
+use artifact_envelope::*;
 pub(crate) use history::ValidatedHistoryLedger;
 use history::*;
 
-use self::identity_discovery::{discover_current_pr_artifact, is_current_pr_identity};
-use std::collections::{BTreeMap, BTreeSet};
-use std::fs;
-use std::path::{Path, PathBuf};
-
+use self::identity_discovery::{discover_current_pr_artifacts, is_current_pr_identity};
+use self::terminal_write::NoopArtifactPublicationHook;
+pub(crate) use self::terminal_write::{
+    ArtifactLaunchBinding, ImmutableReceiptRequest, RecoverableCurrentArtifact,
+    RecoverableHistoryCandidate,
+};
+pub use self::terminal_write::{
+    ArtifactPublicationHook, ArtifactPublicationStage, TerminalArtifactPublication,
+};
 use serde::Serialize;
 use serde_json::{Map, Value};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use crate::engine::executors::pr_followup_types::{
-    ArtifactSequenceMetadata, CiFailures, PrCheckStatus, PrFollowupBinding,
+    ArtifactSequenceMetadata, CiFailures, PostPrFailureTerminal, PrCheckStatus, PrFollowupBinding,
 };
 use crate::engine::runner::EngineError;
-
-/// Filesystem seam for artifact store root canonicalization.
-/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P05
-/// @requirement:REQ-PRFU-002
-/// @pseudocode lines 5-7
-pub trait PrFollowupFilesystem: Send + Sync {
-    fn canonicalize_root(&self, path: &Path) -> Result<PathBuf, EngineError>;
-}
-
-/// System filesystem used by default artifact store construction.
-/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P05
-/// @requirement:REQ-PRFU-002
-/// @pseudocode lines 5-7
-#[derive(Debug, Default)]
-pub struct SystemPrFollowupFilesystem;
-
-/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P05
-/// @requirement:REQ-PRFU-002
-/// @pseudocode lines 5-7
-impl PrFollowupFilesystem for SystemPrFollowupFilesystem {
-    fn canonicalize_root(&self, path: &Path) -> Result<PathBuf, EngineError> {
-        fs::create_dir_all(path)
-            .map_err(|err| artifact_error(format!("create artifact root: {err}")))?;
-        path.canonicalize()
-            .map_err(|err| artifact_error(format!("canonicalize artifact root: {err}")))
-    }
-}
 
 /// Clock/sleeper abstraction for deterministic post-PR polling and artifact timestamps.
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P05
@@ -127,28 +116,141 @@ pub struct ArtifactWriteRecord {
     pub failure_sequence: Option<u64>,
 }
 
+/// Binding and provenance shared by every artifact write request.
+pub struct ArtifactWriteContext<'a> {
+    binding: &'a PrFollowupBinding,
+    artifact_family: &'a str,
+    producer_step_id: &'a str,
+    step_order_index: u64,
+    clock: &'a dyn ClockSleeper,
+}
+
+impl<'a> ArtifactWriteContext<'a> {
+    #[must_use]
+    pub fn new(
+        binding: &'a PrFollowupBinding,
+        artifact_family: &'a str,
+        producer_step_id: &'a str,
+        step_order_index: u64,
+        clock: &'a dyn ClockSleeper,
+    ) -> Self {
+        Self {
+            binding,
+            artifact_family,
+            producer_step_id,
+            step_order_index,
+            clock,
+        }
+    }
+}
+
+struct ArtifactFailure<'a> {
+    semantic_state: &'a str,
+    reason: &'a str,
+    details: Value,
+}
+
+/// Typed request for writing a JSON artifact and its store-managed envelope.
+pub struct JsonArtifactWriteRequest<'a, T: ?Sized> {
+    context: ArtifactWriteContext<'a>,
+    payload: &'a T,
+    failure: Option<ArtifactFailure<'a>>,
+}
+
+impl<'a, T: ?Sized> JsonArtifactWriteRequest<'a, T> {
+    #[must_use]
+    pub fn new(
+        context: ArtifactWriteContext<'a>,
+        payload: &'a T,
+        failure: Option<(&'a str, &'a str, Value)>,
+    ) -> Self {
+        Self {
+            context,
+            payload,
+            failure: failure.map(|(semantic_state, reason, details)| ArtifactFailure {
+                semantic_state,
+                reason,
+                details,
+            }),
+        }
+    }
+}
+
+/// Identity embedded by a producer to make conditional publication replay-safe.
+pub struct ArtifactReplayKey<'a> {
+    field: &'a str,
+    value: &'a str,
+    allow_superseding_source: bool,
+}
+
+impl<'a> ArtifactReplayKey<'a> {
+    #[must_use]
+    pub fn new(field: &'a str, value: &'a str) -> Self {
+        Self {
+            field,
+            value,
+            allow_superseding_source: false,
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn superseding(field: &'a str, value: &'a str) -> Self {
+        Self {
+            field,
+            value,
+            allow_superseding_source: true,
+        }
+    }
+}
+
+/// Typed request for preserving raw text in an artifact envelope.
+pub struct RawTextArtifactWriteRequest<'a> {
+    context: ArtifactWriteContext<'a>,
+    artifact_name: &'a str,
+    raw_text: &'a str,
+}
+
+impl<'a> RawTextArtifactWriteRequest<'a> {
+    #[must_use]
+    pub fn new(
+        context: ArtifactWriteContext<'a>,
+        artifact_name: &'a str,
+        raw_text: &'a str,
+    ) -> Self {
+        Self {
+            context,
+            artifact_name,
+            raw_text,
+        }
+    }
+}
+
+struct StoreFieldContext<'a> {
+    write: ArtifactWriteContext<'a>,
+    sequence: &'a ArtifactSequenceMetadata,
+    canonical_path: &'a Path,
+    history_path: &'a Path,
+    failure_sequence: Option<u64>,
+    failure: Option<ArtifactFailure<'a>>,
+}
+
 /// PR follow-through artifact store implementation.
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P05
 /// @requirement:REQ-PRFU-002,REQ-PRFU-004
 /// @pseudocode lines 5-7
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct PrFollowupArtifactStore {
     root: PathBuf,
+    publication_hook: Arc<dyn ArtifactPublicationHook>,
 }
 
-/// Recovered sequence state derived from accepted same-run snapshots.
-/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P05
-/// @requirement:REQ-PRFU-002
-/// @pseudocode lines 5-7
-#[derive(Debug, Default)]
-struct RecoveredSequenceState {
-    max_artifact_sequence: u64,
-    max_failure_sequence: u64,
-    max_write_sequence_by_family: BTreeMap<String, u64>,
-    seen_artifact_sequences: BTreeSet<u64>,
-    seen_failure_sequences: BTreeSet<u64>,
-    seen_family_writes: BTreeSet<(String, u64)>,
-    seen_writes_by_family: BTreeMap<String, BTreeSet<u64>>,
+impl std::fmt::Debug for PrFollowupArtifactStore {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PrFollowupArtifactStore")
+            .field("root", &self.root)
+            .finish_non_exhaustive()
+    }
 }
 
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P05
@@ -157,7 +259,21 @@ struct RecoveredSequenceState {
 impl PrFollowupArtifactStore {
     #[must_use]
     pub fn new(root: PathBuf) -> Self {
-        Self { root }
+        Self {
+            root: path_safety::canonicalize_root_alias(root),
+            publication_hook: Arc::new(NoopArtifactPublicationHook),
+        }
+    }
+
+    #[must_use]
+    pub fn with_publication_hook(
+        root: PathBuf,
+        publication_hook: Arc<dyn ArtifactPublicationHook>,
+    ) -> Self {
+        Self {
+            root: path_safety::canonicalize_root_alias(root),
+            publication_hook,
+        }
     }
 
     pub fn with_filesystem(
@@ -165,6 +281,17 @@ impl PrFollowupArtifactStore {
         filesystem: &dyn PrFollowupFilesystem,
     ) -> Result<Self, EngineError> {
         Ok(Self::new(filesystem.canonicalize_root(root)?))
+    }
+
+    pub fn with_filesystem_and_publication_hook(
+        root: &Path,
+        filesystem: &dyn PrFollowupFilesystem,
+        publication_hook: Arc<dyn ArtifactPublicationHook>,
+    ) -> Result<Self, EngineError> {
+        Ok(Self::with_publication_hook(
+            filesystem.canonicalize_root(root)?,
+            publication_hook,
+        ))
     }
 
     #[must_use]
@@ -177,101 +304,258 @@ impl PrFollowupArtifactStore {
         run_id: &str,
         requested: &PrFollowupBinding,
     ) -> Result<Option<Value>, EngineError> {
-        let requested_value = if requested.pr_number == 0 {
-            None
-        } else {
-            let requested_path = self.canonical_path(requested, "pr");
-            requested_path
-                .exists()
-                .then(|| read_json_file(&requested_path))
-                .transpose()?
-        };
-
-        if requested_value
-            .as_ref()
-            .filter(|value| value.get("run_id").and_then(Value::as_str) == Some(run_id))
-            .is_some_and(is_current_pr_identity)
-        {
-            return Ok(requested_value);
+        if requested.run_id != run_id {
+            return Err(artifact_error("requested PR binding run_id mismatch"));
+        }
+        if requested.pr_number != 0 {
+            return self.read_requested_pr_artifact(run_id, requested);
         }
 
-        let current_root = self.root.join("pr-followup").join("current").join(run_id);
-        let discovered = discover_current_pr_artifact(&current_root, run_id)?;
-        if discovered.is_some() {
-            return Ok(discovered);
+        let current_root = self
+            .root
+            .join("pr-followup")
+            .join("current")
+            .join(sanitize_path_segment(run_id));
+        let mut budget = path_safety::ReadBudget::default();
+        let discovered =
+            discover_current_pr_artifacts(&self.root, &current_root, run_id, &mut budget)?;
+        let mut validated = Vec::new();
+        for (path, value) in discovered {
+            self.validate_discovered_pr_artifact_with_budget(&path, &value, &mut budget)?;
+            validated.push((path, value));
         }
-
-        Ok(None)
+        match validated.len() {
+            0 => Ok(None),
+            1 => Ok(Some(validated.remove(0).1)),
+            _ => {
+                let paths = validated
+                    .iter()
+                    .map(|(path, _)| path.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                Err(artifact_error(format!(
+                    "multiple PR identity artifacts found for run {run_id}; provide repository_owner, repository_name, and pr_number parameters; conflicting artifacts: {paths}"
+                )))
+            }
+        }
     }
 
-    pub fn next_sequence_for_step(
+    fn read_requested_pr_artifact(
+        &self,
+        run_id: &str,
+        requested: &PrFollowupBinding,
+    ) -> Result<Option<Value>, EngineError> {
+        let path = self.canonical_path(requested, "pr");
+        if !path_safety::validate_contained_file(&self.root, &path)? {
+            return Ok(None);
+        }
+        let mut budget = path_safety::ReadBudget::default();
+        let value = self.read_json_path_with_budget(&path, &mut budget)?;
+        let actual =
+            self.validate_discovered_pr_artifact_with_budget(&path, &value, &mut budget)?;
+        if value.get("run_id").and_then(Value::as_str) != Some(run_id)
+            || !requested.pr_identity_matches(&actual)
+        {
+            return Err(artifact_error(
+                "requested PR binding identity does not match the direct PR artifact",
+            ));
+        }
+        Ok(is_current_pr_identity(&value).then_some(value))
+    }
+
+    pub(crate) fn read_untrusted_current_json(
         &self,
         binding: &PrFollowupBinding,
         artifact_family: &str,
-        producer_step_id: &str,
-    ) -> Result<ArtifactSequenceMetadata, EngineError> {
-        let state = self.recover_sequence_state(binding, Some(artifact_family))?;
-        Ok(ArtifactSequenceMetadata {
-            artifact_sequence: state.max_artifact_sequence + 1,
-            write_sequence: state
-                .max_write_sequence_by_family
-                .get(artifact_family)
-                .copied()
-                .unwrap_or_default()
-                + 1,
-            producer_step_id: producer_step_id.to_string(),
+    ) -> Result<Option<Value>, EngineError> {
+        let path = self.canonical_path(binding, artifact_family);
+        if !path_safety::validate_contained_file(&self.root, &path)? {
+            return Ok(None);
+        }
+        let raw = path_safety::read_contained_file_with_budget(
+            &self.root,
+            &path,
+            &mut path_safety::ReadBudget::default(),
+        )?;
+        serde_json::from_str(&raw)
+            .map(Some)
+            .map_err(|error| artifact_error(format!("parse {}: {error}", path.display())))
+    }
+
+    pub(crate) fn remediation_launch_result_path(
+        &self,
+        binding: &PrFollowupBinding,
+        launch_ordinal: u64,
+        owner_token: &str,
+    ) -> PathBuf {
+        self.canonical_path(binding, "pr-remediation-result")
+            .with_file_name(format!(
+                "pr-remediation-result-{launch_ordinal}-{}.json",
+                sanitize_path_segment(owner_token)
+            ))
+    }
+
+    pub(crate) fn write_remediation_launch_result(
+        &self,
+        binding: &PrFollowupBinding,
+        launch_ordinal: u64,
+        owner_token: &str,
+        payload: &Value,
+    ) -> Result<(), EngineError> {
+        let path = self.remediation_launch_result_path(binding, launch_ordinal, owner_token);
+        let bytes = serde_json::to_vec_pretty(payload).map_err(|error| {
+            artifact_error(format!(
+                "serialize remediation launch result {}: {error}",
+                path.display()
+            ))
+        })?;
+        path_safety::durable_replace(&self.root, &path, &bytes)
+    }
+
+    pub(crate) fn read_untrusted_remediation_launch_result(
+        &self,
+        binding: &PrFollowupBinding,
+        launch_ordinal: u64,
+        owner_token: &str,
+    ) -> Result<Option<Value>, EngineError> {
+        let path = self.remediation_launch_result_path(binding, launch_ordinal, owner_token);
+        if !path_safety::validate_contained_file(&self.root, &path)? {
+            return Ok(None);
+        }
+        let raw = path_safety::read_contained_file_with_budget(
+            &self.root,
+            &path,
+            &mut path_safety::ReadBudget::default(),
+        )?;
+        serde_json::from_str(&raw)
+            .map(Some)
+            .map_err(|error| artifact_error(format!("parse {}: {error}", path.display())))
+    }
+
+    pub(crate) fn promote_remediation_launch_result_locked(
+        &self,
+        binding: &PrFollowupBinding,
+        launch_ordinal: u64,
+        owner_token: &str,
+    ) -> Result<bool, EngineError> {
+        let source = self.remediation_launch_result_path(binding, launch_ordinal, owner_token);
+        if !path_safety::validate_contained_file(&self.root, &source)? {
+            return Ok(false);
+        }
+        let raw = path_safety::read_contained_file_with_budget(
+            &self.root,
+            &source,
+            &mut path_safety::ReadBudget::default(),
+        )?;
+        serde_json::from_str::<Value>(&raw)
+            .map_err(|error| artifact_error(format!("parse {}: {error}", source.display())))?;
+        let canonical = self.canonical_path(binding, "pr-remediation-result");
+        path_safety::durable_replace(&self.root, &canonical, raw.as_bytes())?;
+        Ok(true)
+    }
+
+    fn validate_discovered_pr_artifact_with_budget(
+        &self,
+        path: &Path,
+        value: &Value,
+        budget: &mut path_safety::ReadBudget,
+    ) -> Result<PrFollowupBinding, EngineError> {
+        let actual = binding_from_value(value)?;
+        self.validate_artifact_value(&actual, "pr", value)?;
+        validate_canonical_embedded_path(value, path)?;
+        self.validate_artifact_invariants("pr", value)?;
+        self.validate_canonical_matches_immutable_history_with_budget(
+            &actual, "pr", value, budget,
+        )?;
+        Ok(actual)
+    }
+
+    pub fn write_json_artifact<T: Serialize + ?Sized>(
+        &self,
+        request: JsonArtifactWriteRequest<'_, T>,
+    ) -> Result<ArtifactWriteRecord, EngineError> {
+        self.with_binding_publication_lock(request.context.binding, || {
+            self.write_json_artifact_locked(request)
         })
     }
 
-    pub fn next_failure_sequence(&self, binding: &PrFollowupBinding) -> Result<u64, EngineError> {
-        let state = self.recover_sequence_state(binding, None)?;
-        Ok(state.max_failure_sequence + 1)
+    pub fn write_json_artifact_once<T: Serialize + ?Sized>(
+        &self,
+        request: JsonArtifactWriteRequest<'_, T>,
+        replay_key: ArtifactReplayKey<'_>,
+    ) -> Result<ArtifactWriteRecord, EngineError> {
+        self.with_binding_publication_lock(request.context.binding, || {
+            self.write_json_artifact_once_locked(request, replay_key)
+        })
     }
 
-    // Pre-existing artifact writer API shape shared by follow-up executors.
-    #[allow(clippy::too_many_arguments)]
-    pub fn write_json_artifact<T: Serialize>(
+    pub(crate) fn write_json_artifact_once_locked<T: Serialize + ?Sized>(
         &self,
-        binding: &PrFollowupBinding,
-        artifact_family: &str,
-        producer_step_id: &str,
-        step_order_index: u64,
-        payload: &T,
-        failure: Option<(&str, &str, Value)>,
-        clock: &dyn ClockSleeper,
+        request: JsonArtifactWriteRequest<'_, T>,
+        replay_key: ArtifactReplayKey<'_>,
     ) -> Result<ArtifactWriteRecord, EngineError> {
-        let sequence = self.next_sequence_for_step(binding, artifact_family, producer_step_id)?;
-        let failure_sequence = if failure.is_some() {
-            Some(self.next_failure_sequence(binding)?)
-        } else {
-            None
+        if let Some(record) = self.resolve_authenticated_replay(
+            request.context.binding,
+            request.context.artifact_family,
+            request.context.producer_step_id,
+            &replay_key,
+        )? {
+            return Ok(record);
+        }
+        self.write_json_artifact_locked(request)
+    }
+
+    pub(crate) fn write_json_artifact_locked<T: Serialize + ?Sized>(
+        &self,
+        request: JsonArtifactWriteRequest<'_, T>,
+    ) -> Result<ArtifactWriteRecord, EngineError> {
+        let JsonArtifactWriteRequest {
+            context,
+            payload,
+            failure,
+        } = request;
+        let binding = context.binding;
+        let artifact_family = context.artifact_family;
+        let state = self.recover_sequence_state(binding, Some(artifact_family))?;
+        let sequence = ArtifactSequenceMetadata {
+            artifact_sequence: checked_next_sequence(
+                state.max_artifact_sequence,
+                "artifact_sequence",
+            )?,
+            write_sequence: checked_next_sequence(
+                state
+                    .max_write_sequence_by_family
+                    .get(artifact_family)
+                    .copied()
+                    .unwrap_or_default(),
+                "write_sequence",
+            )?,
+            producer_step_id: context.producer_step_id.to_string(),
         };
+        let failure_sequence = failure
+            .as_ref()
+            .map(|_| checked_next_sequence(state.max_failure_sequence, "failure_sequence"))
+            .transpose()?;
         let canonical_path = self.canonical_path(binding, artifact_family);
         let history_path = self.history_path(binding, artifact_family, &sequence);
         let mut value = serde_json::to_value(payload)
             .map_err(|err| artifact_error(format!("serialize artifact payload: {err}")))?;
         self.inject_store_fields(
-            binding,
-            artifact_family,
-            &sequence,
-            step_order_index,
-            &canonical_path,
-            &history_path,
-            failure_sequence,
-            failure,
-            clock,
+            StoreFieldContext {
+                write: context,
+                sequence: &sequence,
+                canonical_path: &canonical_path,
+                history_path: &history_path,
+                failure_sequence,
+                failure,
+            },
             &mut value,
         )?;
         validate_json_object(&value)?;
-        // Reject contradictory routing states at the source: a contradictory
-        // artifact must never be persisted, so the same per-family invariants
-        // enforced on the read path are also enforced here before the write.
-        // @requirement:REQ-PRFU-007
         validate_family_invariants(artifact_family, &value)?;
         let bytes = serde_json::to_vec_pretty(&value)
             .map_err(|err| artifact_error(format!("serialize artifact json: {err}")))?;
-        atomic_write(&history_path, &bytes)?;
-        atomic_write(&canonical_path, &bytes)?;
+        self.publish_artifact(&history_path, &canonical_path, &bytes)?;
         Ok(ArtifactWriteRecord {
             sequence,
             canonical_path,
@@ -280,57 +564,71 @@ impl PrFollowupArtifactStore {
         })
     }
 
-    // Pre-existing artifact writer API shape shared by follow-up executors.
-    #[allow(clippy::too_many_arguments)]
     pub fn write_raw_text_artifact(
         &self,
-        binding: &PrFollowupBinding,
-        artifact_family: &str,
-        producer_step_id: &str,
-        step_order_index: u64,
-        artifact_name: &str,
-        raw_text: &str,
-        clock: &dyn ClockSleeper,
+        request: RawTextArtifactWriteRequest<'_>,
     ) -> Result<ArtifactWriteRecord, EngineError> {
-        let sequence = self.next_sequence_for_step(binding, artifact_family, producer_step_id)?;
-        let canonical_path = self.canonical_path(binding, artifact_family);
-        let history_path = self
-            .history_binding_root(binding)
-            .join(artifact_family)
-            .join(format!(
-                "{}-{}-{}-{}.json",
-                sequence.artifact_sequence,
-                sequence.write_sequence,
-                sequence.producer_step_id,
-                sanitize_path_segment(artifact_name)
-            ));
-        let value = serde_json::json!({
-            "artifact_name": artifact_name,
-            "raw_text": raw_text
-        });
-        let mut value = value;
-        self.inject_store_fields(
-            binding,
-            artifact_family,
-            &sequence,
-            step_order_index,
-            &canonical_path,
-            &history_path,
-            None,
-            None,
-            clock,
-            &mut value,
-        )?;
-        validate_json_object(&value)?;
-        let bytes = serde_json::to_vec_pretty(&value)
-            .map_err(|err| artifact_error(format!("serialize raw text artifact json: {err}")))?;
-        atomic_write(&history_path, &bytes)?;
-        atomic_write(&canonical_path, &bytes)?;
-        Ok(ArtifactWriteRecord {
-            sequence,
-            canonical_path,
-            history_path,
-            failure_sequence: None,
+        let RawTextArtifactWriteRequest {
+            context,
+            artifact_name,
+            raw_text,
+        } = request;
+        let binding = context.binding;
+        let artifact_family = context.artifact_family;
+        self.with_binding_publication_lock(binding, || {
+            let state = self.recover_sequence_state(binding, Some(artifact_family))?;
+            let sequence = ArtifactSequenceMetadata {
+                artifact_sequence: checked_next_sequence(
+                    state.max_artifact_sequence,
+                    "artifact_sequence",
+                )?,
+                write_sequence: checked_next_sequence(
+                    state
+                        .max_write_sequence_by_family
+                        .get(artifact_family)
+                        .copied()
+                        .unwrap_or_default(),
+                    "write_sequence",
+                )?,
+                producer_step_id: context.producer_step_id.to_string(),
+            };
+            let canonical_path = self.canonical_path(binding, artifact_family);
+            let history_path = self
+                .history_binding_root(binding)
+                .join(sanitize_path_segment(artifact_family))
+                .join(format!(
+                    "{}-{}-{}-{}.json",
+                    sequence.artifact_sequence,
+                    sequence.write_sequence,
+                    sanitize_path_segment(&sequence.producer_step_id),
+                    sanitize_path_segment(artifact_name)
+                ));
+            let mut value = serde_json::json!({
+                "artifact_name": artifact_name,
+                "raw_text": raw_text
+            });
+            self.inject_store_fields(
+                StoreFieldContext {
+                    write: context,
+                    sequence: &sequence,
+                    canonical_path: &canonical_path,
+                    history_path: &history_path,
+                    failure_sequence: None,
+                    failure: None,
+                },
+                &mut value,
+            )?;
+            validate_json_object(&value)?;
+            let bytes = serde_json::to_vec_pretty(&value).map_err(|err| {
+                artifact_error(format!("serialize raw text artifact json: {err}"))
+            })?;
+            self.publish_artifact(&history_path, &canonical_path, &bytes)?;
+            Ok(ArtifactWriteRecord {
+                sequence,
+                canonical_path,
+                history_path,
+                failure_sequence: None,
+            })
         })
     }
 
@@ -339,19 +637,33 @@ impl PrFollowupArtifactStore {
         binding: &PrFollowupBinding,
         artifact_family: &str,
     ) -> Result<Value, EngineError> {
+        let mut budget = path_safety::ReadBudget::default();
         let path = self.canonical_path(binding, artifact_family);
-        let value = read_json_file(&path)?;
+        let value = self.read_json_path_with_budget(&path, &mut budget)?;
         self.validate_artifact_value(binding, artifact_family, &value)?;
+        validate_canonical_embedded_path(&value, &path)?;
         self.validate_artifact_invariants(artifact_family, &value)?;
+        self.validate_canonical_matches_immutable_history_with_budget(
+            binding,
+            artifact_family,
+            &value,
+            &mut budget,
+        )?;
         Ok(value)
     }
 
-    pub fn read_current_raw_json(
+    pub(super) fn read_json_path(&self, path: &Path) -> Result<Value, EngineError> {
+        self.read_json_path_with_budget(path, &mut path_safety::ReadBudget::default())
+    }
+
+    fn read_json_path_with_budget(
         &self,
-        binding: &PrFollowupBinding,
-        artifact_family: &str,
+        path: &Path,
+        budget: &mut path_safety::ReadBudget,
     ) -> Result<Value, EngineError> {
-        read_json_file(&self.canonical_path(binding, artifact_family))
+        let content = path_safety::read_contained_file_with_budget(&self.root, path, budget)?;
+        serde_json::from_str(&content)
+            .map_err(|err| artifact_error(format!("parse {}: {err}", path.display())))
     }
 
     // Immutable history lookup methods are implemented in `history`.
@@ -382,43 +694,6 @@ impl PrFollowupArtifactStore {
         validate_family_invariants(artifact_family, value)
     }
 
-    fn validate_sequence_artifact_value(
-        &self,
-        expected: &PrFollowupBinding,
-        artifact_family: &str,
-        value: &Value,
-    ) -> Result<(), EngineError> {
-        let actual = binding_from_value(value)?;
-        if !self.validate_sequence_binding(expected, &actual) {
-            return Err(artifact_error("artifact binding mismatch"));
-        }
-        self.validate_artifact_metadata(artifact_family, value)
-    }
-
-    fn validate_sequence_binding(
-        &self,
-        expected: &PrFollowupBinding,
-        actual: &PrFollowupBinding,
-    ) -> bool {
-        expected.schema_version == actual.schema_version
-            && expected.schema_version != 0
-            && expected.run_id == actual.run_id
-            && !expected.run_id.is_empty()
-            && expected.repository_owner == actual.repository_owner
-            && !expected.repository_owner.is_empty()
-            && expected.repository_name == actual.repository_name
-            && !expected.repository_name.is_empty()
-            && expected.pr_number == actual.pr_number
-            && expected.pr_number != 0
-            && expected.head_ref == actual.head_ref
-            && !expected.head_ref.is_empty()
-            && !expected.head_sha.is_empty()
-            && !actual.head_sha.is_empty()
-            && expected.base_ref == actual.base_ref
-            && !expected.base_ref.is_empty()
-            && expected.base_sha.as_ref().is_none_or(|sha| !sha.is_empty())
-            && actual.base_sha.as_ref().is_none_or(|sha| !sha.is_empty())
-    }
     fn validate_artifact_metadata(
         &self,
         artifact_family: &str,
@@ -448,25 +723,23 @@ impl PrFollowupArtifactStore {
         Ok(())
     }
 
-    // Pre-existing store metadata shape shared by artifact writers.
-    #[allow(clippy::too_many_arguments)]
     fn inject_store_fields(
         &self,
-        binding: &PrFollowupBinding,
-        artifact_family: &str,
-        sequence: &ArtifactSequenceMetadata,
-        step_order_index: u64,
-        canonical_path: &Path,
-        history_path: &Path,
-        failure_sequence: Option<u64>,
-        failure: Option<(&str, &str, Value)>,
-        clock: &dyn ClockSleeper,
+        context: StoreFieldContext<'_>,
         value: &mut Value,
     ) -> Result<(), EngineError> {
+        let StoreFieldContext {
+            write,
+            sequence,
+            canonical_path,
+            history_path,
+            failure_sequence,
+            failure,
+        } = context;
         let object = value
             .as_object_mut()
             .ok_or_else(|| artifact_error("artifact payload must serialize to a JSON object"))?;
-        insert_binding_fields(object, binding);
+        insert_binding_fields(object, write.binding);
         object.insert(
             "artifact_sequence".to_string(),
             Value::from(sequence.artifact_sequence),
@@ -481,229 +754,63 @@ impl PrFollowupArtifactStore {
         );
         object.insert(
             "step_order_index".to_string(),
-            Value::from(step_order_index),
+            Value::from(write.step_order_index),
         );
         object.insert(
             "history_metadata".to_string(),
             serde_json::to_value(HistoryMetadata {
                 canonical_path: canonical_path.display().to_string(),
                 history_path: history_path.display().to_string(),
-                artifact_family: artifact_family.to_string(),
+                artifact_family: write.artifact_family.to_string(),
                 is_canonical: true,
-                history_written_at: clock.now_rfc3339(),
+                history_written_at: write.clock.now_rfc3339(),
             })
             .map_err(|err| artifact_error(format!("serialize history metadata: {err}")))?,
         );
-        if let (Some(next_failure_sequence), Some((semantic_state, failure_reason, details))) =
-            (failure_sequence, failure)
-        {
-            object.insert("semantic_state".to_string(), Value::from(semantic_state));
-            object.insert("failure_reason".to_string(), Value::from(failure_reason));
+        if let (Some(next_failure_sequence), Some(failure)) = (failure_sequence, failure) {
+            object.insert(
+                "semantic_state".to_string(),
+                Value::from(failure.semantic_state),
+            );
+            object.insert("failure_reason".to_string(), Value::from(failure.reason));
             object.insert(
                 "failure_sequence".to_string(),
                 Value::from(next_failure_sequence),
             );
-            object.insert("produced_at".to_string(), Value::from(clock.now_rfc3339()));
-            object.insert("failure_details".to_string(), details);
+            object.insert(
+                "produced_at".to_string(),
+                Value::from(write.clock.now_rfc3339()),
+            );
+            object.insert("failure_details".to_string(), failure.details);
         }
         Ok(())
     }
 
-    fn recover_sequence_state(
-        &self,
-        binding: &PrFollowupBinding,
-        consumed_family: Option<&str>,
-    ) -> Result<RecoveredSequenceState, EngineError> {
-        let mut state = RecoveredSequenceState::default();
-        let mut last_path = None;
-        let history_root = self.history_binding_root(binding);
-        for path in self.sequence_candidate_paths(binding, consumed_family)? {
-            let value = read_json_file(&path)?;
-            if let Some(family) = consumed_family {
-                if path == self.canonical_path(binding, family)
-                    && self
-                        .validate_artifact_value(binding, family, &value)
-                        .is_err()
-                {
-                    continue;
-                }
-            }
-
-            let family = artifact_family_from_value(&value).ok_or_else(|| {
-                artifact_error(format!(
-                    "missing history_metadata.artifact_family in {}",
-                    path.display()
-                ))
-            })?;
-            self.validate_sequence_artifact_value(binding, &family, &value)?;
-            if path.starts_with(&history_root) {
-                self.validate_history_snapshot(&family, &value, &path)?;
-                validate_history_filename(&family, &value, &path)?;
-                validate_history_embedded_path(&value, &path)?;
-            }
-            state.accept_snapshot(&family, &value, &path)?;
-            last_path = Some(path);
-        }
-        if let Some(path) = last_path.as_deref() {
-            state.validate_monotonic_sequence_contiguity(path)?;
-        }
-        Ok(state)
-    }
-
-    fn sequence_candidate_paths(
-        &self,
-        binding: &PrFollowupBinding,
-        consumed_family: Option<&str>,
-    ) -> Result<Vec<PathBuf>, EngineError> {
-        let mut paths = Vec::new();
-        let mut history_families = BTreeSet::new();
-        let history_root = self.history_binding_root(binding);
-        if history_root.exists() {
-            collect_json_paths(&history_root, &mut paths)?;
-            for path in &paths {
-                if let Some(family) = path
-                    .parent()
-                    .and_then(Path::file_name)
-                    .and_then(|name| name.to_str())
-                {
-                    history_families.insert(family.to_string());
-                }
-            }
-        }
-        match consumed_family {
-            Some(family) => {
-                let current = self.canonical_path(binding, family);
-                if current.exists() && !history_families.contains(family) {
-                    paths.push(current);
-                }
-            }
-            None => {
-                let current_root = self
-                    .root
-                    .join("pr-followup")
-                    .join("current")
-                    .join(&binding.run_id)
-                    .join(&binding.repository_owner)
-                    .join(&binding.repository_name)
-                    .join(binding.pr_number.to_string());
-                if current_root.exists() {
-                    for entry in fs::read_dir(current_root)
-                        .map_err(|err| artifact_error(format!("read current dir: {err}")))?
-                    {
-                        let path = entry
-                            .map_err(|err| {
-                                artifact_error(format!("read current dir entry: {err}"))
-                            })?
-                            .path();
-                        let family = path
-                            .file_stem()
-                            .and_then(|name| name.to_str())
-                            .unwrap_or_default();
-                        if path.extension().and_then(|ext| ext.to_str()) == Some("json")
-                            && !history_families.contains(family)
-                        {
-                            paths.push(path);
-                        }
-                    }
-                }
-            }
-        }
-        paths.sort();
-        Ok(paths)
+    fn current_binding_root(&self, binding: &PrFollowupBinding) -> PathBuf {
+        self.binding_root("current", binding)
     }
 
     fn history_binding_root(&self, binding: &PrFollowupBinding) -> PathBuf {
+        self.binding_root("history", binding)
+    }
+
+    pub fn history_root_for_family(
+        &self,
+        binding: &PrFollowupBinding,
+        artifact_family: &str,
+    ) -> PathBuf {
+        self.history_binding_root(binding)
+            .join(sanitize_path_segment(artifact_family))
+    }
+
+    fn binding_root(&self, collection: &str, binding: &PrFollowupBinding) -> PathBuf {
         self.root
             .join("pr-followup")
-            .join("history")
-            .join(&binding.run_id)
-            .join(&binding.repository_owner)
-            .join(&binding.repository_name)
+            .join(collection)
+            .join(sanitize_path_segment(&binding.run_id))
+            .join(sanitize_path_segment(&binding.repository_owner))
+            .join(sanitize_path_segment(&binding.repository_name))
             .join(binding.pr_number.to_string())
-    }
-}
-
-/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P05
-/// @requirement:REQ-PRFU-002
-/// @pseudocode lines 5-7
-impl RecoveredSequenceState {
-    fn accept_snapshot(
-        &mut self,
-        artifact_family: &str,
-        value: &Value,
-        path: &Path,
-    ) -> Result<(), EngineError> {
-        let artifact_sequence = require_u64(value, "artifact_sequence")?;
-        let write_sequence = require_u64(value, "write_sequence")?;
-        if artifact_sequence == 0 || write_sequence == 0 {
-            return Err(artifact_error(format!(
-                "sequence values must start at one in {}",
-                path.display()
-            )));
-        }
-        if !self.seen_artifact_sequences.insert(artifact_sequence) {
-            return Err(artifact_error(format!(
-                "duplicate artifact_sequence {artifact_sequence} in {}",
-                path.display()
-            )));
-        }
-        if !self
-            .seen_family_writes
-            .insert((artifact_family.to_string(), write_sequence))
-        {
-            return Err(artifact_error(format!(
-                "duplicate write_sequence {write_sequence} for {artifact_family} in {}",
-                path.display()
-            )));
-        }
-        if let Some(failure_sequence) = value.get("failure_sequence").and_then(Value::as_u64) {
-            if failure_sequence == 0 || !self.seen_failure_sequences.insert(failure_sequence) {
-                return Err(artifact_error(format!(
-                    "duplicate or zero failure_sequence {failure_sequence} in {}",
-                    path.display()
-                )));
-            }
-            self.max_failure_sequence = self.max_failure_sequence.max(failure_sequence);
-        }
-        self.max_artifact_sequence = self.max_artifact_sequence.max(artifact_sequence);
-        self.max_write_sequence_by_family
-            .entry(artifact_family.to_string())
-            .and_modify(|max| *max = (*max).max(write_sequence))
-            .or_insert(write_sequence);
-        self.seen_writes_by_family
-            .entry(artifact_family.to_string())
-            .or_default()
-            .insert(write_sequence);
-        Ok(())
-    }
-
-    fn validate_monotonic_sequence_contiguity(&self, path: &Path) -> Result<(), EngineError> {
-        require_contiguous_sequence(
-            "artifact_sequence",
-            &self.seen_artifact_sequences,
-            self.max_artifact_sequence,
-            path,
-        )?;
-        for (artifact_family, write_sequences) in &self.seen_writes_by_family {
-            let max_write_sequence = self
-                .max_write_sequence_by_family
-                .get(artifact_family)
-                .copied()
-                .unwrap_or_default();
-            require_contiguous_sequence(
-                &format!("write_sequence for {artifact_family}"),
-                write_sequences,
-                max_write_sequence,
-                path,
-            )?;
-        }
-        require_contiguous_sequence(
-            "failure_sequence",
-            &self.seen_failure_sequences,
-            self.max_failure_sequence,
-            path,
-        )?;
-        Ok(())
     }
 }
 
@@ -712,14 +819,8 @@ impl RecoveredSequenceState {
 /// @pseudocode lines 5-7
 impl ArtifactWriter for PrFollowupArtifactStore {
     fn canonical_path(&self, binding: &PrFollowupBinding, artifact_family: &str) -> PathBuf {
-        self.root
-            .join("pr-followup")
-            .join("current")
-            .join(&binding.run_id)
-            .join(&binding.repository_owner)
-            .join(&binding.repository_name)
-            .join(binding.pr_number.to_string())
-            .join(format!("{artifact_family}.json"))
+        self.current_binding_root(binding)
+            .join(format!("{}.json", sanitize_path_segment(artifact_family)))
     }
 
     fn history_path(
@@ -729,10 +830,12 @@ impl ArtifactWriter for PrFollowupArtifactStore {
         sequence: &ArtifactSequenceMetadata,
     ) -> PathBuf {
         self.history_binding_root(binding)
-            .join(artifact_family)
+            .join(sanitize_path_segment(artifact_family))
             .join(format!(
                 "{}-{}-{}.json",
-                sequence.artifact_sequence, sequence.write_sequence, sequence.producer_step_id
+                sequence.artifact_sequence,
+                sequence.write_sequence,
+                sanitize_path_segment(&sequence.producer_step_id)
             ))
     }
 
@@ -755,221 +858,4 @@ impl ArtifactWriter for PrFollowupArtifactStore {
             && !expected.head_sha.is_empty()
             && !expected.base_ref.is_empty()
     }
-}
-
-/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P05
-/// @requirement:REQ-PRFU-002
-/// @pseudocode lines 5-7
-fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), EngineError> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| artifact_error(format!("missing parent for {}", path.display())))?;
-    fs::create_dir_all(parent).map_err(|err| artifact_error(format!("create parent: {err}")))?;
-    let temp_path = parent.join(format!(
-        ".{}.{}.tmp",
-        path.file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("artifact"),
-        uuid::Uuid::new_v4()
-    ));
-    fs::write(&temp_path, bytes)
-        .map_err(|err| artifact_error(format!("write temp file: {err}")))?;
-    fs::rename(&temp_path, path).map_err(|err| {
-        let _ = fs::remove_file(&temp_path);
-        artifact_error(format!("atomic rename into {}: {err}", path.display()))
-    })?;
-    Ok(())
-}
-
-/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P05
-/// @requirement:REQ-PRFU-002,REQ-PRFU-004
-/// @pseudocode lines 5-7
-fn binding_from_value(value: &Value) -> Result<PrFollowupBinding, EngineError> {
-    Ok(PrFollowupBinding {
-        schema_version: u32::try_from(require_u64(value, "schema_version")?)
-            .map_err(|err| artifact_error(format!("schema_version out of range: {err}")))?,
-        run_id: require_string(value, "run_id")?,
-        repository_owner: require_string(value, "repository_owner")?,
-        repository_name: require_string(value, "repository_name")?,
-        pr_number: require_u64(value, "pr_number")?,
-        head_ref: require_string(value, "head_ref")?,
-        head_sha: require_string(value, "head_sha")?,
-        base_ref: require_string(value, "base_ref")?,
-        base_sha: value
-            .get("base_sha")
-            .map(|base_sha| {
-                if base_sha.is_null() {
-                    Ok(None)
-                } else {
-                    base_sha
-                        .as_str()
-                        .map(|value| Some(value.to_string()))
-                        .ok_or_else(|| artifact_error("base_sha must be string or null"))
-                }
-            })
-            .transpose()?
-            .flatten(),
-    })
-}
-
-/// Dispatches per-family typed invariant validation for the artifact families
-/// that participate in workflow routing decisions. Unknown families pass
-/// through (only generic envelope/binding checks apply to them).
-/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P05
-/// @requirement:REQ-PRFU-007
-fn validate_family_invariants(artifact_family: &str, value: &Value) -> Result<(), EngineError> {
-    match artifact_family {
-        "pr-check-status" => {
-            let typed: PrCheckStatus = serde_json::from_value(value.clone()).map_err(|err| {
-                artifact_error(format!("deserialize pr-check-status artifact: {err}"))
-            })?;
-            typed.validate_invariants().map_err(artifact_error)
-        }
-        "ci-failures" => {
-            let typed: CiFailures = serde_json::from_value(value.clone()).map_err(|err| {
-                artifact_error(format!("deserialize ci-failures artifact: {err}"))
-            })?;
-            typed.validate_invariants().map_err(artifact_error)
-        }
-        _ => Ok(()),
-    }
-}
-
-/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P05
-/// @requirement:REQ-PRFU-002
-/// @pseudocode lines 5-7
-fn artifact_family_from_value(value: &Value) -> Option<String> {
-    value
-        .get("history_metadata")?
-        .get("artifact_family")?
-        .as_str()
-        .map(ToString::to_string)
-}
-
-/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P05
-/// @requirement:REQ-PRFU-002,REQ-PRFU-004
-/// @pseudocode lines 5-7
-fn insert_binding_fields(object: &mut Map<String, Value>, binding: &PrFollowupBinding) {
-    object.insert(
-        "schema_version".to_string(),
-        Value::from(binding.schema_version),
-    );
-    object.insert("run_id".to_string(), Value::from(binding.run_id.clone()));
-    object.insert(
-        "repository_owner".to_string(),
-        Value::from(binding.repository_owner.clone()),
-    );
-    object.insert(
-        "repository_name".to_string(),
-        Value::from(binding.repository_name.clone()),
-    );
-    object.insert("pr_number".to_string(), Value::from(binding.pr_number));
-    object.insert(
-        "head_ref".to_string(),
-        Value::from(binding.head_ref.clone()),
-    );
-    object.insert(
-        "head_sha".to_string(),
-        Value::from(binding.head_sha.clone()),
-    );
-    object.insert(
-        "base_ref".to_string(),
-        Value::from(binding.base_ref.clone()),
-    );
-    object.insert(
-        "base_sha".to_string(),
-        binding
-            .base_sha
-            .as_ref()
-            .map_or(Value::Null, |base_sha| Value::from(base_sha.clone())),
-    );
-}
-
-/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P05
-/// @requirement:REQ-PRFU-002
-/// @pseudocode lines 5-7
-fn require_u64(value: &Value, field: &str) -> Result<u64, EngineError> {
-    value
-        .get(field)
-        .and_then(Value::as_u64)
-        .ok_or_else(|| artifact_error(format!("missing or invalid integer field {field}")))
-}
-
-/// @pseudocode lines 5-7
-fn require_string(value: &Value, field: &str) -> Result<String, EngineError> {
-    value
-        .get(field)
-        .and_then(Value::as_str)
-        .filter(|text| !text.is_empty())
-        .map(ToString::to_string)
-        .ok_or_else(|| artifact_error(format!("missing or invalid string field {field}")))
-}
-
-/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P05
-/// @requirement:REQ-PRFU-002
-/// @pseudocode lines 5-7
-fn require_string_from_object(
-    object: &Map<String, Value>,
-    field: &str,
-) -> Result<String, EngineError> {
-    object
-        .get(field)
-        .and_then(Value::as_str)
-        .filter(|text| !text.is_empty())
-        .map(ToString::to_string)
-        .ok_or_else(|| artifact_error(format!("missing or invalid string field {field}")))
-}
-
-/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P05
-/// @requirement:REQ-PRFU-002
-/// @pseudocode lines 5-7
-fn require_bool_from_object(object: &Map<String, Value>, field: &str) -> Result<bool, EngineError> {
-    object
-        .get(field)
-        .and_then(Value::as_bool)
-        .ok_or_else(|| artifact_error(format!("missing or invalid bool field {field}")))
-}
-
-/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P05
-/// @requirement:REQ-PRFU-002
-/// @pseudocode lines 5-7
-fn artifact_error(message: impl Into<String>) -> EngineError {
-    EngineError::StepExecutionError {
-        step_id: "pr_followup_artifact_store".to_string(),
-
-        message: message.into(),
-    }
-}
-
-/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P05
-/// @requirement:REQ-PRFU-002
-/// @pseudocode lines 5-7
-fn require_contiguous_sequence(
-    sequence_name: &str,
-    seen_sequences: &BTreeSet<u64>,
-    max_sequence: u64,
-    path: &Path,
-) -> Result<(), EngineError> {
-    for expected in 1..=max_sequence {
-        if !seen_sequences.contains(&expected) {
-            return Err(artifact_error(format!(
-                "non-monotonic {sequence_name}: missing sequence {expected} before {max_sequence} in {}",
-                path.display()
-            )));
-        }
-    }
-    Ok(())
-}
-
-fn sanitize_path_segment(value: &str) -> String {
-    value
-        .chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.') {
-                ch
-            } else {
-                '_'
-            }
-        })
-        .collect()
 }

@@ -551,16 +551,17 @@ fn test_verify_timeout_returns_fixable_and_records_report() {
         "checks": ["test"],
         "timeout_seconds": 1,
         "check_commands": {
-            "test": "sleep 5"
+            "test": "(sleep 2; touch timeout-descendant-survived) & wait"
         }
     });
 
     let result = executor.execute(&mut ctx, &params);
 
-    assert!(result.is_ok());
     assert_eq!(result.unwrap(), StepOutcome::Fixable);
     assert_eq!(ctx.get("verify_passed"), Some(&"false".to_string()));
     assert!(ctx.get("verify_error").unwrap().contains("timed out"));
+    std::thread::sleep(std::time::Duration::from_millis(1_200));
+    assert!(!work_dir.join("timeout-descendant-survived").exists());
 
     let report_path = work_dir.join(".luther").join("verify-report.json");
     let report_content = fs::read_to_string(&report_path).unwrap();

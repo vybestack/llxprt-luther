@@ -1,3 +1,5 @@
+use std::fs;
+
 use super::*;
 
 /// Proof that the complete run-wide artifact sequence ledger was validated for
@@ -80,11 +82,11 @@ impl PrFollowupArtifactStore {
         artifact_family: &str,
     ) -> Result<Option<Value>, EngineError> {
         let path = self.canonical_path(binding, artifact_family);
-        let content = match fs::read_to_string(&path) {
-            Ok(content) => content,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(err) => return Err(artifact_error(format!("read {}: {err}", path.display()))),
-        };
+        if !path_safety::validate_contained_file(&self.root, &path)? {
+            return Ok(None);
+        }
+        let mut budget = path_safety::ReadBudget::default();
+        let content = path_safety::read_contained_file_with_budget(&self.root, &path, &mut budget)?;
         let value: Value = serde_json::from_str(&content)
             .map_err(|err| artifact_error(format!("parse {}: {err}", path.display())))?;
         let actual = binding_from_value(&value)?;
@@ -92,11 +94,18 @@ impl PrFollowupArtifactStore {
         // shortcut: a wrong-family artifact at the canonical path is always
         // a fatal corruption, even if it happens to be a stale prior head.
         self.validate_artifact_metadata(artifact_family, &value)?;
+        validate_canonical_embedded_path(&value, &path)?;
+        self.validate_artifact_invariants(artifact_family, &value)?;
+        self.validate_canonical_matches_immutable_history_with_budget(
+            &actual,
+            artifact_family,
+            &value,
+            &mut budget,
+        )?;
         if actual.is_stale_prior_head_of(binding) {
             return Ok(None);
         }
         self.validate_artifact_value(binding, artifact_family, &value)?;
-        self.validate_artifact_invariants(artifact_family, &value)?;
         Ok(Some(value))
     }
 
@@ -117,11 +126,11 @@ impl PrFollowupArtifactStore {
         artifact_family: &str,
     ) -> Result<Option<Value>, EngineError> {
         let path = self.canonical_path(binding, artifact_family);
-        let content = match fs::read_to_string(&path) {
-            Ok(content) => content,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(err) => return Err(artifact_error(format!("read {}: {err}", path.display()))),
-        };
+        if !path_safety::validate_contained_file(&self.root, &path)? {
+            return Ok(None);
+        }
+        let mut budget = path_safety::ReadBudget::default();
+        let content = path_safety::read_contained_file_with_budget(&self.root, &path, &mut budget)?;
         let value: Value = serde_json::from_str(&content)
             .map_err(|err| artifact_error(format!("parse {}: {err}", path.display())))?;
         let actual = binding_from_value(&value)?;
@@ -129,6 +138,12 @@ impl PrFollowupArtifactStore {
             // Same PR — validate metadata/invariants regardless of head match.
             self.validate_history_snapshot(artifact_family, &value, &path)?;
             validate_canonical_embedded_path(&value, &path)?;
+            self.validate_canonical_matches_immutable_history_with_budget(
+                &actual,
+                artifact_family,
+                &value,
+                &mut budget,
+            )?;
             return Ok(Some(value));
         }
         // Different PR — this is a corruption, not a carry-forward.
@@ -222,9 +237,11 @@ impl PrFollowupArtifactStore {
         &self,
         binding: &PrFollowupBinding,
     ) -> Result<ValidatedHistoryLedger, EngineError> {
-        self.recover_sequence_state(binding, None)?;
-        Ok(ValidatedHistoryLedger {
-            binding: binding.clone(),
+        self.with_binding_publication_lock(binding, || {
+            self.recover_sequence_state(binding, None)?;
+            Ok(ValidatedHistoryLedger {
+                binding: binding.clone(),
+            })
         })
     }
 
@@ -261,7 +278,7 @@ impl PrFollowupArtifactStore {
                 "validated history ledger binding does not match evidence query binding",
             ));
         }
-        let family_root = self.history_binding_root(binding).join(artifact_family);
+        let family_root = self.history_root_for_family(binding, artifact_family);
         if !family_root.exists() {
             return Ok(None);
         }
@@ -285,26 +302,29 @@ impl PrFollowupArtifactStore {
         query: &HistoryEvidenceQuery<'_>,
         family_root: &Path,
     ) -> Result<Vec<Value>, EngineError> {
-        let mut paths = Vec::new();
-        collect_json_paths(family_root, &mut paths)?;
-        paths.sort();
-        paths
-            .iter()
-            .map(|path| {
-                let raw = fs::read_to_string(path)
-                    .map_err(|err| artifact_error(format!("read {}: {err}", path.display())))?;
-                let value: Value = serde_json::from_str(&raw)
-                    .map_err(|err| artifact_error(format!("parse {}: {err}", path.display())))?;
+        let mut budget = path_safety::ReadBudget::default();
+        let mut files = path_safety::read_contained_history_candidates_with_budget(
+            &self.root,
+            family_root,
+            &mut budget,
+        )?;
+        files.sort_by(|left, right| left.path.cmp(&right.path));
+        files
+            .into_iter()
+            .map(|file| {
+                let value: Value = serde_json::from_str(&file.content).map_err(|err| {
+                    artifact_error(format!("parse {}: {err}", file.path.display()))
+                })?;
                 let actual = binding_from_value(&value)?;
                 if !actual.pr_identity_matches(binding) {
                     return Err(artifact_error(format!(
                         "history artifact binding mismatch under PR-keyed directory: {}",
-                        path.display()
+                        file.path.display()
                     )));
                 }
-                self.validate_history_snapshot(query.artifact_family, &value, path)?;
-                validate_history_filename(query.artifact_family, &value, path)?;
-                validate_history_embedded_path(&value, path)?;
+                self.validate_history_snapshot(query.artifact_family, &value, &file.path)?;
+                validate_history_filename(query.artifact_family, &value, &file.path)?;
+                validate_history_embedded_path(&value, &file.path)?;
                 Ok(value)
             })
             .collect()
@@ -367,39 +387,6 @@ impl PrFollowupArtifactStore {
 }
 
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P05
-/// @requirement:REQ-PRFU-002
-/// @pseudocode lines 5-7
-pub(super) fn collect_json_paths(root: &Path, paths: &mut Vec<PathBuf>) -> Result<(), EngineError> {
-    for entry in fs::read_dir(root).map_err(|err| artifact_error(format!("read dir: {err}")))? {
-        let entry = entry.map_err(|err| artifact_error(format!("read dir entry: {err}")))?;
-        let path = entry.path();
-        let file_type = fs::symlink_metadata(&path)
-            .map_err(|err| artifact_error(format!("read metadata for {}: {err}", path.display())))?
-            .file_type();
-        if file_type.is_symlink() {
-            continue;
-        }
-        if file_type.is_dir() {
-            collect_json_paths(&path, paths)?;
-        } else if file_type.is_file()
-            && path.extension().and_then(|ext| ext.to_str()) == Some("json")
-        {
-            paths.push(path);
-        }
-    }
-    Ok(())
-}
-
-/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P05
-/// @requirement:REQ-PRFU-002
-/// @pseudocode lines 5-7
-pub(super) fn read_json_file(path: &Path) -> Result<Value, EngineError> {
-    let content = fs::read_to_string(path)
-        .map_err(|err| artifact_error(format!("read {}: {err}", path.display())))?;
-    serde_json::from_str(&content)
-        .map_err(|err| artifact_error(format!("parse {}: {err}", path.display())))
-}
-
 pub(super) fn validate_json_object(value: &Value) -> Result<(), EngineError> {
     if value.is_object() {
         Ok(())
@@ -452,12 +439,14 @@ pub(super) fn validate_history_filename(
             "{}-{}-{}-{}",
             artifact_sequence,
             write_sequence,
-            producer_step_id,
+            sanitize_path_segment(producer_step_id),
             sanitize_path_segment(artifact_name)
         ),
         None => format!(
             "{}-{}-{}",
-            artifact_sequence, write_sequence, producer_step_id
+            artifact_sequence,
+            write_sequence,
+            sanitize_path_segment(producer_step_id)
         ),
     };
     let actual_stem = path

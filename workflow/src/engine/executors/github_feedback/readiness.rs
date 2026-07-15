@@ -1,7 +1,9 @@
 use super::*;
 use crate::engine::executor::StepContext;
 use crate::engine::executors::github_pr::GithubPrCommandRunner;
-use crate::engine::executors::pr_followup_artifacts::{ClockSleeper, PrFollowupArtifactStore};
+use crate::engine::executors::pr_followup_artifacts::{
+    ArtifactWriteContext, ClockSleeper, JsonArtifactWriteRequest, PrFollowupArtifactStore,
+};
 use crate::engine::executors::pr_followup_types::{
     is_summary_marker_key, PrFollowupBinding, PR_FOLLOWUP_SCHEMA_VERSION,
 };
@@ -642,19 +644,15 @@ pub(super) fn write_marker_validation_failure(
         "github_side_effects_performed": false,
         "generated_at": clock.now_rfc3339()
     });
-    store.write_json_artifact(
-        binding,
-        MARKER_ARTIFACT_FAMILY,
-        step_id,
-        step_order,
+    store.write_json_artifact(JsonArtifactWriteRequest::new(
+        ArtifactWriteContext::new(binding, MARKER_ARTIFACT_FAMILY, step_id, step_order, clock),
         &report,
         Some((
             "fatal",
             "marker_actions_failed_pre_mutation_validation",
             json!({ "validation_violations": report["validation_violations"].clone() }),
         )),
-        clock,
-    )?;
+    ))?;
     Ok(true)
 }
 
@@ -769,15 +767,11 @@ pub(super) fn write_marker_report(
     let state = marker_report_state(&report);
     report["marker_state"] = json!(state);
     let failure = marker_report_failure(state, &report);
-    store.write_json_artifact(
-        binding,
-        MARKER_ARTIFACT_FAMILY,
-        step_id,
-        step_order,
+    store.write_json_artifact(JsonArtifactWriteRequest::new(
+        ArtifactWriteContext::new(binding, MARKER_ARTIFACT_FAMILY, step_id, step_order, clock),
         &report,
         failure,
-        clock,
-    )?;
+    ))?;
     Ok(if state == "complete" {
         StepOutcome::Success
     } else {

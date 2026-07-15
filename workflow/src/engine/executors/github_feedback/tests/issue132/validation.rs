@@ -32,15 +32,17 @@ fn legacy_pending_fixture_is_normalized_when_carried_to_a_resumed_head() {
     let temp = tempfile::tempdir().expect("tempdir");
     let store = PrFollowupArtifactStore::new(temp.path().to_path_buf());
     store
-        .write_json_artifact(
-            &source_binding,
-            PENDING_MARKER_ACTIONS_FAMILY,
-            "build_remediation_plan",
-            7,
+        .write_json_artifact(JsonArtifactWriteRequest::new(
+            ArtifactWriteContext::new(
+                &source_binding,
+                PENDING_MARKER_ACTIONS_FAMILY,
+                "build_remediation_plan",
+                7,
+                &SystemClockSleeper,
+            ),
             &fixture,
             None,
-            &SystemClockSleeper,
-        )
+        ))
         .expect("write legacy pending fixture");
 
     let carried = read_pending_marker_artifact(&store, &resumed_binding)
@@ -167,15 +169,17 @@ fn assert_pending_actions_rejected_without_github_calls(actions: Vec<Value>) {
     let binding = issue132_binding("aaa");
     let store = PrFollowupArtifactStore::new(temp.path().to_path_buf());
     store
-        .write_json_artifact(
-            &binding,
-            PENDING_MARKER_ACTIONS_FAMILY,
-            "validate_remediation_result",
-            11,
+        .write_json_artifact(JsonArtifactWriteRequest::new(
+            ArtifactWriteContext::new(
+                &binding,
+                PENDING_MARKER_ACTIONS_FAMILY,
+                "validate_remediation_result",
+                11,
+                &SystemClockSleeper,
+            ),
             &json!({"pending_actions": actions}),
             None,
-            &SystemClockSleeper,
-        )
+        ))
         .expect("write pending artifact");
     let mut context = StepContext::new(temp.path().to_path_buf(), binding.run_id.clone());
     let params = json!({
@@ -269,15 +273,17 @@ fn malformed_pending_action_with_response_text_cannot_mutate_github() {
     let mut malformed = valid_pending_action_value();
     malformed["item_id"] = json!({"looks": "present"});
     store
-        .write_json_artifact(
-            &binding,
-            PENDING_MARKER_ACTIONS_FAMILY,
-            "validate_remediation_result",
-            11,
+        .write_json_artifact(JsonArtifactWriteRequest::new(
+            ArtifactWriteContext::new(
+                &binding,
+                PENDING_MARKER_ACTIONS_FAMILY,
+                "validate_remediation_result",
+                11,
+                &SystemClockSleeper,
+            ),
             &json!({"pending_actions": [malformed]}),
             None,
-            &SystemClockSleeper,
-        )
+        ))
         .expect("write pending artifact");
     let mut context = StepContext::new(temp.path().to_path_buf(), binding.run_id.clone());
     let params = json!({

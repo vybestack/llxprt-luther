@@ -22,15 +22,17 @@ fn duplicate_history_snapshot(store: &PrFollowupArtifactStore, b: &PrFollowupBin
     )
     .expect("parse existing history snapshot");
     store
-        .write_json_artifact(
-            b,
-            "pr-remediation-result",
-            "pr_remediation_result",
-            9,
+        .write_json_artifact(JsonArtifactWriteRequest::new(
+            ArtifactWriteContext::new(
+                b,
+                "pr-remediation-result",
+                "pr_remediation_result",
+                9,
+                &FixedClock,
+            ),
             &payload,
             None,
-            &FixedClock,
-        )
+        ))
         .expect("write second valid history snapshot")
         .history_path
 }
@@ -90,11 +92,14 @@ fn exact_sequence_lookup_selects_precise_snapshot() {
 
     let b = binding("aaa", Some("ccc"));
     let record = store
-        .write_json_artifact(
-            &b,
-            "pr-remediation-result",
-            "pr_remediation_result",
-            9,
+        .write_json_artifact(JsonArtifactWriteRequest::new(
+            ArtifactWriteContext::new(
+                &b,
+                "pr-remediation-result",
+                "pr_remediation_result",
+                9,
+                &clock,
+            ),
             &json!({
                 "validation_state": "valid",
                 "overall_status": "success",
@@ -104,8 +109,7 @@ fn exact_sequence_lookup_selects_precise_snapshot() {
                 "retry_scope": {}
             }),
             None,
-            &clock,
-        )
+        ))
         .expect("write result");
 
     // Create a second snapshot with the same head identity (ambiguity for

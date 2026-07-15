@@ -1,3 +1,7 @@
+mod iteration_guard;
+
+pub use iteration_guard::PostPrIterationGuardExecutor;
+
 use super::post_pr_test_process::{
     run_manifest_post_pr_test_process, run_post_pr_test_process, validated_command_manifest,
 };
@@ -328,15 +332,19 @@ fn write_post_pr_test_completion(
     } else {
         None
     };
-    setup.store.write_json_artifact(
-        &setup.binding,
-        "post-pr-test-result",
-        &setup.step_id,
-        setup.step_order,
-        &payload,
-        failure,
-        clock,
-    )?;
+    setup
+        .store
+        .write_json_artifact(JsonArtifactWriteRequest::new(
+            ArtifactWriteContext::new(
+                &setup.binding,
+                "post-pr-test-result",
+                &setup.step_id,
+                setup.step_order,
+                clock,
+            ),
+            &payload,
+            failure,
+        ))?;
 
     Ok(if !summary.any_failed {
         StepOutcome::Success
@@ -723,15 +731,11 @@ fn write_post_pr_test_fatal(
             clock,
         ),
     };
-    store.write_json_artifact(
-        binding,
-        "post-pr-test-result",
-        step_id,
-        step_order,
+    store.write_json_artifact(JsonArtifactWriteRequest::new(
+        ArtifactWriteContext::new(binding, "post-pr-test-result", step_id, step_order, clock),
         &payload,
         Some(("fatal", reason, json!({ "errors": errors }))),
-        clock,
-    )?;
+    ))?;
     Ok(StepOutcome::Fatal)
 }
 
@@ -839,157 +843,4 @@ pub(super) fn sanitize_command_id(command_id: &str) -> String {
             }
         })
         .collect()
-}
-
-/// Post-PR iteration guard executor for `post_pr_iteration_guard`.
-/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P03
-/// @requirement:REQ-PRFU-020
-/// @pseudocode lines 8-15
-#[derive(Debug, Default)]
-pub struct PostPrIterationGuardExecutor;
-
-/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P03
-/// @requirement:REQ-PRFU-020
-/// @pseudocode lines 8-15
-impl StepExecutor for PostPrIterationGuardExecutor {
-    fn execute(
-        &self,
-        context: &mut StepContext,
-        params: &serde_json::Value,
-    ) -> Result<StepOutcome, EngineError> {
-        let artifact_root = artifact_root(context, params)?;
-        let store = PrFollowupArtifactStore::new(artifact_root);
-        let binding = binding_for_context(context, params, &store, &SystemClockSleeper)?;
-        let max_iterations = u64_param(params, "max_post_pr_remediation_iterations", 3);
-        let previous = latest_guard_for_current_run(&store, &binding)?;
-        let (iteration_index, previous_head_sha, reason) = match previous.as_ref() {
-            None => (0, Value::Null, "initial_entry"),
-            Some(guard)
-                if guard.get("head_sha").and_then(Value::as_str)
-                    == Some(binding.head_sha.as_str()) =>
-            {
-                (
-                    guard
-                        .get("iteration_index")
-                        .and_then(Value::as_u64)
-                        .unwrap_or(0),
-                    Value::String(binding.head_sha.clone()),
-                    "same_head_reentry",
-                )
-            }
-            Some(guard) => (
-                guard
-                    .get("iteration_index")
-                    .and_then(Value::as_u64)
-                    .unwrap_or(0)
-                    + 1,
-                guard.get("head_sha").cloned().unwrap_or(Value::Null),
-                "head_sha_changed_after_remediation_push",
-            ),
-        };
-        let exceeded = iteration_index > max_iterations;
-        let payload = json!({
-            "guard_state": if exceeded { "max_iterations_exceeded" } else { "proceed" },
-            "iteration_index": iteration_index,
-            "max_post_pr_remediation_iterations": max_iterations,
-            "previous_head_sha": previous_head_sha,
-            "reason": if exceeded { "max_iterations_exceeded" } else { reason },
-            "ignored_stale_artifacts": [],
-            "updated_at": SystemClockSleeper.now_rfc3339()
-        });
-        let failure = exceeded.then(|| {
-            (
-                "fatal",
-                "max_iterations_exceeded",
-                json!({
-                    "iteration_index": iteration_index,
-                    "max_post_pr_remediation_iterations": max_iterations
-                }),
-            )
-        });
-        store.write_json_artifact(
-            &binding,
-            "post-pr-iteration-guard",
-            "post_pr_iteration_guard",
-            u64_param(params, "step_order_index", 2),
-            &payload,
-            failure,
-            &SystemClockSleeper,
-        )?;
-        if exceeded {
-            Ok(StepOutcome::Fatal)
-        } else {
-            Ok(StepOutcome::Success)
-        }
-    }
-}
-
-fn latest_guard_for_current_run(
-    store: &PrFollowupArtifactStore,
-    binding: &PrFollowupBinding,
-) -> Result<Option<Value>, EngineError> {
-    let root = store
-        .root()
-        .join("pr-followup")
-        .join("history")
-        .join(&binding.run_id)
-        .join(&binding.repository_owner)
-        .join(&binding.repository_name)
-        .join(binding.pr_number.to_string())
-        .join("post-pr-iteration-guard");
-    if !root.exists() {
-        return Ok(None);
-    }
-    let mut values = Vec::new();
-    for entry in std::fs::read_dir(&root)
-        .map_err(|err| pr_remediation_error(format!("read guard history: {err}")))?
-    {
-        let path = entry
-            .map_err(|err| pr_remediation_error(format!("read guard history entry: {err}")))?
-            .path();
-        if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
-            continue;
-        }
-        let content = std::fs::read_to_string(&path).map_err(|err| {
-            pr_remediation_error(format!("read guard artifact {}: {err}", path.display()))
-        })?;
-        let value: Value = serde_json::from_str(&content).map_err(|err| {
-            pr_remediation_error(format!("parse guard artifact {}: {err}", path.display()))
-        })?;
-        if binding_from_value(&value).is_ok_and(|actual| {
-            actual.run_id == binding.run_id
-                && actual.repository_owner == binding.repository_owner
-                && actual.repository_name == binding.repository_name
-                && actual.pr_number == binding.pr_number
-        }) {
-            values.push(value);
-        }
-    }
-    values.sort_by_key(|value| {
-        value
-            .get("artifact_sequence")
-            .and_then(Value::as_u64)
-            .unwrap_or(0)
-    });
-    Ok(values.pop())
-}
-
-/// Post-PR failure terminal executor contract for `post_pr_failure_terminal`.
-/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P03
-/// @requirement:REQ-PRFU-020
-/// @pseudocode lines 50-53
-#[derive(Debug, Default)]
-pub struct PostPrFailureTerminalExecutor;
-
-/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P03
-/// @requirement:REQ-PRFU-020
-/// @pseudocode lines 50-53
-impl StepExecutor for PostPrFailureTerminalExecutor {
-    fn execute(
-        &self,
-        _context: &mut StepContext,
-        _params: &serde_json::Value,
-    ) -> Result<StepOutcome, EngineError> {
-        Ok(StepOutcome::Fatal)
-    }
 }

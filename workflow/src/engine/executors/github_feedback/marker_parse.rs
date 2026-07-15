@@ -3,6 +3,9 @@ use crate::engine::executor::{interpolate_string, StepContext};
 use crate::engine::executors::pr_followup_artifacts::PrFollowupArtifactStore;
 use crate::engine::executors::pr_followup_types::NO_REMEDIATION_OUTPUT_HEAD;
 use crate::engine::executors::pr_followup_types::{PrFollowupBinding, PR_FOLLOWUP_SCHEMA_VERSION};
+use crate::engine::executors::pr_identity_params::{
+    explicit_pr_number, string_identity_is_explicit,
+};
 use crate::engine::runner::EngineError;
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
@@ -225,8 +228,13 @@ pub(super) fn read_or_build_binding(
     params: &Value,
     store: &PrFollowupArtifactStore,
 ) -> Result<PrFollowupBinding, EngineError> {
+    let explicit_pr = explicit_pr_number(context, params).map_err(github_feedback_error)?;
     let requested = fallback_binding(context, params)?;
-    if let Some(value) = store.find_current_pr_artifact_for_run(context.run_id(), &requested)? {
+    let mut lookup = requested.clone();
+    if !requested_pr_identity_is_explicit(context, params, explicit_pr) {
+        lookup.pr_number = 0;
+    }
+    if let Some(value) = store.find_current_pr_artifact_for_run(context.run_id(), &lookup)? {
         return binding_from_value(&value);
     }
     require_binding_identity(context, params)
@@ -236,16 +244,21 @@ pub(super) fn fallback_binding(
     context: &StepContext,
     params: &Value,
 ) -> Result<PrFollowupBinding, EngineError> {
+    let explicit_pr = explicit_pr_number(context, params).map_err(github_feedback_error)?;
+    fallback_binding_with_pr(context, params, explicit_pr)
+}
+
+fn fallback_binding_with_pr(
+    context: &StepContext,
+    params: &Value,
+    explicit_pr: Option<u64>,
+) -> Result<PrFollowupBinding, EngineError> {
     Ok(PrFollowupBinding {
         schema_version: PR_FOLLOWUP_SCHEMA_VERSION,
         run_id: context.run_id().to_string(),
         repository_owner: string_param(context, params, "repository_owner", "example"),
         repository_name: string_param(context, params, "repository_name", "workflow"),
-        pr_number: {
-            let raw = string_param(context, params, "pr_number", "1910");
-            raw.parse()
-                .map_err(|err| github_feedback_error(format!("invalid pr_number '{raw}': {err}")))?
-        },
+        pr_number: explicit_pr.unwrap_or(1910),
         head_ref: string_param(context, params, "head_ref", "feature"),
         head_sha: string_param(
             context,
@@ -267,11 +280,9 @@ pub(super) fn require_binding_identity(
         run_id: context.run_id().to_string(),
         repository_owner: required_string_param(context, params, "repository_owner")?,
         repository_name: required_string_param(context, params, "repository_name")?,
-        pr_number: {
-            let raw = required_string_param(context, params, "pr_number")?;
-            raw.parse()
-                .map_err(|err| github_feedback_error(format!("invalid pr_number '{raw}': {err}")))?
-        },
+        pr_number: explicit_pr_number(context, params)
+            .map_err(github_feedback_error)?
+            .ok_or_else(|| github_feedback_error("missing pr_number"))?,
         head_ref: required_string_param(context, params, "head_ref")?,
         head_sha: required_string_param(context, params, "head_sha")?,
         base_ref: required_string_param(context, params, "base_ref")?,
@@ -335,6 +346,17 @@ pub(super) fn require_u64(value: &Value, field: &str) -> Result<u64, EngineError
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P08
 /// @requirement:REQ-PRFU-008
 /// @pseudocode lines 1
+fn requested_pr_identity_is_explicit(
+    context: &StepContext,
+    params: &Value,
+    explicit_pr: Option<u64>,
+) -> bool {
+    explicit_pr.is_some()
+        && ["repository_owner", "repository_name"]
+            .iter()
+            .all(|key| string_identity_is_explicit(context, params, key))
+}
+
 pub(super) fn string_param(
     context: &StepContext,
     params: &Value,

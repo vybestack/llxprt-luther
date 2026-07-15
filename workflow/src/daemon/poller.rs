@@ -9,7 +9,9 @@ use crate::engine::executors::pr_check_wait::{
     check_bucket as shared_check_bucket, classify_api_error, classify_pr_checks,
     counters_from_value, status_payload, PrCheckObservation, PrCheckWaitConfig,
 };
-use crate::engine::executors::pr_followup_artifacts::{ClockSleeper, PrFollowupArtifactStore};
+use crate::engine::executors::pr_followup_artifacts::{
+    ArtifactWriteContext, ClockSleeper, JsonArtifactWriteRequest, PrFollowupArtifactStore,
+};
 use crate::engine::executors::pr_followup_types::{PrFollowupBinding, PR_FOLLOWUP_SCHEMA_VERSION};
 use crate::persistence::run_metadata::RunStatus;
 use crate::persistence::sqlite::get_run_with_conn;
@@ -426,15 +428,11 @@ fn write_pr_check_status_snapshot(
     };
     let store = PrFollowupArtifactStore::new(artifact_root);
     let clock = PollerClock;
-    store.write_json_artifact(
-        &binding,
-        "pr-check-status",
-        "poll_pr_checks",
-        3,
+    store.write_json_artifact(JsonArtifactWriteRequest::new(
+        ArtifactWriteContext::new(&binding, "pr-check-status", "poll_pr_checks", 3, &clock),
         state,
         None,
-        &clock,
-    )?;
+    ))?;
     Ok(())
 }
 

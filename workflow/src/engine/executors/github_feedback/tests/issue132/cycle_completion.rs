@@ -97,26 +97,30 @@ fn two_cycle_marker_fixture() -> TwoCycleMarkerFixture {
     let temp = tempfile::tempdir().expect("tempdir");
     let store = PrFollowupArtifactStore::new(temp.path().to_path_buf());
     let first = store
-        .write_json_artifact(
-            &issue132_binding("aaa"),
-            "pr-remediation-result",
-            "pr_remediation_result",
-            9,
+        .write_json_artifact(JsonArtifactWriteRequest::new(
+            ArtifactWriteContext::new(
+                &issue132_binding("aaa"),
+                "pr-remediation-result",
+                "pr_remediation_result",
+                9,
+                &SystemClockSleeper,
+            ),
             &issue132_result_payload_for("aaa", "bbb", 1),
             None,
-            &SystemClockSleeper,
-        )
+        ))
         .expect("write A->B evidence");
     let second = store
-        .write_json_artifact(
-            &issue132_binding("bbb"),
-            "pr-remediation-result",
-            "pr_remediation_result",
-            9,
+        .write_json_artifact(JsonArtifactWriteRequest::new(
+            ArtifactWriteContext::new(
+                &issue132_binding("bbb"),
+                "pr-remediation-result",
+                "pr_remediation_result",
+                9,
+                &SystemClockSleeper,
+            ),
             &issue132_result_payload_for("bbb", "ccc", 2),
             None,
-            &SystemClockSleeper,
-        )
+        ))
         .expect("write B->C evidence");
     let actions = vec![
         exact_cycle_action(&first, "aaa", "bbb", 1),
