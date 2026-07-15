@@ -21,6 +21,12 @@
 //! (reduce) it. Expansion is rejected. The budget is persisted in the
 //! `RetryState` and compared against the configured budget on every write.
 
+mod parameters;
+mod persistence;
+
+use self::{parameters::parameter, persistence::launch_transition_id};
+pub(super) use persistence::{fnv64, persist};
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -614,39 +620,37 @@ impl<'a> LaunchReservation<'a> {
         Err(exhausted_error(previous).expect("exhaustion reason was just persisted"))
     }
 
-    fn recover_agent_result_after_crash(&mut self) -> Result<bool, EngineError> {
-        let recoverable_phase = match self.previous.as_ref() {
+    fn recoverable_crash_phase(&mut self) -> Result<Option<LaunchPhase>, EngineError> {
+        match self.previous.as_ref() {
             Some(state) if state.launch_phase == LaunchPhase::Completed => {
                 if !matches!(
                     state.transition_type.as_str(),
                     "launch_completed" | "policy_tightened"
                 ) {
-                    return Ok(false);
+                    return Ok(None);
                 }
                 let launch_ordinal = self.next_launch_ordinal()?;
                 self.reject_launch_beyond_budget(launch_ordinal, self.resolve_budget())?;
-                LaunchPhase::Completed
+                Ok(Some(LaunchPhase::Completed))
             }
             Some(state) if state.launch_phase == LaunchPhase::Launched => {
                 if !is_lease_expired(state, self.clock)? {
-                    return Ok(false);
+                    return Ok(None);
                 }
-                LaunchPhase::Launched
+                Ok(Some(LaunchPhase::Launched))
             }
-            _ => return Ok(false),
-        };
-        let canonical = self
-            .store
-            .read_untrusted_current_json(self.binding, "pr-remediation-result")?;
-        if canonical.as_ref().is_some_and(result_is_validated) {
-            return Ok(false);
+            _ => Ok(None),
         }
-        let mut state = self.previous.clone().ok_or_else(|| {
-            EngineError::InvalidState("recoverable retry state disappeared".to_string())
-        })?;
-        let canonical_launch_matches = canonical
-            .as_ref()
-            .is_some_and(|result| result_matches_unvalidated_launch(result, &state));
+    }
+
+    fn recover_launch_result(
+        &self,
+        recoverable_phase: LaunchPhase,
+        canonical: Option<&Value>,
+        state: &mut RetryState,
+    ) -> Result<bool, EngineError> {
+        let canonical_launch_matches =
+            canonical.is_some_and(|result| result_matches_unvalidated_launch(result, state));
         let launch_result = self.store.read_untrusted_remediation_launch_result(
             self.binding,
             state.launch_ordinal,
@@ -671,13 +675,20 @@ impl<'a> LaunchReservation<'a> {
             return Ok(false);
         } else if recoverable_phase == LaunchPhase::Completed {
             let canonical_owner = canonical
-                .as_ref()
                 .and_then(|result| result.get("retry_launch_owner_token"))
                 .and_then(Value::as_str);
             if canonical_owner != Some(state.owner_token.as_str()) {
                 return Ok(false);
             }
         }
+        Ok(true)
+    }
+
+    fn persist_recovered_launch(
+        &mut self,
+        recoverable_phase: LaunchPhase,
+        mut state: RetryState,
+    ) -> Result<(), EngineError> {
         state.predecessor_artifact_sequence = state_sequence_locked(self.store, self.binding)?;
         state.launch_phase = LaunchPhase::Completed;
         state.transition_type = match recoverable_phase {
@@ -699,6 +710,26 @@ impl<'a> LaunchReservation<'a> {
             self.clock,
         )?;
         self.previous = Some(state);
+        Ok(())
+    }
+
+    fn recover_agent_result_after_crash(&mut self) -> Result<bool, EngineError> {
+        let Some(recoverable_phase) = self.recoverable_crash_phase()? else {
+            return Ok(false);
+        };
+        let canonical = self
+            .store
+            .read_untrusted_current_json(self.binding, "pr-remediation-result")?;
+        if canonical.as_ref().is_some_and(result_is_validated) {
+            return Ok(false);
+        }
+        let mut state = self.previous.clone().ok_or_else(|| {
+            EngineError::InvalidState("recoverable retry state disappeared".to_string())
+        })?;
+        if !self.recover_launch_result(recoverable_phase, canonical.as_ref(), &mut state)? {
+            return Ok(false);
+        }
+        self.persist_recovered_launch(recoverable_phase, state)?;
         Ok(true)
     }
 
@@ -962,65 +993,6 @@ pub(super) fn write_terminal_tombstone_locked(
             "persisted retry tombstone could not be reconstructed".to_string(),
         )
     })
-}
-
-pub(super) fn persist(
-    store: &PrFollowupArtifactStore,
-    binding: &PrFollowupBinding,
-    producer_step_id: &str,
-    step_order: u64,
-    state: &RetryState,
-    clock: &dyn ClockSleeper,
-) -> Result<(), EngineError> {
-    store.write_json_artifact_locked(JsonArtifactWriteRequest::new(
-        ArtifactWriteContext::new(
-            binding,
-            RETRY_STATE_FAMILY,
-            producer_step_id,
-            step_order,
-            clock,
-        ),
-        state,
-        None,
-    ))?;
-    Ok(())
-}
-
-fn launch_transition_id(binding: &PrFollowupBinding, plan: &Value, ordinal: u64) -> String {
-    let identity = format!(
-        "{}:{}/{}:{}:{}:{}:launch:{ordinal}",
-        binding.run_id,
-        binding.repository_owner,
-        binding.repository_name,
-        binding.pr_number,
-        binding.head_sha,
-        plan.get("artifact_sequence")
-            .and_then(Value::as_u64)
-            .unwrap_or_default()
-    );
-    format!("fnv64:{:016x}", fnv64(identity.as_bytes()))
-}
-
-pub(super) fn fnv64(bytes: &[u8]) -> u64 {
-    bytes.iter().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
-        (hash ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3)
-    })
-}
-
-fn parameter(params: &Value, name: &str, default: u64) -> Result<u64, EngineError> {
-    if !params.is_object() {
-        return Err(EngineError::InvalidState(
-            "remediation retry parameters must be a JSON object".to_string(),
-        ));
-    }
-    match params.get(name) {
-        None => Ok(default),
-        Some(value) => value.as_u64().ok_or_else(|| {
-            EngineError::InvalidState(format!(
-                "remediation retry parameter {name} must be an unsigned integer"
-            ))
-        }),
-    }
 }
 
 #[cfg(test)]

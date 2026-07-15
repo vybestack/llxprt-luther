@@ -4,12 +4,11 @@
 //! atomically replacing canonical state. Terminal publication additionally
 //! recovers from valid history while refusing to supersede immutable identity.
 
+mod receipt_validation;
+
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
-
-use serde_json::Value;
-use sha2::{Digest, Sha256};
 
 use super::path_safety::{
     acquire_publication_lock, durable_create_new, durable_replace, publish_in_retained_directory,
@@ -17,6 +16,8 @@ use super::path_safety::{
     validate_publication_size,
 };
 use super::*;
+use receipt_validation::*;
+use serde_json::Value;
 
 /// Typed inputs for a terminal publication whose canonical identity is
 /// immutable once its idempotency key has been committed.
@@ -917,71 +918,6 @@ impl PrFollowupArtifactStore {
             },
         )
     }
-}
-
-fn validated_result_source_id(result: &Value) -> Option<&str> {
-    if result.get("producer_step_id").and_then(Value::as_str) != Some("validate_remediation_result")
-    {
-        return None;
-    }
-    result
-        .get("agent_result_source_identity")
-        .and_then(Value::as_str)
-        .or_else(|| result.get("validation_source_id").and_then(Value::as_str))
-}
-
-fn validated_result_launch_error(
-    result: &Value,
-    expected: Option<&ArtifactLaunchBinding<'_>>,
-) -> Option<String> {
-    let expected = expected?;
-    let actual_transition = result
-        .get("retry_launch_transition_id")
-        .and_then(Value::as_str);
-    let actual_ordinal = result.get("retry_launch_ordinal").and_then(Value::as_u64);
-    if actual_transition == Some(expected.transition_id) && actual_ordinal == Some(expected.ordinal)
-    {
-        return None;
-    }
-    Some(format!(
-        "validated remediation result belongs to launch transition {:?} ordinal {:?}, expected {} ordinal {}",
-        actual_transition, actual_ordinal, expected.transition_id, expected.ordinal
-    ))
-}
-
-fn unique_receipt_for_source<'a>(
-    histories: &'a [Value],
-    source_identity: &str,
-) -> Result<Option<&'a Value>, EngineError> {
-    let matching = histories
-        .iter()
-        .filter(|receipt| {
-            receipt
-                .get("agent_result_source_identity")
-                .and_then(Value::as_str)
-                == Some(source_identity)
-        })
-        .collect::<Vec<_>>();
-    match matching.as_slice() {
-        [] => Ok(None),
-        [receipt] => Ok(Some(*receipt)),
-        _ => Err(artifact_error(
-            "agent-result source has ambiguous immutable receipts",
-        )),
-    }
-}
-
-fn immutable_source_identity(exact_payload: &[u8]) -> String {
-    let digest = Sha256::digest(exact_payload);
-    format!("sha256:{digest:x}")
-}
-
-fn receipt_validation_source_id(receipt: &Value) -> Option<String> {
-    receipt
-        .get("agent_result_source_identity")?
-        .as_str()
-        .filter(|identity| identity.len() == 71 && identity.starts_with("sha256:"))
-        .map(ToString::to_string)
 }
 
 fn existing_publication_record(
