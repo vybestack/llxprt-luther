@@ -1,0 +1,168 @@
+{
+  "schema_version": 1,
+  "charter_id": "ISSUE-142-SCOPE-CONTROL",
+  "issue": {
+    "number": 142,
+    "title": "Bound Luther scope growth and review-remediation loops",
+    "url": "https://github.com/vybestack/llxprt-luther/issues/142"
+  },
+  "acceptance_criteria": [
+    {
+      "id": "AC-142-01",
+      "text": "A workflow cannot exceed its configured scope/change budget without a durable approval decision."
+    },
+    {
+      "id": "AC-142-02",
+      "text": "Review findings can be recorded as follow-up work without failing the current delivery."
+    },
+    {
+      "id": "AC-142-03",
+      "text": "Broad review/remediation loops terminate at a configured bound."
+    },
+    {
+      "id": "AC-142-04",
+      "text": "Subsequent reviews are delta-focused after the first full review."
+    },
+    {
+      "id": "AC-142-05",
+      "text": "OCR receives an explicit merge-base-to-head range and includes changed tests."
+    },
+    {
+      "id": "AC-142-06",
+      "text": "Workflow status exposes patch growth and scope divergence."
+    },
+    {
+      "id": "AC-142-07",
+      "text": "Agent timeout recovery prevents silent scope accumulation."
+    },
+    {
+      "id": "AC-142-08",
+      "text": "Existing mandatory compile, lint, test, security, and coverage gates remain mandatory and are not weakened."
+    }
+  ],
+  "allowed_subsystems": [
+    {
+      "id": "scope-control-domain",
+      "paths": [
+        "workflow/src/engine/executors/scope_control/**"
+      ]
+    },
+    {
+      "id": "workflow-contracts",
+      "paths": [
+        "workflow/src/workflow/schema.rs",
+        "workflow/src/workflow/config_loader.rs",
+        "workflow/src/workflow/validation.rs",
+        "workflow/src/engine/executor.rs",
+        "workflow/src/engine/executors/mod.rs",
+        "workflow/src/engine/runner/support.rs",
+        "workflow/config/workflow-configs/llxprt-luther.toml",
+        "workflow/config/workflows/llxprt-issue-fix-v1.toml",
+        "workflow/config/workflows/llxprt-luther-dogfood-v1.toml"
+      ]
+    },
+    {
+      "id": "mutation-and-timeout-boundaries",
+      "paths": [
+        "workflow/src/engine/executors/llxprt.rs",
+        "workflow/src/engine/executors/pr_remediation.rs",
+        "workflow/src/engine/executors/pr_remediation/**",
+        "workflow/src/engine/continuation.rs"
+      ]
+    },
+    {
+      "id": "finding-and-review-control",
+      "paths": [
+        "workflow/src/engine/executors/feedback_eval/**",
+        "workflow/src/engine/executors/feedback_eval_policy.rs",
+        "workflow/src/engine/executors/pr_followup_types.rs",
+        "workflow/src/engine/executors/github_feedback/**"
+      ]
+    },
+    {
+      "id": "durable-decision-and-status",
+      "paths": [
+        "workflow/src/persistence/wait_state.rs",
+        "workflow/src/persistence/wait_state_tests.rs",
+        "workflow/src/persistence/mod.rs",
+        "workflow/src/app/status.rs",
+        "workflow/src/app/status_tests.rs",
+        "workflow/src/app/wait_state.rs",
+        "workflow/src/app/wait_state_tests.rs",
+        "workflow/src/app/runs/**",
+        "workflow/src/cli/**",
+        "workflow/src/daemon/poller.rs",
+        "workflow/src/daemon/poller/**"
+      ]
+    },
+    {
+      "id": "review-range-integration",
+      "paths": [
+        ".github/workflows/ocr-pr-review.yml",
+        ".coderabbit.yaml",
+        "workflow/xtask/src/ocr_review.rs"
+      ]
+    },
+    {
+      "id": "behavioral-tests-and-docs",
+      "paths": [
+        "workflow/tests/**",
+        "workflow/project-plans/scope-control/**",
+        "workflow/docs/architecture/**",
+        "workflow/docs/guides/**"
+      ]
+    }
+  ],
+  "non_goals": [
+    "Redesign the generic PR-follow-up artifact store or its path/sequence machinery.",
+    "Build a language-independent source-analysis plugin framework.",
+    "Change issue discovery, claim authorization, lease ownership, or assignment behavior handled by issue 136.",
+    "Change review providers or disable CodeRabbit or Open Code Review.",
+    "Remove, skip, downgrade, ignore, or weaken compile, lint, test, security, coverage, documentation, release, or OCR gates.",
+    "Add lint/type suppression directives or increase complexity and size thresholds.",
+    "Refactor unrelated workflow executors, persistence schemas, or repository adapters.",
+    "Modify or delete unrelated untracked workflow/_edit*.py scripts or any .llxprt content."
+  ],
+  "change_budget": {
+    "max_files_changed": 45,
+    "max_added_lines": 8000,
+    "max_new_modules": 12,
+    "max_dependencies_added": 0,
+    "max_public_apis_added": 8
+  },
+  "scope_decisions": [
+    {
+      "decision": "approve_expanded_scope",
+      "basis": "The 7000-line signal was crossed by 23 lines while completing required workflow fixture parity and bounded graph transitions. The user confirmed that semantic issue scope and prevention of risky fixes are controlling; raw line count is an observability signal rather than the delivery objective.",
+      "authorization": "Continue the current issue-142 implementation and directly necessary verification remediation up to 8000 added lines, provided every edit remains within allowed subsystems, maps to an acceptance criterion, introduces no dependency, preserves mandatory gates, and does not enter a non-goal.",
+      "recorded_at": "2026-07-15"
+    }
+  ],
+  "mandatory_verification_gates": [
+    "cargo fmt --all -- --check",
+    "cargo check --workspace --all-targets --all-features",
+    "cargo clippy --workspace --all-targets --all-features -- -D warnings",
+    "cargo test --workspace --all-features --lib --tests",
+    "cargo xtask guard",
+    "cargo xtask complexity --changed origin/main HEAD",
+    "cargo coverage",
+    "cargo doc --workspace --all-features --no-deps",
+    "cargo audit",
+    "cargo build --release --bin luther-workflow",
+    "Open Code Review with changed tests included",
+    "rustreviewer"
+  ],
+  "review_round_limits": {
+    "initial_full_reviews": 1,
+    "max_delta_reviews": 2,
+    "final_acceptance_reviews": 1,
+    "max_mutating_remediation_rounds": 2
+  },
+  "stop_conditions": [
+    "Any edit outside an allowed path requires an explicit charter amendment before editing.",
+    "Any budget crossing freezes implementation until the user chooses approve expanded scope, split follow-up issue, or return to minimal implementation.",
+    "A proposed generic artifact-store redesign, repository-wide framework, or new dependency is out of scope.",
+    "A partial-edit timeout requires diff freeze, targeted compile, requirement mapping, and a scope decision before broad continuation.",
+    "Review cap exhaustion produces a durable unresolved-finding summary and stops broad remediation."
+  ]
+}

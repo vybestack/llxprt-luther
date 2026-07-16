@@ -150,6 +150,8 @@ fn validate_response_accepts_well_formed_valid_decision() {
         "body_hash": "hash-a",
         "head_sha": "sha-head",
         "decision": "valid",
+        "correctness": "high",
+        "delivery_scope": "required_acceptance_criterion",
         "reason": "",
         "recommended_action": "do the thing",
         "response_text": "Valid finding."
@@ -158,6 +160,11 @@ fn validate_response_accepts_well_formed_valid_decision() {
     let resp = validate_response(&raw, &req).expect("valid response");
     assert_eq!(resp.decision, "valid");
     assert_eq!(resp.item_id, "a");
+    assert_eq!(resp.correctness.as_deref(), Some("high"));
+    assert_eq!(
+        resp.delivery_scope.as_deref(),
+        Some("required_acceptance_criterion")
+    );
 }
 
 #[test]
@@ -171,6 +178,8 @@ fn validate_response_rejects_wrong_item_id() {
         "body_hash": "hash-a",
         "head_sha": "sha-head",
         "decision": "invalid",
+        "correctness": "invalid",
+        "delivery_scope": "follow_up_issue",
         "reason": "r",
         "recommended_action": "x",
         "response_text": "y"
@@ -191,6 +200,8 @@ fn validate_response_rejects_missing_reason_for_non_valid() {
         "body_hash": "hash-a",
         "head_sha": "sha-head",
         "decision": "invalid",
+        "correctness": "invalid",
+        "delivery_scope": "follow_up_issue",
         "reason": "   ",
         "recommended_action": "x",
         "response_text": "y"
@@ -211,6 +222,8 @@ fn validate_response_rejects_missing_response_text() {
         "body_hash": "hash-a",
         "head_sha": "sha-head",
         "decision": "valid",
+        "correctness": "high",
+        "delivery_scope": "required_acceptance_criterion",
         "reason": "",
         "recommended_action": "x",
         "response_text": "  "

@@ -1,5 +1,5 @@
 use super::config_tokens::{has_unresolved_config_token, interpolate_config_variables};
-use super::status::wait_kind_for_step;
+use super::status::resolve_wait_kind;
 use luther_workflow::persistence::{
     get_run_with_conn, get_wait_state, load_checkpoint_with_conn, persist_run_with_conn,
     upsert_wait_state, write_wait_state_artifact, RunMetadata, WaitKind, WaitStateRecord,
@@ -9,6 +9,23 @@ use luther_workflow::workflow::schema::{
     StepDef, WorkflowConfig, DEFAULT_MAX_CHILD_MERGE_WAIT_SECONDS,
 };
 use serde_json::{Map, Value};
+
+fn checkpoint_context_bool(
+    checkpoint: &luther_workflow::persistence::Checkpoint,
+    key: &str,
+) -> bool {
+    checkpoint
+        .state_snapshot
+        .context
+        .get(key)
+        .is_some_and(|value| {
+            value.as_bool().unwrap_or_else(|| {
+                value
+                    .as_str()
+                    .is_some_and(|text| text.eq_ignore_ascii_case("true"))
+            })
+        })
+}
 
 pub fn persist_external_wait_state(
     request: &luther_workflow::daemon::launcher::LaunchRequest,
@@ -22,7 +39,10 @@ pub fn persist_external_wait_state(
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("missing waiting checkpoint for {}", request.run_id))?;
     let mut metadata = get_run_with_conn(&conn, &request.run_id).map_err(|e| e.to_string())?;
-    let wait_kind = wait_kind_for_step(step_id);
+    let scope_barrier_wait = checkpoint_context_bool(&checkpoint, "scope_barrier_wait");
+    let scope_timeout_recovery_required =
+        checkpoint_context_bool(&checkpoint, "scope_timeout_recovery_required");
+    let wait_kind = resolve_wait_kind(step_id, scope_barrier_wait, scope_timeout_recovery_required);
     let identity = wait_poll_identity(request, config, metadata.as_ref(), wait_kind)?;
     // The run poll-identity update and the wait-state upsert are one logical
     // state transition. Wrap both writes in a single transaction so the
@@ -54,6 +74,9 @@ pub fn persist_external_wait_state(
         wait_condition_payload(step_id, reason, request, wait_kind, &step_params)?;
     if wait_kind == WaitKind::DependencyChildWorkflow {
         enrich_dependency_child_wait_condition(&mut record, request, config, metadata.as_ref())?;
+    }
+    if wait_kind == WaitKind::ScopeDecision {
+        enrich_scope_decision_wait_condition(&mut record, config, metadata.as_ref())?;
     }
     record.last_observed_state = serde_json::json!({
         "classification": "suspended",
@@ -110,6 +133,41 @@ fn enrich_dependency_child_wait_condition(
         }
     }
     Ok(())
+}
+
+/// Enrich a `ScopeDecision` wait-state record's `wait_condition` with the
+/// resolved artifact root used by the scope-control executor and poller.
+///
+/// The poller reads `wait_condition["artifact_root"]` to locate scope-control
+/// artifacts (expansion request/resolution). If this field is missing, the
+/// wait is unresolvable — the poller would never find the resolution. We
+/// resolve the artifact root from run metadata or config variables (the same
+/// resolution used by the executor) and inject it into the wait condition.
+fn enrich_scope_decision_wait_condition(
+    record: &mut WaitStateRecord,
+    config: &WorkflowConfig,
+    metadata: Option<&RunMetadata>,
+) -> Result<(), String> {
+    let existing = record
+        .wait_condition
+        .get("artifact_root")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty());
+    if existing.is_some() {
+        return Ok(());
+    }
+    match wait_artifact_root(config, metadata)? {
+        Some(root) => {
+            record.wait_condition["artifact_root"] =
+                Value::String(root.to_string_lossy().to_string());
+            Ok(())
+        }
+        None => Err(format!(
+            "ScopeDecision wait for run {} cannot resolve artifact_root from metadata or config; \
+             the poller cannot resolve the scope decision without it",
+            record.run_id
+        )),
+    }
 }
 
 pub fn max_wait_seconds_for_wait(config: &WorkflowConfig, wait_kind: WaitKind) -> Option<u64> {
@@ -211,6 +269,7 @@ pub fn validate_wait_poll_identity(
             }
         }
         WaitKind::RateLimitBackoff => {}
+        WaitKind::ScopeDecision => {}
     }
     Ok(())
 }
@@ -468,9 +527,67 @@ pub fn wait_condition_payload(
         WaitKind::DependencyChildWorkflow => {
             add_optional_wait_parameters(&mut payload, step_params)
         }
+        WaitKind::ScopeDecision => {
+            add_scope_decision_wait_parameters(&mut payload, step_params, request, wait_kind)?
+        }
         _ => add_optional_wait_parameters(&mut payload, step_params),
     }
     Ok(payload)
+}
+
+/// Populate wait-condition parameters for a `ScopeDecision` wait.
+///
+/// The `artifact_root` must be resolved to the actual artifact directory used
+/// by the scope-control executors (derived from run metadata or config
+/// variables), not left as a raw step parameter token. The poller uses this
+/// path to check for resolution artifacts, so a missing or unresolved
+/// `artifact_root` would create an unresolvable wait.
+fn add_scope_decision_wait_parameters(
+    payload: &mut Value,
+    step_params: &Value,
+    request: &luther_workflow::daemon::launcher::LaunchRequest,
+    wait_kind: WaitKind,
+) -> Result<(), String> {
+    add_optional_wait_parameters(payload, step_params);
+    // Resolve the artifact root from the run metadata (the same resolution
+    // used by the executor and poller). If the step params already provide a
+    // resolved artifact_root, prefer it; otherwise derive from the config.
+    if payload
+        .get("artifact_root")
+        .and_then(Value::as_str)
+        .is_none()
+    {
+        // Build a temporary WorkflowConfig reference to resolve the artifact
+        // root using the same logic as wait_artifact_root.
+        // We reconstruct from the request's known fields.
+        // The config is loaded separately in persist_external_wait_state;
+        // here we rely on the config variables being available through the
+        // step params or fall back to a metadata-derived path.
+        if let Some(artifact_root) = step_params
+            .get("artifact_root")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty() && !has_unresolved_config_token(s))
+        {
+            payload["artifact_root"] = Value::String(artifact_root.to_string());
+        }
+    }
+    // Validate: ScopeDecision must have a non-null artifact_root to be
+    // resolvable by the poller. If neither step params nor context provide
+    // one, this is a configuration error.
+    if payload
+        .get("artifact_root")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .is_none()
+    {
+        return Err(format!(
+            "ScopeDecision wait for run {} is missing artifact_root; \
+             the poller cannot resolve the scope decision without it",
+            request.run_id
+        ));
+    }
+    let _ = wait_kind;
+    Ok(())
 }
 
 pub fn add_required_pr_check_wait_parameters(

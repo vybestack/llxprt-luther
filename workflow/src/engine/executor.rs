@@ -376,6 +376,18 @@ impl ExecutorRegistry {
             "parent_orchestration",
             Box::new(crate::engine::executors::ParentOrchestrationExecutor),
         );
+        self.register(
+            "task_charter",
+            Box::new(
+                crate::engine::executors::scope_control::TaskCharterExecutor::with_system_probe(),
+            ),
+        );
+        self.register(
+            "scope_measure",
+            Box::new(
+                crate::engine::executors::scope_control::ScopeMeasureExecutor::with_system_collector(),
+            ),
+        );
     }
 
     fn register_github_followup_executors(&mut self) {

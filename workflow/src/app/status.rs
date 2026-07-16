@@ -13,11 +13,37 @@ pub fn wait_kind_for_step(step_id: &str) -> WaitKind {
         }
         "dependency_child_merge" | "wait_for_child_merge" => WaitKind::DependencyChildMerge,
         "rate_limit_backoff" | "github_rate_limit_backoff" => WaitKind::RateLimitBackoff,
+        "scope_measure" | "scope_measure_pre_push" => WaitKind::ScopeDecision,
         other => {
             eprintln!("Warning: unmapped wait step '{other}' defaulting to human_review");
             WaitKind::HumanReview
         }
     }
+}
+
+/// Resolve the effective wait kind for a paused step, honoring scope-control
+/// indicators set by the scope barrier or timeout recovery.
+///
+/// When the scope barrier blocks mutation (`scope_barrier_wait=true`) or
+/// timeout recovery is required (`scope_timeout_recovery_required=true`), the
+/// wait must be classified as [`WaitKind::ScopeDecision`] — even when the
+/// originating step (e.g. `llxprt`, `pr_followup_remediation`) is not in the
+/// static `scope_measure` mapping. Without this, the wait is classified as
+/// `HumanReview` and polled by the wrong poller, making the scope decision
+/// unresolvable.
+///
+/// `scope_barrier_wait` and `scope_timeout_recovery_required` are read from the
+/// workflow checkpoint's saved context variables. This function is the single
+/// authority for mapping a paused run to its wait kind.
+pub fn resolve_wait_kind(
+    step_id: &str,
+    scope_barrier_wait: bool,
+    scope_timeout_recovery_required: bool,
+) -> WaitKind {
+    if scope_barrier_wait || scope_timeout_recovery_required {
+        return WaitKind::ScopeDecision;
+    }
+    wait_kind_for_step(step_id)
 }
 
 pub fn install_interrupt_handlers(interrupted: std::sync::Arc<std::sync::atomic::AtomicBool>) {
@@ -225,6 +251,12 @@ pub fn next_step_label(md: &luther_workflow::persistence::RunMetadata) -> String
 /// Convert a run record into a JSON object for `--json` status output.
 /// @plan:PLAN-20260404-INITIAL-RUNTIME.P05
 pub fn run_metadata_to_json(md: &luther_workflow::persistence::RunMetadata) -> serde_json::Value {
+    let scope_status = luther_workflow::engine::executors::scope_control::project_scope_status(
+        md.artifact_root.as_deref(),
+        &md.run_id,
+    );
+    let scope_json =
+        luther_workflow::engine::executors::scope_control::scope_status_to_json(&scope_status);
     serde_json::json!({
         "run_id": md.run_id,
         "config_id": md.config_id,
@@ -247,7 +279,24 @@ pub fn run_metadata_to_json(md: &luther_workflow::persistence::RunMetadata) -> s
         "process_stale": md.is_process_stale(),
         "child_pids": md.child_pids,
         "stale_child_pids": md.are_child_pids_stale(),
+        "scope_control": scope_json,
     })
+}
+
+/// Print the scope-control status projection for a run (human-readable).
+///
+/// The projection is indented to align with the run-registry block. Legacy
+/// runs (no scope-control artifacts) print a single "unavailable" line; corrupt
+/// artifacts surface an explicit error line.
+fn print_scope_control_status(md: &luther_workflow::persistence::RunMetadata) {
+    let status = luther_workflow::engine::executors::scope_control::project_scope_status(
+        md.artifact_root.as_deref(),
+        &md.run_id,
+    );
+    let human = luther_workflow::engine::executors::scope_control::scope_status_to_human(&status);
+    for line in human.lines() {
+        println!("    {line}");
+    }
 }
 
 /// Print the persistent run registry section for human-readable status.
@@ -301,6 +350,7 @@ pub fn print_run_registry(
             md.head_sha.as_deref().unwrap_or("(none)")
         );
         println!("    Process PID: {}", pid_liveness_label(md));
+        print_scope_control_status(md);
         println!();
     }
 }

@@ -35,6 +35,9 @@ pub(super) fn apply_low_confidence_accepted_policy(
         object.insert("reason".to_string(), json!(DOWNRANK_REASON));
         object.insert("recommended_action".to_string(), json!(DOWNRANK_ACTION));
         object.insert("response_text".to_string(), json!(DOWNRANK_RESPONSE));
+        // Downranked items are low-priority follow-up work, not blockers.
+        object.insert("correctness".to_string(), json!("low"));
+        object.insert("delivery_scope".to_string(), json!("follow_up_issue"));
     }
 }
 
@@ -56,6 +59,8 @@ pub(super) fn apply_low_confidence_needs_judgment_policy(
     response.reason = DOWNRANK_REASON.to_string();
     response.recommended_action = Some(DOWNRANK_ACTION.to_string());
     response.response_text = DOWNRANK_RESPONSE.to_string();
+    response.correctness = Some("low".to_string());
+    response.delivery_scope = Some("follow_up_issue".to_string());
 }
 
 pub(super) fn is_forbidden_response_field(field: &str, field_value: &Value) -> bool {
@@ -96,6 +101,8 @@ pub(super) fn feedback_response_from_value(
         reason: optional_value_string(value, "reason"),
         recommended_action: optional_value_string_opt(value, "recommended_action"),
         response_text: optional_value_string(value, "response_text"),
+        correctness: optional_value_string_opt(value, "correctness"),
+        delivery_scope: optional_value_string_opt(value, "delivery_scope"),
     })
 }
 

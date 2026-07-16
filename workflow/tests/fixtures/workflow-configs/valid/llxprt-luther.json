@@ -28,6 +28,7 @@
     "exclude_labels": [
       "Luther working"
     ],
+    "active_parent_label": "Luther working",
     "issue_states": [
       "open"
     ],
@@ -36,8 +37,7 @@
     "route_parent_issues": true,
     "parent_workflow_type_id": "parent-issue-orchestrator-v1",
     "parent_config_id": "parent-orchestrator-luther",
-    "skip_children_of_active_parents": true,
-    "active_parent_label": "Luther working"
+    "skip_children_of_active_parents": true
   },
   "variables": {
     "primary_issue_number": "3",
@@ -138,6 +138,132 @@
       "forbidden_actions": "Do not loosen lint rules, add suppressions, or edit generated/unrelated files. Do not use include!() for Rust source module assembly, do not create part_N/core_N/tail/misc/utils/support buckets to satisfy file-size limits, and do not increase complexity/size thresholds.",
       "remediation_scope": "Fix only current-branch diff issues and required evaluator feedback.",
       "command_manifest_summary": "Local gates run cargo fmt, check, clippy, test, fixture parity, and shell safety checks."
+    },
+    "scope_control": {
+      "enabled": true,
+      "partial_compile_group": "local",
+      "mandatory_command_groups": [
+        "local",
+        "full"
+      ],
+      "mandatory_gates": [
+        "cargo fmt --check",
+        "cargo check",
+        "cargo build",
+        "cargo test",
+        "cargo clippy --all-targets -- -D warnings",
+        "cargo xtask coverage",
+        "cargo doc --no-deps",
+        "cargo audit",
+        "cargo xtask release-readiness",
+        "cargo xtask ocr-review --from {task_charter_merge_base} --to HEAD --format json"
+      ],
+      "budget": {
+        "max_files_changed": 45,
+        "max_added_lines": 7000,
+        "max_new_modules": 12,
+        "max_dependencies_added": 0,
+        "max_public_apis_added": 8
+      },
+      "review_caps": {
+        "initial_full_reviews": 1,
+        "max_delta_reviews": 2,
+        "final_acceptance_reviews": 1,
+        "max_mutating_remediation_rounds": 2
+      },
+      "subsystems": [
+        {
+          "id": "scope-control-domain",
+          "paths": [
+            "workflow/src/engine/executors/scope_control/**"
+          ]
+        },
+        {
+          "id": "workflow-contracts",
+          "paths": [
+            "workflow/src/workflow/schema.rs",
+            "workflow/src/workflow/config_loader.rs",
+            "workflow/src/workflow/validation.rs",
+            "workflow/src/engine/executor.rs",
+            "workflow/src/engine/executors/mod.rs",
+            "workflow/src/engine/runner/support.rs",
+            "workflow/config/workflow-configs/llxprt-luther.toml",
+            "workflow/config/workflows/llxprt-issue-fix-v1.toml",
+            "workflow/config/workflows/llxprt-luther-dogfood-v1.toml"
+          ]
+        },
+        {
+          "id": "mutation-and-timeout-boundaries",
+          "paths": [
+            "workflow/src/engine/executors/llxprt.rs",
+            "workflow/src/engine/executors/pr_remediation.rs",
+            "workflow/src/engine/executors/pr_remediation/**",
+            "workflow/src/engine/continuation.rs"
+          ]
+        },
+        {
+          "id": "finding-and-review-control",
+          "paths": [
+            "workflow/src/engine/executors/feedback_eval/**",
+            "workflow/src/engine/executors/feedback_eval_policy.rs",
+            "workflow/src/engine/executors/pr_followup_types.rs",
+            "workflow/src/engine/executors/github_feedback/**"
+          ]
+        },
+        {
+          "id": "durable-decision-and-status",
+          "paths": [
+            "workflow/src/persistence/wait_state.rs",
+            "workflow/src/persistence/wait_state_tests.rs",
+            "workflow/src/persistence/mod.rs",
+            "workflow/src/app/status.rs",
+            "workflow/src/app/status_tests.rs",
+            "workflow/src/app/wait_state.rs",
+            "workflow/src/app/wait_state_tests.rs",
+            "workflow/src/app/runs/**",
+            "workflow/src/cli/**",
+            "workflow/src/daemon/poller.rs",
+            "workflow/src/daemon/poller/**"
+          ]
+        },
+        {
+          "id": "review-range-integration",
+          "paths": [
+            ".github/workflows/ocr-pr-review.yml",
+            ".coderabbit.yaml",
+            "workflow/xtask/src/ocr_review.rs"
+          ]
+        },
+        {
+          "id": "behavioral-tests-and-docs",
+          "paths": [
+            "workflow/tests/**",
+            "workflow/project-plans/scope-control/**",
+            "workflow/docs/architecture/**",
+            "workflow/docs/guides/**"
+          ]
+        }
+      ],
+      "measurement": {
+        "source_extensions": [
+          "rs"
+        ],
+        "public_api_regexes": [
+          "^\\s*pub\\s+(?:async\\s+)?(?:unsafe\\s+)?(?:const\\s+)?(?:fn|struct|enum|trait|type|mod|static|const)\\b"
+        ],
+        "disable_rename_inference": true,
+        "enumerate_untracked": true
+      },
+      "dependency_manifests": [
+        {
+          "path": "workflow/Cargo.toml",
+          "sections": [
+            "dependencies",
+            "dev-dependencies",
+            "build-dependencies"
+          ]
+        }
+      ]
     }
   },
   "command_manifest": {
@@ -246,10 +372,15 @@
           "cargo",
           "xtask",
           "ocr-review",
-          "--preview"
+          "--from",
+          "{task_charter_merge_base}",
+          "--to",
+          "HEAD",
+          "--format",
+          "json"
         ],
         "project_subdirectory": "workflow",
-        "timeout_seconds": 300,
+        "timeout_seconds": 1800,
         "failure_outcome": "fatal"
       }
     ],

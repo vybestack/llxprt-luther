@@ -103,6 +103,8 @@ fn setup_registry(outcomes: HashMap<String, Vec<StepOutcome>>) -> ExecutorRegist
     registry.register("workflow_auth_preflight", Box::new(executor.clone()));
     registry.register("command_manifest_group", Box::new(executor.clone()));
     for step_type in [
+        "task_charter",
+        "scope_measure",
         "github_pr_identity",
         "post_pr_iteration_guard",
         "github_pr_checks",
@@ -130,7 +132,7 @@ fn setup_registry(outcomes: HashMap<String, Vec<StepOutcome>>) -> ExecutorRegist
 /// Test 1: Happy path — all steps succeed
 /// GIVEN: Workflow loaded from TOML with all steps returning Success
 /// WHEN: Engine runs
-/// THEN: `RunOutcome::Success`, all 30 steps visited
+/// THEN: `RunOutcome::Success`, all configured steps visited
 /// @plan:PLAN-20260408-LLXPRT-FIRST.P18
 /// @requirement:REQ-LF-ISSUE-001,REQ-LF-ISSUE-002,REQ-LF-ISSUE-003,REQ-LF-PR-001
 #[test]
@@ -140,8 +142,8 @@ fn test_happy_path_all_steps_succeed() {
     // Count the steps
     assert_eq!(
         workflow_type.steps.len(),
-        30,
-        "Expected 30 steps in workflow after workflow auth gates and PR follow-through tail"
+        33,
+        "Expected scope-control gates plus workflow auth and PR follow-through steps"
     );
 
     // All steps succeed by default (empty outcomes map)
@@ -632,7 +634,7 @@ fn evaluate_impl_fixable_routes_to_remediation() {
 /// Test 9: Workflow type loads from TOML
 /// GIVEN: llxprt-issue-fix-v1.toml exists
 /// WHEN: `resolve_workflow_type()` is called
-/// THEN: Returns `WorkflowType` with 30 steps, transitions include per-edge limits
+/// THEN: Returns the complete `WorkflowType`, including scope-control gates
 /// @plan:PLAN-20260408-LLXPRT-FIRST.P18
 /// @requirement:REQ-LF-SEP-003
 #[test]
@@ -641,8 +643,8 @@ fn test_workflow_type_loads_from_toml() {
     let workflow_type = resolve_workflow_type("llxprt-issue-fix-v1", &fixture_root)
         .expect("Failed to load workflow type");
 
-    // Assert base workflow plus PR follow-through tail steps
-    assert_eq!(workflow_type.steps.len(), 30, "Expected 30 steps");
+    // Assert base workflow, scope-control gates, and PR follow-through tail steps.
+    assert_eq!(workflow_type.steps.len(), 33, "Expected 33 steps");
 
     // Assert transitions include per-edge limits
     let has_per_edge_limit = workflow_type
