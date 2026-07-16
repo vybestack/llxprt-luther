@@ -480,6 +480,18 @@ impl ReplayFeedbackAdapter {
     }
 }
 
+/// Map a legacy single-axis decision to two-axis correctness/delivery_scope
+/// values consistent with the production legacy projection.
+fn replay_axes(decision: &str) -> (&'static str, &'static str) {
+    match decision {
+        "valid" => ("high", "required_acceptance_criterion"),
+        "invalid" => ("invalid", "follow_up_issue"),
+        "out_of_scope" => ("low", "follow_up_issue"),
+        "needs_user_judgment" => ("medium", "user_decision"),
+        _ => ("high", "required_acceptance_criterion"),
+    }
+}
+
 impl FeedbackEvaluationAdapter for ReplayFeedbackAdapter {
     fn evaluate(&self, request: &FeedbackEvaluationRequest) -> Result<String, EngineError> {
         self.requests
@@ -492,12 +504,15 @@ impl FeedbackEvaluationAdapter for ReplayFeedbackAdapter {
             .expect("decisions")
             .pop_front()
             .unwrap_or_else(|| "valid".to_string());
+        let (correctness, delivery_scope) = replay_axes(&decision);
         let response = json!({
             "item_id": request.item_id,
             "stable_marker_key": request.stable_marker_key,
             "body_hash": request.body_hash,
             "head_sha": request.head_sha,
             "decision": decision,
+            "correctness": correctness,
+            "delivery_scope": delivery_scope,
             "reason": "scripted deterministic replay decision",
             "recommended_action": "scripted_action",
             "response_text": "Luther recorded this scripted replay decision on the review thread."

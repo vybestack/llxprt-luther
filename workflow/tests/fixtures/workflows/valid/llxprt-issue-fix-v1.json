@@ -517,6 +517,30 @@
       "parameters": {
         "command": "echo \"Workflow completed successfully for issue #{issue_number}\"\n"
       }
+    },
+    {
+      "step_id": "task_charter",
+      "step_type": "task_charter",
+      "description": "Freeze scope-control task charter before mutable implementation (issue 142)",
+      "parameters": {
+        "artifact_dir": "{artifact_dir}"
+      }
+    },
+    {
+      "step_id": "scope_measure",
+      "step_type": "scope_measure",
+      "description": "Measure patch growth and enforce scope barrier after implementation (issue 142)",
+      "parameters": {
+        "artifact_dir": "{artifact_dir}"
+      }
+    },
+    {
+      "step_id": "scope_measure_pre_push",
+      "step_type": "scope_measure",
+      "description": "Enforce scope barrier before push (issue 142)",
+      "parameters": {
+        "artifact_dir": "{artifact_dir}"
+      }
     }
   ],
   "transitions": [
@@ -553,8 +577,20 @@
     },
     {
       "from": "workflow_auth_preflight_plan",
-      "to": "implement",
+      "to": "task_charter",
       "condition": "success"
+    },
+    {
+      "from": "task_charter",
+      "to": "implement",
+      "condition": "success",
+      "max_iterations": 1
+    },
+    {
+      "from": "task_charter",
+      "to": "abandon_and_log",
+      "condition": "fatal",
+      "max_iterations": 1
     },
     {
       "from": "create_plan",
@@ -564,7 +600,20 @@
     },
     {
       "from": "implement",
-      "to": "run_tests"
+      "to": "scope_measure",
+      "condition": "success"
+    },
+    {
+      "from": "scope_measure",
+      "to": "run_tests",
+      "condition": "success",
+      "max_iterations": 2
+    },
+    {
+      "from": "scope_measure",
+      "to": "abandon_and_log",
+      "condition": "fatal",
+      "max_iterations": 1
     },
     {
       "from": "implement",
@@ -614,8 +663,25 @@
     },
     {
       "from": "workflow_auth_preflight_pre_push",
-      "to": "push_changes",
+      "to": "scope_measure_pre_push",
       "condition": "success"
+    },
+    {
+      "from": "scope_measure_pre_push",
+      "to": "push_changes",
+      "condition": "success",
+      "max_iterations": 2
+    },
+    {
+      "from": "scope_measure_pre_push",
+      "to": "abandon_and_log",
+      "condition": "fatal",
+      "max_iterations": 1
+    },
+    {
+      "from": "workflow_auth_preflight_pre_push",
+      "to": "abandon_and_log",
+      "condition": "fatal"
     },
     {
       "from": "push_changes",

@@ -151,16 +151,14 @@ fn enforce_gate(
     }
     let request = build_expansion_request(run_id, charter, measurement, evaluation);
     if matches!(gate, ScopeGateOutcome::OverBudgetNeedsRequest) {
-        write_expansion_request(artifact_dir, &request).map_err(|err| measure_error(err.to_string()))?;
+        write_expansion_request(artifact_dir, &request)
+            .map_err(|err| measure_error(err.to_string()))?;
     }
     context.set(
         "scope_measure_expansion_request_digest",
         &request.measurement_digest,
     );
-    context.set(
-        "scope_measure_gate_outcome",
-        gate_outcome_label(gate),
-    );
+    context.set("scope_measure_gate_outcome", gate_outcome_label(gate));
     context.set("artifact_root", &artifact_dir.to_string_lossy());
     Ok(Some(StepOutcome::Wait))
 }

@@ -170,9 +170,9 @@ failure_outcome = "fixable"
 
 [[command_manifest.commands]]
 id = "ocr_review"
-argv = ["cargo", "xtask", "ocr-review", "--preview"]
+argv = ["cargo", "xtask", "ocr-review", "--from", "{task_charter_merge_base}", "--to", "HEAD", "--format", "json"]
 project_subdirectory = "workflow"
-timeout_seconds = 300
+timeout_seconds = 1800
 failure_outcome = "fatal"
 
 [command_manifest.groups]
@@ -180,3 +180,121 @@ local = ["format", "check", "build", "test", "clippy", "ocr_review"]
 post_pr = ["test", "coverage"]
 review = ["ocr_review"]
 full = ["format", "check", "build", "test", "clippy", "coverage", "docs", "audit", "release_readiness", "ocr_review"]
+
+# =============================================================================
+# Scope Control (issue 142)
+# -----------------------------------------------------------------------------
+# A task charter is frozen before the mutable implementation step. Scope
+# measurement + barrier runs after mutation and before push to bound scope
+# growth. All mandatory gates remain in the command manifest above.
+# =============================================================================
+[target_profile.scope_control]
+enabled = true
+partial_compile_group = "local"
+mandatory_command_groups = ["local", "full"]
+mandatory_gates = [
+  "cargo fmt --check",
+  "cargo check",
+  "cargo build",
+  "cargo test",
+  "cargo clippy --all-targets -- -D warnings",
+  "cargo xtask coverage",
+  "cargo doc --no-deps",
+  "cargo audit",
+  "cargo xtask release-readiness",
+  "cargo xtask ocr-review --from {task_charter_merge_base} --to HEAD --format json",
+]
+
+[target_profile.scope_control.budget]
+max_files_changed = 45
+max_added_lines = 7000
+max_new_modules = 12
+max_dependencies_added = 0
+max_public_apis_added = 8
+
+[target_profile.scope_control.review_caps]
+initial_full_reviews = 1
+max_delta_reviews = 2
+final_acceptance_reviews = 1
+max_mutating_remediation_rounds = 2
+
+[[target_profile.scope_control.subsystems]]
+id = "scope-control-domain"
+paths = ["workflow/src/engine/executors/scope_control/**"]
+
+[[target_profile.scope_control.subsystems]]
+id = "workflow-contracts"
+paths = [
+  "workflow/src/workflow/schema.rs",
+  "workflow/src/workflow/config_loader.rs",
+  "workflow/src/workflow/validation.rs",
+  "workflow/src/engine/executor.rs",
+  "workflow/src/engine/executors/mod.rs",
+  "workflow/src/engine/runner/support.rs",
+  "workflow/config/workflow-configs/llxprt-luther.toml",
+  "workflow/config/workflows/llxprt-issue-fix-v1.toml",
+  "workflow/config/workflows/llxprt-luther-dogfood-v1.toml",
+]
+
+[[target_profile.scope_control.subsystems]]
+id = "mutation-and-timeout-boundaries"
+paths = [
+  "workflow/src/engine/executors/llxprt.rs",
+  "workflow/src/engine/executors/pr_remediation.rs",
+  "workflow/src/engine/executors/pr_remediation/**",
+  "workflow/src/engine/continuation.rs",
+]
+
+[[target_profile.scope_control.subsystems]]
+id = "finding-and-review-control"
+paths = [
+  "workflow/src/engine/executors/feedback_eval/**",
+  "workflow/src/engine/executors/feedback_eval_policy.rs",
+  "workflow/src/engine/executors/pr_followup_types.rs",
+  "workflow/src/engine/executors/github_feedback/**",
+]
+
+[[target_profile.scope_control.subsystems]]
+id = "durable-decision-and-status"
+paths = [
+  "workflow/src/persistence/wait_state.rs",
+  "workflow/src/persistence/wait_state_tests.rs",
+  "workflow/src/persistence/mod.rs",
+  "workflow/src/app/status.rs",
+  "workflow/src/app/status_tests.rs",
+  "workflow/src/app/wait_state.rs",
+  "workflow/src/app/wait_state_tests.rs",
+  "workflow/src/app/runs/**",
+  "workflow/src/cli/**",
+  "workflow/src/daemon/poller.rs",
+  "workflow/src/daemon/poller/**",
+]
+
+[[target_profile.scope_control.subsystems]]
+id = "review-range-integration"
+paths = [
+  ".github/workflows/ocr-pr-review.yml",
+  ".coderabbit.yaml",
+  "workflow/xtask/src/ocr_review.rs",
+]
+
+[[target_profile.scope_control.subsystems]]
+id = "behavioral-tests-and-docs"
+paths = [
+  "workflow/tests/**",
+  "workflow/project-plans/scope-control/**",
+  "workflow/docs/architecture/**",
+  "workflow/docs/guides/**",
+]
+
+[target_profile.scope_control.measurement]
+source_extensions = ["rs"]
+public_api_regexes = [
+  "^\\s*pub\\s+(?:async\\s+)?(?:unsafe\\s+)?(?:const\\s+)?(?:fn|struct|enum|trait|type|mod|static|const)\\b",
+]
+disable_rename_inference = true
+enumerate_untracked = true
+
+[[target_profile.scope_control.dependency_manifests]]
+path = "workflow/Cargo.toml"
+sections = ["dependencies", "dev-dependencies", "build-dependencies"]

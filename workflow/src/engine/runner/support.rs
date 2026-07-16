@@ -86,8 +86,39 @@ pub(super) fn build_step_context(
     }
 
     seed_target_paths(&mut context, instance);
+    seed_scope_control_policy(&mut context, instance);
 
     Ok(context)
+}
+
+/// Seed the active serialized scope-control policy from the target profile into
+/// the step context so executors consume the trusted config binding rather than
+/// requiring the workflow topology to duplicate it.
+fn seed_scope_control_policy(context: &mut StepContext, instance: &WorkflowInstance) {
+    if let Some(profile) = &instance.config.target_profile {
+        if profile.scope_control.enabled {
+            if let Ok(json) = serde_json::to_string(&profile.scope_control) {
+                context.set("scope_control_policy", &json);
+            }
+            // Seed derived charter context so the production task_charter
+            // executor can resolve canonical acceptance criteria and non-goals
+            // from trusted resolved config rather than test-only injected params.
+            let sub_ids: Vec<&str> = profile
+                .scope_control
+                .subsystems
+                .iter()
+                .map(|s| s.id.as_str())
+                .collect();
+            context.set("task_charter_subsystem_ids", &sub_ids.join(","));
+            let gates: Vec<&str> = profile
+                .scope_control
+                .mandatory_gates
+                .iter()
+                .map(String::as_str)
+                .collect();
+            context.set("task_charter_mandatory_gates", &gates.join(", "));
+        }
+    }
 }
 
 fn seed_run_context(context: &mut StepContext, run_context: &RunContext) {

@@ -48,6 +48,138 @@ pub struct WorkflowConfig {
     pub target_profile: Option<TargetProfileConfig>,
 }
 
+/// @plan:PLAN-20260715-SCOPE-CONTROL
+/// Optional scope-control policy attached to a target profile. When present and
+/// enabled it constrains the change budget, review caps, subsystems, dependency
+/// manifests, mandatory command-manifest groups, and measurement policy for a
+/// workflow run.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ScopeControlConfig {
+    /// Master switch; when `false` every policy below is inert.
+    pub enabled: bool,
+    /// Numeric change-budget ceiling.
+    pub budget: ScopeBudgetConfig,
+    /// Bounded review-remediation loop caps.
+    pub review_caps: ScopeReviewCapsConfig,
+    /// Declared subsystems with their normalized path prefixes.
+    #[serde(default)]
+    pub subsystems: Vec<ScopeSubsystemConfig>,
+    /// Declared dependency manifests and their section paths.
+    #[serde(default)]
+    pub dependency_manifests: Vec<ScopeDependencyManifestConfig>,
+    /// Logical command-manifest group names that must remain present.
+    #[serde(default)]
+    pub mandatory_command_groups: Vec<String>,
+    /// Command used for partial-compile checks after a timeout freeze.
+    pub partial_compile_command: Option<String>,
+    /// Command-manifest group for partial-compile checks.
+    pub partial_compile_group: Option<String>,
+    /// Policy controlling how patch growth is measured.
+    pub measurement: ScopeMeasurementConfig,
+    /// Mandatory PR gates that must not be weakened or removed.
+    #[serde(default)]
+    pub mandatory_gates: Vec<String>,
+}
+
+/// @plan:PLAN-20260715-SCOPE-CONTROL
+/// Numeric change-budget ceiling.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ScopeBudgetConfig {
+    pub max_files_changed: u32,
+    pub max_added_lines: u32,
+    pub max_new_modules: u32,
+    pub max_dependencies_added: u32,
+    pub max_public_apis_added: u32,
+}
+
+impl Default for ScopeBudgetConfig {
+    fn default() -> Self {
+        Self {
+            max_files_changed: 1,
+            max_added_lines: 1,
+            max_new_modules: 1,
+            max_dependencies_added: 0,
+            max_public_apis_added: 1,
+        }
+    }
+}
+
+/// @plan:PLAN-20260715-SCOPE-CONTROL
+/// Bounded review-remediation loop caps.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ScopeReviewCapsConfig {
+    pub initial_full_reviews: u32,
+    pub max_delta_reviews: u32,
+    pub final_acceptance_reviews: u32,
+    pub max_mutating_remediation_rounds: u32,
+}
+
+impl Default for ScopeReviewCapsConfig {
+    fn default() -> Self {
+        Self {
+            initial_full_reviews: 1,
+            max_delta_reviews: 2,
+            final_acceptance_reviews: 1,
+            max_mutating_remediation_rounds: 2,
+        }
+    }
+}
+
+/// @plan:PLAN-20260715-SCOPE-CONTROL
+/// A declared subsystem with its normalized repository-relative path prefixes.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ScopeSubsystemConfig {
+    pub id: String,
+    #[serde(default)]
+    pub paths: Vec<String>,
+}
+
+/// @plan:PLAN-20260715-SCOPE-CONTROL
+/// A declared dependency manifest and the sections that may receive additions.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ScopeDependencyManifestConfig {
+    pub path: String,
+    #[serde(default)]
+    pub sections: Vec<String>,
+}
+
+/// @plan:PLAN-20260715-SCOPE-CONTROL
+/// Policy controlling how patch growth is measured.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ScopeMeasurementConfig {
+    /// File extensions treated as source files for module/API counting.
+    #[serde(default = "default_source_extensions")]
+    pub source_extensions: Vec<String>,
+    /// Regex patterns matching public Rust API surface lines.
+    #[serde(default)]
+    pub public_api_regexes: Vec<String>,
+    /// Whether rename inference is disabled during measurement.
+    pub disable_rename_inference: bool,
+    /// Whether untracked files are enumerated explicitly.
+    pub enumerate_untracked: bool,
+}
+
+impl Default for ScopeMeasurementConfig {
+    fn default() -> Self {
+        Self {
+            source_extensions: default_source_extensions(),
+            public_api_regexes: Vec::new(),
+            disable_rename_inference: true,
+            enumerate_untracked: true,
+        }
+    }
+}
+
+fn default_source_extensions() -> Vec<String> {
+    vec!["rs".to_string()]
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct TargetProfileConfig {
@@ -63,6 +195,10 @@ pub struct TargetProfileConfig {
     pub preflight: TargetPreflightConfig,
     pub prompt_guidance: TargetPromptGuidance,
     pub bootstrap: TargetBootstrapConfig,
+    /// @plan:PLAN-20260715-SCOPE-CONTROL
+    /// Optional scope-control policy. Serde-defaulted so existing configs are
+    /// unaffected; validated only when [`ScopeControlConfig::enabled`] is true.
+    pub scope_control: ScopeControlConfig,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]

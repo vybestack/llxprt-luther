@@ -77,6 +77,7 @@ pub enum WaitKind {
     RateLimitBackoff,
     DependencyChildWorkflow,
     DependencyChildMerge,
+    ScopeDecision,
 }
 
 impl std::fmt::Display for WaitKind {
@@ -89,6 +90,7 @@ impl std::fmt::Display for WaitKind {
             WaitKind::RateLimitBackoff => "rate_limit_backoff",
             WaitKind::DependencyChildWorkflow => "dependency_child_workflow",
             WaitKind::DependencyChildMerge => "dependency_child_merge",
+            WaitKind::ScopeDecision => "scope_decision",
         };
         write!(f, "{s}")
     }
@@ -106,6 +108,7 @@ impl std::str::FromStr for WaitKind {
             "rate_limit_backoff" => Ok(WaitKind::RateLimitBackoff),
             "dependency_child_workflow" => Ok(WaitKind::DependencyChildWorkflow),
             "dependency_child_merge" => Ok(WaitKind::DependencyChildMerge),
+            "scope_decision" => Ok(WaitKind::ScopeDecision),
             _ => Err(format!("Unknown wait kind: {s}")),
         }
     }

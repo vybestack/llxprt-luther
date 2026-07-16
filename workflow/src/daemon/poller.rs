@@ -146,6 +146,7 @@ fn poll_with_child_workflow_cache(
             record,
             json!({ "classification": "still_waiting", "wait_kind": record.wait_kind }),
         ),
+        WaitKind::ScopeDecision => poll_scope_decision(record),
     }
 }
 
@@ -751,6 +752,99 @@ fn review_decision_ready(state: &Value) -> bool {
         state.get("reviewDecision").and_then(Value::as_str),
         Some("APPROVED")
     )
+}
+
+/// Poll a scope-decision wait by checking whether an operator has written a
+/// resolution artifact. The decision is ready to resume only when a
+/// `ScopeExpansionResolution` exists whose `measurement_digest` matches the
+/// request's digest. Declined decisions (split/minimal) are also "ready" in
+/// the sense that they unblock the executor — the executor will re-measure and
+/// yield Wait again if the patch is still over-budget.
+///
+/// Stale resolutions (where the measurement digest changed since the request
+/// was written) behave deterministically: the poller reports `still_waiting`
+/// because the resolution does not apply to the current request generation.
+/// Read errors are reported as transient failures rather than silently
+/// treated as "pending" so the wait does not become unresolvable due to a
+/// transient I/O error.
+fn poll_scope_decision(record: &WaitStateRecord) -> PollDecision {
+    let artifact_root = record
+        .wait_condition
+        .get("artifact_root")
+        .and_then(Value::as_str)
+        .map(std::path::PathBuf::from);
+    let Some(artifact_dir) = artifact_root else {
+        return PollDecision::still_waiting_with_state(
+            record,
+            json!({
+                "classification": "still_waiting",
+                "reason": "missing_artifact_root",
+                "wait_kind": record.wait_kind
+            }),
+        );
+    };
+    let request = crate::engine::executors::scope_control::read_expansion_request(
+        &artifact_dir,
+        &record.run_id,
+    );
+    let resolution = crate::engine::executors::scope_control::read_expansion_resolution(
+        &artifact_dir,
+        &record.run_id,
+    );
+    match (request, resolution) {
+        (Ok(Some(request)), Ok(Some(resolution))) => {
+            if resolution.measurement_digest == request.measurement_digest {
+                PollDecision::ready(
+                    record,
+                    json!({
+                        "classification": "resolved",
+                        "wait_kind": record.wait_kind,
+                        "decision": resolution.decision.to_string(),
+                        "measurement_digest": resolution.measurement_digest,
+                    }),
+                )
+            } else {
+                // Stale resolution digest: the patch changed since this
+                // request generation was written. Deterministically keep
+                // waiting — the operator must resolve the current generation.
+                PollDecision::still_waiting_with_state(
+                    record,
+                    json!({
+                        "classification": "still_waiting",
+                        "reason": "stale_resolution_digest",
+                        "wait_kind": record.wait_kind,
+                        "request_digest": request.measurement_digest,
+                        "resolution_digest": resolution.measurement_digest,
+                    }),
+                )
+            }
+        }
+        (Ok(Some(_)), Ok(None)) => PollDecision::still_waiting_with_state(
+            record,
+            json!({
+                "classification": "still_waiting",
+                "reason": "pending_resolution",
+                "wait_kind": record.wait_kind
+            }),
+        ),
+        (Ok(None), _) => PollDecision::still_waiting_with_state(
+            record,
+            json!({
+                "classification": "still_waiting",
+                "reason": "no_expansion_request",
+                "wait_kind": record.wait_kind
+            }),
+        ),
+        (Err(err), _) | (_, Err(err)) => PollDecision::transient(
+            record,
+            json!({
+                "classification": "transient_failure",
+                "reason": "scope_decision_read_error",
+                "wait_kind": record.wait_kind,
+                "error": err.to_string(),
+            }),
+        ),
+    }
 }
 
 fn record_repo_parts(repo: &str) -> Option<(&str, &str)> {

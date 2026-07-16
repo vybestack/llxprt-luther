@@ -20,8 +20,10 @@ pub use config_loader::{
     Result as ConfigResult, UnresolvedToken,
 };
 pub use schema::{
-    DiffPathNormalization, GuardConfig, GuardLimits, RepoConfig, RuntimeConfig, StepDef,
-    TransitionDef, WorkflowConfig, WorkflowRunRef, WorkflowType,
+    DiffPathNormalization, GuardConfig, GuardLimits, RepoConfig, RuntimeConfig, ScopeBudgetConfig,
+    ScopeControlConfig, ScopeDependencyManifestConfig, ScopeMeasurementConfig,
+    ScopeReviewCapsConfig, ScopeSubsystemConfig, StepDef, TransitionDef, WorkflowConfig,
+    WorkflowRunRef, WorkflowType,
 };
 pub use target_paths::TargetPathConfig;
 pub use target_profile::{

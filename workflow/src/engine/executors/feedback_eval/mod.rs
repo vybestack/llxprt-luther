@@ -51,7 +51,7 @@ pub const DEFAULT_FEEDBACK_EVALUATOR_ARGV: &[&str] = &[
     "--set",
     "maxTurnsPerPrompt=1",
     "-p",
-    "Evaluate the single PR review feedback request JSON from stdin. Classify it using only the JSON provided; do not use any tools, do not run commands, and do not inspect the repository. Use needs_user_judgment only when the comment asks for a genuine product/scope/design choice that cannot be decided from the current PR. Speculative robustness suggestions, low-value nits, optional future hardening, and comments phrased as consider/if this becomes an issue should be invalid or out_of_scope unless they identify a concrete current defect. Respond with exactly one JSON object containing item_id, stable_marker_key, body_hash, head_sha, decision, reason, recommended_action, and response_text. The response_text must be a non-empty, reviewer-facing message that Luther will post verbatim on the original review thread explaining the decision; do not address the reviewer as yourself or claim to have posted it. Do not return arrays or extra item identities.",
+    "Evaluate the single PR review feedback request JSON from stdin. Classify it using only the JSON provided; do not use any tools, do not run commands, and do not inspect the repository. Use needs_user_judgment only when the comment asks for a genuine product/scope/design choice that cannot be decided from the current PR. Speculative robustness suggestions, low-value nits, optional future hardening, and comments phrased as consider/if this becomes an issue should be invalid or out_of_scope unless they identify a concrete current defect. For every item you must classify it along two independent axes: correctness (one of blocker, high, medium, low, invalid) rates the severity and validity of the defect, and delivery_scope (one of required_acceptance_criterion, regression_from_current_patch, small_adjacent_fix, follow_up_issue, user_decision) determines where the fix belongs. The two axes are independent and must both be set: required_acceptance_criterion and regression_from_current_patch findings must be remediated now regardless of severity; follow_up_issue findings are deferred to a separate issue and never block the current PR; small_adjacent_fix with low correctness is deferred, otherwise remediated now; user_decision blocks the PR for maintainer input; invalid correctness is never remediated. Respond with exactly one JSON object containing item_id, stable_marker_key, body_hash, head_sha, decision, correctness, delivery_scope, reason, recommended_action, and response_text. The response_text must be a non-empty, reviewer-facing message that Luther will post verbatim on the original review thread explaining the decision; do not address the reviewer as yourself or claim to have posted it. Do not return arrays or extra item identities.",
 ];
 
 #[must_use]
@@ -103,6 +103,10 @@ pub struct FeedbackEvaluationResponse {
     pub reason: String,
     pub recommended_action: Option<String>,
     pub response_text: String,
+    /// Two-axis correctness severity (issue 142). `None` for legacy artifacts.
+    pub correctness: Option<String>,
+    /// Two-axis delivery scope (issue 142). `None` for legacy artifacts.
+    pub delivery_scope: Option<String>,
 }
 
 /// Feedback evaluator executor for `feedback_evaluator`.

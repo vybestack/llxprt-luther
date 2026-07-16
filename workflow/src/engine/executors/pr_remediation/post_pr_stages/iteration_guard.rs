@@ -21,6 +21,9 @@ impl StepExecutor for PostPrIterationGuardExecutor {
         let artifact_root = artifact_root(context, params)?;
         let store = PrFollowupArtifactStore::new(artifact_root);
         let binding = binding_for_context(context, params, &store, &SystemClockSleeper)?;
+        if !scope_review_gate(context, &binding)? {
+            return Ok(StepOutcome::Fatal);
+        }
         let max_iterations = u64_param(params, "max_post_pr_remediation_iterations", 3);
         let previous = latest_guard_for_current_run(&store, &binding)?;
         let predecessor_artifact_sequence = previous
@@ -92,12 +95,91 @@ impl StepExecutor for PostPrIterationGuardExecutor {
     }
 }
 
+fn scope_review_gate(
+    context: &mut StepContext,
+    binding: &PrFollowupBinding,
+) -> Result<bool, EngineError> {
+    use crate::engine::executors::scope_control::{
+        charter_path, filter_changed_tests, pre_launch_review_gate, read_json, scope_control_dir,
+        CanonicalTaskCharter, PreLaunchReviewRequest,
+    };
+
+    let Some(policy_json) = context.get("scope_control_policy") else {
+        return Ok(true);
+    };
+    let policy: crate::workflow::schema::ScopeControlConfig = serde_json::from_str(policy_json)
+        .map_err(|err| EngineError::InvalidState(format!("invalid scope-control policy: {err}")))?;
+    if !policy.enabled {
+        return Ok(true);
+    }
+    let Some(artifact_dir) = context
+        .get("artifact_dir")
+        .or_else(|| context.get("artifact_root"))
+        .map(PathBuf::from)
+    else {
+        return Err(EngineError::InvalidState(
+            "scope review gate requires artifact_dir or artifact_root".into(),
+        ));
+    };
+    let charter_file = charter_path(&scope_control_dir(&artifact_dir, context.run_id()));
+    let charter: CanonicalTaskCharter = read_json(&charter_file).map_err(|err| {
+        EngineError::InvalidState(format!("failed to read scope-control charter: {err}"))
+    })?;
+    let changed_files = review_changed_files(context.work_dir(), &charter.merge_base)?;
+    let changed_tests = filter_changed_tests(&changed_files);
+    let now = SystemClockSleeper.now_rfc3339();
+    let request = PreLaunchReviewRequest {
+        run_id: context.run_id(),
+        head_sha: &binding.head_sha,
+        merge_base: &charter.merge_base,
+        changed_files: &changed_files,
+        changed_tests: &changed_tests,
+        charter_digest: &charter.digest,
+        caps: &charter.review_caps,
+        now_rfc3339: &now,
+    };
+    let outcome = pre_launch_review_gate(&artifact_dir, &request).map_err(|err| {
+        EngineError::InvalidState(format!("scope-control review gate failed: {err}"))
+    })?;
+    context.set("task_charter_merge_base", &charter.merge_base);
+    context.set("scope_review_from", &charter.merge_base);
+    context.set("scope_review_to", &binding.head_sha);
+    let changed_tests_json = serde_json::to_string(&changed_tests)
+        .map_err(|err| EngineError::InvalidState(format!("serialize changed tests: {err}")))?;
+    context.set("scope_review_changed_tests", &changed_tests_json);
+    Ok(outcome.permits_review())
+}
+
+fn review_changed_files(work_dir: &Path, merge_base: &str) -> Result<Vec<String>, EngineError> {
+    let output = std::process::Command::new("git")
+        .args(["diff", "--name-only", "-z", merge_base, "HEAD"])
+        .current_dir(work_dir)
+        .output()
+        .map_err(|err| EngineError::InvalidState(format!("failed to invoke git diff: {err}")))?;
+    if !output.status.success() {
+        return Err(EngineError::InvalidState(format!(
+            "failed to collect review range: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    let mut paths: Vec<String> = output
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|path| !path.is_empty())
+        .map(|path| String::from_utf8_lossy(path).into_owned())
+        .collect();
+    paths.sort();
+    paths.dedup();
+    Ok(paths)
+}
+
 fn latest_guard_for_current_run(
     store: &PrFollowupArtifactStore,
     binding: &PrFollowupBinding,
 ) -> Result<Option<Value>, EngineError> {
     let mut candidates =
         store.read_pr_identity_history_candidates(binding, "post-pr-iteration-guard")?;
+
     candidates.sort_by_key(|candidate| {
         candidate
             .value

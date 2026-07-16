@@ -36,6 +36,9 @@ use crate::engine::executors::change_detection::{
 use crate::engine::runner::EngineError;
 use crate::engine::transition::StepOutcome;
 
+#[path = "llxprt_timeout.rs"]
+mod llxprt_timeout;
+
 /// Production llxprt executor (uses [`GitChangedPathDetector`]).
 #[derive(Debug, Clone, Copy, Default)]
 pub struct LlxprtExecutor;
@@ -77,6 +80,15 @@ impl<D: ChangedPathDetector> StepExecutor for LlxprtExecutorWithDetector<D> {
     }
 }
 
+fn llxprt_step_requires_scope_barrier(context: &StepContext) -> bool {
+    context.get("current_step_id").is_some_and(|step_id| {
+        matches!(
+            step_id.as_str(),
+            "implement" | "remediate" | "remediate_tests" | "remediate_pr_followup"
+        )
+    })
+}
+
 /// llxprt process orchestration entry point.
 ///
 /// Parses the step configuration once, then delegates to focused phase helpers
@@ -93,8 +105,10 @@ fn execute_llxprt(
         message: format!("Failed to create work_dir: {e}"),
     })?;
 
-    if let Some(outcome) = crate::engine::executors::scope_control_barrier(context) {
-        return Ok(outcome);
+    if llxprt_step_requires_scope_barrier(context) {
+        if let Some(outcome) = crate::engine::executors::scope_control_barrier(context) {
+            return Ok(outcome);
+        }
     }
 
     let config = LlxprtStepConfig::build(params, context, detector);
@@ -176,11 +190,7 @@ impl<'a> LlxprtStepConfig<'a> {
 
         Self {
             diff_gate: DiffGateConfig {
-                early_success_on_diff: bool_param(
-                    params,
-                    "early_success_on_diff",
-                    success_on_diff,
-                ),
+                early_success_on_diff: bool_param(params, "early_success_on_diff", success_on_diff),
                 continue_on_empty_diff: bool_param(params, "continue_on_empty_diff", false),
                 success_on_diff,
             },
@@ -322,9 +332,18 @@ fn run_llxprt_process(
     });
 
     let mut poll = ProcessPoll::new(timing);
-    let outcome_seen = poll.run(context, params, config, &stdout_buffer, &stderr_buffer, &mut child)?;
+    let outcome_seen = poll.run(
+        context,
+        params,
+        config,
+        &stdout_buffer,
+        &stderr_buffer,
+        &mut child,
+    )?;
 
-    if poll.success_seen || poll.timed_out(outcome_seen) || poll.idle_timed_out(outcome_seen)
+    if poll.success_seen
+        || poll.timed_out(outcome_seen)
+        || poll.idle_timed_out(outcome_seen)
         || outcome_seen.is_some()
     {
         terminate_process_tree(&mut child);
@@ -377,8 +396,11 @@ fn spawn_llxprt(
     let prompt = params
         .get("prompt")
         .and_then(serde_json::Value::as_str)
-        .map_or_else(String::new, |template| interpolate_string(template, context));
-    let profile = str_param(params, "profile").map(|template| interpolate_string(template, context));
+        .map_or_else(String::new, |template| {
+            interpolate_string(template, context)
+        });
+    let profile =
+        str_param(params, "profile").map(|template| interpolate_string(template, context));
 
     let binary_template = params
         .get(crate::adapters::llxprt::BINARY_PATH_PARAM)
@@ -503,7 +525,12 @@ impl ProcessPoll {
         let mut stderr_snapshot_len = 0usize;
         let mut outcome_seen = None;
         while self.start.elapsed() < self.timing.timeout {
-            if self.check_idle_timeout(stdout_buffer, stderr_buffer, &mut stdout_snapshot_len, &mut stderr_snapshot_len) {
+            if self.check_idle_timeout(
+                stdout_buffer,
+                stderr_buffer,
+                &mut stdout_snapshot_len,
+                &mut stderr_snapshot_len,
+            ) {
                 break;
             }
 
@@ -629,6 +656,7 @@ impl ProcessPoll {
         println!(
             "[llxprt] running for {elapsed}s (stdout {stdout_len} bytes, stderr {stderr_len} bytes)"
         );
+
         if stdout_len != *stdout_snapshot_len || stderr_len != *stderr_snapshot_len {
             if let Some(path_template) = config.stdout_file.as_deref() {
                 let stdout = lock_clone(stdout_buffer);
@@ -685,10 +713,8 @@ fn classify_llxprt_outcome(
             |code| format!("llxprt exited with status {code}"),
         );
         context.set("diagnostic", &diagnostic);
-        return Ok(
-            match_exit_code_outcome(params, result.exit_status.code())
-                .unwrap_or(StepOutcome::Fatal),
-        );
+        return Ok(match_exit_code_outcome(params, result.exit_status.code())
+            .unwrap_or(StepOutcome::Fatal));
     }
 
     if let Some(outcome) = match_static_stdout_outcome(params, &result.stdout) {
@@ -758,7 +784,7 @@ fn resolve_timeout_outcome(
             "timeout"
         },
     );
-    let diagnostic = timeout_diagnostic(result);
+    let diagnostic = llxprt_timeout::timeout_diagnostic(result);
     context.set("diagnostic", &diagnostic);
 
     let timeout_kind = if result.idle_timed_out {
@@ -766,7 +792,7 @@ fn resolve_timeout_outcome(
     } else {
         crate::engine::executors::scope_control::timeout_recovery::TimeoutKind::Timeout
     };
-    if let Some(outcome) = recover_partial_timeout(
+    if let Some(outcome) = llxprt_timeout::recover_partial_timeout(
         context,
         &config.initial_changed_paths,
         config.detection,
@@ -775,152 +801,6 @@ fn resolve_timeout_outcome(
         return Ok(outcome);
     }
     Ok(StepOutcome::Fatal)
-}
-
-/// Build the human-readable diagnostic for a timeout result.
-fn timeout_diagnostic(result: &ProcessResult) -> String {
-    if result.idle_timed_out {
-        result.idle_timeout.map_or_else(
-            || "llxprt timed out after stalled output".to_string(),
-            |timeout| {
-                format!(
-                    "llxprt produced no new output for {} seconds",
-                    timeout.as_secs()
-                )
-            },
-        )
-    } else {
-        format!(
-            "llxprt timed out after {} seconds",
-            result.timeout.as_secs()
-        )
-    }
-}
-
-/// Read a string step parameter.
-fn recover_partial_timeout(
-    context: &mut StepContext,
-    initial_changed_paths: &[String],
-    detection: DiffDetection<'_>,
-    timeout_kind: crate::engine::executors::scope_control::timeout_recovery::TimeoutKind,
-) -> Result<Option<StepOutcome>, EngineError> {
-    use crate::engine::executors::scope_control::timeout_recovery::ProcessEvidence;
-    use crate::engine::executors::scope_control::{
-        charter_path, handle_timeout_recovery, read_json, scope_control_dir, CanonicalTaskCharter,
-        SystemGitPatchCollector,
-    };
-
-    let Some(current_paths) = detection.detect(context, "timeout change detection failed") else {
-        return Ok(Some(StepOutcome::Fatal));
-    };
-    if new_changed_paths(&current_paths, initial_changed_paths).is_empty() {
-        return Ok(None);
-    }
-    let Some(policy) = resolve_recovery_policy(context)? else {
-        return Ok(None);
-    };
-    let artifact_dir = resolve_recovery_artifact_dir(context);
-    let scope_dir = scope_control_dir(&artifact_dir, context.run_id());
-    let charter: CanonicalTaskCharter =
-        read_json(&charter_path(&scope_dir)).map_err(|err| recovery_error("charter unavailable", err))?;
-    let measurement = compute_recovery_measurement(
-        context,
-        &charter,
-        &policy,
-        SystemGitPatchCollector,
-    )?;
-    let process_evidence = ProcessEvidence {
-        exit_code: Some(124),
-        wall_clock_timeout: matches!(
-            timeout_kind,
-            crate::engine::executors::scope_control::timeout_recovery::TimeoutKind::Timeout
-        ),
-        process_killed: true,
-    };
-    handle_timeout_recovery(
-        &artifact_dir,
-        context.run_id(),
-        &charter,
-        &measurement,
-        timeout_kind,
-        policy.partial_compile_command.is_some() || policy.partial_compile_group.is_some(),
-        &process_evidence,
-    )
-    .map_err(|err| recovery_error("persist timeout recovery snapshot", err))?;
-    context.set("artifact_root", &artifact_dir.to_string_lossy());
-    context.set("scope_timeout_recovery_required", "true");
-    Ok(Some(StepOutcome::Wait))
-}
-
-/// Build a step-execution error for a timeout-recovery failure.
-fn recovery_error(label: &str, err: impl std::fmt::Display) -> EngineError {
-    EngineError::StepExecutionError {
-        step_id: "llxprt".into(),
-        message: format!("timeout recovery {label}: {err}"),
-    }
-}
-
-/// Resolve and validate the scope-control policy for timeout recovery.
-///
-/// Returns `None` when scope control is disabled or no policy is configured.
-fn resolve_recovery_policy(
-    context: &mut StepContext,
-) -> Result<Option<crate::workflow::schema::ScopeControlConfig>, EngineError> {
-    let Some(policy_json) = context.get("scope_control_policy") else {
-        return Ok(None);
-    };
-    let policy: crate::workflow::schema::ScopeControlConfig =
-        serde_json::from_str(policy_json).map_err(|err| EngineError::StepExecutionError {
-            step_id: "llxprt".into(),
-            message: format!("invalid scope-control policy during timeout recovery: {err}"),
-        })?;
-    if !policy.enabled {
-        return Ok(None);
-    }
-    Ok(Some(policy))
-}
-
-/// Resolve the artifact directory used to persist timeout-recovery artifacts.
-fn resolve_recovery_artifact_dir(context: &StepContext) -> std::path::PathBuf {
-    context
-        .get("artifact_dir")
-        .or_else(|| context.get("artifact_root"))
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| context.work_dir().clone())
-}
-
-/// Collect git patch data, dependency diffs, and compute the patch measurement
-/// for timeout recovery.
-fn compute_recovery_measurement<C>(
-    context: &mut StepContext,
-    charter: &crate::engine::executors::scope_control::model::CanonicalTaskCharter,
-    policy: &crate::workflow::schema::ScopeControlConfig,
-    collector: C,
-) -> Result<crate::engine::executors::scope_control::measurement::PatchMeasurement, EngineError>
-where
-    C: crate::engine::executors::scope_control::GitPatchCollector,
-{
-    use crate::engine::executors::scope_control::{
-        collect_dependency_diffs, compute_measurement,
-    };
-
-    let git_data = collector
-        .collect(context.work_dir(), &charter.merge_base, &policy.measurement)
-        .map_err(|err| recovery_error("measurement failed", err))?;
-    let dependency_diffs = collect_dependency_diffs(
-        context.work_dir(),
-        &policy.dependency_manifests,
-        &charter.merge_base,
-    )
-    .map_err(|err| recovery_error("dependency measurement failed", err))?;
-    compute_measurement(
-        &git_data,
-        charter,
-        &policy.measurement,
-        context.work_dir(),
-        &dependency_diffs,
-    )
-    .map_err(|err| recovery_error("measurement failed", err))
 }
 
 fn str_param<'a>(params: &'a serde_json::Value, name: &str) -> Option<&'a str> {
@@ -1158,101 +1038,5 @@ fn parse_outcome_name(name: &str) -> StepOutcome {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json::json;
-    use std::path::PathBuf;
-
-    #[test]
-    fn parse_outcome_name_maps_known_names() {
-        assert!(matches!(
-            parse_outcome_name("success"),
-            StepOutcome::Success
-        ));
-        assert!(matches!(
-            parse_outcome_name("fixable"),
-            StepOutcome::Fixable
-        ));
-        assert!(matches!(parse_outcome_name("fatal"), StepOutcome::Fatal));
-        assert!(matches!(
-            parse_outcome_name("retryable"),
-            StepOutcome::Retryable
-        ));
-        assert!(matches!(
-            parse_outcome_name("abandon"),
-            StepOutcome::Abandon
-        ));
-    }
-
-    #[test]
-    fn parse_outcome_name_unknown_defaults_to_fatal() {
-        assert!(matches!(parse_outcome_name("nonsense"), StepOutcome::Fatal));
-        assert!(matches!(parse_outcome_name(""), StepOutcome::Fatal));
-    }
-
-    #[test]
-    fn contains_outcome_marker_line_matches_trimmed_line() {
-        let stdout = "noise\n   MARKER_DONE   \nmore";
-        assert!(contains_outcome_marker_line(stdout, "MARKER_DONE"));
-    }
-
-    #[test]
-    fn contains_outcome_marker_line_requires_full_line_match() {
-        let stdout = "prefix MARKER suffix";
-        assert!(!contains_outcome_marker_line(stdout, "MARKER"));
-    }
-
-    #[test]
-    fn match_exit_code_outcome_maps_configured_code() {
-        let params = json!({"exit_code_map": {"2": "fixable", "3": "abandon"}});
-        assert!(matches!(
-            match_exit_code_outcome(&params, Some(2)),
-            Some(StepOutcome::Fixable)
-        ));
-        assert!(matches!(
-            match_exit_code_outcome(&params, Some(3)),
-            Some(StepOutcome::Abandon)
-        ));
-    }
-
-    #[test]
-    fn match_exit_code_outcome_none_when_unmapped_or_missing() {
-        let params = json!({"exit_code_map": {"2": "fixable"}});
-        assert!(match_exit_code_outcome(&params, Some(9)).is_none());
-        assert!(match_exit_code_outcome(&params, None).is_none());
-        assert!(match_exit_code_outcome(&json!({}), Some(2)).is_none());
-    }
-
-    #[test]
-    fn match_static_stdout_outcome_matches_marker_line() {
-        let params = json!({"outcome_on_stdout": {"ALL_DONE": "success"}});
-        let outcome = match_static_stdout_outcome(&params, "log\nALL_DONE\n");
-        assert!(matches!(outcome, Some(StepOutcome::Success)));
-    }
-
-    #[test]
-    fn match_static_stdout_outcome_none_without_match() {
-        let params = json!({"outcome_on_stdout": {"ALL_DONE": "success"}});
-        assert!(match_static_stdout_outcome(&params, "nothing here").is_none());
-        assert!(match_static_stdout_outcome(&json!({}), "ALL_DONE").is_none());
-    }
-
-    #[test]
-    fn match_stdout_outcome_reads_shared_buffer() {
-        let params = json!({"outcome_on_stdout": {"READY": "retryable"}});
-        let buffer = Arc::new(Mutex::new("prelude\nREADY\n".to_string()));
-        let outcome = match_stdout_outcome(&params, &buffer);
-        assert!(matches!(outcome, Some(StepOutcome::Retryable)));
-    }
-
-    #[test]
-    fn string_array_param_interpolates_and_defaults() {
-        let mut context = StepContext::new(PathBuf::from("/tmp/work"), "run-1".to_string());
-        context.set("name", "world");
-        let params = json!({"args": ["hello-{name}", "static"]});
-        let out = string_array_param(&params, "args", &context);
-        assert_eq!(out, vec!["hello-world".to_string(), "static".to_string()]);
-        // Missing key yields empty vec.
-        assert!(string_array_param(&params, "missing", &context).is_empty());
-    }
-}
+#[path = "llxprt_tests.rs"]
+mod tests;

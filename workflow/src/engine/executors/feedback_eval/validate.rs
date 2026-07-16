@@ -33,6 +33,11 @@ pub(super) fn validate_response(
     ) {
         return Err(reject("unknown_decision", &value));
     }
+    // Newly generated evaluator responses must carry explicit two-axis
+    // classifications (issue 142). Historical persisted artifacts are read
+    // via `validate_reusable_accepted`, which tolerates missing axes via
+    // legacy projection; this check applies only to fresh adapter output.
+    validate_two_axis_fields(&response, &value)?;
     if response.decision != "valid" && response.reason.trim().is_empty() {
         return Err(reject("missing_required_reason", &value));
     }
@@ -49,6 +54,47 @@ pub(super) fn validate_response(
         return Err(reject("missing_response_text", &value));
     }
     Ok(response)
+}
+
+/// Legal correctness enum values accepted from the evaluator (issue 142).
+pub(super) const LEGAL_CORRECTNESS_VALUES: &[&str] =
+    &["blocker", "high", "medium", "low", "invalid"];
+
+/// Legal delivery_scope enum values accepted from the evaluator (issue 142).
+pub(super) const LEGAL_DELIVERY_SCOPE_VALUES: &[&str] = &[
+    "required_acceptance_criterion",
+    "regression_from_current_patch",
+    "small_adjacent_fix",
+    "follow_up_issue",
+    "user_decision",
+];
+
+/// Validate that a **freshly generated** evaluator response carries both
+/// required two-axis classifications with legal enum values.
+///
+/// This applies only to newly generated adapter output. Historical persisted
+/// artifacts that predate the two-axis schema are read via
+/// [`validate_reusable_accepted`], which tolerates missing axes via legacy
+/// projection — ensuring backward compatibility for already-stored state.
+fn validate_two_axis_fields(
+    response: &FeedbackEvaluationResponse,
+    value: &Value,
+) -> Result<(), RejectReason> {
+    let correctness = response.correctness.as_deref().unwrap_or("");
+    if correctness.is_empty() {
+        return Err(reject("missing_correctness", value));
+    }
+    if !LEGAL_CORRECTNESS_VALUES.contains(&correctness) {
+        return Err(reject("invalid_correctness", value));
+    }
+    let delivery_scope = response.delivery_scope.as_deref().unwrap_or("");
+    if delivery_scope.is_empty() {
+        return Err(reject("missing_delivery_scope", value));
+    }
+    if !LEGAL_DELIVERY_SCOPE_VALUES.contains(&delivery_scope) {
+        return Err(reject("invalid_delivery_scope", value));
+    }
+    Ok(())
 }
 
 pub(super) fn reject_batch_response_fields(value: &Value) -> Result<(), RejectReason> {
@@ -79,6 +125,8 @@ pub(super) fn deterministic_feedback_evaluation(
         "body_hash": item.body_hash,
         "head_sha": item.head_sha,
         "decision": "invalid",
+        "correctness": "invalid",
+        "delivery_scope": "user_decision",
         "reason": "CodeRabbit summary/walkthrough comments are informational and do not identify a specific actionable feedback item.",
         "recommended_action": "No code changes or review-thread response are required for the summary comment.",
         "response_text": "This is an informational CodeRabbit summary/walkthrough comment rather than an actionable review item, so no code change is required.",
@@ -184,7 +232,7 @@ pub(super) fn accepted_result(
     source: &str,
     reuse_state: &str,
 ) -> Value {
-    json!({
+    let mut result = json!({
         "item_id": response.item_id,
         "stable_marker_key": response.stable_marker_key,
         "body_hash": response.body_hash,
@@ -197,7 +245,22 @@ pub(super) fn accepted_result(
         "attempt_count": attempt_count,
         "source": source,
         "reuse_state": reuse_state
-    })
+    });
+    if let Some(object) = result.as_object_mut() {
+        if let Some(ref correctness) = response.correctness {
+            object.insert(
+                "correctness".to_string(),
+                Value::String(correctness.clone()),
+            );
+        }
+        if let Some(ref delivery_scope) = response.delivery_scope {
+            object.insert(
+                "delivery_scope".to_string(),
+                Value::String(delivery_scope.clone()),
+            );
+        }
+    }
+    result
 }
 
 pub(super) fn validate_reusable_accepted(

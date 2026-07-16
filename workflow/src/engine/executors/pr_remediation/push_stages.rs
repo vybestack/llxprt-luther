@@ -126,11 +126,14 @@ where
 /// @requirement:REQ-PRFU-015,REQ-PRFU-017
 /// @pseudocode lines 34-40
 fn push_remediation_changes(
-    context: &StepContext,
+    context: &mut StepContext,
     params: &Value,
     clock: &dyn ClockSleeper,
     runner: &dyn PushRemediationCommandRunner,
 ) -> Result<StepOutcome, EngineError> {
+    if let Some(outcome) = crate::engine::executors::scope_control_barrier_pub(context) {
+        return Ok(outcome);
+    }
     let setup = load_push_run_setup(context, params, clock)?;
     let test_result = match read_verified_post_pr_test_result(&setup, clock) {
         Ok(test_result) => test_result,

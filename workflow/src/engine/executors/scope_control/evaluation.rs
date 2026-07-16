@@ -309,6 +309,7 @@ mod tests {
             binary_files: 0,
             new_modules: 1,
             dependencies_added: 0,
+            content_digest: String::new(),
             public_apis_added: 2,
             changed_paths: vec!["src/core/a.rs".into(), "src/core/b.rs".into()],
             changed_subsystems: vec!["core".into()],

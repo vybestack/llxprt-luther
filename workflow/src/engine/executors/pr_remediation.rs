@@ -6,6 +6,7 @@
 //! @pseudocode lines 1-53
 
 mod failure_terminal;
+mod finding_routing;
 mod post_pr_plan_inputs;
 mod post_pr_stages;
 mod post_pr_test_process;
@@ -107,6 +108,10 @@ struct RemediationPlanArtifact {
     mark_invalid: Vec<Value>,
     needs_user_judgment: Vec<Value>,
     pending_or_unknown: Vec<Value>,
+    /// Durably recorded follow-up work that does not fail the current delivery
+    /// (two-axis `DeferToFollowUp` findings). Issue 142.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    deferred_followups: Vec<Value>,
     source_artifacts: Vec<Value>,
     built_at: String,
 }
@@ -187,6 +192,7 @@ fn build_remediation_plan(
     let mut mark_invalid = Vec::new();
     let mut needs_user_judgment = Vec::new();
     let mut pending_or_unknown = Vec::new();
+    let mut deferred_followups = Vec::new();
 
     append_pending_ci_judgment(
         &inputs.ci_failures,
@@ -271,58 +277,21 @@ fn build_remediation_plan(
         .into_iter()
         .flatten()
     {
-        match result.get("decision").and_then(Value::as_str) {
-            Some("valid") => must_fix.push(feedback_plan_item(
-                result,
-                "coderabbit_feedback",
-                &binding,
-                &inputs.evaluations,
-            )),
-            Some("invalid" | "out_of_scope") => {
-                // CodeRabbit summary/walkthrough comments are deterministically
-                // classified "invalid" purely as a readiness signal. They are
-                // informational only and must not become mark_invalid plan
-                // entries (which would later materialize a top-level PR comment).
-                if !value_has_summary_marker_key(result) {
-                    mark_invalid.push(feedback_plan_item(
-                        result,
-                        "coderabbit_feedback",
-                        &binding,
-                        &inputs.evaluations,
-                    ));
-                }
-            }
-            Some("needs_user_judgment") => needs_user_judgment.push(feedback_plan_item(
-                result,
-                "coderabbit_feedback",
-                &binding,
-                &inputs.evaluations,
-            )),
-            Some(other) => needs_user_judgment.push(json!({
-                "source_type": "coderabbit_feedback",
-                "source_id": string_field(result, "item_id", "unknown-feedback-item"),
-                "reason": format!("unknown_feedback_decision:{other}"),
-                "recommended_action": "human_review_required",
-                "input_head_sha": binding.head_sha,
-                "source_artifact_sequence": artifact_sequence(&inputs.evaluations),
-                "evidence": result
-            })),
-            None => needs_user_judgment.push(json!({
-                "source_type": "coderabbit_feedback",
-                "source_id": string_field(result, "item_id", "unknown-feedback-item"),
-                "reason": "missing_feedback_decision",
-                "recommended_action": "human_review_required",
-                "input_head_sha": binding.head_sha,
-                "source_artifact_sequence": artifact_sequence(&inputs.evaluations),
-                "evidence": result
-            })),
-        }
+        finding_routing::route_accepted_result(
+            result,
+            &binding,
+            &inputs.evaluations,
+            &mut must_fix,
+            &mut mark_invalid,
+            &mut needs_user_judgment,
+            &mut deferred_followups,
+        );
     }
 
-    let plan_state = if !must_fix.is_empty() {
-        PlanState::NeedsRemediation
-    } else if !needs_user_judgment.is_empty() {
+    let plan_state = if !needs_user_judgment.is_empty() {
         PlanState::BlockedNeedsUserJudgment
+    } else if !must_fix.is_empty() {
+        PlanState::NeedsRemediation
     } else {
         PlanState::Clean
     };
@@ -332,6 +301,7 @@ fn build_remediation_plan(
     let payload = RemediationPlanArtifact {
         plan_state,
         must_fix,
+        deferred_followups,
         mark_invalid: mark_invalid.clone(),
         needs_user_judgment,
         pending_or_unknown,
@@ -408,31 +378,6 @@ fn ci_must_fix_item(
         "input_head_sha": binding.head_sha,
         "source_artifact_sequence": artifact_sequence(ci_failures),
         "evidence": failure
-    })
-}
-
-/// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P10
-/// @requirement:REQ-PRFU-013
-/// @pseudocode lines 6-8
-fn feedback_plan_item(
-    result: &Value,
-    source_type: &str,
-    binding: &PrFollowupBinding,
-    evaluations: &Value,
-) -> Value {
-    json!({
-        "source_type": source_type,
-        "source_id": string_field(result, "item_id", "unknown-feedback-item"),
-        "stable_marker_key": result.get("stable_marker_key").cloned().unwrap_or(Value::Null),
-        "reason": string_field(result, "reason", "no_reason_provided"),
-        "recommended_action": string_field(result, "recommended_action", "human_review_required"),
-        "response_text": result.get("response_text").cloned().unwrap_or(Value::Null),
-        "thread_id": result.get("thread_id").cloned().unwrap_or(Value::Null),
-        "input_head_sha": binding.head_sha,
-        "source_artifact_sequence": artifact_sequence(evaluations),
-        "decision": result.get("decision").cloned().unwrap_or(Value::Null),
-        "body_hash": result.get("body_hash").cloned().unwrap_or(Value::Null),
-        "evidence": result
     })
 }
 
@@ -528,6 +473,7 @@ fn fatal_plan_payload(
         mark_invalid: Vec::new(),
         needs_user_judgment: Vec::new(),
         pending_or_unknown: Vec::new(),
+        deferred_followups: Vec::new(),
         source_artifacts,
         built_at: clock.now_rfc3339(),
     }
@@ -978,7 +924,7 @@ where
 /// @requirement:REQ-PRFU-013,REQ-PRFU-017
 /// @pseudocode lines 12-17
 fn remediate_pr_followup(
-    context: &StepContext,
+    context: &mut StepContext,
     params: &Value,
     clock: &dyn ClockSleeper,
     runner: &dyn PrFollowupLlxprtCommandRunner,
@@ -987,6 +933,9 @@ fn remediate_pr_followup(
     else {
         return Ok(StepOutcome::Success);
     };
+    if let Some(outcome) = crate::engine::executors::scope_control_barrier_pub(context) {
+        return Ok(outcome);
+    }
     let request = run.invocation_request(context, params);
     run.mark_launched(clock)?;
     run.invoke(request, context, runner);

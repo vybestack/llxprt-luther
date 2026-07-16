@@ -95,6 +95,8 @@ const STEP_TYPES: &[&str] = &[
     "llxprt",
     "workflow_auth_preflight",
     "command_manifest_group",
+    "task_charter",
+    "scope_measure",
     "github_pr_identity",
     "post_pr_iteration_guard",
     "github_pr_checks",

@@ -351,7 +351,21 @@ pub fn print_runs_show_human(
 ) {
     print_runs_show_info(md);
     print_runs_show_paths_and_procs(md, log_path, log_exists);
+    print_runs_show_scope_control(md);
     print_runs_show_events(events, artifacts);
+}
+
+/// Render the scope-control section of `runs show` (issue #142).
+fn print_runs_show_scope_control(md: &RunMetadata) {
+    println!();
+    let status = luther_workflow::engine::executors::scope_control::project_scope_status(
+        md.artifact_root.as_deref(),
+        &md.run_id,
+    );
+    let human = luther_workflow::engine::executors::scope_control::scope_status_to_human(&status);
+    for line in human.lines() {
+        println!("{line}");
+    }
 }
 
 /// Resolve the run id for `runs tail` from args or active heartbeats (issue #51).

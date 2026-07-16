@@ -3834,6 +3834,8 @@ fn feedback_evaluation_ignores_unresolved_identity_params_and_uses_context() {
         "body_hash": "hash-a",
         "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         "decision": "valid",
+        "correctness": "high",
+        "delivery_scope": "required_acceptance_criterion",
         "reason": "valid feedback",
         "recommended_action": "fix",
         "response_text": "Luther will address this valid feedback on the thread."
@@ -3990,6 +3992,8 @@ fn p09_recovered_feedback_adapter() -> ScriptedFeedbackEvaluationAdapter {
         "body_hash": "hash-a",
         "head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
         "decision": "valid",
+        "correctness": "high",
+        "delivery_scope": "required_acceptance_criterion",
         "reason": "valid feedback",
         "recommended_action": "fix",
         "response_text": "Luther will address this valid feedback on the thread."
@@ -4454,6 +4458,8 @@ fn feedback_evaluation_evaluates_matching_state_entry_when_not_reuse_eligible() 
         "body_hash": "hash-a",
         "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         "decision": "valid",
+        "correctness": "high",
+        "delivery_scope": "required_acceptance_criterion",
         "reason": "valid feedback",
         "recommended_action": "fix",
         "response_text": "Luther will address this valid feedback on the thread."
@@ -5150,14 +5156,14 @@ fn remediation_plan_with_must_fix_defers_user_judgment_and_remediates_actionable
 
     assert_expected_outcome(
         outcome,
-        StepOutcome::Fixable,
-        "actionable must_fix items should still be remediated while user-judgment items remain out of scope",
+        StepOutcome::Fatal,
+        "user judgment must block mutation even when actionable items remain queued",
     );
     assert_eq!(
         artifact
             .get("plan_state")
             .and_then(serde_json::Value::as_str),
-        Some("needs_remediation")
+        Some("blocked_needs_user_judgment")
     );
     let must_fix = artifact
         .get("must_fix")
@@ -11213,7 +11219,7 @@ fn feedback_evaluator_accepts_json_object_wrapped_by_llxprt_cli_progress() {
         serde_json::json!([p09_feedback_item("item-json", "thread-json", "hash-json")]),
         serde_json::json!([]),
     );
-    let raw = "## Todo Progress\n[opusthinking]\n{\"item_id\":\"item-json\",\"stable_marker_key\":\"thread-json\",\"body_hash\":\"hash-json\",\"head_sha\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"decision\":\"valid\",\"reason\":\"actionable\",\"recommended_action\":\"fix it\",\"response_text\":\"Luther will address this actionable feedback.\"}\n";
+    let raw = "## Todo Progress\n[opusthinking]\n{\"item_id\":\"item-json\",\"stable_marker_key\":\"thread-json\",\"body_hash\":\"hash-json\",\"head_sha\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"decision\":\"valid\",\"correctness\":\"high\",\"delivery_scope\":\"required_acceptance_criterion\",\"reason\":\"actionable\",\"recommended_action\":\"fix it\",\"response_text\":\"Luther will address this actionable feedback.\"}\n";
     let runner = RecordingFeedbackEvaluatorRunner::new(raw.to_string());
     let adapter =
         CommandFeedbackEvaluationAdapter::new(vec!["feedback-evaluator-bin".to_string()], runner);

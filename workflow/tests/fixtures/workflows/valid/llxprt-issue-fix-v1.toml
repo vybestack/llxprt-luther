@@ -835,8 +835,28 @@ max_iterations = 5
 
 [[transitions]]
 from = "workflow_auth_preflight_plan"
+to = "task_charter"
+condition = "success"
+
+[[steps]]
+step_id = "task_charter"
+step_type = "task_charter"
+description = "Freeze scope-control task charter before mutable implementation (issue 142)"
+
+[steps.parameters]
+artifact_dir = "{artifact_dir}"
+
+[[transitions]]
+from = "task_charter"
 to = "implement"
 condition = "success"
+max_iterations = 1
+
+[[transitions]]
+from = "task_charter"
+to = "abandon_and_log"
+condition = "fatal"
+max_iterations = 1
 
 # Implementation → deterministic verification first
 [[transitions]]
@@ -848,7 +868,28 @@ max_iterations = 3
 
 [[transitions]]
 from = "implement"
+to = "scope_measure"
+condition = "success"
+
+[[steps]]
+step_id = "scope_measure"
+step_type = "scope_measure"
+description = "Measure patch growth and enforce scope barrier after implementation (issue 142)"
+
+[steps.parameters]
+artifact_dir = "{artifact_dir}"
+
+[[transitions]]
+from = "scope_measure"
 to = "run_tests"
+condition = "success"
+max_iterations = 2
+
+[[transitions]]
+from = "scope_measure"
+to = "abandon_and_log"
+condition = "fatal"
+max_iterations = 1
 
 [[transitions]]
 from = "implement"
@@ -904,8 +945,33 @@ max_iterations = 2
 
 [[transitions]]
 from = "workflow_auth_preflight_pre_push"
+to = "scope_measure_pre_push"
+condition = "success"
+
+[[steps]]
+step_id = "scope_measure_pre_push"
+step_type = "scope_measure"
+description = "Enforce scope barrier before push (issue 142)"
+
+[steps.parameters]
+artifact_dir = "{artifact_dir}"
+
+[[transitions]]
+from = "scope_measure_pre_push"
 to = "push_changes"
 condition = "success"
+max_iterations = 2
+
+[[transitions]]
+from = "scope_measure_pre_push"
+to = "abandon_and_log"
+condition = "fatal"
+max_iterations = 1
+
+[[transitions]]
+from = "workflow_auth_preflight_pre_push"
+to = "abandon_and_log"
+condition = "fatal"
 
 # Post-test success flow
 [[transitions]]

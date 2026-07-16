@@ -30,6 +30,7 @@ pub mod pr_followup_artifacts;
 pub mod pr_followup_types;
 mod pr_identity_params;
 pub mod pr_remediation;
+pub mod scope_control;
 pub mod shell;
 pub mod verify;
 pub mod workflow_auth_preflight;
@@ -90,7 +91,92 @@ pub use pr_remediation::{
     PushRemediationCommandResult, PushRemediationCommandRunner, RunPostPrTestsExecutor,
     RunPostPrTestsExecutorWithRunner, SystemPrFollowupLlxprtCommandRunner,
 };
+pub use scope_control::{
+    normalize_charter, validate_draft_against_config, validate_scope_control, CanonicalBudget,
+    CanonicalReviewCaps, CanonicalTaskCharter, DraftBudget, DraftReviewCaps, DraftSubsystem,
+    MergeBaseError, MergeBaseProbe, PreLaunchReviewRequest, ReviewCheckOutcome, ScopeEvaluation,
+    ScopeMeasureExecutor, ScopePersistenceError, ScopeStatus, SystemMergeBaseProbe,
+    TaskCharterDraft, TaskCharterExecutor, Violation, ViolationCode, CHARTER_SCHEMA_VERSION,
+};
 pub use shell::ShellExecutor;
 pub use verify::VerifyExecutor;
 pub use workflow_auth_preflight::WorkflowAuthPreflightExecutor;
 pub use write_file::WriteFileExecutor;
+
+/// Enforce the scope-decision barrier at a mutation entry point.
+///
+/// Returns `Some(StepOutcome::Wait)` when the patch is over-budget and must
+/// be resolved before mutation proceeds, or `None` when mutation is allowed.
+/// When no scope-control policy is active or no charter artifact exists, the
+/// barrier is a no-op (`None`).
+///
+/// This is the shared compact barrier for broad mutation executors
+/// (`llxprt`, `pr_followup_remediation`) and the pre-push executor
+/// (`push_remediation_changes`).
+fn scope_control_barrier(
+    context: &mut crate::engine::executor::StepContext,
+) -> Option<crate::engine::transition::StepOutcome> {
+    scope_control_barrier_impl(context)
+}
+
+/// Public barrier entry point used by mutation executors that receive an
+/// immutable `&StepContext` (e.g. `pr_followup_remediation`).
+pub(crate) fn scope_control_barrier_pub(
+    context: &mut crate::engine::executor::StepContext,
+) -> Option<crate::engine::transition::StepOutcome> {
+    scope_control_barrier_impl(context)
+}
+
+fn scope_control_barrier_impl(
+    context: &mut crate::engine::executor::StepContext,
+) -> Option<crate::engine::transition::StepOutcome> {
+    use crate::engine::executors::scope_control::{
+        enforce_scope_barrier, ScopeBarrierResult, SystemGitPatchCollector,
+    };
+    let scope_control = match resolve_scope_control_policy(context) {
+        Ok(Some(config)) => config,
+        Ok(None) => return None,
+        Err(err) => {
+            tracing::error!(run_id = %context.run_id(), error = %err, "invalid scope-control policy");
+            return Some(crate::engine::transition::StepOutcome::Fatal);
+        }
+    };
+    match enforce_scope_barrier(context, &SystemGitPatchCollector, &scope_control) {
+        Ok(ScopeBarrierResult::Blocked) => {
+            // Mark the context so the wait-state persistence layer classifies
+            // this as a ScopeDecision wait rather than defaulting to
+            // HumanReview. Without this marker, the originating step (e.g.
+            // llxprt) would be misclassified and polled by the wrong poller.
+            context.set("scope_barrier_wait", "true");
+            Some(crate::engine::transition::StepOutcome::Wait)
+        }
+        Ok(ScopeBarrierResult::Allow) => None,
+        Ok(ScopeBarrierResult::Denied(decision)) => {
+            tracing::error!(run_id = %context.run_id(), %decision, "scope expansion denied");
+            Some(crate::engine::transition::StepOutcome::Fatal)
+        }
+        Err(err) => {
+            // Fail closed: a barrier persistence/measurement error means the
+            // patch cannot be safely classified. Return Fatal rather than
+            // allowing the mutation through unguarded.
+            tracing::error!(
+                run_id = %context.run_id(),
+                error = %err,
+                "scope-control barrier failed closed"
+            );
+            Some(crate::engine::transition::StepOutcome::Fatal)
+        }
+    }
+}
+
+/// Resolve the active scope-control config, distinguishing an absent policy
+/// from malformed trusted context so mutation barriers cannot fail open.
+fn resolve_scope_control_policy(
+    context: &crate::engine::executor::StepContext,
+) -> Result<Option<crate::workflow::schema::ScopeControlConfig>, serde_json::Error> {
+    let Some(policy_json) = context.get("scope_control_policy") else {
+        return Ok(None);
+    };
+    let config = serde_json::from_str::<crate::workflow::schema::ScopeControlConfig>(policy_json)?;
+    Ok(config.enabled.then_some(config))
+}
