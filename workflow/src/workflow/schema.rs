@@ -469,9 +469,14 @@ pub struct DiscoveryConfig {
     /// Issue states to query. Defaults to `["open"]` when unset.
     #[serde(default)]
     pub issue_states: Vec<String>,
-    /// Required assignee filter. `Some("")` means unassigned (matching the
-    /// legacy `select_issue` behavior). Defaults from `variables.assignee`.
-    pub assignee_filter: Option<String>,
+    /// Label whose application authorizes issue execution.
+    pub approval_label: Option<String>,
+    /// GitHub actor permitted to apply the approval label.
+    pub approval_actor: Option<String>,
+    /// Operating user assigned after the daemon wins the issue lease.
+    pub claim_assignee: Option<String>,
+    /// Working label applied after the daemon wins the issue lease.
+    pub claim_label: Option<String>,
     /// Milestone ordering strategy: `"semver"` or `"none"`. Defaults to
     /// `"semver"` when unset.
     pub milestone_order: Option<String>,

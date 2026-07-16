@@ -16,7 +16,9 @@ use tracing::warn;
 
 use crate::adapters::github::{GithubCommandRunner, GithubError};
 
+mod approval_events;
 mod graphql;
+mod issue_mutations;
 mod prs;
 mod subissues;
 
@@ -97,7 +99,7 @@ pub struct GithubIssue {
     pub title: String,
     pub state: String,
     pub labels: Vec<String>,
-    pub assignee: Option<String>,
+    pub assignees: Vec<String>,
     pub milestone: Option<String>,
     pub body: Option<String>,
 }
@@ -145,6 +147,16 @@ pub trait GithubIssueQuery {
         states: &[String],
     ) -> Result<Vec<GithubIssue>, GithubError>;
 
+    /// Actor responsible for the most recent application of `label`.
+    fn latest_label_actor(
+        &self,
+        _repo: &str,
+        _number: u64,
+        _label: &str,
+    ) -> Result<Option<String>, GithubError> {
+        Ok(None)
+    }
+
     /// Whether an open PR references the given issue number.
     fn has_open_pr_for_issue(&self, repo: &str, number: u64) -> Result<bool, GithubError>;
 
@@ -181,6 +193,16 @@ pub trait GithubIssueQuery {
 
     /// Remove an issue label.
     fn remove_label(&self, _repo: &str, _number: u64, _label: &str) -> Result<(), GithubError> {
+        Ok(())
+    }
+
+    /// Assign the operating user after winning the issue lease.
+    fn add_assignee(&self, _repo: &str, _number: u64, _login: &str) -> Result<(), GithubError> {
+        Ok(())
+    }
+
+    /// Remove an assignment introduced by a failed claim.
+    fn remove_assignee(&self, _repo: &str, _number: u64, _login: &str) -> Result<(), GithubError> {
         Ok(())
     }
 
@@ -327,7 +349,12 @@ fn graphql_issue_to_issue(issue: GraphqlIssue) -> GithubIssue {
             .into_iter()
             .map(|label| label.name)
             .collect(),
-        assignee: issue.assignees.nodes.into_iter().next().map(|a| a.login),
+        assignees: issue
+            .assignees
+            .nodes
+            .into_iter()
+            .map(|assignee| assignee.login)
+            .collect(),
         milestone: issue.milestone.map(|m| m.title),
         body: issue.body,
     }
@@ -339,7 +366,11 @@ fn raw_issue_view_to_issue(issue: RawIssueView) -> GithubIssue {
         title: issue.title,
         state: normalize_state(&issue.state),
         labels: issue.labels.into_iter().map(|label| label.name).collect(),
-        assignee: issue.assignees.into_iter().next().map(|a| a.login),
+        assignees: issue
+            .assignees
+            .into_iter()
+            .map(|assignee| assignee.login)
+            .collect(),
         milestone: issue.milestone.map(|m| m.title),
         body: issue.body,
     }
@@ -479,7 +510,11 @@ pub fn parse_issue_list(json: &str) -> Result<Vec<GithubIssue>, GithubError> {
             title: r.title,
             state: normalize_state(&r.state),
             labels: r.labels.into_iter().map(|l| l.name).collect(),
-            assignee: r.assignees.into_iter().next().map(|a| a.login),
+            assignees: r
+                .assignees
+                .into_iter()
+                .map(|assignee| assignee.login)
+                .collect(),
             milestone: r.milestone.map(|m| m.title),
             body: None,
         })
@@ -543,6 +578,17 @@ impl<R: GithubCommandRunner> GithubIssueQuery for SystemGithubIssueQuery<R> {
                     .any(|state| state.eq_ignore_ascii_case(&issue.state))
             })
             .collect())
+    }
+
+    fn latest_label_actor(
+        &self,
+        repo: &str,
+        number: u64,
+        label: &str,
+    ) -> Result<Option<String>, GithubError> {
+        let argv = approval_events::issue_events_argv(repo, number);
+        let output = self.runner.run(&argv)?;
+        approval_events::latest_label_actor(&output, label)
     }
 
     fn has_open_pr_for_issue(&self, repo: &str, number: u64) -> Result<bool, GithubError> {
@@ -634,16 +680,7 @@ impl<R: GithubCommandRunner> GithubIssueQuery for SystemGithubIssueQuery<R> {
     }
 
     fn add_label(&self, repo: &str, number: u64, label: &str) -> Result<(), GithubError> {
-        let argv = vec![
-            "gh".to_string(),
-            "issue".to_string(),
-            "edit".to_string(),
-            number.to_string(),
-            "--repo".to_string(),
-            repo.to_string(),
-            "--add-label".to_string(),
-            label.to_string(),
-        ];
+        let argv = issue_mutations::edit_issue_argv(repo, number, "--add-label", label);
         self.runner.run(&argv).map(|_| ())
     }
 
@@ -658,6 +695,16 @@ impl<R: GithubCommandRunner> GithubIssueQuery for SystemGithubIssueQuery<R> {
             "--remove-label".to_string(),
             label.to_string(),
         ];
+        self.runner.run(&argv).map(|_| ())
+    }
+
+    fn add_assignee(&self, repo: &str, number: u64, login: &str) -> Result<(), GithubError> {
+        let argv = issue_mutations::edit_issue_argv(repo, number, "--add-assignee", login);
+        self.runner.run(&argv).map(|_| ())
+    }
+
+    fn remove_assignee(&self, repo: &str, number: u64, login: &str) -> Result<(), GithubError> {
+        let argv = issue_mutations::edit_issue_argv(repo, number, "--remove-assignee", login);
         self.runner.run(&argv).map(|_| ())
     }
 

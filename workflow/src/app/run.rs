@@ -466,11 +466,24 @@ pub fn launch_daemon_workflow(
     };
     apply_target_profile_overrides(&mut config, &overrides)
         .map_err(|e| format!("apply overrides: {e}"))?;
+    apply_daemon_claim_overrides(&mut config, request);
     ensure_daemon_run_dirs(request)?;
     let db_path = luther_workflow::runtime_paths::get_data_dir().join("checkpoints.db");
     let wait_config = config.clone();
     let mut runner = create_durable_runner(workflow_type, config, &request.run_id, &db_path);
     run_daemon_runner(request, &wait_config, &db_path, &mut runner)
+}
+fn apply_daemon_claim_overrides(
+    config: &mut luther_workflow::workflow::schema::WorkflowConfig,
+    request: &luther_workflow::daemon::launcher::LaunchRequest,
+) {
+    for (key, value) in [
+        ("daemon_managed_claim", request.daemon_managed_claim),
+        ("claim_assignment_added", request.claim_assignment_added),
+        ("claim_label_added", request.claim_label_added),
+    ] {
+        config.variables.insert(key.to_owned(), value.to_string());
+    }
 }
 
 pub fn ensure_daemon_run_dirs(

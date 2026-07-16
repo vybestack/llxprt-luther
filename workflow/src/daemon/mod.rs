@@ -23,6 +23,7 @@ use std::process::Command;
 
 // Daemon discovery/queueing/leasing/launch submodules (issue #49).
 // @plan:PLAN-20260415-DAEMON-DISCOVERY.P04
+pub(crate) mod claim;
 pub mod discovery;
 pub mod launcher;
 pub mod poller;

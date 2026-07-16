@@ -11,27 +11,43 @@ use std::borrow::Cow;
 use std::collections::{btree_map::Entry, BTreeMap};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::thread;
 use std::time::Duration;
 
 use rusqlite::Connection;
 
 use crate::adapters::github_issues::GithubIssueQuery;
-use crate::daemon::discovery::discover;
+use crate::daemon::claim::{
+    apply_remote_claim, cleanup_remote_claim, inspect_remote_claim, reconcile_pending_cleanup,
+    verify_remote_claim, ClaimOwnership,
+};
+use crate::daemon::discovery::{discover, RoutedIssue};
 use crate::daemon::launcher::{
-    claim_for_launch, finish_lease_after_result, prepare_resume_lease, DaemonPathBases,
-    LaunchOutcome, LaunchRequest, WorkflowLauncher,
+    claim_for_launch_pending, prepare_resume_lease, ClaimedLaunch, DaemonPathBases, LaunchRequest,
+    WorkflowLauncher,
 };
 use crate::daemon::poller::{
     apply_poll_decision, ArtifactPhase, ExternalWaitPoller, PollApplyError, PollApplyOutcome,
     SystemExternalWaitPoller,
 };
+use crate::persistence::claim_metadata::{
+    get_claim_metadata, list_pending_claim_cleanups, upsert_claim_metadata, ClaimMetadataReceipt,
+};
 use crate::persistence::leases::{
     count_active_leases, count_active_leases_for_config, count_active_leases_for_repository,
-    list_ready_to_resume_leases, mark_stale_leases, mark_stale_ready_to_resume_leases, IssueLease,
+    list_ready_to_resume_leases, mark_stale_leases, mark_stale_ready_to_resume_leases,
+    update_lease_status_conditional_outcome, ConditionalLeaseStatusOutcome, IssueLease,
+    LeaseStatus,
 };
 use crate::persistence::wait_state::list_pollable_wait_states;
 use crate::workflow::schema::DiscoveryConfig;
+
+mod dispatch;
+
+#[cfg(test)]
+use crate::daemon::launcher::LaunchOutcome;
+#[cfg(test)]
+use dispatch::record_outcome;
+use dispatch::{dispatch_units, DispatchUnit};
 
 /// Maximum number of per-run skipped-poll details retained in one pass.
 pub const MAX_SKIPPED_POLL_DETAILS: usize = 100;
@@ -230,13 +246,6 @@ pub struct CapacityLimits {
     pub per_repository: usize,
 }
 
-#[derive(Debug, Clone)]
-struct DispatchUnit {
-    lease_id: String,
-    request: LaunchRequest,
-    resume: bool,
-}
-
 /// Execute a single discovery + launch pass.
 ///
 /// Discovers eligible issues (accounting for already-active leases), then for
@@ -305,13 +314,64 @@ pub fn run_multi_target_once_with_poller(
             queries: queries.len(),
         });
     }
+    reconcile_claim_cleanups(targets, queries, conn)?;
     let mut summary = poll_due_waits(conn, poller)?;
     let limits = capacity_limits(targets);
     let mut units = collect_resume_units(targets, conn, &limits)?;
     collect_launch_units(targets, queries, conn, &limits, &mut units, &mut summary)?;
     let max_parallel = dispatch_parallelism(&limits, units.len());
-    dispatch_units(conn, launcher, units, max_parallel, &mut summary)?;
+    dispatch_units(conn, launcher, queries, units, max_parallel, &mut summary)?;
     Ok(summary)
+}
+
+fn reconcile_claim_cleanups(
+    targets: &[SchedulerTarget],
+    queries: &[&dyn GithubIssueQuery],
+    conn: &Connection,
+) -> Result<(), SchedulerError> {
+    for (target, query) in targets.iter().zip(queries.iter()) {
+        let Some(repo) = target.discovery.repo.as_deref() else {
+            continue;
+        };
+        for cleanup in list_pending_claim_cleanups(conn, repo)? {
+            if cleanup.lease_status == LeaseStatus::Claimed {
+                let transition = update_lease_status_conditional_outcome(
+                    conn,
+                    &cleanup.receipt.lease_id,
+                    LeaseStatus::Pending,
+                    &[LeaseStatus::Claimed],
+                    None,
+                    None,
+                )?;
+                if transition != ConditionalLeaseStatusOutcome::Applied {
+                    continue;
+                }
+            }
+            if let Err(error) = reconcile_pending_cleanup(*query, &cleanup) {
+                eprintln!(
+                    "claim cleanup reconciliation error for issue={}#{}: {error}",
+                    cleanup.issue_repo, cleanup.issue_number
+                );
+                continue;
+            }
+            let mut receipt = cleanup.receipt;
+            receipt.cleanup_pending = false;
+            upsert_claim_metadata(conn, &receipt)?;
+            if cleanup.lease_status == LeaseStatus::Claimed
+                || cleanup.lease_status == LeaseStatus::Pending
+            {
+                update_lease_status_conditional_outcome(
+                    conn,
+                    &receipt.lease_id,
+                    LeaseStatus::Abandoned,
+                    &[LeaseStatus::Pending],
+                    None,
+                    None,
+                )?;
+            }
+        }
+    }
+    Ok(())
 }
 
 fn collect_resume_units(
@@ -417,7 +477,184 @@ fn prepare_resume_unit(
         lease_id: claimed.lease_id,
         request: claimed.request,
         resume: true,
+        query_index: None,
     }))
+}
+
+fn persist_claim_ownership(
+    conn: &Connection,
+    lease_id: &str,
+    config: &DiscoveryConfig,
+    ownership: ClaimOwnership,
+    cleanup_pending: bool,
+) -> Result<(), rusqlite::Error> {
+    let (Some(assignee), Some(label)) = (&config.claim_assignee, &config.claim_label) else {
+        return Ok(());
+    };
+    upsert_claim_metadata(
+        conn,
+        &ClaimMetadataReceipt {
+            lease_id: lease_id.to_owned(),
+            assignee: assignee.clone(),
+            label: label.clone(),
+            assignment_added: ownership.assignment_added,
+            label_added: ownership.label_added,
+            cleanup_pending,
+        },
+    )?;
+    if get_claim_metadata(conn, lease_id)?.is_none() {
+        return Err(rusqlite::Error::QueryReturnedNoRows);
+    }
+    Ok(())
+}
+fn abandon_failed_claim(
+    query: &dyn GithubIssueQuery,
+    config: &DiscoveryConfig,
+    conn: &Connection,
+    claimed: &ClaimedLaunch,
+    ownership: ClaimOwnership,
+    error: impl std::fmt::Display,
+) -> Result<(), rusqlite::Error> {
+    let receipt = ClaimMetadataReceipt {
+        lease_id: claimed.lease_id.clone(),
+        assignee: config.claim_assignee.clone().unwrap_or_default(),
+        label: config.claim_label.clone().unwrap_or_default(),
+        assignment_added: ownership.assignment_added,
+        label_added: ownership.label_added,
+        cleanup_pending: true,
+    };
+    let cleanup_pending = cleanup_remote_claim(
+        query,
+        &claimed.request.repo,
+        claimed.request.issue_number,
+        &receipt,
+    )
+    .is_err();
+    persist_claim_ownership(conn, &claimed.lease_id, config, ownership, cleanup_pending)?;
+    update_lease_status_conditional_outcome(
+        conn,
+        &claimed.lease_id,
+        LeaseStatus::Abandoned,
+        &[LeaseStatus::Claimed, LeaseStatus::Pending],
+        Some(&claimed.request.run_id),
+        None,
+    )?;
+    eprintln!(
+        "remote claim error for config={} issue={}#{}: {error}",
+        claimed.request.config_id, claimed.request.repo, claimed.request.issue_number
+    );
+    Ok(())
+}
+
+fn apply_claim_ownership(request: &mut LaunchRequest, ownership: ClaimOwnership) {
+    request.daemon_managed_claim = true;
+    request.claim_assignment_added = ownership.assignment_added;
+    request.claim_label_added = ownership.label_added;
+}
+
+enum PrepareLaunchOutcome {
+    Ready(Box<DispatchUnit>),
+    Skipped,
+    Failed,
+}
+
+fn acquire_claimed_launch(
+    target: &SchedulerTarget,
+    routed: &RoutedIssue,
+    discovery: &DiscoveryConfig,
+    conn: &Connection,
+    config_id: &str,
+) -> Result<Result<ClaimedLaunch, PrepareLaunchOutcome>, SchedulerError> {
+    let path_bases = path_bases_for(target, config_id);
+    match claim_for_launch_pending(
+        &routed.issue,
+        discovery,
+        conn,
+        config_id,
+        path_bases.as_ref(),
+    ) {
+        Ok(Ok(claimed)) => Ok(Ok(claimed)),
+        Ok(Err(_)) => Ok(Err(PrepareLaunchOutcome::Skipped)),
+        Err(error) => {
+            eprintln!(
+                "claim error for config={} issue={}#{}: {error}",
+                config_id,
+                target.discovery.repo.as_deref().unwrap_or(""),
+                routed.issue.number
+            );
+            Ok(Err(PrepareLaunchOutcome::Failed))
+        }
+    }
+}
+
+fn prepare_launch_unit(
+    target: &SchedulerTarget,
+    query: &dyn GithubIssueQuery,
+    query_index: usize,
+    routed: &RoutedIssue,
+    conn: &Connection,
+    limits: &CapacityLimits,
+    parent_discoveries: &BTreeMap<String, DiscoveryConfig>,
+) -> Result<PrepareLaunchOutcome, SchedulerError> {
+    let repo = target.discovery.repo.as_deref().unwrap_or("");
+    let config_id = routed.config_id.as_deref().unwrap_or(&target.config_id);
+    let discovery = launch_discovery_for(target, config_id, limits, parent_discoveries)?;
+    if !has_capacity(conn, &discovery, config_id, repo, limits)? {
+        return Ok(PrepareLaunchOutcome::Skipped);
+    }
+    let mut claimed = match acquire_claimed_launch(target, routed, &discovery, conn, config_id)? {
+        Ok(claimed) => claimed,
+        Err(outcome) => return Ok(outcome),
+    };
+    let ownership = match inspect_remote_claim(query, &discovery, &routed.issue) {
+        Ok(ownership) => ownership,
+        Err(error) => {
+            abandon_failed_claim(
+                query,
+                &discovery,
+                conn,
+                &claimed,
+                ClaimOwnership::default(),
+                error,
+            )?;
+            return Ok(PrepareLaunchOutcome::Failed);
+        }
+    };
+    persist_claim_ownership(conn, &claimed.lease_id, &discovery, ownership, true)?;
+    let claim_result = apply_remote_claim(query, &discovery, &routed.issue, ownership)
+        .and_then(|()| verify_remote_claim(query, &discovery, routed.issue.number));
+    if let Err(error) = claim_result {
+        abandon_failed_claim(query, &discovery, conn, &claimed, ownership, error)?;
+        return Ok(PrepareLaunchOutcome::Failed);
+    }
+    let transition = update_lease_status_conditional_outcome(
+        conn,
+        &claimed.lease_id,
+        LeaseStatus::Running,
+        &[LeaseStatus::Claimed],
+        Some(&claimed.request.run_id),
+        None,
+    )?;
+    if transition != ConditionalLeaseStatusOutcome::Applied {
+        abandon_failed_claim(
+            query,
+            &discovery,
+            conn,
+            &claimed,
+            ownership,
+            "lease ownership changed during remote claim",
+        )?;
+        return Ok(PrepareLaunchOutcome::Failed);
+    }
+    persist_claim_ownership(conn, &claimed.lease_id, &discovery, ownership, false)?;
+    apply_claim_ownership(&mut claimed.request, ownership);
+    claimed.request.workflow_type_id = routed.workflow_type_id.clone();
+    Ok(PrepareLaunchOutcome::Ready(Box::new(DispatchUnit {
+        lease_id: claimed.lease_id,
+        request: claimed.request,
+        resume: false,
+        query_index: Some(query_index),
+    })))
 }
 
 fn collect_launch_units(
@@ -429,8 +666,7 @@ fn collect_launch_units(
     summary: &mut RunSummary,
 ) -> Result<(), SchedulerError> {
     let parent_discoveries = parent_launch_discoveries(targets, limits);
-    for (target, query) in targets.iter().zip(queries.iter()) {
-        let repo = target.discovery.repo.as_deref().unwrap_or("");
+    for (query_index, (target, query)) in targets.iter().zip(queries.iter()).enumerate() {
         let active = count_active_leases_for_config(conn, &target.config_id)?;
         let result = match discover(&target.discovery, *query, conn, active) {
             Ok(result) => result,
@@ -441,37 +677,18 @@ fn collect_launch_units(
         };
         summary.eligible += result.eligible.len();
         for routed in &result.eligible {
-            let launch_config_id = routed.config_id.as_deref().unwrap_or(&target.config_id);
-            let launch_discovery =
-                launch_discovery_for(target, launch_config_id, limits, &parent_discoveries)?;
-            if !has_capacity(conn, &launch_discovery, launch_config_id, repo, limits)? {
-                summary.skipped += 1;
-                continue;
-            }
-            let launch_path_bases = path_bases_for(target, launch_config_id);
-            match claim_for_launch(
-                &routed.issue,
-                &launch_discovery,
+            match prepare_launch_unit(
+                target,
+                *query,
+                query_index,
+                routed,
                 conn,
-                launch_config_id,
-                launch_path_bases.as_ref(),
-            ) {
-                Ok(Ok(mut claimed)) => {
-                    claimed.request.workflow_type_id = routed.workflow_type_id.clone();
-                    units.push(DispatchUnit {
-                        lease_id: claimed.lease_id,
-                        request: claimed.request,
-                        resume: false,
-                    })
-                }
-                Ok(Err(_)) => summary.skipped += 1,
-                Err(e) => {
-                    eprintln!(
-                        "claim error for config={} issue={}#{}: {e}",
-                        launch_config_id, repo, routed.issue.number
-                    );
-                    summary.failed += 1;
-                }
+                limits,
+                &parent_discoveries,
+            )? {
+                PrepareLaunchOutcome::Ready(unit) => units.push(*unit),
+                PrepareLaunchOutcome::Skipped => summary.skipped += 1,
+                PrepareLaunchOutcome::Failed => summary.failed += 1,
             }
         }
     }
@@ -561,55 +778,6 @@ fn parent_capacity_discovery(
     Ok(parent)
 }
 
-fn dispatch_units(
-    conn: &Connection,
-    launcher: &dyn WorkflowLauncher,
-    units: Vec<DispatchUnit>,
-    max_parallel: usize,
-    summary: &mut RunSummary,
-) -> Result<(), SchedulerError> {
-    let max_parallel = max_parallel.max(1);
-    for chunk in units.chunks(max_parallel) {
-        dispatch_unit_chunk(conn, launcher, chunk, summary)?;
-    }
-    Ok(())
-}
-
-fn dispatch_unit_chunk(
-    conn: &Connection,
-    launcher: &dyn WorkflowLauncher,
-    units: &[DispatchUnit],
-    summary: &mut RunSummary,
-) -> Result<(), SchedulerError> {
-    thread::scope(|scope| {
-        let handles: Vec<_> = units
-            .iter()
-            .map(|unit| {
-                let lease_id = unit.lease_id.clone();
-                let run_id = unit.request.run_id.clone();
-                let resume = unit.resume;
-                let handle = scope.spawn(move || {
-                    if resume {
-                        launcher.resume(&unit.request)
-                    } else {
-                        launcher.launch(&unit.request)
-                    }
-                });
-                (lease_id, run_id, resume, handle)
-            })
-            .collect();
-        for (lease_id, run_id, resume, handle) in handles {
-            let result = match handle.join() {
-                Ok(result) => result,
-                Err(_) => Err("launcher thread panicked".to_string()),
-            };
-            let outcome = finish_lease_after_result(conn, &lease_id, &run_id, result)?;
-            record_outcome(outcome, resume, summary);
-        }
-        Ok(())
-    })
-}
-
 fn dispatch_parallelism(limits: &CapacityLimits, unit_count: usize) -> usize {
     unit_count.min(limits.global).max(1)
 }
@@ -656,25 +824,6 @@ fn has_capacity(
     Ok(count_active_leases(conn)? < limits.global
         && count_active_leases_for_config(conn, config_id)? < config_limit
         && count_active_leases_for_repository(conn, repo)? < repo_limit)
-}
-
-fn record_outcome(outcome: LaunchOutcome, was_resume: bool, summary: &mut RunSummary) {
-    match outcome {
-        LaunchOutcome::Launched { success: true, .. } if was_resume => summary.resumed += 1,
-        LaunchOutcome::Launched { success: true, .. } => summary.launched += 1,
-        LaunchOutcome::Launched { success: false, .. } => summary.failed += 1,
-        LaunchOutcome::WaitingExternal { .. } => summary.suspended += 1,
-        LaunchOutcome::LeaseStatePreserved {
-            run_id,
-            current_status,
-            current_run_id,
-        } => summary.record_lease_state_preserved(LeaseStatePreservedDetail {
-            run_id,
-            current_status,
-            current_run_id,
-        }),
-        LaunchOutcome::Skipped(_) => summary.skipped += 1,
-    }
 }
 
 fn poll_due_waits(

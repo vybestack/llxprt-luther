@@ -84,7 +84,7 @@ pub(super) fn issue(number: u64, state: &str) -> GithubIssue {
         title: format!("Issue {number}"),
         state: state.to_string(),
         labels: Vec::new(),
-        assignee: None,
+        assignees: vec![],
         milestone: None,
         body: None,
     }

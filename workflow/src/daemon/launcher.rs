@@ -17,9 +17,8 @@ use rusqlite::Connection;
 use crate::adapters::github_issues::GithubIssue;
 use crate::daemon::discovery::SkipReason;
 use crate::persistence::leases::{
-    count_active_leases_for_config, try_claim, update_lease_status,
-    update_lease_status_conditional_outcome, ConditionalLeaseStatusOutcome, IssueLease,
-    LeaseStatus,
+    update_lease_status, update_lease_status_conditional_outcome, ConditionalLeaseStatusOutcome,
+    IssueLease, LeaseStatus,
 };
 use crate::workflow::schema::DiscoveryConfig;
 
@@ -59,6 +58,9 @@ pub struct LaunchRequest {
     pub run_id: String,
     pub repo: String,
     pub issue_number: u64,
+    pub daemon_managed_claim: bool,
+    pub claim_assignment_added: bool,
+    pub claim_label_added: bool,
     /// Resolved per-run work directory (`base/issue-N/run-id`), or `None` when
     /// no daemon path base is available (one-shot CLI runs).
     pub work_dir: Option<PathBuf>,
@@ -85,10 +87,6 @@ pub trait WorkflowLauncher: Sync {
 }
 
 /// Generate a fresh run id for a launch.
-fn new_run_id() -> String {
-    format!("run-{}", uuid::Uuid::new_v4())
-}
-
 /// Structured daemon base roots used to construct isolated per-run paths.
 ///
 /// Configured `work_dir`/`artifact_dir` values from the resolved
@@ -152,56 +150,8 @@ pub struct PerRunPaths {
     pub artifact_dir: Option<PathBuf>,
 }
 
-pub struct ClaimedLaunch {
-    pub lease_id: String,
-    pub request: LaunchRequest,
-}
-
-pub fn claim_for_launch(
-    issue: &GithubIssue,
-    cfg: &DiscoveryConfig,
-    conn: &Connection,
-    config_id: &str,
-    bases: &DaemonPathBases,
-) -> Result<Result<ClaimedLaunch, SkipReason>, rusqlite::Error> {
-    let repo = cfg.repo.clone().unwrap_or_default();
-    let lease = match try_claim(conn, &repo, issue.number, config_id)? {
-        Some(lease) => lease,
-        None => return Ok(Err(SkipReason::HasActiveLease)),
-    };
-
-    let max = cfg
-        .max_concurrent_runs_per_config
-        .or(cfg.max_concurrent_runs)
-        .unwrap_or(1) as usize;
-    let active = count_active_leases_for_config(conn, config_id)?;
-    if active > max {
-        update_lease_status(conn, &lease.lease_id, LeaseStatus::Abandoned, None)?;
-        return Ok(Err(SkipReason::ConcurrencyLimitReached));
-    }
-
-    let run_id = new_run_id();
-    let paths = match bases.per_run_paths(issue.number, &run_id) {
-        Ok(paths) => paths,
-        Err(error) => {
-            update_lease_status(conn, &lease.lease_id, LeaseStatus::Abandoned, None)?;
-            return Ok(Err(SkipReason::InvalidPath(error)));
-        }
-    };
-    update_lease_status(conn, &lease.lease_id, LeaseStatus::Running, Some(&run_id))?;
-    Ok(Ok(ClaimedLaunch {
-        lease_id: lease.lease_id,
-        request: LaunchRequest {
-            config_id: config_id.to_string(),
-            workflow_type_id: None,
-            run_id,
-            repo,
-            issue_number: issue.number,
-            work_dir: paths.work_dir,
-            artifact_dir: paths.artifact_dir,
-        },
-    }))
-}
+pub(crate) use super::claim::claim_for_launch_pending;
+pub use super::claim::{claim_for_launch, ClaimedLaunch};
 
 pub fn finish_lease_after_result(
     conn: &Connection,
@@ -373,6 +323,9 @@ pub fn prepare_resume_lease(
             run_id,
             repo: lease.issue_repo.clone(),
             issue_number: lease.issue_number,
+            daemon_managed_claim: false,
+            claim_assignment_added: false,
+            claim_label_added: false,
             // Resumes reuse persisted RunMetadata paths; do not synthesize new
             // per-run paths for a resumed run. @plan:issue-117
             work_dir: None,
@@ -411,6 +364,7 @@ pub fn resume_lease(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::persistence::leases::{count_active_leases_for_config, try_claim};
     use crate::persistence::leases::{get_lease_for_issue, init_leases_table};
     use std::sync::Mutex;
 
@@ -422,7 +376,10 @@ mod tests {
             exclude_labels: vec![],
             active_parent_label: None,
             issue_states: vec!["open".to_string()],
-            assignee_filter: None,
+            approval_label: None,
+            approval_actor: None,
+            claim_assignee: None,
+            claim_label: None,
             milestone_order: Some("semver".to_string()),
             max_concurrent_runs: Some(max),
             poll_interval_secs: Some(300),
@@ -442,7 +399,7 @@ mod tests {
             title: format!("Issue {number}"),
             state: "open".to_string(),
             labels: vec![],
-            assignee: None,
+            assignees: vec![],
             milestone: None,
             body: None,
         }

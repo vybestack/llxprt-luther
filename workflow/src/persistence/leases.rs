@@ -164,6 +164,7 @@ pub fn init_leases_table(conn: &Connection) -> SqliteResult<()> {
             ON issue_leases (config_id, status)",
         [],
     )?;
+    super::claim_metadata::init_claim_metadata_table(conn)?;
     Ok(())
 }
 
