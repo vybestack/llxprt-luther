@@ -23,6 +23,7 @@ pub mod feedback_eval_timeout;
 pub mod github_feedback;
 pub mod github_pr;
 pub mod llxprt;
+mod llxprt_diff;
 pub mod noop;
 pub mod parent_orchestration;
 pub mod pr_check_wait;

@@ -30,8 +30,10 @@ use std::time::{Duration, Instant};
 
 use crate::engine::executor::{interpolate_string, StepContext, StepExecutor};
 use crate::engine::executors::change_detection::{
-    diff_requirements_met, new_changed_paths, ChangeDetectionMode, ChangedPathDetector,
-    GitChangedPathDetector,
+    ChangeDetectionMode, ChangedPathDetector, GitChangedPathDetector,
+};
+use crate::engine::executors::llxprt_diff::{
+    detect_initial_changed_paths, string_array_param, success_condition_met, DiffDetection,
 };
 use crate::engine::runner::EngineError;
 use crate::engine::transition::StepOutcome;
@@ -927,96 +929,6 @@ fn match_stdout_outcome(
 
 fn contains_outcome_marker_line(stdout: &str, marker: &str) -> bool {
     stdout.lines().any(|line| line.trim() == marker)
-}
-
-/// Bundles the changed-path detector with its selected mode so success-checking
-/// helpers stay within the project's argument-count lint budget.
-#[derive(Clone, Copy)]
-struct DiffDetection<'a> {
-    detector: &'a dyn ChangedPathDetector,
-    mode: ChangeDetectionMode,
-}
-
-impl DiffDetection<'_> {
-    /// Detect changed paths, recording any explicit error to `context`'s
-    /// `diagnostic` variable (prefixed with `label`) and returning `None` so
-    /// the caller can distinguish failure from a genuinely clean tree.
-    fn detect(&self, context: &mut StepContext, label: &str) -> Option<Vec<String>> {
-        let work_dir = context.work_dir().to_path_buf();
-        match self.detector.detect_changed_paths(&work_dir, self.mode) {
-            Ok(paths) => Some(paths),
-            Err(err) => {
-                context.set("diagnostic", &format!("{label}: {err}"));
-                None
-            }
-        }
-    }
-}
-
-/// Snapshot the changed paths before llxprt runs, surfacing detection failures
-/// as an explicit `diagnostic` context variable rather than silently treating a
-/// missing-git / non-repo condition as a clean worktree.
-fn detect_initial_changed_paths(
-    context: &mut StepContext,
-    detection: DiffDetection<'_>,
-) -> Vec<String> {
-    detection
-        .detect(context, "initial change detection failed")
-        .unwrap_or_default()
-}
-
-fn success_condition_met(
-    context: &mut StepContext,
-    detection: DiffDetection<'_>,
-    success_file: Option<&str>,
-    success_on_diff: bool,
-    required_changed_paths: &[String],
-    required_changed_path_patterns: &[String],
-    initial_changed_paths: &[String],
-) -> bool {
-    if let Some(path) = success_file {
-        let path = std::path::Path::new(path);
-        let path = if path.is_absolute() {
-            path.to_path_buf()
-        } else {
-            context.work_dir().join(path)
-        };
-        if path.metadata().is_ok_and(|m| m.len() > 0) {
-            return true;
-        }
-    }
-
-    if success_on_diff {
-        return detection
-            .detect(context, "change detection failed")
-            .is_some_and(|paths| {
-                diff_requirements_met(
-                    &new_changed_paths(&paths, initial_changed_paths),
-                    required_changed_paths,
-                    required_changed_path_patterns,
-                )
-            });
-    }
-
-    false
-}
-
-fn string_array_param(
-    params: &serde_json::Value,
-    name: &str,
-    context: &StepContext,
-) -> Vec<String> {
-    params
-        .get(name)
-        .and_then(serde_json::Value::as_array)
-        .map(|values| {
-            values
-                .iter()
-                .filter_map(serde_json::Value::as_str)
-                .map(|template| interpolate_string(template, context))
-                .collect()
-        })
-        .unwrap_or_default()
 }
 
 fn terminate_process_tree(child: &mut std::process::Child) {
