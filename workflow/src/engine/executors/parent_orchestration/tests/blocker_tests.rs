@@ -185,6 +185,7 @@ fn start_child_workflow_compensates_running_lease_when_add_label_fails_after_cas
     );
     let runner = NoLaunchTrackingRunner::new();
     let launched = runner.launched.clone();
+    let resumed = runner.resumed.clone();
     let query = FailingAddLabelQuery::new(GithubError::CommandFailed {
         argv: vec!["gh".to_string(), "issue".to_string(), "edit".to_string()],
         exit_code: Some(1),
@@ -211,7 +212,11 @@ fn start_child_workflow_compensates_running_lease_when_add_label_fails_after_cas
     );
     assert!(
         !launched.load(std::sync::atomic::Ordering::SeqCst),
-        "the runner must not be invoked when add_label fails before dispatch"
+        "launch_child must not be invoked when add_label fails before dispatch"
+    );
+    assert!(
+        !resumed.load(std::sync::atomic::Ordering::SeqCst),
+        "resume_child must not be invoked when add_label fails before dispatch"
     );
     // The durable lease must NOT be stranded as Running: it must be compensated
     // back to Claimed (the observed status) so it can be re-claimed rather than
@@ -329,6 +334,60 @@ fn resume_child_workflow_missing_run_id_fails_lease() {
     assert_eq!(final_lease.status, LeaseStatus::Failed);
 }
 
+#[test]
+fn child_cas_rejected_outcome_propagates_artifact_write_error() {
+    // Finding 4: child_cas_rejected_outcome must not silently swallow artifact
+    // write errors. When the durable wait-record cannot be written, the error
+    // must propagate to the caller rather than being discarded. We drive this
+    // by pointing the state's artifact_root at a path beneath a regular file,
+    // so create_dir_all fails and write_launch_artifact returns an EngineError.
+    let (state, conn, lease) = cas_harness();
+    let child = lease.issue_number;
+    // Advance the lease so the CAS is rejected and child_cas_rejected_outcome
+    // is reached.
+    update_lease_status(
+        &conn,
+        &lease.lease_id,
+        LeaseStatus::Running,
+        Some("concurrent-run"),
+    )
+    .unwrap();
+    let lease_snapshot = get_lease_for_issue(&conn, &state.repo, child)
+        .unwrap()
+        .unwrap();
+
+    // Sabotage the artifact root: create a regular file at the root path so
+    // that create_dir_all cannot create the directory beneath it.
+    std::fs::write(&state.artifact_root, "not a directory").unwrap();
+
+    let runner = LaunchTrackingRunner::new();
+    let query = MockQuery {
+        issue: None,
+        children: Vec::new(),
+        pr: None,
+    };
+    let mut context = StepContext::new(state.artifact_root.join("work"), "run-parent".to_string());
+
+    let result = start_child_workflow(
+        &mut context,
+        &state,
+        &query,
+        &runner,
+        child,
+        &lease_snapshot,
+        &conn,
+    );
+
+    assert!(
+        result.is_err(),
+        "an artifact write failure must propagate as an error, got: {:?}",
+        result
+    );
+    assert!(
+        !runner.launched.load(std::sync::atomic::Ordering::SeqCst),
+        "the runner must not be invoked when the CAS is rejected"
+    );
+}
 // ---------------------------------------------------------------------------
 // Blocker 3: run id path-component validation
 // ---------------------------------------------------------------------------

@@ -59,10 +59,28 @@ fn collision_safe_temp_path(luther_dir: &Path) -> PathBuf {
 }
 
 /// Fsync the `.luther` parent directory so the published hard-link is durable.
-/// Failure is propagated because callers rely on this marker as the durable
-/// workspace-ownership authority.
+///
+/// On Unix, the directory's own metadata sync (`sync_all`) is propagated to
+/// the caller, because a directory fsync failure means the link entry may not
+/// survive a crash and the marker could not be relied upon for durable
+/// ownership. On non-Unix platforms where a reliable directory fsync is not
+/// available through `sync_all`, this is a documented best-effort no-op that
+/// returns `Ok(())` so callers never fail solely because the platform lacks
+/// directory fsync support — mirroring the established scope-control
+/// persistence helper.
 fn fsync_dir(dir: &Path) -> std::io::Result<()> {
-    std::fs::File::open(dir)?.sync_all()
+    #[cfg(unix)]
+    {
+        std::fs::File::open(dir)?.sync_all()
+    }
+    #[cfg(not(unix))]
+    {
+        // Best-effort: attempt to open and sync, but treat any failure as a
+        // no-op so callers never fail solely because the platform lacks
+        // reliable directory fsync support.
+        let _ = std::fs::File::open(dir).and_then(|file| file.sync_all());
+        Ok(())
+    }
 }
 
 /// Create the `.luther` directory beneath `workspace`, rejecting a symlinked

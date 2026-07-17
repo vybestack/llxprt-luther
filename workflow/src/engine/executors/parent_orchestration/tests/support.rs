@@ -524,16 +524,20 @@ impl GithubIssueQuery for FailingAddLabelQuery {
     }
 }
 
-/// A runner that records whether `launch_child` was invoked. It is expected
-/// *never* to be called when `add_label` fails before dispatch.
+/// A runner that records whether `launch_child` and `resume_child` were each
+/// invoked, tracked separately so a test can assert that neither dispatch path
+/// fires. Each is expected *never* to be called when `add_label` fails before
+/// dispatch.
 pub(super) struct NoLaunchTrackingRunner {
     pub(super) launched: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    pub(super) resumed: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl NoLaunchTrackingRunner {
     pub(super) fn new() -> Self {
         Self {
             launched: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            resumed: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 }
@@ -552,7 +556,7 @@ impl ChildWorkflowRunner for NoLaunchTrackingRunner {
         &self,
         _request: &ChildWorkflowLaunchRequest,
     ) -> Result<ChildWorkflowRunResult, ChildWorkflowRunnerError> {
-        self.launched
+        self.resumed
             .store(true, std::sync::atomic::Ordering::SeqCst);
         Ok(ChildWorkflowRunResult::CompletedSuccess)
     }

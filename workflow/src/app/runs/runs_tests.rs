@@ -630,3 +630,98 @@ fn finalize_lease_maps_failure_without_cleanup_provenance_to_failed() {
     assert_eq!(finalized.run_id.as_deref(), Some(run_id));
     let _ = lease;
 }
+
+#[test]
+fn finalize_lease_maps_waiting_external_to_waiting_external_status() {
+    // Finding 5: a WaitingExternal outcome must transition the Running lease to
+    // WaitingExternal so a later continuation can resume it once the external
+    // condition clears. This is the direct finalization test for the outcome.
+    let store = lease_store();
+    let run_id = "waiting-external-run";
+    let lease = seed_running_lease(&store, run_id, 214);
+    let md = issue_metadata(run_id, 214);
+    persist_run_with_conn(store.conn(), &md).expect("persist run");
+
+    let outcome: Result<RunOutcome, luther_workflow::engine::runner::EngineError> =
+        Ok(RunOutcome::WaitingExternal {
+            step_id: "wait_for_pr_checks".to_string(),
+            reason: "checks still pending".to_string(),
+        });
+
+    finalize_continuation_lease(&store, &md, run_id, &outcome)
+        .expect("waiting external finalization");
+
+    let finalized = get_lease_for_issue(store.conn(), "o/r", 214)
+        .expect("query")
+        .expect("lease present");
+    assert_eq!(finalized.status, LeaseStatus::WaitingExternal);
+    assert_eq!(finalized.run_id.as_deref(), Some(run_id));
+    let _ = lease;
+}
+
+#[test]
+fn finalize_lease_maps_runner_error_to_failed() {
+    // Finding 5: an Err outcome (runner engine error) must finalize the lease
+    // as Failed, the plain terminal for an unhandled runner crash.
+    let store = lease_store();
+    let run_id = "runner-error-run";
+    let lease = seed_running_lease(&store, run_id, 215);
+    let mut md = issue_metadata(run_id, 215);
+    md.status = RunStatus::Failed;
+    persist_run_with_conn(store.conn(), &md).expect("persist run");
+
+    let outcome: Result<RunOutcome, luther_workflow::engine::runner::EngineError> = Err(
+        luther_workflow::engine::runner::EngineError::StepExecutionError {
+            step_id: "remediate".to_string(),
+            message: "runner crashed".to_string(),
+        },
+    );
+
+    finalize_continuation_lease(&store, &md, run_id, &outcome).expect("error finalization");
+
+    let finalized = get_lease_for_issue(store.conn(), "o/r", 215)
+        .expect("query")
+        .expect("lease present");
+    assert_eq!(finalized.status, LeaseStatus::Failed);
+    assert_eq!(finalized.run_id.as_deref(), Some(run_id));
+    let _ = lease;
+}
+
+#[test]
+fn finalize_lease_failure_idempotent_when_already_failed() {
+    // Finding 5: re-finalizing a lease that is already Failed (owned by this
+    // run) for a plain Failure outcome must be idempotent, not fail closed.
+    // The conditional update is rejected (the status is no longer Running),
+    // but the idempotent re-read must match and succeed.
+    let store = lease_store();
+    let run_id = "failure-idempotent";
+    let lease = seed_running_lease(&store, run_id, 216);
+    let mut md = issue_metadata(run_id, 216);
+    md.status = RunStatus::Failed;
+    persist_run_with_conn(store.conn(), &md).expect("persist run");
+
+    // A prior finalization already transitioned the lease to Failed.
+    update_lease_status(
+        store.conn(),
+        &lease.lease_id,
+        LeaseStatus::Failed,
+        Some(run_id),
+    )
+    .expect("pre-advance to Failed");
+
+    let outcome: Result<RunOutcome, luther_workflow::engine::runner::EngineError> =
+        Ok(RunOutcome::Failure {
+            step_id: "remediate".to_string(),
+            reason: "agent timed out".to_string(),
+        });
+
+    finalize_continuation_lease(&store, &md, run_id, &outcome)
+        .expect("idempotent failure finalization");
+
+    let finalized = get_lease_for_issue(store.conn(), "o/r", 216)
+        .expect("query")
+        .expect("lease present");
+    assert_eq!(finalized.status, LeaseStatus::Failed);
+    assert_eq!(finalized.run_id.as_deref(), Some(run_id));
+    let _ = lease;
+}

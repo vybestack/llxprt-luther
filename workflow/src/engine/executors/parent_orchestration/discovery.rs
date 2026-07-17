@@ -415,12 +415,12 @@ pub fn start_child_workflow(
         lease.run_id.as_deref(),
         &request.run_id,
     )? {
-        return Ok(child_cas_rejected_outcome(
+        return child_cas_rejected_outcome(
             state,
             child,
             lease,
             "start_child_workflow_cas_rejected",
-        ));
+        );
     }
     query
         .add_label(&state.repo, child, &state.luther_label)
@@ -496,12 +496,12 @@ pub fn resume_child_workflow(
         Some(&run_id),
         &request.run_id,
     )? {
-        return Ok(child_cas_rejected_outcome(
+        return child_cas_rejected_outcome(
             state,
             child,
             lease,
             "resume_child_workflow_cas_rejected",
-        ));
+        );
     }
     dispatch_and_finalize_child(
         state,
@@ -708,7 +708,7 @@ fn restore_for_compensation(
 /// step cannot overwrite a lease that a concurrent writer has already advanced.
 /// Returns `true` when the transition applied and dispatch may proceed; `false`
 /// when the CAS was rejected and dispatch must be skipped.
-pub fn claim_running_lease_cas(
+pub(super) fn claim_running_lease_cas(
     conn: &rusqlite::Connection,
     lease: &crate::persistence::leases::IssueLease,
     expected_statuses: &[LeaseStatus],
@@ -729,13 +729,15 @@ pub fn claim_running_lease_cas(
 /// Build the step outcome for a rejected pre-dispatch CAS, recording a wait
 /// artifact so the orchestrator re-evaluates the lease on the next pass rather
 /// than erroring on a contention that a concurrent writer has already resolved.
-pub fn child_cas_rejected_outcome(
+/// Artifact write errors are propagated rather than silently swallowed so a
+/// durable-record failure surfaces to the caller.
+pub(super) fn child_cas_rejected_outcome(
     state: &OrchestrationState,
     child: u64,
     lease: &crate::persistence::leases::IssueLease,
     reason: &str,
-) -> StepOutcome {
-    let _ = write_launch_artifact(
+) -> Result<StepOutcome, EngineError> {
+    write_launch_artifact(
         state,
         json!({
             "launched": false,
@@ -745,8 +747,8 @@ pub fn child_cas_rejected_outcome(
             "observed_lease_status": lease.status.to_string(),
             "observed_run_id": lease.run_id
         }),
-    );
-    StepOutcome::Wait
+    )?;
+    Ok(StepOutcome::Wait)
 }
 
 pub fn restore_child_lease_after_runner_error(
