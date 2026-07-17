@@ -495,3 +495,138 @@ fn finalize_lease_fails_when_lease_vanishes_after_conditional_update() {
     // Confirm get_run_with_conn is exercised (the abandoned branch loads it).
     assert!(get_run_with_conn(store.conn(), run_id).unwrap().is_some());
 }
+
+/// A `FailureCleanupState` where cleanup has not yet succeeded, exercising the
+/// Failure -> CleanupAbandoned mapping.
+fn incomplete_failure_cleanup() -> FailureCleanupState {
+    let now = chrono::Utc::now();
+    FailureCleanupState {
+        schema_version: FailureCleanupState::SCHEMA_VERSION,
+        failed_step: "remediate".to_string(),
+        failure_outcome: "fatal".to_string(),
+        failure_reason: "agent timed out".to_string(),
+        failed_checkpoint_id: "cp-1".to_string(),
+        failed_state_snapshot: luther_workflow::persistence::StateSnapshot::default(),
+        cleanup_step: "abandon_and_log".to_string(),
+        cleanup_succeeded: false,
+        captured_at: now,
+        cleanup_completed_at: None,
+        recovery_consumed_at: None,
+    }
+}
+
+#[test]
+fn finalize_lease_maps_interrupted_to_ready_to_resume() {
+    // An interrupted run is resumable, not failed: the lease must move to
+    // ReadyToResume so a later continuation can reclaim it.
+    let store = lease_store();
+    let run_id = "interrupted-run";
+    let lease = seed_running_lease(&store, run_id, 210);
+    let md = issue_metadata(run_id, 210);
+    persist_run_with_conn(store.conn(), &md).expect("persist run");
+
+    let outcome: Result<RunOutcome, luther_workflow::engine::runner::EngineError> =
+        Ok(RunOutcome::Interrupted {
+            step_id: "remediate".to_string(),
+        });
+
+    finalize_continuation_lease(&store, &md, run_id, &outcome).expect("interrupted finalization");
+
+    let finalized = get_lease_for_issue(store.conn(), "o/r", 210)
+        .expect("query")
+        .expect("lease present");
+    assert_eq!(finalized.status, LeaseStatus::ReadyToResume);
+    assert_eq!(finalized.run_id.as_deref(), Some(run_id));
+    let _ = lease;
+}
+
+#[test]
+fn finalize_lease_maps_interrupted_idempotent_when_already_ready_to_resume() {
+    // A prior continuation commit may have already advanced the lease to
+    // ReadyToResume; finalization must be idempotent in that case.
+    let store = lease_store();
+    let run_id = "interrupted-idempotent";
+    let lease = seed_running_lease(&store, run_id, 211);
+    let md = issue_metadata(run_id, 211);
+    persist_run_with_conn(store.conn(), &md).expect("persist run");
+
+    update_lease_status(
+        store.conn(),
+        &lease.lease_id,
+        LeaseStatus::ReadyToResume,
+        Some(run_id),
+    )
+    .expect("pre-advance to ReadyToResume");
+
+    let outcome: Result<RunOutcome, luther_workflow::engine::runner::EngineError> =
+        Ok(RunOutcome::Interrupted {
+            step_id: "remediate".to_string(),
+        });
+
+    finalize_continuation_lease(&store, &md, run_id, &outcome)
+        .expect("idempotent interrupted finalization");
+
+    let finalized = get_lease_for_issue(store.conn(), "o/r", 211)
+        .expect("query")
+        .expect("lease present");
+    assert_eq!(finalized.status, LeaseStatus::ReadyToResume);
+    assert_eq!(finalized.run_id.as_deref(), Some(run_id));
+}
+
+#[test]
+fn finalize_lease_maps_failure_with_incomplete_cleanup_to_cleanup_abandoned() {
+    // A failure outcome with durable provenance that cleanup has not yet
+    // succeeded must preserve the failed-run identity as CleanupAbandoned
+    // rather than plain Failed, preventing a duplicate relaunch from
+    // clobbering pending recovery state.
+    let store = lease_store();
+    let run_id = "failure-incomplete-cleanup";
+    let lease = seed_running_lease(&store, run_id, 212);
+    let mut md = issue_metadata(run_id, 212);
+    md.status = RunStatus::Failed;
+    md.failure_cleanup = Some(incomplete_failure_cleanup());
+    persist_run_with_conn(store.conn(), &md).expect("persist failed run");
+
+    let outcome: Result<RunOutcome, luther_workflow::engine::runner::EngineError> =
+        Ok(RunOutcome::Failure {
+            step_id: "remediate".to_string(),
+            reason: "agent timed out".to_string(),
+        });
+
+    finalize_continuation_lease(&store, &md, run_id, &outcome)
+        .expect("failure with incomplete cleanup finalization");
+
+    let finalized = get_lease_for_issue(store.conn(), "o/r", 212)
+        .expect("query")
+        .expect("lease present");
+    assert_eq!(finalized.status, LeaseStatus::CleanupAbandoned);
+    assert_eq!(finalized.run_id.as_deref(), Some(run_id));
+    let _ = lease;
+}
+
+#[test]
+fn finalize_lease_maps_failure_without_cleanup_provenance_to_failed() {
+    // A failure with no failure_cleanup provenance (or with cleanup already
+    // succeeded) must finalize as plain Failed.
+    let store = lease_store();
+    let run_id = "failure-no-cleanup";
+    let lease = seed_running_lease(&store, run_id, 213);
+    let mut md = issue_metadata(run_id, 213);
+    md.status = RunStatus::Failed;
+    persist_run_with_conn(store.conn(), &md).expect("persist failed run");
+
+    let outcome: Result<RunOutcome, luther_workflow::engine::runner::EngineError> =
+        Ok(RunOutcome::Failure {
+            step_id: "remediate".to_string(),
+            reason: "agent timed out".to_string(),
+        });
+
+    finalize_continuation_lease(&store, &md, run_id, &outcome).expect("plain failure finalization");
+
+    let finalized = get_lease_for_issue(store.conn(), "o/r", 213)
+        .expect("query")
+        .expect("lease present");
+    assert_eq!(finalized.status, LeaseStatus::Failed);
+    assert_eq!(finalized.run_id.as_deref(), Some(run_id));
+    let _ = lease;
+}

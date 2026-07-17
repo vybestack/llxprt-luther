@@ -48,7 +48,6 @@ pub use validation::validate_continuation;
 // cfg(test)-gated so the non-test public API is unchanged.
 #[cfg(test)]
 pub(crate) use selection::{select_rewind_checkpoint, TERMINAL_STEP};
-#[cfg(test)]
 pub(crate) use workspace_marker::verify_workspace_ownership_marker;
 
 /// Steps that are safe to re-run because they are external-wait or otherwise

@@ -44,6 +44,8 @@ fn safe_failure_category_accepts_known_snake_case_values() {
         "no_diff",
         "idle_timeout",
         "timeout",
+        "push_failure",
+        "validation_failure",
     ] {
         assert!(
             EngineRunner::is_safe_failure_category(category),
@@ -102,12 +104,43 @@ fn safe_failure_category_rejects_leading_digits() {
 }
 
 #[test]
-fn safe_failure_category_rejects_empty_and_overlong() {
+fn safe_failure_category_rejects_empty_and_unlisted_snake_case() {
+    // The allowlist is explicit: a structurally valid snake_case value that is
+    // not in the allowlist must be rejected. This prevents a secret like
+    // `bearer_abc123` (which would pass a structural snake_case check) from
+    // being persisted as a durable failure category.
     assert!(!EngineRunner::is_safe_failure_category(""));
-    let long_category = "a".repeat(33);
-    assert!(!EngineRunner::is_safe_failure_category(&long_category));
-    let max_category = "a".repeat(32);
-    assert!(EngineRunner::is_safe_failure_category(&max_category));
+    assert!(!EngineRunner::is_safe_failure_category("bearer_abc123"));
+    assert!(!EngineRunner::is_safe_failure_category("some_new_category"));
+    assert!(
+        !EngineRunner::is_safe_failure_category(&"a".repeat(32)),
+        "even a 32-char snake_case value not in the allowlist must be rejected"
+    );
+}
+
+#[test]
+fn public_failure_reason_rejects_secret_shaped_snake_case_category() {
+    // The explicit allowlist must reject a secret that happens to be valid
+    // snake_case (lowercase + underscores), which the prior structural check
+    // would have accepted. The public failure reason must fall back to the
+    // generic outcome label, never the secret-shaped category.
+    let secret_category = "bearer_s3cr3t_t0k3n_value";
+    // Sanity: this would have passed the old structural check.
+    assert!(secret_category
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_'));
+    // But the explicit allowlist rejects it.
+    assert!(!EngineRunner::is_safe_failure_category(secret_category));
+
+    let reason = EngineRunner::public_failure_reason(
+        "run_llxprt",
+        &StepOutcome::Fatal,
+        Some(secret_category),
+    );
+    assert_eq!(reason, "fatal outcome at run_llxprt");
+    assert!(!reason.contains("bearer"));
+    assert!(!reason.contains("s3cr3t"));
+    assert!(!reason.contains("t0k3n"));
 }
 
 use super::support::preview_for_log;

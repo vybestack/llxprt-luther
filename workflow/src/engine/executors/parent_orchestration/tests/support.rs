@@ -443,3 +443,121 @@ pub(super) fn rollup_state(
         config_root: PathBuf::from("/config"),
     }
 }
+
+/// A mock query whose `add_label` always fails with a given `GithubError`. Used
+/// to verify that a stranded `Running` lease is compensated back to the observed
+/// state when `add_label` fails after the CAS in `start_child_workflow`.
+pub(super) struct FailingAddLabelQuery {
+    pub(super) error: GithubError,
+}
+
+impl FailingAddLabelQuery {
+    pub(super) fn new(error: GithubError) -> Self {
+        Self { error }
+    }
+}
+
+impl GithubIssueQuery for FailingAddLabelQuery {
+    fn list_issues(
+        &self,
+        _repo: &str,
+        _include_labels: &[String],
+        _states: &[String],
+    ) -> Result<Vec<GithubIssue>, GithubError> {
+        Ok(Vec::new())
+    }
+
+    fn has_open_pr_for_issue(&self, _repo: &str, _number: u64) -> Result<bool, GithubError> {
+        Ok(false)
+    }
+
+    fn list_milestones(&self, _repo: &str) -> Result<Vec<String>, GithubError> {
+        Ok(Vec::new())
+    }
+
+    fn get_issue(&self, _repo: &str, _number: u64) -> Result<Option<GithubIssue>, GithubError> {
+        Ok(None)
+    }
+
+    fn list_sub_issues(
+        &self,
+        _repo: &str,
+        _number: u64,
+    ) -> Result<Vec<GithubSubIssue>, GithubError> {
+        Ok(Vec::new())
+    }
+
+    fn get_parent_issue(
+        &self,
+        _repo: &str,
+        _number: u64,
+    ) -> Result<Option<GithubParentIssue>, GithubError> {
+        Ok(None)
+    }
+
+    fn add_label(&self, _repo: &str, _number: u64, _label: &str) -> Result<(), GithubError> {
+        Err(self.error.clone())
+    }
+
+    fn remove_label(&self, _repo: &str, _number: u64, _label: &str) -> Result<(), GithubError> {
+        Ok(())
+    }
+
+    fn pr_state_for_issue(
+        &self,
+        _repo: &str,
+        _number: u64,
+    ) -> Result<Option<GithubIssuePrState>, GithubError> {
+        Ok(None)
+    }
+
+    fn comment_issue(&self, _repo: &str, _number: u64, _body: &str) -> Result<(), GithubError> {
+        Ok(())
+    }
+
+    fn close_issue(&self, _repo: &str, _number: u64) -> Result<(), GithubError> {
+        Ok(())
+    }
+
+    fn enable_pr_auto_merge(&self, _repo: &str, _pr_number: u64) -> Result<(), GithubError> {
+        Ok(())
+    }
+}
+
+/// A runner that records whether `launch_child` was invoked. It is expected
+/// *never* to be called when `add_label` fails before dispatch.
+pub(super) struct NoLaunchTrackingRunner {
+    pub(super) launched: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl NoLaunchTrackingRunner {
+    pub(super) fn new() -> Self {
+        Self {
+            launched: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        }
+    }
+}
+
+impl ChildWorkflowRunner for NoLaunchTrackingRunner {
+    fn launch_child(
+        &self,
+        _request: &ChildWorkflowLaunchRequest,
+    ) -> Result<ChildWorkflowRunResult, ChildWorkflowRunnerError> {
+        self.launched
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        Ok(ChildWorkflowRunResult::CompletedSuccess)
+    }
+
+    fn resume_child(
+        &self,
+        _request: &ChildWorkflowLaunchRequest,
+    ) -> Result<ChildWorkflowRunResult, ChildWorkflowRunnerError> {
+        self.launched
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        Ok(ChildWorkflowRunResult::CompletedSuccess)
+    }
+
+    fn run_status(&self, _run_id: &str) -> Result<Option<RunStatus>, ChildWorkflowRunnerError> {
+        Ok(Some(RunStatus::Completed))
+    }
+}

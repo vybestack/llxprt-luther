@@ -14,6 +14,24 @@ fn workspace_owner_marker_path(workspace: &Path) -> PathBuf {
     workspace.join(".luther").join("workspace-owner")
 }
 
+/// Reject a symlinked workspace root: a symlinked root could redirect every
+/// subsequent path operation (including the `.luther` directory and the marker)
+/// to an attacker-controlled location. The check must happen *before*
+/// canonicalization, because `canonicalize` transparently resolves symlinks
+/// and would silently accept the redirected root. Uses `symlink_metadata` so
+/// the link itself is inspected rather than its target.
+fn reject_symlinked_workspace_root(workspace: &Path) -> Option<String> {
+    if let Ok(meta) = std::fs::symlink_metadata(workspace) {
+        if meta.file_type().is_symlink() {
+            return Some(format!(
+                "workspace root is a symlink and must be a real directory: {workspace_display}",
+                workspace_display = workspace.display()
+            ));
+        }
+    }
+    None
+}
+
 /// Reject a symlinked `.luther` parent directory: a symlinked `.luther` could
 /// redirect the workspace-owner marker to an attacker-controlled location. The
 /// check uses `symlink_metadata` so the link itself is inspected rather than
@@ -32,18 +50,72 @@ fn reject_symlinked_luther_parent(workspace: &Path) -> Option<String> {
     None
 }
 
+/// Collision-safe temp path inside `.luther`, mirroring the established
+/// crash-safe publication pattern in `scope_control::persistence`. The uuid
+/// suffix guarantees uniqueness across concurrent writers and processes.
+fn collision_safe_temp_path(luther_dir: &Path) -> PathBuf {
+    let unique = uuid::Uuid::new_v4().simple().to_string();
+    luther_dir.join(format!(".workspace-owner.tmp.{unique}"))
+}
+
+/// Fsync the `.luther` parent directory so the published hard-link is durable.
+/// Failure is propagated because callers rely on this marker as the durable
+/// workspace-ownership authority.
+fn fsync_dir(dir: &Path) -> std::io::Result<()> {
+    std::fs::File::open(dir)?.sync_all()
+}
+
+/// Create the `.luther` directory beneath `workspace`, rejecting a symlinked
+/// workspace root and a symlinked `.luther` both before and after creation to
+/// close the TOCTOU window in which a concurrent attacker could swap a freshly
+/// created directory for a symlink. The workspace root is checked before any
+/// canonicalization so a symlinked root is rejected outright rather than
+/// silently resolved.
+fn ensure_luther_dir(workspace: &Path) -> std::io::Result<PathBuf> {
+    if let Some(reason) = reject_symlinked_workspace_root(workspace) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            reason,
+        ));
+    }
+    if let Some(reason) = reject_symlinked_luther_parent(workspace) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            reason,
+        ));
+    }
+    let luther = workspace.join(".luther");
+    std::fs::create_dir_all(&luther)?;
+    if let Some(reason) = reject_symlinked_workspace_root(workspace) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            reason,
+        ));
+    }
+    if let Some(reason) = reject_symlinked_luther_parent(workspace) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            reason,
+        ));
+    }
+    Ok(luther)
+}
+
 /// Write the `.luther/workspace-owner` marker recording `run_id` as the owner
 /// of `workspace`. Creates `.luther/` and the marker regular file, refusing to
 /// overwrite an existing marker that belongs to a different run so two
 /// concurrent runs cannot claim the same workspace. Returns `Ok(())` when the
 /// marker already records the same `run_id`.
 ///
-/// Atomicity: the marker file is created with an exclusive `O_CREAT | O_EXCL`
-/// primitive (`OpenOptions::create_new`) so that a concurrent first-writer for
-/// the same workspace wins and all later writers observe the committed content.
-/// This closes the check-then-write TOCTOU window that a naive
-/// metadata-check-then-overwrite would leave between the existence probe and
-/// `write`.
+/// Crash-safe no-replace publication: a new marker is written to a unique temp
+/// file inside `.luther`, fully synced (`write_all` + `flush` + `sync_all`),
+/// then atomically hard-linked into the final marker path. `hard_link` never
+/// replaces an existing file: it fails atomically with `AlreadyExists` if a
+/// concurrent writer linked first, so exactly one writer wins and every later
+/// writer observes the committed content. The temp is removed and the parent
+/// directory fsynced so the link metadata is durable. An existing final marker
+/// is never rewritten: it is validated for exact ownership, preserving the
+/// symlink/empty/foreign rejection.
 ///
 /// This is the durable ownership anchor consulted during
 /// cleanup-failure-abandonment recovery. Provisioning call sites should write it once
@@ -51,49 +123,92 @@ fn reject_symlinked_luther_parent(workspace: &Path) -> Option<String> {
 ///
 /// @plan:PLAN-20260623-LUTHER-CONTINUATION
 pub fn write_workspace_owner_marker(workspace: &Path, run_id: &str) -> std::io::Result<()> {
-    use std::io::Write;
+    let luther = ensure_luther_dir(workspace)?;
     let marker = workspace_owner_marker_path(workspace);
-    // Reject a symlinked `.luther` parent before creating it: `create_dir_all`
-    // would happily follow an existing symlink and place the marker outside the
-    // real workspace.
-    if let Some(reason) = reject_symlinked_luther_parent(workspace) {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            reason,
-        ));
+    // Existing final marker: validate exact ownership (idempotent re-run or
+    // reject a foreign/empty/malformed marker) without ever rewriting it.
+    if marker_exists(&marker) {
+        return inspect_existing_marker(&marker, run_id);
     }
-    std::fs::create_dir_all(marker.parent().unwrap_or(Path::new(".")))?;
-    // Re-check the `.luther` parent after creation: a concurrent attacker could
-    // replace the freshly created directory with a symlink between the first
-    // check and now.
-    if let Some(reason) = reject_symlinked_luther_parent(workspace) {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            reason,
-        ));
+    // Publish a brand-new marker via the crash-safe temp + atomic hard-link
+    // (no replace) path.
+    publish_new_marker(&luther, &marker, run_id)
+}
+
+/// Whether any entry (including a symlink or directory) exists at the marker
+/// path. `symlink_metadata` is used so a symlink is observed rather than its
+/// target; a dangling symlink still counts as "exists" and is rejected by the
+/// subsequent inspection.
+fn marker_exists(marker: &Path) -> bool {
+    std::fs::symlink_metadata(marker).is_ok()
+}
+
+/// Crash-safe no-replace publication of a brand-new marker. Writes a unique
+/// temp file, fsyncs it, atomically hard-links it to the final path, removes
+/// the temp, and fsyncs the parent directory. A concurrent winner is detected
+/// via `hard_link`'s atomic `AlreadyExists` and delegated to exact-owner
+/// validation.
+fn publish_new_marker(luther: &Path, marker: &Path, run_id: &str) -> std::io::Result<()> {
+    let temp = collision_safe_temp_path(luther);
+    // Durability: fully write and fsync the temp before linking so a crash
+    // never leaves a partial final marker.
+    if let Err(err) = write_and_sync_temp(&temp, run_id.as_bytes()) {
+        let _ = std::fs::remove_file(&temp);
+        return Err(err);
     }
-    // Atomic create-new: wins exactly one concurrent writer. Existing files
-    // fall through to the same-owner / different-owner inspection below.
-    let mut opts = std::fs::OpenOptions::new();
-    opts.write(true).read(true).create_new(true);
-    match opts.open(&marker) {
-        Ok(mut file) => {
-            file.write_all(run_id.as_bytes())?;
-            file.flush()?;
+    link_temp_to_final(&temp, marker, luther, run_id)
+}
+
+/// Create a brand-new temp file, write `data`, flush, and fsync its contents to
+/// stable storage. `create_new` guarantees the temp path is unique to this
+/// writer.
+fn write_and_sync_temp(temp: &Path, data: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(temp)?;
+    file.write_all(data)?;
+    file.flush()?;
+    file.sync_all()?;
+    Ok(())
+}
+
+/// Atomically link the synced temp into the final marker path (no replace), then
+/// remove the temp and fsync the parent directory. If a concurrent writer
+/// already linked the final marker, validate the winner's content for exact
+/// ownership instead of overwriting it.
+fn link_temp_to_final(
+    temp: &Path,
+    marker: &Path,
+    luther: &Path,
+    run_id: &str,
+) -> std::io::Result<()> {
+    match std::fs::hard_link(temp, marker) {
+        Ok(()) => {
+            // The final link is committed; the temp is now an extra name for
+            // the same inode and can be removed without affecting the marker.
+            let _ = std::fs::remove_file(temp);
+            // Persist the new directory entry for the marker.
+            fsync_dir(luther)?;
             Ok(())
         }
         Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
-            // Existing marker: validate it is a regular file with a matching
-            // or empty owner. Every malformed condition is rejected.
-            inspect_existing_marker(&marker, run_id)
+            // A concurrent writer won the race and linked the final marker.
+            // Clean up our temp and validate the winner rather than overwrite.
+            let _ = std::fs::remove_file(temp);
+            inspect_existing_marker(marker, run_id)
         }
-        Err(err) => Err(err),
+        Err(err) => {
+            let _ = std::fs::remove_file(temp);
+            Err(err)
+        }
     }
 }
 
 /// Validate an existing marker file: reject symlinks, directories, empty
 /// content, and a different owner. Returns `Ok(())` only for exact same-owner
-/// idempotency.
+/// idempotency. The marker is never rewritten by this path.
 fn inspect_existing_marker(marker: &Path, run_id: &str) -> std::io::Result<()> {
     let meta = std::fs::symlink_metadata(marker)?;
     if meta.file_type().is_symlink() {
@@ -110,6 +225,15 @@ fn inspect_existing_marker(marker: &Path, run_id: &str) -> std::io::Result<()> {
             std::io::ErrorKind::InvalidInput,
             format!(
                 "workspace owner marker is a directory and must be a regular file: {marker_display}",
+                marker_display = marker.display()
+            ),
+        ));
+    }
+    if !meta.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "workspace owner marker is not a regular file: {marker_display}",
                 marker_display = marker.display()
             ),
         ));
@@ -142,14 +266,47 @@ fn inspect_existing_marker(marker: &Path, run_id: &str) -> std::io::Result<()> {
 /// marker whose recorded owner differs from `run_id` are all rejected. There
 /// is no backward-compatibility exemption: the marker is mandatory for
 /// cleanup-failure-abandonment recovery.
+///
+/// The workspace is canonicalized first and the canonicalized `.luther`/marker
+/// paths are required to remain beneath the canonical workspace root, ruling
+/// out redirection through any path component. Marker metadata is rechecked
+/// around the content read to detect a path swap (e.g. replaced with a symlink)
+/// that occurs between the type check and the read.
+///
+/// @plan:PLAN-20260623-LUTHER-CONTINUATION
 pub(crate) fn verify_workspace_ownership_marker(workspace: &Path, run_id: &str) -> Option<String> {
-    let marker = workspace_owner_marker_path(workspace);
-    // Reject a symlinked `.luther` parent: a symlink could redirect the marker
-    // to an attacker-controlled location.
-    if let Some(reason) = reject_symlinked_luther_parent(workspace) {
+    // Reject a symlinked workspace root *before* canonicalization. Canonicalize
+    // would silently resolve the symlink and accept the redirected root, so the
+    // link itself must be inspected first.
+    if let Some(reason) = reject_symlinked_workspace_root(workspace) {
         return Some(reason);
     }
-    let meta = match std::fs::symlink_metadata(&marker) {
+    // Canonicalize the workspace so subsequent containment checks are proof
+    // against symlink redirection at any path component.
+    let canonical_workspace = match workspace.canonicalize() {
+        Ok(path) => path,
+        Err(err) => {
+            return Some(format!("workspace cannot be canonicalized: {err}"));
+        }
+    };
+    // Revalidate the workspace root identity after canonicalization to detect a
+    // TOCTOU swap (e.g. the root was replaced with a symlink between the initial
+    // check and now). The canonicalized path is a real directory at this point.
+    if let Some(reason) = revalidate_workspace_root_identity(workspace, &canonical_workspace) {
+        return Some(reason);
+    }
+    if let Some(reason) = reject_symlinked_luther_parent(&canonical_workspace) {
+        return Some(reason);
+    }
+    let marker = canonical_workspace.join(".luther").join("workspace-owner");
+    verify_marker_file(&marker, run_id, &canonical_workspace)
+}
+
+/// Verify the marker file at `marker`: existence, regular-file type, containment
+/// beneath `workspace_root`, content, and tamper-resistant metadata around the
+/// read. Returns `None` when trusted or `Some(reason)` explaining a rejection.
+fn verify_marker_file(marker: &Path, run_id: &str, workspace_root: &Path) -> Option<String> {
+    let meta_before = match std::fs::symlink_metadata(marker) {
         Ok(meta) => meta,
         Err(_) => {
             return Some(format!(
@@ -158,35 +315,144 @@ pub(crate) fn verify_workspace_ownership_marker(workspace: &Path, run_id: &str) 
             ));
         }
     };
-    if meta.file_type().is_symlink() {
+    if meta_before.file_type().is_symlink() {
         return Some(format!(
             "workspace ownership marker is a symlink and must be a regular file: {marker_display}",
             marker_display = marker.display()
         ));
     }
-    if meta.is_dir() {
+    if meta_before.is_dir() {
         return Some(format!(
             "workspace ownership marker is a directory and must be a regular file: {marker_display}",
             marker_display = marker.display()
         ));
     }
-    match std::fs::read_to_string(&marker) {
-        Ok(contents) => {
-            let trimmed = contents.trim();
-            if trimmed.is_empty() {
-                Some(format!(
-                    "workspace ownership marker is empty: {marker_display}",
-                    marker_display = marker.display()
-                ))
-            } else if trimmed == run_id {
-                None
-            } else {
-                Some(format!(
-                    "workspace ownership marker belongs to run '{marker_owner}' not '{run_id}'",
-                    marker_owner = trimmed
-                ))
-            }
+    // Containment: the canonicalized marker must stay beneath the canonical
+    // workspace root, ruling out any redirection that escaped the earlier
+    // component checks.
+    if let Some(reason) = verify_marker_containment(marker, workspace_root) {
+        return Some(reason);
+    }
+    let contents = match std::fs::read_to_string(marker) {
+        Ok(contents) => contents,
+        Err(err) => return Some(format!("workspace ownership marker is not readable: {err}")),
+    };
+    // Recheck metadata around the read to detect a path swap (e.g. replaced
+    // with a symlink) that occurred between the type check and the content
+    // read. Fail closed on any change.
+    if let Some(reason) = recheck_marker_metadata(marker, &meta_before) {
+        return Some(reason);
+    }
+    evaluate_marker_contents(&contents, run_id, marker)
+}
+
+/// Ensure the canonicalized marker remains beneath the canonical workspace
+/// root. Both operands are canonical (absolute, symlink-resolved, no `..`), so
+/// `starts_with` is a valid containment check.
+fn verify_marker_containment(marker: &Path, workspace_root: &Path) -> Option<String> {
+    match marker.canonicalize() {
+        Ok(canonical_marker) if !canonical_marker.starts_with(workspace_root) => Some(format!(
+            "workspace ownership marker escapes the workspace root: {marker_display}",
+            marker_display = marker.display()
+        )),
+        Ok(_) => None,
+        Err(err) => Some(format!(
+            "workspace ownership marker cannot be canonicalized: {err}"
+        )),
+    }
+}
+
+/// Re-fetch marker metadata after the content read and reject any change that
+/// indicates the path was swapped between the pre-read type check and now.
+fn recheck_marker_metadata(marker: &Path, meta_before: &std::fs::Metadata) -> Option<String> {
+    let meta_after = match std::fs::symlink_metadata(marker) {
+        Ok(meta) => meta,
+        Err(err) => {
+            return Some(format!(
+                "workspace ownership marker vanished during verification: {err}"
+            ));
         }
-        Err(err) => Some(format!("workspace ownership marker is not readable: {err}")),
+    };
+    if meta_after.file_type().is_symlink() {
+        return Some("workspace ownership marker became a symlink during verification".to_string());
+    }
+    if meta_after.is_dir() {
+        return Some(
+            "workspace ownership marker became a directory during verification".to_string(),
+        );
+    }
+    if marker_identity_changed(meta_before, &meta_after) {
+        return Some("workspace ownership marker identity changed during verification".to_string());
+    }
+    None
+}
+
+/// Compare two metadata snapshots for the same path to detect an inode swap.
+/// On Unix the device+inode pair uniquely identifies the file; elsewhere we
+/// fall back to length and mtime as a best-effort identity.
+fn marker_identity_changed(before: &std::fs::Metadata, after: &std::fs::Metadata) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        before.dev() != after.dev() || before.ino() != after.ino()
+    }
+    #[cfg(not(unix))]
+    {
+        before.len() != after.len() || before.modified().ok() != after.modified().ok()
+    }
+}
+
+/// Revalidate the workspace root identity after canonicalization: re-check the
+/// original path is not a symlink (closing the TOCTOU window between the initial
+/// `reject_symlinked_workspace_root` and the canonicalize call) and confirm the
+/// observed path resolves to the same inode as the canonical root. This detects
+/// a swap of the workspace root for a symlink or a different directory that
+/// occurred between the initial check and now. Fails closed on any change.
+fn revalidate_workspace_root_identity(
+    observed_workspace: &Path,
+    canonical_workspace: &Path,
+) -> Option<String> {
+    if let Some(reason) = reject_symlinked_workspace_root(observed_workspace) {
+        return Some(reason);
+    }
+    let observed_meta = match std::fs::metadata(observed_workspace) {
+        Ok(meta) => meta,
+        Err(err) => {
+            return Some(format!(
+                "workspace root became inaccessible during verification: {err}"
+            ));
+        }
+    };
+    let canonical_meta = match std::fs::symlink_metadata(canonical_workspace) {
+        Ok(meta) => meta,
+        Err(err) => {
+            return Some(format!(
+                "canonical workspace root became inaccessible during verification: {err}"
+            ));
+        }
+    };
+    if marker_identity_changed(&observed_meta, &canonical_meta) {
+        return Some("workspace root identity changed during verification".to_string());
+    }
+    None
+}
+
+/// Evaluate marker contents: reject empty content and a foreign owner; trust an
+/// exact-owner match.
+fn evaluate_marker_contents(contents: &str, run_id: &str, marker: &Path) -> Option<String> {
+    let trimmed = contents.trim();
+    if trimmed.is_empty() {
+        return Some(format!(
+            "workspace ownership marker is empty: {marker_display}",
+            marker_display = marker.display()
+        ));
+    }
+    if trimmed == run_id {
+        None
+    } else {
+        Some(format!(
+            "workspace ownership marker belongs to run '{marker_owner}' not '{run_id}'",
+            marker_owner = trimmed
+        ))
     }
 }

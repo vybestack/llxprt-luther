@@ -206,7 +206,6 @@ fn acquire_continuation_lease(
         metadata.repository.as_deref(),
         metadata
             .issue_number
-            .or(metadata.pr_number)
             .and_then(|number| u64::try_from(number).ok()),
     ) else {
         return Ok(());
@@ -214,7 +213,17 @@ fn acquire_continuation_lease(
     let Some(lease) =
         crate::persistence::leases::get_lease_for_issue(conn, repository, issue_number)?
     else {
-        return Ok(());
+        // The run has repository + issue identity, so a lease is expected. A
+        // missing lease means the durable claim was lost (DB corruption, manual
+        // deletion, or a race that allowed another dispatcher to reclaim it).
+        // Fail closed rather than allowing an untracked continuation: every
+        // continuation of an issue-bound run must be backed by a lease that this
+        // transaction authoritatively acquires.
+        return Err(ContinuationError::InvalidTarget(format!(
+            "run {} references {repository}#{issue_number} but no issue lease exists; \
+             the durable claim is missing and continuation cannot proceed authoritatively",
+            request.run_id
+        )));
     };
     let expected_owner = lease.run_id.as_deref().ok_or_else(|| {
         ContinuationError::InvalidTarget(format!(

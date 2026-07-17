@@ -528,12 +528,17 @@ pub fn resume_daemon_workflow(
         .map_err(|e| format!("resolve config '{}': {e}", metadata.config_id))?;
     apply_daemon_claim_overrides(&mut wait_config, request);
     let config_dir = Some(config_root);
-    let step = metadata
+    if metadata
         .current_step
         .as_deref()
-        .filter(|step| !step.is_empty())
-        .ok_or_else(|| format!("missing current_step for resume of run {}", request.run_id))?
-        .to_string();
+        .unwrap_or_default()
+        .is_empty()
+    {
+        return Err(format!(
+            "missing current_step for resume of run {}",
+            request.run_id
+        ));
+    }
     let overrides = TargetProfileOverrides {
         repo: Some(request.repo.clone()),
         issue: Some(request.issue_number.to_string()),
@@ -553,22 +558,25 @@ pub fn resume_daemon_workflow(
         &config_dir,
         wait_config.clone(),
     )?;
+    // Construct the resume request once and derive the checkpoint identity via
+    // request-bound `select_checkpoint` rather than a first-by-step lookup. The
+    // same request is then passed to `commit_continuation`, whose internal
+    // transaction re-selects and verifies this identity, so the bound identity
+    // and the in-transaction selection cannot diverge. `select_checkpoint`
+    // honors failure-cleanup provenance and terminal-step handling rather than
+    // blindly matching the first checkpoint for `current_step`.
+    let resume_request = luther_workflow::engine::ContinuationRequest {
+        run_id: request.run_id.clone(),
+        kind: luther_workflow::engine::ContinuationKind::Resume,
+        force: true,
+    };
     let checkpoint =
-        luther_workflow::persistence::get_checkpoint_for_step(&conn, &request.run_id, &step)
-            .map_err(|e| e.to_string())?
-            .ok_or_else(|| format!("missing checkpoint for run {} step {step}", request.run_id))?;
+        luther_workflow::engine::continuation::select_checkpoint(&conn, &resume_request, &metadata)
+            .map_err(|e| format!("select resume checkpoint: {e}"))?;
     let checkpoint_identity =
         luther_workflow::engine::continuation::checkpoint_identity(&checkpoint);
-    luther_workflow::engine::commit_continuation(
-        &conn,
-        &luther_workflow::engine::ContinuationRequest {
-            run_id: request.run_id.clone(),
-            kind: luther_workflow::engine::ContinuationKind::Resume,
-            force: true,
-        },
-        &checkpoint_identity,
-    )
-    .map_err(|e| format!("commit resume: {e}"))?;
+    luther_workflow::engine::commit_continuation(&conn, &resume_request, &checkpoint_identity)
+        .map_err(|e| format!("commit resume: {e}"))?;
     run_daemon_runner(request, &wait_config, &db_path, &mut runner)
 }
 

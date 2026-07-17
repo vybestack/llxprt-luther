@@ -402,17 +402,29 @@ pub fn start_child_workflow(
     lease: &crate::persistence::leases::IssueLease,
     conn: &rusqlite::Connection,
 ) -> Result<StepOutcome, EngineError> {
+    let request = child_launch_request(state, child);
+    // Exact compare-and-swap: transition to Running only when the lease is
+    // still in the fresh-claim state we observed. A rejected CAS means a
+    // concurrent writer advanced the lease (relaunch, reclaim, or
+    // finalization), so we must skip dispatch entirely rather than launch a
+    // duplicate child.
+    if !claim_running_lease_cas(
+        conn,
+        lease,
+        &[LeaseStatus::Claimed],
+        lease.run_id.as_deref(),
+        &request.run_id,
+    )? {
+        return Ok(child_cas_rejected_outcome(
+            state,
+            child,
+            lease,
+            "start_child_workflow_cas_rejected",
+        ));
+    }
     query
         .add_label(&state.repo, child, &state.luther_label)
-        .map_err(github_error)?;
-    let request = child_launch_request(state, child);
-    update_lease_status(
-        conn,
-        &lease.lease_id,
-        LeaseStatus::Running,
-        Some(&request.run_id),
-    )
-    .map_err(sql_error)?;
+        .map_err(|err| compensate_label_error(conn, lease, &request.run_id, err))?;
     let result = runner.launch_child(&request).map_err(|err| {
         if let Err(restore_err) = restore_child_lease_after_runner_error(
             conn,
@@ -470,57 +482,106 @@ pub fn resume_child_workflow(
     conn: &rusqlite::Connection,
 ) -> Result<StepOutcome, EngineError> {
     let Some(run_id) = lease.run_id.clone() else {
-        update_lease_status(conn, &lease.lease_id, LeaseStatus::Failed, None).map_err(sql_error)?;
-        write_launch_artifact(
-            state,
-            json!({
-                "launched": false,
-                "child_issue_number": child,
-                "reason": "missing_child_run_id",
-                "lease_id": lease.lease_id,
-                "lease_status": lease.status.to_string()
-            }),
-        )?;
-        return Ok(StepOutcome::Fixable);
+        return missing_resume_run_id_outcome(conn, state, child, lease);
     };
     let request = child_resume_request(state, child, run_id.clone());
-    update_lease_status(
+    // Exact compare-and-swap: transition to Running only when the lease still
+    // holds the ReadyToResume status and the same run_id we are resuming. A
+    // rejected CAS means a concurrent writer advanced the lease, so we skip the
+    // dispatch rather than resume a stale or duplicate child workflow.
+    if !claim_running_lease_cas(
         conn,
-        &lease.lease_id,
-        LeaseStatus::Running,
-        Some(&request.run_id),
-    )
-    .map_err(sql_error)?;
-    let result = runner.resume_child(&request).map_err(|err| {
-        if let Err(restore_err) = restore_child_lease_after_runner_error(
-            conn,
+        lease,
+        &[LeaseStatus::ReadyToResume],
+        Some(&run_id),
+        &request.run_id,
+    )? {
+        return Ok(child_cas_rejected_outcome(
+            state,
+            child,
             lease,
-            lease.status,
-            Some(&run_id),
-            &request.run_id,
-        ) {
-            return parent_error(format!(
-                "{err}; failed to restore child lease {}: {restore_err}",
-                lease.lease_id
-            ));
-        }
-        parent_error(err.to_string())
+            "resume_child_workflow_cas_rejected",
+        ));
+    }
+    dispatch_and_finalize_child(
+        state,
+        context,
+        query,
+        runner,
+        conn,
+        ChildDispatchInput {
+            child,
+            lease,
+            request: &request,
+            compensate_run_id: Some(&run_id),
+        },
+        |req| runner.resume_child(req),
+    )
+}
+
+/// Fail a resume lease that has no durable run id and record a fixable launch
+/// artifact, so the orchestrator re-evaluates the child rather than erroring.
+fn missing_resume_run_id_outcome(
+    conn: &rusqlite::Connection,
+    state: &OrchestrationState,
+    child: u64,
+    lease: &crate::persistence::leases::IssueLease,
+) -> Result<StepOutcome, EngineError> {
+    update_lease_status(conn, &lease.lease_id, LeaseStatus::Failed, None).map_err(sql_error)?;
+    write_launch_artifact(
+        state,
+        json!({
+            "launched": false,
+            "child_issue_number": child,
+            "reason": "missing_child_run_id",
+            "lease_id": lease.lease_id,
+            "lease_status": lease.status.to_string()
+        }),
+    )?;
+    Ok(StepOutcome::Fixable)
+}
+
+/// Per-child references needed to dispatch and finalize a child workflow.
+struct ChildDispatchInput<'a> {
+    child: u64,
+    lease: &'a crate::persistence::leases::IssueLease,
+    request: &'a ChildWorkflowLaunchRequest,
+    /// The run id keyed on the lease's owned `Running` transition, used to
+    /// restore the lease on a post-dispatch error.
+    compensate_run_id: Option<&'a str>,
+}
+
+/// Dispatch a child workflow (launch or resume), collect post-launch metadata,
+/// and finalize the lease, applying identical error-compensation to both phases.
+///
+/// When the runner dispatch or the post-launch metadata read fails after the
+/// CAS has transitioned the lease to `Running`, the lease is restored to its
+/// observed status keyed on the owned run id. A failed restore augments the
+/// original error with the restore failure; otherwise the original error
+/// propagates unchanged.
+fn dispatch_and_finalize_child(
+    state: &OrchestrationState,
+    context: &mut StepContext,
+    query: &dyn GithubIssueQuery,
+    runner: &dyn ChildWorkflowRunner,
+    conn: &rusqlite::Connection,
+    input: ChildDispatchInput<'_>,
+    dispatch: impl FnOnce(
+        &ChildWorkflowLaunchRequest,
+    ) -> Result<ChildWorkflowRunResult, ChildWorkflowRunnerError>,
+) -> Result<StepOutcome, EngineError> {
+    let ChildDispatchInput {
+        child,
+        lease,
+        request,
+        compensate_run_id,
+    } = input;
+    let result = dispatch(request).map_err(|err| {
+        compensate_dispatch_error(conn, lease, compensate_run_id, &request.run_id, err)
     })?;
-    let (run_status, pr) = post_launch_metadata(state, query, runner, child, lease, &request)
+    let (run_status, pr) = post_launch_metadata(state, query, runner, child, lease, request)
         .map_err(|err| {
-            if let Err(restore_err) = restore_child_lease_after_runner_error(
-                conn,
-                lease,
-                lease.status,
-                Some(&run_id),
-                &request.run_id,
-            ) {
-                return parent_error(format!(
-                    "{err}; failed to restore child lease {} after metadata error: {restore_err}",
-                    lease.lease_id
-                ));
-            }
-            err
+            compensate_metadata_error(conn, lease, compensate_run_id, &request.run_id, err)
         })?;
     finish_child_launch(
         state,
@@ -530,12 +591,162 @@ pub fn resume_child_workflow(
         ChildLaunchCompletion {
             child,
             lease,
-            request: &request,
+            request,
             result,
             run_status,
             pr,
         },
     )
+}
+
+/// Compensate a label-add failure that occurs after the CAS has transitioned
+/// the lease to `Running` with the new run id. Because no dispatch has happened
+/// yet, the lease must be rolled back to its observed status and observed run
+/// id so a future pass can reclaim it; otherwise the lease would be stranded
+/// as `Running` with no running workflow.
+///
+/// The restore is keyed on the exact `Running` status owned by
+/// `running_run_id` (the CAS-acquired owner). A concurrent writer that already
+/// advanced the lease causes the restore to be a no-op, which is the correct
+/// outcome: that writer is authoritative. On a successful restore the original
+/// GitHub error is propagated; on a failed restore both errors are chained.
+fn compensate_label_error(
+    conn: &rusqlite::Connection,
+    lease: &crate::persistence::leases::IssueLease,
+    running_run_id: &str,
+    err: GithubError,
+) -> EngineError {
+    restore_for_compensation(
+        conn,
+        lease,
+        lease.run_id.as_deref(),
+        running_run_id,
+        &err.to_string(),
+        " after label add failure",
+    )
+    .unwrap_or_else(|| github_error(err))
+}
+
+/// Restore a lease whose CAS-acquired `Running` transition must be rolled back
+/// after a runner dispatch error, returning the error to propagate. A failed
+/// restore augments the dispatch error with the restore failure; a successful
+/// restore re-wraps the runner error as a parent orchestration error.
+fn compensate_dispatch_error(
+    conn: &rusqlite::Connection,
+    lease: &crate::persistence::leases::IssueLease,
+    run_id: Option<&str>,
+    expected_running_run_id: &str,
+    err: ChildWorkflowRunnerError,
+) -> EngineError {
+    restore_for_compensation(
+        conn,
+        lease,
+        run_id,
+        expected_running_run_id,
+        &err.to_string(),
+        "",
+    )
+    .unwrap_or_else(|| parent_error(err.to_string()))
+}
+
+/// Restore a lease whose CAS-acquired `Running` transition must be rolled back
+/// after a post-launch metadata error, returning the error to propagate. A
+/// failed restore augments the metadata error with the restore failure; a
+/// successful restore returns the original metadata error unchanged.
+fn compensate_metadata_error(
+    conn: &rusqlite::Connection,
+    lease: &crate::persistence::leases::IssueLease,
+    run_id: Option<&str>,
+    expected_running_run_id: &str,
+    err: EngineError,
+) -> EngineError {
+    restore_for_compensation(
+        conn,
+        lease,
+        run_id,
+        expected_running_run_id,
+        &err.to_string(),
+        " after metadata error",
+    )
+    // On successful restore, the original metadata error propagates unchanged
+    // (it is already an EngineError) to avoid double-wrapping its message.
+    .unwrap_or(err)
+}
+
+/// Attempt the conditional lease restore used by error-compensation. Returns
+/// `Some(augmented_error)` when the restore itself failed (the augmented error
+/// must be propagated), or `None` when the restore succeeded and the caller
+/// should propagate the original error instead.
+fn restore_for_compensation(
+    conn: &rusqlite::Connection,
+    lease: &crate::persistence::leases::IssueLease,
+    run_id: Option<&str>,
+    expected_running_run_id: &str,
+    err_message: &str,
+    suffix: &str,
+) -> Option<EngineError> {
+    let Err(restore_err) = restore_child_lease_after_runner_error(
+        conn,
+        lease,
+        lease.status,
+        run_id,
+        expected_running_run_id,
+    ) else {
+        return None;
+    };
+    Some(parent_error(format!(
+        "{err_message}; failed to restore child lease {lease_id}{suffix}: {restore_err}",
+        lease_id = lease.lease_id
+    )))
+}
+
+/// Conditionally transition a child lease to `Running` via an exact
+/// expected-status/expected-owner compare-and-swap.
+///
+/// The CAS is keyed on the lease's *observed* status (and, when provided, the
+/// observed run_id) so a stale orchestrator returning from a slow pre-dispatch
+/// step cannot overwrite a lease that a concurrent writer has already advanced.
+/// Returns `true` when the transition applied and dispatch may proceed; `false`
+/// when the CAS was rejected and dispatch must be skipped.
+pub fn claim_running_lease_cas(
+    conn: &rusqlite::Connection,
+    lease: &crate::persistence::leases::IssueLease,
+    expected_statuses: &[LeaseStatus],
+    expected_run_id: Option<&str>,
+    new_run_id: &str,
+) -> Result<bool, EngineError> {
+    update_lease_status_conditional(
+        conn,
+        &lease.lease_id,
+        LeaseStatus::Running,
+        expected_statuses,
+        Some(new_run_id),
+        expected_run_id,
+    )
+    .map_err(sql_error)
+}
+
+/// Build the step outcome for a rejected pre-dispatch CAS, recording a wait
+/// artifact so the orchestrator re-evaluates the lease on the next pass rather
+/// than erroring on a contention that a concurrent writer has already resolved.
+pub fn child_cas_rejected_outcome(
+    state: &OrchestrationState,
+    child: u64,
+    lease: &crate::persistence::leases::IssueLease,
+    reason: &str,
+) -> StepOutcome {
+    let _ = write_launch_artifact(
+        state,
+        json!({
+            "launched": false,
+            "child_issue_number": child,
+            "reason": reason,
+            "lease_id": lease.lease_id,
+            "observed_lease_status": lease.status.to_string(),
+            "observed_run_id": lease.run_id
+        }),
+    );
+    StepOutcome::Wait
 }
 
 pub fn restore_child_lease_after_runner_error(

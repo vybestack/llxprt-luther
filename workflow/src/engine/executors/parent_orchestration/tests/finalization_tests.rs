@@ -299,6 +299,12 @@ fn stale_finalization_on_completed_lease_has_zero_side_effects() {
     // must not be overwritten by a stale child finalization decision, AND
     // finish_child_launch must emit zero side effects (no artifacts, no
     // context mutation, no rollup, no label removal, no comments).
+    //
+    // Blocker 4: the returned step outcome must be derived from the durable
+    // lease state (Completed → Success), never from the stale process result
+    // (which was CompletedFailure → Fixable). The concurrent writer that won
+    // the CAS is authoritative, so the orchestrator observes the child as
+    // successfully completed even though this in-process result was a failure.
     let (state, conn, lease) = lease_finalization_harness();
     let child = lease.issue_number;
     let run_id = "child-run-completed";
@@ -319,7 +325,7 @@ fn stale_finalization_on_completed_lease_has_zero_side_effects() {
     };
 
     let outcome = finish_child_launch(&state, &mut context, &query, &conn, completion).unwrap();
-    assert_eq!(outcome, StepOutcome::Fixable);
+    assert_eq!(outcome, StepOutcome::Success);
 
     assert_zero_finalization_side_effects(&state, &context, &query, child);
 
@@ -344,6 +350,11 @@ fn stale_finalization_on_reassigned_owner_has_zero_side_effects() {
     // by a concurrent writer, finish_child_launch must treat the conditional
     // update as rejected and emit zero side effects. Only an exact same-owner
     // idempotent match may apply side effects.
+    //
+    // Blocker 4: the returned step outcome must be derived from the durable
+    // lease state. The lease is Running (held by a foreign owner), so the
+    // outcome is Wait — a concurrent writer is actively driving the child.
+    // It must NOT be Fixable (the stale process result's classification).
     let (state, conn, lease) = lease_finalization_harness();
     let child = lease.issue_number;
     let run_id = "child-run-original";
@@ -372,7 +383,7 @@ fn stale_finalization_on_reassigned_owner_has_zero_side_effects() {
     };
 
     let outcome = finish_child_launch(&state, &mut context, &query, &conn, completion).unwrap();
-    assert_eq!(outcome, StepOutcome::Fixable);
+    assert_eq!(outcome, StepOutcome::Wait);
 
     assert_zero_finalization_side_effects(&state, &context, &query, child);
 

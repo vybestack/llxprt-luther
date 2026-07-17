@@ -2,6 +2,40 @@ use super::*;
 
 use crate::workflow::config_loader::{resolve_workflow_config, resolve_workflow_type};
 
+/// Verify (without writing) that a child workspace's durable ownership marker
+/// already exists and belongs to the resume's `run_id`.
+///
+/// A resume re-enters a workspace that a prior launch provisioned and therefore
+/// must never (re)write the marker. Instead it verifies the marker is present
+/// and owned by the resuming run id, failing closed (returning an error) when
+/// the marker is missing, empty, malformed, or owned by a different run. This
+/// prevents a resume from silently claiming a workspace that was never
+/// provisioned for it or that a concurrent run has since claimed.
+pub(super) fn verify_existing_workspace_owner_marker(
+    workspace: &Path,
+    run_id: &str,
+) -> Result<(), String> {
+    crate::engine::continuation::verify_workspace_ownership_marker(workspace, run_id)
+        .map_or(Ok(()), Err)
+}
+
+/// Provision a child workspace's durable ownership marker.
+///
+/// Only the launch path may write the marker: it is the provisioning moment
+/// that establishes durable ownership for the new run id. This writes the
+/// `.luther/workspace-owner` marker atomically (create-new on first provision,
+/// idempotent on a same-owner match) and rejects a workspace already owned by a
+/// different run.
+pub(super) fn write_child_workspace_owner_marker(
+    workspace: &Path,
+    run_id: &str,
+) -> Result<(), String> {
+    std::fs::create_dir_all(workspace)
+        .map_err(|err| format!("create child work_dir '{}': {err}", workspace.display()))?;
+    crate::engine::continuation::write_workspace_owner_marker(workspace, run_id)
+        .map_err(|err| format!("write child workspace owner marker: {err}"))
+}
+
 pub fn child_launch_request(state: &OrchestrationState, child: u64) -> ChildWorkflowLaunchRequest {
     let stamp = Utc::now().timestamp_millis();
     child_request_with_run_id(
@@ -81,10 +115,45 @@ pub enum ChildRunMode {
     Resume,
 }
 
+/// Reject a run id that is not a safe single path component.
+///
+/// A run id is interpolated directly into child artifact and work directories
+/// (`base/issue-{child}/{run_id}` and `base/children/issue-{child}/{run_id}`),
+/// so it must be a safe single path component: non-empty, no path separators
+/// (`/`, ``), no parent-directory traversal (`..`), no NUL byte, and only
+/// otherwise-permissible identifier characters. This prevents a hostile or
+/// malformed run id from escaping the per-child directory subtree into an
+/// arbitrary filesystem location.
+pub fn validate_run_id_path_component(run_id: &str) -> Result<(), String> {
+    if run_id.is_empty() {
+        return Err("child workflow run id must not be empty".to_string());
+    }
+    if run_id.contains('/') || run_id.contains('\\') {
+        return Err(format!(
+            "child workflow run id '{run_id}' must not contain path separators"
+        ));
+    }
+    if run_id == "." || run_id == ".." || run_id.contains('\0') {
+        return Err(format!(
+            "child workflow run id '{run_id}' must be a safe single path component"
+        ));
+    }
+    if !run_id
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
+    {
+        return Err(format!(
+            "child workflow run id '{run_id}' must contain only alphanumeric, '-', or '_' characters"
+        ));
+    }
+    Ok(())
+}
+
 pub fn run_child_workflow(
     request: &ChildWorkflowLaunchRequest,
     mode: ChildRunMode,
 ) -> Result<ChildWorkflowRunResult, String> {
+    validate_run_id_path_component(&request.run_id)?;
     let config_root = &request.config_root;
     let config_id = validated_child_id(&request.config_id, "config id")?;
     let workflow_type_id = validated_child_id(&request.workflow_type_id, "type id")?;
@@ -95,10 +164,19 @@ pub fn run_child_workflow(
     apply_child_overrides(&mut config, request)?;
     let db_path = crate::runtime_paths::get_data_dir().join("checkpoints.db");
     if let Some(work_dir) = request.work_dir.as_deref() {
-        std::fs::create_dir_all(work_dir)
-            .map_err(|err| format!("create child work_dir '{}': {err}", work_dir.display()))?;
-        crate::engine::continuation::write_workspace_owner_marker(work_dir, &request.run_id)
-            .map_err(|err| format!("write child workspace owner marker: {err}"))?;
+        match mode {
+            // Launch provisions the durable workspace ownership marker; it is
+            // the only path that may write it.
+            ChildRunMode::Launch => {
+                write_child_workspace_owner_marker(work_dir, &request.run_id)?;
+            }
+            // Resume must verify the marker already exists and belongs to the
+            // resuming run id, never (re)writing it. A missing or foreign-owned
+            // marker means the resume cannot safely proceed.
+            ChildRunMode::Resume => {
+                verify_existing_workspace_owner_marker(work_dir, &request.run_id)?;
+            }
+        }
     }
     let run_context = child_run_context(&config, request)?;
     let instance =

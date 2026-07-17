@@ -2,7 +2,7 @@
 
 use super::support::*;
 use crate::engine::continuation::{
-    checkpoint_identity, commit_continuation, select_checkpoint, ContinuationKind,
+    checkpoint_identity, commit_continuation, select_checkpoint, ContinuationKind, TERMINAL_STEP,
 };
 use crate::persistence::{
     get_checkpoint_for_step, get_run_with_conn, persist_run_with_conn, RunStatus,
@@ -220,4 +220,73 @@ fn commit_accepts_stale_running_resume_point() {
         commit_continuation(&conn, &req, &identity).expect("stale running claim should reopen");
     assert_eq!(metadata.status, RunStatus::Running);
     assert_eq!(metadata.process_pid, Some(std::process::id()));
+}
+
+#[test]
+fn commit_rejects_continuation_when_issue_lease_is_missing() {
+    // A run with repository + issue identity must have a backing issue lease.
+    // If the lease is missing (DB corruption, manual deletion, or a race that
+    // let another dispatcher reclaim it), the continuation must fail closed
+    // rather than proceeding without an authoritative lease acquisition.
+    let conn = test_conn();
+    seed_run(&conn, "missing-lease-run", RunStatus::Failed, TERMINAL_STEP);
+    seed_checkpoint(&conn, "missing-lease-run", TERMINAL_STEP, "completed");
+    // Delete the lease that seed_run created, simulating a lost durable claim.
+    conn.execute(
+        "DELETE FROM issue_leases WHERE run_id = ?1",
+        rusqlite::params!["missing-lease-run"],
+    )
+    .expect("delete lease");
+
+    let req = request(
+        "missing-lease-run",
+        ContinuationKind::Retry {
+            from_failed_step: false,
+        },
+        true,
+    );
+    let md = get_run_with_conn(&conn, "missing-lease-run")
+        .expect("load run")
+        .expect("run exists");
+    let cp = select_checkpoint(&conn, &req, &md).expect("select");
+    let error = commit_continuation(&conn, &req, &checkpoint_identity(&cp))
+        .expect_err("missing lease must block continuation");
+    assert!(
+        error.to_string().contains("no issue lease exists"),
+        "expected missing-lease rejection, got: {error}"
+    );
+}
+
+#[test]
+fn commit_rejects_continuation_when_lease_owned_by_different_run() {
+    // A lease owned by a different run_id must not be acquirable, even with
+    // force. The conditional update's expected-owner guard enforces this.
+    let conn = test_conn();
+    seed_run(&conn, "foreign-owner-run", RunStatus::Failed, TERMINAL_STEP);
+    seed_checkpoint(&conn, "foreign-owner-run", TERMINAL_STEP, "completed");
+    // Reassign the lease to a different run, simulating a reclaimed claim.
+    conn.execute(
+        "UPDATE issue_leases SET run_id = ?2 WHERE issue_repo = ?3 AND issue_number = 2133",
+        rusqlite::params!["x", "other-run", "vybestack/llxprt-code"],
+    )
+    .expect("reassign lease");
+
+    let req = request(
+        "foreign-owner-run",
+        ContinuationKind::Retry {
+            from_failed_step: false,
+        },
+        true,
+    );
+    let md = get_run_with_conn(&conn, "foreign-owner-run")
+        .expect("load run")
+        .expect("run exists");
+    let cp = select_checkpoint(&conn, &req, &md).expect("select");
+    let error = commit_continuation(&conn, &req, &checkpoint_identity(&cp))
+        .expect_err("foreign-owned lease must block continuation");
+    assert!(
+        error.to_string().contains("belongs to run")
+            || error.to_string().contains("could not be acquired"),
+        "expected foreign-owner rejection, got: {error}"
+    );
 }

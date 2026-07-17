@@ -27,13 +27,44 @@ pub(super) fn test_conn() -> Connection {
 
 pub(super) fn seed_run(conn: &Connection, run_id: &str, status: RunStatus, current_step: &str) {
     let mut md = RunMetadata::new(run_id, "llxprt-issue-fix", "llxprt-issue-fix-v1");
-    md.status = status;
+    md.status = status.clone();
     md.current_step = Some(current_step.to_string());
     md.repository = Some("vybestack/llxprt-code".to_string());
     md.issue_number = Some(2133);
     md.pr_number = Some(2138);
     md.workspace_path = Some("/tmp/ws".to_string());
     persist_run_with_conn(conn, &md).expect("persist run");
+    // Seed the issue lease that backs this run's claim. `acquire_continuation_lease`
+    // rejects missing leases when repository+issue identity is present, so every
+    // test run that expects a successful commit must have a backing lease owned
+    // by the same run_id.
+    seed_lease_for_run(conn, run_id, status);
+}
+
+/// Create an issue lease owned by `run_id`, mapping the run's terminal status
+/// to an appropriate starting lease status so `acquire_continuation_lease`'s
+/// expected-status set matches.
+pub(super) fn seed_lease_for_run(conn: &Connection, run_id: &str, status: RunStatus) {
+    use crate::persistence::{IssueLease, LeaseStatus};
+    let lease_status = match status {
+        RunStatus::Failed | RunStatus::Abandoned => LeaseStatus::Failed,
+        RunStatus::WaitingExternal => LeaseStatus::WaitingExternal,
+        RunStatus::ReadyToResume | RunStatus::Paused => LeaseStatus::ReadyToResume,
+        _ => LeaseStatus::Running,
+    };
+    let now = Utc::now();
+    let lease = IssueLease {
+        lease_id: format!("lease-{run_id}"),
+        issue_repo: "vybestack/llxprt-code".to_string(),
+        issue_number: 2133,
+        config_id: "llxprt-issue-fix-v1".to_string(),
+        run_id: Some(run_id.to_string()),
+        status: lease_status,
+        claimed_at: now,
+        updated_at: now,
+        heartbeat_at: now,
+    };
+    crate::persistence::leases::create_lease(conn, &lease).expect("create lease");
 }
 
 pub(super) fn seed_checkpoint(conn: &Connection, run_id: &str, step: &str, status: &str) {

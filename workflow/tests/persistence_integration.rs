@@ -11,7 +11,9 @@ use luther_workflow::engine::runner::{EngineError, EngineRunner};
 use luther_workflow::engine::transition::StepOutcome;
 use luther_workflow::persistence::checkpoint::PersistenceError;
 use luther_workflow::persistence::{
-    load_checkpoint, run_metadata_from_ref, save_checkpoint, Checkpoint, SqliteStore,
+    get_run_with_conn, load_checkpoint, persist_run_with_conn, run_metadata_from_ref,
+    save_checkpoint, Checkpoint, FailureCleanupState, RunMetadata, RunStatus, SqliteStore,
+    StateSnapshot,
 };
 use luther_workflow::workflow::schema::{
     GuardLimits, RepoConfig, RuntimeConfig, WorkflowConfig, WorkflowRunRef, WorkflowType,
@@ -215,4 +217,160 @@ fn test_persistence_error_halts_execution() {
             // errors halt execution. For now, Ok is acceptable for RED phase.
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// FailureCleanupState durable metadata fail-closed contract tests.
+//
+// PR-147 blocker: `failed_state_snapshot` must be present in persisted JSON.
+// A missing or malformed field must fail closed at deserialization rather than
+// silently substituting a default snapshot, which would corrupt recovery state.
+// An explicitly empty/default StateSnapshot remains a legitimate value.
+// ---------------------------------------------------------------------------
+
+/// Initialize the runs table on an in-memory connection.
+fn runs_test_conn() -> rusqlite::Connection {
+    let conn = rusqlite::Connection::open_in_memory().expect("in-memory db");
+    luther_workflow::persistence::run_metadata::init_runs_table(&conn).expect("init runs table");
+    conn
+}
+
+/// Build a complete, recoverable FailureCleanupState fixture.
+fn complete_failure_cleanup_fixture() -> FailureCleanupState {
+    let now = chrono::Utc::now();
+    FailureCleanupState {
+        schema_version: FailureCleanupState::SCHEMA_VERSION,
+        failed_step: "remediate".to_string(),
+        failure_outcome: "fatal".to_string(),
+        failure_reason: "agent timed out".to_string(),
+        failed_checkpoint_id: "remediate@2026-01-01T00:00:00Z".to_string(),
+        failed_state_snapshot: StateSnapshot::default(),
+        cleanup_step: "abandon_and_log".to_string(),
+        cleanup_succeeded: true,
+        captured_at: now,
+        cleanup_completed_at: Some(now),
+        recovery_consumed_at: None,
+    }
+}
+
+/// Persist a run row, then overwrite its `failure_cleanup` column with raw JSON,
+/// simulating a corrupted or legacy persisted record.
+fn seed_run_with_raw_failure_cleanup(conn: &rusqlite::Connection, run_id: &str, raw_json: &str) {
+    let mut md = RunMetadata::new(run_id, "wf", "cfg");
+    md.status = RunStatus::Abandoned;
+    persist_run_with_conn(conn, &md).expect("persist run before corruption");
+    conn.execute(
+        "UPDATE runs SET failure_cleanup = ?2 WHERE run_id = ?1",
+        rusqlite::params![run_id, raw_json],
+    )
+    .expect("overwrite failure_cleanup column");
+}
+
+/// Test: A persisted FailureCleanupState with an empty/default snapshot
+/// round-trips through SQLite and is recoverable.
+#[test]
+fn failure_cleanup_with_empty_snapshot_round_trips_through_sqlite() {
+    let conn = runs_test_conn();
+    let run_id = "recoverable-empty-snapshot";
+    let mut md = RunMetadata::new(run_id, "wf", "cfg");
+    md.status = RunStatus::Abandoned;
+    md.failure_cleanup = Some(complete_failure_cleanup_fixture());
+    persist_run_with_conn(&conn, &md).expect("persist run");
+
+    let loaded = get_run_with_conn(&conn, run_id)
+        .expect("load run")
+        .expect("run present");
+    let cleanup = loaded.failure_cleanup.expect("failure_cleanup present");
+    assert_eq!(cleanup.failed_state_snapshot, StateSnapshot::default());
+    assert!(cleanup.is_complete());
+}
+
+/// Test: A persisted FailureCleanupState with a populated snapshot
+/// round-trips through SQLite and preserves the recovery state.
+#[test]
+fn failure_cleanup_with_populated_snapshot_round_trips_through_sqlite() {
+    let conn = runs_test_conn();
+    let run_id = "recoverable-populated-snapshot";
+    let mut md = RunMetadata::new(run_id, "wf", "cfg");
+    md.status = RunStatus::Abandoned;
+    let mut cleanup = complete_failure_cleanup_fixture();
+    cleanup.failed_state_snapshot.retry_count = 5;
+    cleanup.failed_state_snapshot.loop_count = 2;
+    cleanup.failed_state_snapshot.status = "interrupted".to_string();
+    md.failure_cleanup = Some(cleanup);
+    persist_run_with_conn(&conn, &md).expect("persist run");
+
+    let loaded = get_run_with_conn(&conn, run_id)
+        .expect("load run")
+        .expect("run present");
+    let cleanup = loaded.failure_cleanup.expect("failure_cleanup present");
+    assert_eq!(cleanup.failed_state_snapshot.retry_count, 5);
+    assert_eq!(cleanup.failed_state_snapshot.status, "interrupted");
+}
+
+/// Test: A persisted failure_cleanup JSON missing the failed_state_snapshot
+/// key must fail closed when loading the run, rather than silently returning a
+/// record with a default snapshot.
+#[test]
+fn failure_cleanup_missing_snapshot_fails_closed_on_load() {
+    let conn = runs_test_conn();
+    let run_id = "corrupted-missing-snapshot";
+
+    let mut value =
+        serde_json::to_value(complete_failure_cleanup_fixture()).expect("serialize fixture");
+    value
+        .as_object_mut()
+        .expect("object")
+        .remove("failed_state_snapshot");
+    let truncated = serde_json::to_string(&value).expect("re-serialize");
+
+    seed_run_with_raw_failure_cleanup(&conn, run_id, &truncated);
+
+    let result = get_run_with_conn(&conn, run_id);
+    assert!(
+        result.is_err(),
+        "loading a run with a missing failed_state_snapshot must fail closed, got: {result:?}"
+    );
+}
+
+/// Test: A persisted failure_cleanup JSON with a structurally malformed
+/// failed_state_snapshot must fail closed when loading the run.
+#[test]
+fn failure_cleanup_malformed_snapshot_fails_closed_on_load() {
+    let conn = runs_test_conn();
+    let run_id = "corrupted-malformed-snapshot";
+
+    let mut value =
+        serde_json::to_value(complete_failure_cleanup_fixture()).expect("serialize fixture");
+    let obj = value.as_object_mut().expect("object");
+    obj.insert(
+        "failed_state_snapshot".to_string(),
+        serde_json::json!({"retry_count": "not-a-number"}),
+    );
+    let malformed = serde_json::to_string(&value).expect("re-serialize");
+
+    seed_run_with_raw_failure_cleanup(&conn, run_id, &malformed);
+
+    let result = get_run_with_conn(&conn, run_id);
+    assert!(
+        result.is_err(),
+        "loading a run with a malformed failed_state_snapshot must fail closed, got: {result:?}"
+    );
+}
+
+/// Test: A run with no failure_cleanup at all (None) still loads normally.
+/// The fail-closed contract applies only when the failure_cleanup JSON is
+/// present-but-incomplete, not when it is legitimately absent.
+#[test]
+fn run_without_failure_cleanup_loads_normally() {
+    let conn = runs_test_conn();
+    let run_id = "no-cleanup";
+    let mut md = RunMetadata::new(run_id, "wf", "cfg");
+    md.status = RunStatus::Completed;
+    persist_run_with_conn(&conn, &md).expect("persist run");
+
+    let loaded = get_run_with_conn(&conn, run_id)
+        .expect("load run")
+        .expect("run present");
+    assert!(loaded.failure_cleanup.is_none());
 }

@@ -114,12 +114,28 @@ impl StepContext {
     }
 
     /// Restore non-secret values captured by [`Self::checkpoint_values`].
+    ///
+    /// When restoring `__namespaced_vars`, the inner maps are filtered through
+    /// the checkpointable-key allowlist so a malicious or corrupted persisted
+    /// payload cannot inject disallowed keys (tokens, shell output, etc.) into
+    /// the live context. Malformed JSON values fail closed with the underlying
+    /// serde error rather than silently substituting an empty context.
     pub fn restore_checkpoint_values(
         &mut self,
         mut values: HashMap<String, serde_json::Value>,
     ) -> Result<(), serde_json::Error> {
         if let Some(value) = values.remove("__namespaced_vars") {
-            self.namespaced_vars = serde_json::from_value(value)?;
+            let raw: HashMap<String, HashMap<String, String>> = serde_json::from_value(value)?;
+            self.namespaced_vars = raw
+                .into_iter()
+                .map(|(step, variables)| {
+                    let variables = variables
+                        .into_iter()
+                        .filter(|(key, _)| is_checkpointable_context_key(key))
+                        .collect();
+                    (step, variables)
+                })
+                .collect();
         }
         if let Some(value) = values.remove("__step_order") {
             self.step_order = serde_json::from_value(value)?;
@@ -703,6 +719,70 @@ mod tests {
         assert_eq!(
             extract_tokens("${HOME}/{artifact_dir}/${USER}"),
             vec!["artifact_dir"]
+        );
+    }
+
+    #[test]
+    fn restore_checkpoint_values_filters_disallowed_namespaced_keys() {
+        // A malicious payload carrying secret-like keys in a namespaced map
+        // must be filtered through the allowlist on restore, so secrets never
+        // re-enter the live context even if they slipped into persisted state.
+        let mut payload: HashMap<String, serde_json::Value> = HashMap::new();
+        let mut malicious = HashMap::new();
+        let mut inner = HashMap::new();
+        inner.insert("issue_number".to_string(), "42".to_string());
+        inner.insert("github_token".to_string(), "bearer-secret".to_string());
+        inner.insert("api_key".to_string(), "key-secret".to_string());
+        inner.insert("stdout".to_string(), "raw-output-secret".to_string());
+        malicious.insert("shell".to_string(), inner);
+        payload.insert(
+            "__namespaced_vars".to_string(),
+            serde_json::to_value(&malicious).unwrap(),
+        );
+        payload.insert(
+            "issue_number".to_string(),
+            serde_json::Value::String("42".into()),
+        );
+
+        let mut context = StepContext::new(PathBuf::from("/tmp/work"), "run-restore".to_string());
+        context
+            .restore_checkpoint_values(payload)
+            .expect("restore must not error on a well-formed payload");
+
+        // Allowed key survives.
+        assert_eq!(
+            context.get("shell.issue_number").map(String::as_str),
+            Some("42")
+        );
+        // Disallowed keys are dropped.
+        assert!(context.get("shell.github_token").is_none());
+        assert!(context.get("shell.api_key").is_none());
+        assert!(context.get("shell.stdout").is_none());
+    }
+
+    #[test]
+    fn restore_checkpoint_values_rejects_malformed_namespaced_payload() {
+        // A structurally invalid `__namespaced_vars` value (inner map values
+        // not strings) must fail closed with the serde error rather than
+        // silently substituting an empty/default context.
+        let mut payload: HashMap<String, serde_json::Value> = HashMap::new();
+        let mut malformed = HashMap::new();
+        let mut inner: HashMap<String, serde_json::Value> = HashMap::new();
+        inner.insert(
+            "issue_number".to_string(),
+            serde_json::Value::Number(serde_json::Number::from(42u64)),
+        );
+        malformed.insert("shell".to_string(), serde_json::to_value(&inner).unwrap());
+        payload.insert(
+            "__namespaced_vars".to_string(),
+            serde_json::to_value(&malformed).unwrap(),
+        );
+
+        let mut context = StepContext::new(PathBuf::from("/tmp/work"), "run-malformed".to_string());
+        let result = context.restore_checkpoint_values(payload);
+        assert!(
+            result.is_err(),
+            "malformed __namespaced_vars must fail closed, got: {result:?}"
         );
     }
 }

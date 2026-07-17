@@ -185,71 +185,204 @@ fn finalize_continuation_lease(
     run_id: &str,
     outcome: &Result<RunOutcome, luther_workflow::engine::runner::EngineError>,
 ) -> Result<(), String> {
-    use luther_workflow::persistence::LeaseStatus;
-    let has_issue_identity =
-        metadata.repository.is_some() && metadata.issue_number.or(metadata.pr_number).is_some();
-    let Some(lease) = continuation_lease(store, metadata).map_err(|error| error.to_string())?
-    else {
-        return if has_issue_identity {
-            Err(format!("missing issue lease for continuation run {run_id}"))
-        } else {
-            Ok(())
-        };
+    let Some(lease) = resolve_continuation_lease(store, metadata, run_id)? else {
+        // No lease to finalize for this run (and no missing-lease error).
+        return Ok(());
     };
     // Ownership guard: only the run that owns the lease may finalize it.
-    if lease.run_id.as_deref() != Some(run_id) {
-        return Err(format!(
+    verify_lease_ownership(&lease, run_id)?;
+    let status = lease_status_for_outcome(store, run_id, outcome)?;
+    commit_or_verify_finalization(store, metadata, &lease, run_id, status)
+}
+
+/// Apply the conditional lease transition, or — when it does not apply — re-read
+/// the fresh current lease and validate exact owner + status for idempotent
+/// success. Any ownership or status drift is fail-closed with diagnostics
+/// rather than silently accepted.
+fn commit_or_verify_finalization(
+    store: &SqliteStore,
+    metadata: &RunMetadata,
+    lease: &luther_workflow::persistence::IssueLease,
+    run_id: &str,
+    status: luther_workflow::persistence::LeaseStatus,
+) -> Result<(), String> {
+    let expected_statuses = expected_statuses_for(status);
+    if apply_lease_transition(store, lease, status, &expected_statuses, run_id)? {
+        return Ok(());
+    }
+    verify_idempotent_finalization(store, metadata, lease, run_id, status)
+}
+
+/// Resolve the continuation lease for `metadata`, failing closed with a
+/// diagnostic when the run has issue identity but no lease row is found, and
+/// returning `Ok(None)` when the run has no issue identity to lease against.
+fn resolve_continuation_lease(
+    store: &SqliteStore,
+    metadata: &RunMetadata,
+    run_id: &str,
+) -> Result<Option<luther_workflow::persistence::IssueLease>, String> {
+    let Some(lease) = continuation_lease(store, metadata).map_err(|error| error.to_string())?
+    else {
+        return if metadata_has_issue_identity(metadata) {
+            Err(format!("missing issue lease for continuation run {run_id}"))
+        } else {
+            Ok(None)
+        };
+    };
+    Ok(Some(lease))
+}
+
+/// Whether `metadata` carries enough identity (repository + issue/PR number) to
+/// be expected to hold an issue lease.
+fn metadata_has_issue_identity(metadata: &RunMetadata) -> bool {
+    metadata.repository.is_some() && metadata.issue_number.or(metadata.pr_number).is_some()
+}
+
+/// Fail closed unless the lease is owned by `run_id`.
+fn verify_lease_ownership(
+    lease: &luther_workflow::persistence::IssueLease,
+    run_id: &str,
+) -> Result<(), String> {
+    if lease.run_id.as_deref() == Some(run_id) {
+        Ok(())
+    } else {
+        Err(format!(
             "lease {} belongs to {:?}, not continuation run {}",
             lease.lease_id, lease.run_id, run_id
-        ));
+        ))
     }
+}
+
+/// Map the continuation outcome to the durable lease status.
+///
+/// `Abandoned` and `Failure` outcomes consult the persisted run metadata to
+/// distinguish a cleanup-abandonment terminal from a plain one.
+fn lease_status_for_outcome(
+    store: &SqliteStore,
+    run_id: &str,
+    outcome: &Result<RunOutcome, luther_workflow::engine::runner::EngineError>,
+) -> Result<luther_workflow::persistence::LeaseStatus, String> {
+    use luther_workflow::persistence::LeaseStatus;
     let status = match outcome {
         Ok(RunOutcome::Success) => LeaseStatus::Completed,
         Ok(RunOutcome::WaitingExternal { .. }) => LeaseStatus::WaitingExternal,
-        Ok(RunOutcome::Abandoned { .. }) => {
-            let current = luther_workflow::persistence::get_run_with_conn(store.conn(), run_id)
-                .map_err(|error| error.to_string())?
-                .ok_or_else(|| format!("missing continued run metadata for {run_id}"))?;
-            if current.is_cleanup_failure_abandonment() {
-                LeaseStatus::CleanupAbandoned
-            } else {
-                LeaseStatus::Abandoned
-            }
-        }
-        _ => LeaseStatus::Failed,
+        // An interrupted run is resumable, not failed. Mapping it to
+        // ReadyToResume keeps the lease in a reclaimable state so a later
+        // continuation can resume it, rather than forcing a full failure
+        // recovery path. @plan:PLAN-20260623-LUTHER-CONTINUATION
+        Ok(RunOutcome::Interrupted { .. }) => LeaseStatus::ReadyToResume,
+        Ok(RunOutcome::Abandoned { .. }) => lease_status_for_abandoned(store, run_id)?,
+        Ok(RunOutcome::Failure { .. }) => lease_status_for_failure(store, run_id)?,
+        Err(_) => LeaseStatus::Failed,
     };
-    // When the runner has already atomically protected the lease as
-    // CleanupAbandoned (via protect_failure_cleanup_lease), the durable state
-    // is CleanupAbandoned rather than Running. Including CleanupAbandoned in
-    // the expected set makes the conditional update idempotent in that case,
-    // mirroring the runner's own transition guard.
-    let mut expected_statuses = vec![LeaseStatus::Running];
+    Ok(status)
+}
+
+/// Distinguish a cleanup-after-failure abandonment (`CleanupAbandoned`) from a
+/// plain abandonment (`Abandoned`) by inspecting durable run provenance.
+fn lease_status_for_abandoned(
+    store: &SqliteStore,
+    run_id: &str,
+) -> Result<luther_workflow::persistence::LeaseStatus, String> {
+    use luther_workflow::persistence::LeaseStatus;
+    let current = load_continued_run(store, run_id)?;
+    Ok(if current.is_cleanup_failure_abandonment() {
+        LeaseStatus::CleanupAbandoned
+    } else {
+        LeaseStatus::Abandoned
+    })
+}
+
+/// A failure outcome may have triggered failure-cleanup. If the durable run
+/// metadata records an incomplete cleanup-failure abandonment (cleanup not yet
+/// succeeded), preserve the failed-run identity as `CleanupAbandoned` rather
+/// than plain `Failed`. This prevents a duplicate relaunch from clobbering
+/// pending recovery state. When cleanup has already succeeded (or there is no
+/// `failure_cleanup` provenance), plain `Failed` is correct.
+fn lease_status_for_failure(
+    store: &SqliteStore,
+    run_id: &str,
+) -> Result<luther_workflow::persistence::LeaseStatus, String> {
+    use luther_workflow::persistence::LeaseStatus;
+    let current = luther_workflow::persistence::get_run_with_conn(store.conn(), run_id)
+        .map_err(|err| format!("load continued run {run_id} after failure: {err}"))?
+        .ok_or_else(|| format!("continued run {run_id} disappeared after failure"))?;
+    let has_incomplete_cleanup = current
+        .failure_cleanup
+        .as_ref()
+        .is_some_and(|state| !state.cleanup_succeeded);
+    Ok(if has_incomplete_cleanup {
+        LeaseStatus::CleanupAbandoned
+    } else {
+        LeaseStatus::Failed
+    })
+}
+
+/// Load the durable run metadata for a continued run, failing closed when the
+/// record is missing.
+fn load_continued_run(store: &SqliteStore, run_id: &str) -> Result<RunMetadata, String> {
+    luther_workflow::persistence::get_run_with_conn(store.conn(), run_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| format!("missing continued run metadata for {run_id}"))
+}
+
+/// Build the set of acceptable pre-transition lease statuses for a conditional
+/// update toward `status`.
+///
+/// `Running` is always acceptable. When the runner has already atomically
+/// protected the lease as `CleanupAbandoned` (via
+/// `protect_failure_cleanup_lease`), including `CleanupAbandoned` makes the
+/// update idempotent, mirroring the runner's own transition guard. An
+/// interrupted run may already have the lease in `ReadyToResume` from a prior
+/// continuation commit, so that state is accepted too.
+fn expected_statuses_for(
+    status: luther_workflow::persistence::LeaseStatus,
+) -> Vec<luther_workflow::persistence::LeaseStatus> {
+    use luther_workflow::persistence::LeaseStatus;
+    let mut expected = vec![LeaseStatus::Running];
     if status == LeaseStatus::CleanupAbandoned {
-        expected_statuses.push(LeaseStatus::CleanupAbandoned);
+        expected.push(LeaseStatus::CleanupAbandoned);
     }
-    let finalized = luther_workflow::persistence::update_lease_status_conditional(
+    if status == LeaseStatus::ReadyToResume {
+        expected.push(LeaseStatus::ReadyToResume);
+    }
+    expected
+}
+
+/// Apply a guarded conditional lease transition. Returns `Ok(true)` when the
+/// row was updated and `Ok(false)` when the precondition did not hold.
+fn apply_lease_transition(
+    store: &SqliteStore,
+    lease: &luther_workflow::persistence::IssueLease,
+    status: luther_workflow::persistence::LeaseStatus,
+    expected_statuses: &[luther_workflow::persistence::LeaseStatus],
+    run_id: &str,
+) -> Result<bool, String> {
+    luther_workflow::persistence::update_lease_status_conditional(
         store.conn(),
         &lease.lease_id,
         status,
-        &expected_statuses,
+        expected_statuses,
         None,
         Some(run_id),
     )
-    .map_err(|error| error.to_string())?;
-    if finalized {
-        return Ok(());
-    }
-    // The conditional update did not apply — re-read the fresh current lease
-    // and validate exact owner + status for idempotent success. Any ownership
-    // or status drift is fail-closed with diagnostics rather than silently
-    // accepted.
+    .map_err(|error| error.to_string())
+}
+
+/// Re-read the fresh current lease after a rejected conditional update and
+/// validate exact owner + status for idempotent success. Any ownership or
+/// status drift is fail-closed with diagnostics rather than silently accepted.
+fn verify_idempotent_finalization(
+    store: &SqliteStore,
+    metadata: &RunMetadata,
+    lease: &luther_workflow::persistence::IssueLease,
+    run_id: &str,
+    status: luther_workflow::persistence::LeaseStatus,
+) -> Result<(), String> {
     let current = continuation_lease(store, metadata)
         .map_err(|error| error.to_string())?
         .ok_or_else(|| format!("lease {} vanished during finalization", lease.lease_id))?;
-    if current.lease_id == lease.lease_id
-        && current.run_id.as_deref() == Some(run_id)
-        && current.status == status
-    {
+    if lease_already_finalized(&current, lease, run_id, status) {
         return Ok(());
     }
     Err(format!(
@@ -257,6 +390,20 @@ fn finalize_continuation_lease(
          (current status: {}, owner: {:?}, expected status: {})",
         lease.lease_id, run_id, current.status, current.run_id, status
     ))
+}
+
+/// Whether the freshly re-read `current` lease already matches the original
+/// lease identity, owner, and target status — i.e. the finalization is
+/// idempotent and already in effect.
+fn lease_already_finalized(
+    current: &luther_workflow::persistence::IssueLease,
+    lease: &luther_workflow::persistence::IssueLease,
+    run_id: &str,
+    status: luther_workflow::persistence::LeaseStatus,
+) -> bool {
+    current.lease_id == lease.lease_id
+        && current.run_id.as_deref() == Some(run_id)
+        && current.status == status
 }
 
 /// Commit a planned continuation (re-stamp resume point + reopen run) and

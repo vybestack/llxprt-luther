@@ -128,7 +128,12 @@ pub struct FailureCleanupState {
     pub failure_outcome: String,
     pub failure_reason: String,
     pub failed_checkpoint_id: String,
-    #[serde(default)]
+    /// Snapshot captured at the failed step. Presence is required by the
+    /// versioned contract so persisted JSON missing this field fails closed at
+    /// deserialization rather than silently substituting a default snapshot
+    /// (which would corrupt recovery state). An explicitly empty/default
+    /// `StateSnapshot` is still a legitimate value — only the *field's
+    /// presence* is mandated.
     pub failed_state_snapshot: StateSnapshot,
     pub cleanup_step: String,
     pub cleanup_succeeded: bool,
@@ -597,5 +602,107 @@ mod tests {
         let back = deserialize_pid_list(Some(raw));
         assert_eq!(back, list);
         assert!(deserialize_pid_list(None).is_empty());
+    }
+
+    /// Build a complete `FailureCleanupState` fixture for serialization tests.
+    fn complete_failure_cleanup_fixture() -> FailureCleanupState {
+        let now = chrono::Utc::now();
+        FailureCleanupState {
+            schema_version: FailureCleanupState::SCHEMA_VERSION,
+            failed_step: "remediate".to_string(),
+            failure_outcome: "fatal".to_string(),
+            failure_reason: "agent timed out".to_string(),
+            failed_checkpoint_id: "remediate@2026-01-01T00:00:00Z".to_string(),
+            failed_state_snapshot: StateSnapshot::default(),
+            cleanup_step: "abandon_and_log".to_string(),
+            cleanup_succeeded: true,
+            captured_at: now,
+            cleanup_completed_at: Some(now),
+            recovery_consumed_at: None,
+        }
+    }
+
+    #[test]
+    fn failure_cleanup_state_round_trip_preserves_empty_snapshot() {
+        // An empty/default StateSnapshot is a legitimate value and must survive
+        // serialize/deserialize. The contract requires *presence*, not
+        // non-default content.
+        let original = complete_failure_cleanup_fixture();
+        assert_eq!(original.failed_state_snapshot, StateSnapshot::default());
+
+        let json = serde_json::to_string(&original).expect("serialize");
+        let restored: FailureCleanupState =
+            serde_json::from_str(&json).expect("deserialize round-trip");
+
+        assert_eq!(restored, original);
+    }
+
+    #[test]
+    fn failure_cleanup_state_round_trip_preserves_populated_snapshot() {
+        // A populated StateSnapshot must also round-trip exactly, proving the
+        // field is neither dropped nor silently defaulted.
+        let mut original = complete_failure_cleanup_fixture();
+        original.failed_state_snapshot.retry_count = 3;
+        original.failed_state_snapshot.loop_count = 2;
+        original.failed_state_snapshot.status = "interrupted".to_string();
+        original
+            .failed_state_snapshot
+            .edge_loop_counts
+            .insert("watch:collect".to_string(), 1);
+
+        let json = serde_json::to_string(&original).expect("serialize");
+        let restored: FailureCleanupState =
+            serde_json::from_str(&json).expect("deserialize round-trip");
+
+        assert_eq!(restored, original);
+        assert_eq!(restored.failed_state_snapshot.retry_count, 3);
+    }
+
+    #[test]
+    fn failure_cleanup_state_rejects_missing_failed_state_snapshot() {
+        // Removing the failed_state_snapshot key entirely must fail closed at
+        // deserialization, rather than silently substituting a default.
+        let original = complete_failure_cleanup_fixture();
+        let json = serde_json::to_string(&original).expect("serialize");
+        let mut value: serde_json::Value = serde_json::from_str(&json).expect("parse as value");
+        let obj = value
+            .as_object_mut()
+            .expect("serialized FailureCleanupState must be a JSON object");
+        assert!(
+            obj.remove("failed_state_snapshot").is_some(),
+            "test precondition: field must be present in serialized JSON"
+        );
+        let truncated = serde_json::to_string(&value).expect("re-serialize truncated");
+
+        let result: Result<FailureCleanupState, _> = serde_json::from_str(&truncated);
+        assert!(
+            result.is_err(),
+            "deserialization must fail closed when failed_state_snapshot is absent, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn failure_cleanup_state_rejects_malformed_failed_state_snapshot() {
+        // A structurally invalid failed_state_snapshot value must also fail
+        // closed at deserialization.
+        let original = complete_failure_cleanup_fixture();
+        let json = serde_json::to_string(&original).expect("serialize");
+        let mut value: serde_json::Value = serde_json::from_str(&json).expect("parse as value");
+        let obj = value
+            .as_object_mut()
+            .expect("serialized FailureCleanupState must be a JSON object");
+        // Replace the snapshot with a value that is not a valid StateSnapshot
+        // (retry_count as a string instead of a number).
+        obj.insert(
+            "failed_state_snapshot".to_string(),
+            serde_json::json!({"retry_count": "not-a-number"}),
+        );
+        let malformed = serde_json::to_string(&value).expect("re-serialize malformed");
+
+        let result: Result<FailureCleanupState, _> = serde_json::from_str(&malformed);
+        assert!(
+            result.is_err(),
+            "deserialization must fail closed for a malformed failed_state_snapshot, got: {result:?}"
+        );
     }
 }

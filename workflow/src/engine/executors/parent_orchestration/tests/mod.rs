@@ -1,5 +1,6 @@
 //! Parent orchestration test suite, split into cohesive submodules.
 
+mod blocker_tests;
 mod child_wait_tests;
 mod completion_tests;
 mod executor_tests;

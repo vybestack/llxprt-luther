@@ -41,31 +41,34 @@ pub fn prepare_child_resume(
                 request.run_id
             )
         })?;
-    let step = metadata
+    if metadata
         .current_step
         .as_deref()
-        .filter(|step| !step.is_empty())
-        .ok_or_else(|| format!("missing current_step for child resume {}", request.run_id))?;
-    let checkpoint = crate::persistence::get_checkpoint_for_step(&conn, &request.run_id, step)
-        .map_err(|err| format!("get child checkpoint: {err}"))?
-        .ok_or_else(|| {
-            format!(
-                "missing checkpoint for child run {} step {step}",
-                request.run_id
-            )
-        })?;
+        .unwrap_or_default()
+        .is_empty()
+    {
+        return Err(format!(
+            "missing current_step for child resume {}",
+            request.run_id
+        ));
+    }
+    // Construct the resume request once and derive the checkpoint identity via
+    // request-bound `select_checkpoint` rather than a first-by-step lookup, so
+    // the bound identity honors the same selection logic (including
+    // failure-cleanup provenance) that `commit_continuation` re-verifies
+    // inside its transaction.
+    let resume_request = crate::engine::ContinuationRequest {
+        run_id: request.run_id.clone(),
+        kind: crate::engine::ContinuationKind::Resume,
+        force: true,
+    };
+    let checkpoint =
+        crate::engine::continuation::select_checkpoint(&conn, &resume_request, &metadata)
+            .map_err(|err| format!("select child resume checkpoint: {err}"))?;
     let identity = crate::engine::continuation::checkpoint_identity(&checkpoint);
-    crate::engine::commit_continuation(
-        &conn,
-        &crate::engine::ContinuationRequest {
-            run_id: request.run_id.clone(),
-            kind: crate::engine::ContinuationKind::Resume,
-            force: true,
-        },
-        &identity,
-    )
-    .map(|_| ())
-    .map_err(|err| format!("commit child resume: {err}"))
+    crate::engine::commit_continuation(&conn, &resume_request, &identity)
+        .map(|_| ())
+        .map_err(|err| format!("commit child resume: {err}"))
 }
 
 pub fn child_run_context(

@@ -214,21 +214,28 @@ impl super::EngineRunner {
         }
     }
 
-    /// Validate that a failure category is a safe, bounded `snake_case`
-    /// identifier — never raw diagnostic text that could carry secrets.
+    /// Validate that a failure category is a known, bounded identifier emitted
+    /// by executor source code — never raw diagnostic text that could carry
+    /// secrets.
     ///
-    /// Rejects anything containing uppercase letters, whitespace, special
-    /// characters (including `=`, `:`, `"`, `{`, `@`, `?`), non-ASCII Unicode,
-    /// or leading digits. This structural allowlist is future-proof: any new
-    /// executor following the naming convention is automatically accepted,
-    /// while arbitrary secret-bearing text is always rejected.
+    /// Uses an **explicit allowlist** of the categories actually set by the
+    /// executors (see `engine/executors/llxprt.rs`), rather than a structural
+    /// `snake_case` check. Any new executor that needs a new category must add
+    /// it here, which forces an explicit review rather than silently accepting
+    /// arbitrary `snake_case` text. This is stricter than the structural check:
+    /// a secret that happens to be lowercase `snake_case` (e.g. `bearer_abc`)
+    /// is rejected because it is not in the allowlist.
     pub(super) fn is_safe_failure_category(category: &str) -> bool {
-        !category.is_empty()
-            && category.len() <= 32
-            && category.starts_with(|c: char| c.is_ascii_lowercase())
-            && category
-                .chars()
-                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+        matches!(
+            category,
+            "process_error"
+                | "agent_failure"
+                | "no_diff"
+                | "idle_timeout"
+                | "timeout"
+                | "push_failure"
+                | "validation_failure"
+        )
     }
 
     pub(super) fn build_failure_cleanup_state(

@@ -18,8 +18,9 @@ use luther_workflow::engine::{
 use luther_workflow::persistence::checkpoint::init_checkpoint_table;
 use luther_workflow::persistence::run_metadata::init_runs_table;
 use luther_workflow::persistence::{
-    get_run_with_conn, load_checkpoint_with_conn, persist_run_with_conn, save_checkpoint_with_conn,
-    Checkpoint, RunMetadata, RunStatus, StateSnapshot, CHECKPOINT_STATUS_READY_TO_RESUME,
+    create_lease, get_run_with_conn, init_leases_table, load_checkpoint_with_conn,
+    persist_run_with_conn, save_checkpoint_with_conn, Checkpoint, IssueLease, LeaseStatus,
+    RunMetadata, RunStatus, StateSnapshot, CHECKPOINT_STATUS_READY_TO_RESUME,
     CHECKPOINT_STATUS_WAITING,
 };
 use luther_workflow::workflow::schema::{
@@ -232,6 +233,23 @@ fn seed_failed_with_history(db_path: &std::path::Path, run_id: &str, created_at:
     md.issue_number = Some(63);
     md.pr_number = Some(2138);
     md.artifact_root = db_path.parent().map(|p| p.to_string_lossy().to_string());
+    init_leases_table(&conn).expect("leases table");
+    let now = Utc::now();
+    create_lease(
+        &conn,
+        &IssueLease {
+            lease_id: format!("lease-{run_id}"),
+            issue_repo: "vybestack/llxprt-code".to_string(),
+            issue_number: 63,
+            config_id: "continuation-test".to_string(),
+            run_id: Some(run_id.to_string()),
+            status: LeaseStatus::Failed,
+            claimed_at: now,
+            updated_at: now,
+            heartbeat_at: now,
+        },
+    )
+    .expect("persist issue lease");
     persist_run_with_conn(&conn, &md).expect("persist run");
     for (step_id, _) in STEPS {
         let snapshot = StateSnapshot {

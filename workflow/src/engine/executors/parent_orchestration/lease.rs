@@ -582,7 +582,13 @@ pub fn finish_child_launch(
         // before any side effects — artifacts, context mutation, rollup, label
         // removal, and comments — to avoid duplicating work on a lease we no
         // longer own or that has already reached a durable terminal state.
-        return Ok(step_outcome_for_child_result(&effective_result));
+        //
+        // The returned step outcome is derived from the durable lease state in
+        // the rejected CAS outcome, never from the stale process result: the
+        // concurrent writer that won the CAS is authoritative, and the
+        // in-process result may describe a run that no longer corresponds to
+        // the lease's durable owner.
+        return Ok(step_outcome_from_durable_lease(&lease_outcome));
     }
     write_launch_artifact(
         state,
@@ -734,6 +740,42 @@ fn step_outcome_for_child_result(effective_result: &ChildWorkflowRunResult) -> S
         ChildWorkflowRunResult::CompletedFailure => StepOutcome::Fixable,
         ChildWorkflowRunResult::CompletedSuccess => StepOutcome::Success,
         ChildWorkflowRunResult::WaitingExternal => StepOutcome::Wait,
+    }
+}
+
+/// Derive a workflow step outcome from durable lease state after a rejected
+/// child finalization CAS.
+///
+/// When a concurrent writer won the compare-and-swap, the in-process child
+/// result is stale: it may describe a run that no longer owns the lease, or a
+/// terminal state a foreign writer has already superseded. The returned step
+/// outcome is therefore derived solely from the durable lease state reported
+/// by the rejected CAS, never from the stale process result.
+///
+/// - `Completed`/`Merged`-equivalent durable states → `Success`
+/// - `Failed`/`Abandoned`/`Stale`/`CleanupAbandoned` → `Fixable` (re-evaluate)
+/// - `Missing` → `Fixable` (the child lease is gone; re-select)
+/// - Active in-progress states (`Running`, `WaitingExternal`, `ReadyToResume`,
+///   `Claimed`) → `Wait` (a concurrent writer is driving the child)
+fn step_outcome_from_durable_lease(outcome: &ConditionalLeaseStatusOutcome) -> StepOutcome {
+    match outcome {
+        ConditionalLeaseStatusOutcome::Applied => {
+            // Should not reach here for a rejected path, but treat as
+            // success-adjacent to avoid masking a completed child.
+            StepOutcome::Success
+        }
+        ConditionalLeaseStatusOutcome::Missing => StepOutcome::Fixable,
+        ConditionalLeaseStatusOutcome::Rejected { current_status, .. } => match current_status {
+            LeaseStatus::Completed | LeaseStatus::ReadyToResume => StepOutcome::Success,
+            LeaseStatus::Failed
+            | LeaseStatus::Abandoned
+            | LeaseStatus::Stale
+            | LeaseStatus::CleanupAbandoned => StepOutcome::Fixable,
+            LeaseStatus::Running
+            | LeaseStatus::WaitingExternal
+            | LeaseStatus::Claimed
+            | LeaseStatus::Pending => StepOutcome::Wait,
+        },
     }
 }
 
