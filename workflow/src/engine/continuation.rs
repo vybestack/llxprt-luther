@@ -134,6 +134,15 @@ pub struct ContinuationRequest {
     pub run_id: String,
     pub kind: ContinuationKind,
     pub force: bool,
+    /// Explicit internal-trust capability for engine-internal resume paths
+    /// (daemon launcher, parent-orchestration child resume). This is never
+    /// set by CLI handlers, so an operator `runs resume` cannot infer
+    /// `TrustedInternalWait` authorization from durable wait state alone.
+    /// The capability is revalidated against the durable `wait_states` row
+    /// during authorization and inside the commit transaction, failing closed
+    /// to [`ResumeAuthorization::Operator`] when the wait identity does not
+    /// match.
+    pub trusted_internal: bool,
 }
 
 /// Errors that make a continuation impossible to plan or apply.
@@ -222,18 +231,24 @@ pub fn checkpoint_identity(cp: &Checkpoint) -> String {
     format!("{}@{}", cp.step_id, cp.timestamp.to_rfc3339())
 }
 
-/// Parse a `step_id@rfc3339` checkpoint identity into its step and optional
-/// timestamp. Shared by selection and tests.
-pub(super) fn parse_checkpoint_identity_target(id: &str) -> (String, Option<DateTime<Utc>>) {
-    match id.split_once('@') {
-        Some((step, ts)) => (
-            step.to_string(),
-            DateTime::parse_from_rfc3339(ts)
-                .ok()
-                .map(|d| d.with_timezone(&Utc)),
-        ),
-        None => (id.to_string(), None),
-    }
+/// Parse a `step_id@rfc3339` checkpoint identity into its step and timestamp.
+/// Returns an error when the `@` separator is absent or the timestamp is not
+/// valid RFC3339, so a malformed `ToCheckpoint` target cannot degrade into a
+/// step-only match that defeats exact checkpoint binding.
+pub(super) fn parse_checkpoint_identity_target(
+    id: &str,
+) -> Result<(String, DateTime<Utc>), ContinuationError> {
+    let Some((step, ts)) = id.split_once('@') else {
+        return Err(ContinuationError::InvalidTarget(format!(
+            "checkpoint identity '{id}' is missing the '@' separator"
+        )));
+    };
+    let parsed = DateTime::parse_from_rfc3339(ts).map_err(|err| {
+        ContinuationError::InvalidTarget(format!(
+            "checkpoint identity '{id}' has an invalid RFC3339 timestamp: {err}"
+        ))
+    })?;
+    Ok((step.to_string(), parsed.with_timezone(&Utc)))
 }
 
 /// Outcome of planning (validating + selecting) a continuation, with the

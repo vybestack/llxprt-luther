@@ -766,15 +766,16 @@ fn step_outcome_from_durable_lease(outcome: &ConditionalLeaseStatusOutcome) -> S
         }
         ConditionalLeaseStatusOutcome::Missing => StepOutcome::Fixable,
         ConditionalLeaseStatusOutcome::Rejected { current_status, .. } => match current_status {
-            LeaseStatus::Completed | LeaseStatus::ReadyToResume => StepOutcome::Success,
+            LeaseStatus::Completed => StepOutcome::Success,
+            LeaseStatus::ReadyToResume
+            | LeaseStatus::Running
+            | LeaseStatus::WaitingExternal
+            | LeaseStatus::Claimed
+            | LeaseStatus::Pending => StepOutcome::Wait,
             LeaseStatus::Failed
             | LeaseStatus::Abandoned
             | LeaseStatus::Stale
             | LeaseStatus::CleanupAbandoned => StepOutcome::Fixable,
-            LeaseStatus::Running
-            | LeaseStatus::WaitingExternal
-            | LeaseStatus::Claimed
-            | LeaseStatus::Pending => StepOutcome::Wait,
         },
     }
 }

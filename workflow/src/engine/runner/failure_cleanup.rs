@@ -83,7 +83,11 @@ impl super::EngineRunner {
         let Some(lease) = crate::persistence::get_lease_for_issue(conn, repository, issue_number)
             .map_err(|error| EngineError::PersistenceError(error.to_string()))?
         else {
-            return Ok(());
+            return Err(EngineError::PersistenceError(format!(
+                "issue lease for {repository}#{issue_number} is missing; cannot protect \
+                 failure cleanup for run {} without a durable lease",
+                self.instance.run_id
+            )));
         };
         if lease.run_id.as_deref() != Some(self.instance.run_id.as_str()) {
             return Err(EngineError::PersistenceError(format!(
@@ -313,12 +317,12 @@ impl super::EngineRunner {
                 step_id: current_step_id.to_string(),
                 reason: "Retryable error with no recovery transition".to_string(),
             };
-            let _ = self.record_run_completion(&run_outcome, current_step_id);
+            self.record_run_completion(&run_outcome, current_step_id)?;
             return Ok(run_outcome);
         }
 
         let run_outcome = run_outcome_without_transition(current_step_id, outcome);
-        let _ = self.record_run_completion(&run_outcome, current_step_id);
+        self.record_run_completion(&run_outcome, current_step_id)?;
         Ok(run_outcome)
     }
 
@@ -336,7 +340,7 @@ impl super::EngineRunner {
             step_id: step_id.to_string(),
             reason: "External condition still pending at watch limit".to_string(),
         };
-        let _ = self.record_run_completion(&run_outcome, step_id);
+        self.record_run_completion(&run_outcome, step_id)?;
         Ok(run_outcome)
     }
 }

@@ -662,6 +662,7 @@ pub fn handle_runs_resume(args: &luther_workflow::cli::RunsResumeArgs) {
         run_id: args.run_id.clone(),
         kind: luther_workflow::engine::ContinuationKind::Resume,
         force: args.force,
+        trusted_internal: false,
     };
     let plan = plan_continuation_or_exit(&store, &md, &request);
     commit_and_execute(&store, &md, &request, &plan, &args.config_dir);
@@ -678,6 +679,7 @@ pub fn handle_runs_retry(args: &luther_workflow::cli::RunsRetryArgs) {
             from_failed_step: args.from_failed_step,
         },
         force: args.force,
+        trusted_internal: false,
     };
     let plan = plan_continuation_or_exit(&store, &md, &request);
     commit_and_execute(&store, &md, &request, &plan, &args.config_dir);
@@ -701,6 +703,7 @@ pub fn handle_runs_rewind(args: &luther_workflow::cli::RunsRewindArgs) {
         run_id: args.run_id.clone(),
         kind: luther_workflow::engine::ContinuationKind::Rewind { target },
         force: args.force,
+        trusted_internal: false,
     };
     let plan = plan_continuation_or_exit(&store, &md, &request);
     let step = plan

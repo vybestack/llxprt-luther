@@ -55,7 +55,12 @@ impl ResumeAuthorization {
         request: &ContinuationRequest,
         checkpoint: &Checkpoint,
     ) -> ResumeAuthorization {
-        if !matches!(request.kind, ContinuationKind::Resume) {
+        // TrustedInternalWait requires an explicit internal-trust capability
+        // (`request.trusted_internal`) in addition to a matching durable wait
+        // state. This ensures an ordinary CLI `runs resume` cannot infer
+        // internal trust from durable wait state alone — only the daemon
+        // launcher and parent-orchestration child-resume paths set this flag.
+        if !matches!(request.kind, ContinuationKind::Resume) || !request.trusted_internal {
             return ResumeAuthorization::Operator;
         }
         let identity = checkpoint_identity(checkpoint);

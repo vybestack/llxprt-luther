@@ -569,6 +569,7 @@ pub fn resume_daemon_workflow(
         run_id: request.run_id.clone(),
         kind: luther_workflow::engine::ContinuationKind::Resume,
         force: true,
+        trusted_internal: true,
     };
     let checkpoint =
         luther_workflow::engine::continuation::select_checkpoint(&conn, &resume_request, &metadata)

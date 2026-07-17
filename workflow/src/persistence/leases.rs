@@ -494,6 +494,57 @@ pub fn update_lease_status_conditional(
     Ok(changed > 0)
 }
 
+/// Conditionally update a lease while requiring an exact owner value.
+///
+/// Unlike [`update_lease_status_conditional`], `None` means the durable
+/// `run_id` must be SQL `NULL`; it does not disable owner fencing.
+pub fn update_lease_status_conditional_exact_owner(
+    conn: &Connection,
+    lease_id: &str,
+    status: LeaseStatus,
+    expected_statuses: &[LeaseStatus],
+    new_run_id: Option<&str>,
+    expected_run_id: Option<&str>,
+) -> SqliteResult<bool> {
+    if new_run_id.is_some_and(str::is_empty) {
+        return Err(rusqlite::Error::ToSqlConversionFailure(Box::new(
+            InvalidRunIdError,
+        )));
+    }
+    if expected_statuses.is_empty() {
+        return Ok(false);
+    }
+    let now = Utc::now().to_rfc3339();
+    let status_str = status.as_str();
+    let mut params: Vec<&dyn rusqlite::ToSql> =
+        Vec::with_capacity(5 + expected_statuses.len() + usize::from(expected_run_id.is_some()));
+    params.push(&status_str);
+    params.push(&new_run_id);
+    params.push(&now);
+    params.push(&now);
+    params.push(&lease_id);
+    let expected_placeholders = sql_placeholders(expected_statuses.len());
+    for expected in expected_statuses {
+        params.push(expected);
+    }
+    let ownership_guard = if let Some(run_id) = &expected_run_id {
+        params.push(run_id);
+        " AND run_id = ?"
+    } else {
+        " AND run_id IS NULL"
+    };
+    let sql = format!(
+        "UPDATE issue_leases
+         SET status = ?,
+             run_id = COALESCE(?, run_id),
+             updated_at = ?,
+             heartbeat_at = ?
+         WHERE lease_id = ? AND status IN ({expected_placeholders}){ownership_guard}"
+    );
+    let changed = conn.execute(&sql, params.as_slice())?;
+    Ok(changed > 0)
+}
+
 /// Conditionally update a lease and atomically classify a rejected transition.
 ///
 /// An immediate transaction acquires SQLite writer exclusion before a rejected

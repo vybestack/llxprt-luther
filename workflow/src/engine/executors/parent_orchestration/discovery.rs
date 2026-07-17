@@ -521,13 +521,38 @@ pub fn resume_child_workflow(
 
 /// Fail a resume lease that has no durable run id and record a fixable launch
 /// artifact, so the orchestrator re-evaluates the child rather than erroring.
+///
+/// The failure is conditional on the lease still matching the observed status
+/// (ReadyToResume) and run_id-less state. A concurrent writer that advanced
+/// the lease or assigned a run id is authoritative: the conditional update
+/// becomes a no-op, leaving the durable state intact rather than overwriting
+/// it with a terminal `Failed`.
 fn missing_resume_run_id_outcome(
     conn: &rusqlite::Connection,
     state: &OrchestrationState,
     child: u64,
     lease: &crate::persistence::leases::IssueLease,
 ) -> Result<StepOutcome, EngineError> {
-    update_lease_status(conn, &lease.lease_id, LeaseStatus::Failed, None).map_err(sql_error)?;
+    let updated = crate::persistence::update_lease_status_conditional_exact_owner(
+        conn,
+        &lease.lease_id,
+        LeaseStatus::Failed,
+        &[lease.status],
+        None,
+        lease.run_id.as_deref(),
+    )
+    .map_err(sql_error)?;
+    if !updated {
+        let durable = crate::persistence::get_lease_for_issue(conn, &state.repo, child)
+            .map_err(sql_error)?
+            .ok_or_else(|| EngineError::PersistenceError("child lease disappeared".into()))?;
+        return child_cas_rejected_outcome(
+            state,
+            child,
+            &durable,
+            "missing_child_run_id_repair_rejected",
+        );
+    }
     write_launch_artifact(
         state,
         json!({
@@ -715,7 +740,7 @@ pub(super) fn claim_running_lease_cas(
     expected_run_id: Option<&str>,
     new_run_id: &str,
 ) -> Result<bool, EngineError> {
-    update_lease_status_conditional(
+    crate::persistence::update_lease_status_conditional_exact_owner(
         conn,
         &lease.lease_id,
         LeaseStatus::Running,

@@ -660,14 +660,11 @@ fn verify_rejects_symlinked_workspace_root() {
     );
 }
 
-/// A symlinked workspace root whose target is swapped between the initial
-/// symlink check and canonicalization must still be rejected: the post-
-/// canonicalization revalidation catches the swap. This is a best-effort
-/// TOCTOU guard using std safe APIs.
+/// A normal (non-symlink, owned) workspace verifies successfully: the marker
+/// matches and no symlink is present.
 #[cfg(unix)]
 #[test]
-fn verify_revalidates_root_identity_after_canonicalization() {
-    // A normal workspace (not a symlink) verifies fine.
+fn verify_accepts_owned_normal_workspace() {
     let dir = tempfile::tempdir().expect("workspace");
     write_workspace_owner_marker(dir.path(), "run-revalidate").unwrap();
     assert!(verify_workspace_ownership_marker(dir.path(), "run-revalidate").is_none());

@@ -899,6 +899,9 @@ impl EngineRunner {
         outcome: &RunOutcome,
         final_step_id: &str,
     ) -> Result<(), EngineError> {
+        if !self.persist_registry {
+            return Ok(());
+        }
         // Determine RunStatus based on outcome
         let status = match outcome {
             RunOutcome::Success => RunStatus::Completed,

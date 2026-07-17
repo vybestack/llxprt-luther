@@ -37,58 +37,24 @@ pub fn finish_lease_after_result(
         Ok(WorkflowLaunchResult::CompletedFailure) => {
             finalize_terminal_lease(conn, lease_id, run_id, LeaseStatus::Failed, false)
         }
-        Ok(WorkflowLaunchResult::CleanupAbandoned) => {
-            match update_lease_status_conditional_outcome(
-                conn,
-                lease_id,
-                LeaseStatus::CleanupAbandoned,
-                &[LeaseStatus::Running, LeaseStatus::CleanupAbandoned],
-                None,
-                Some(run_id),
-            )? {
-                ConditionalLeaseStatusOutcome::Applied => Ok(launched(run_id, false)),
-                ConditionalLeaseStatusOutcome::Rejected {
-                    current_status,
-                    current_run_id,
-                } => Ok(LaunchOutcome::LeaseStatePreserved {
-                    run_id: run_id.to_string(),
-                    current_status: Some(current_status),
-                    current_run_id,
-                }),
-                ConditionalLeaseStatusOutcome::Missing => Ok(LaunchOutcome::LeaseStatePreserved {
-                    run_id: run_id.to_string(),
-                    current_status: None,
-                    current_run_id: None,
-                }),
-            }
-        }
-        Ok(WorkflowLaunchResult::SuspendedExternalWait) => {
-            match update_lease_status_conditional_outcome(
-                conn,
-                lease_id,
-                LeaseStatus::WaitingExternal,
-                &[LeaseStatus::Running, LeaseStatus::WaitingExternal],
-                None,
-                Some(run_id),
-            )? {
-                ConditionalLeaseStatusOutcome::Applied => Ok(LaunchOutcome::WaitingExternal {
-                    run_id: run_id.to_string(),
-                }),
-                ConditionalLeaseStatusOutcome::Rejected {
-                    current_status,
-                    current_run_id,
-                } => Ok(LaunchOutcome::LeaseStatePreserved {
-                    run_id: run_id.to_string(),
-                    current_status: Some(current_status),
-                    current_run_id,
-                }),
-                ConditionalLeaseStatusOutcome::Missing => Ok(LaunchOutcome::LeaseStatePreserved {
-                    run_id: run_id.to_string(),
-                    current_status: None,
-                    current_run_id: None,
-                }),
-            }
-        }
+        Ok(WorkflowLaunchResult::CleanupAbandoned) => finalize_exact_owner_lease(
+            conn,
+            lease_id,
+            run_id,
+            LeaseStatus::CleanupAbandoned,
+            &[LeaseStatus::Running, LeaseStatus::CleanupAbandoned],
+            launched(run_id, false),
+        ),
+        Ok(WorkflowLaunchResult::SuspendedExternalWait) => finalize_exact_owner_lease(
+            conn,
+            lease_id,
+            run_id,
+            LeaseStatus::WaitingExternal,
+            &[LeaseStatus::Running, LeaseStatus::WaitingExternal],
+            LaunchOutcome::WaitingExternal {
+                run_id: run_id.to_string(),
+            },
+        ),
         Err(error) => compensate_lease_after_launch_error(conn, lease_id, run_id, &error),
     }
 }
@@ -98,6 +64,51 @@ fn launched(run_id: &str, success: bool) -> LaunchOutcome {
     LaunchOutcome::Launched {
         run_id: run_id.to_string(),
         success,
+    }
+}
+
+/// Finalize a non-terminal or cleanup-abandonment lease transition using an
+/// exact-owner CAS keyed on `run_id` for both `new_run_id` and
+/// `expected_run_id`.
+///
+/// Unlike [`finalize_terminal_lease`], the expected-status set for these
+/// transitions includes the target status itself so an idempotent re-apply of
+/// the same transition by the same owner is accepted. The exact-owner guard
+/// (`expected_run_id == Some(run_id)`) is the critical fencing property: a
+/// stale launcher whose `run_id` was superseded by a concurrent reclaim cannot
+/// overwrite the newer durable state, even when the lease remains in a
+/// matching status. A rejected or missing lease yields
+/// [`LaunchOutcome::LeaseStatePreserved`], preserving the durable state.
+fn finalize_exact_owner_lease(
+    conn: &Connection,
+    lease_id: &str,
+    run_id: &str,
+    target_status: LeaseStatus,
+    expected_statuses: &[LeaseStatus],
+    applied_outcome: LaunchOutcome,
+) -> Result<LaunchOutcome, rusqlite::Error> {
+    match update_lease_status_conditional_outcome(
+        conn,
+        lease_id,
+        target_status,
+        expected_statuses,
+        Some(run_id),
+        Some(run_id),
+    )? {
+        ConditionalLeaseStatusOutcome::Applied => Ok(applied_outcome),
+        ConditionalLeaseStatusOutcome::Rejected {
+            current_status,
+            current_run_id,
+        } => Ok(LaunchOutcome::LeaseStatePreserved {
+            run_id: run_id.to_string(),
+            current_status: Some(current_status),
+            current_run_id,
+        }),
+        ConditionalLeaseStatusOutcome::Missing => Ok(LaunchOutcome::LeaseStatePreserved {
+            run_id: run_id.to_string(),
+            current_status: None,
+            current_run_id: None,
+        }),
     }
 }
 
@@ -191,7 +202,7 @@ fn compensate_lease_after_launch_error(
         lease_id,
         target_status,
         &[LeaseStatus::Running, LeaseStatus::WaitingExternal],
-        None,
+        Some(run_id),
         Some(run_id),
     )? {
         ConditionalLeaseStatusOutcome::Applied => Ok(applied_outcome),

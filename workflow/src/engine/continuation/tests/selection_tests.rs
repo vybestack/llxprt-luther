@@ -147,3 +147,23 @@ fn rewind_to_checkpoint_rejects_timestamp_mismatch() {
         .expect_err("mismatch must error");
     assert!(matches!(err, ContinuationError::InvalidTarget(_)));
 }
+
+#[test]
+fn rewind_to_checkpoint_rejects_missing_separator() {
+    let conn = test_conn();
+    seed_terminal_failed_run(&conn, "run-9a");
+    let malformed = "watch_pr_checks".to_string();
+    let err = select_rewind_checkpoint(&conn, "run-9a", &RewindTarget::ToCheckpoint(malformed))
+        .expect_err("missing @ must error");
+    assert!(matches!(err, ContinuationError::InvalidTarget(_)));
+}
+
+#[test]
+fn rewind_to_checkpoint_rejects_invalid_timestamp() {
+    let conn = test_conn();
+    seed_terminal_failed_run(&conn, "run-9b");
+    let malformed = "watch_pr_checks@not-a-timestamp".to_string();
+    let err = select_rewind_checkpoint(&conn, "run-9b", &RewindTarget::ToCheckpoint(malformed))
+        .expect_err("invalid timestamp must error");
+    assert!(matches!(err, ContinuationError::InvalidTarget(_)));
+}

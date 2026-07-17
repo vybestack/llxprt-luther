@@ -27,7 +27,8 @@ pub use leases::{
     create_lease, get_lease_for_issue, init_leases_table, list_all_leases, list_leases_by_config,
     list_leases_by_status, list_ready_to_resume_leases, mark_stale_leases,
     mark_stale_ready_to_resume_leases, touch_owned_running_lease_heartbeat, try_claim,
-    update_lease_status, update_lease_status_conditional, IssueLease, LeaseStatus,
+    update_lease_status, update_lease_status_conditional,
+    update_lease_status_conditional_exact_owner, IssueLease, LeaseStatus,
 };
 pub use run_metadata::{
     is_pid_stale, run_metadata_from_ref, FailureCleanupState, RunMetadata, RunStatus,

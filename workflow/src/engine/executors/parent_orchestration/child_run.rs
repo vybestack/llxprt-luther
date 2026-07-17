@@ -61,6 +61,7 @@ pub fn prepare_child_resume(
         run_id: request.run_id.clone(),
         kind: crate::engine::ContinuationKind::Resume,
         force: true,
+        trusted_internal: true,
     };
     let checkpoint =
         crate::engine::continuation::select_checkpoint(&conn, &resume_request, &metadata)

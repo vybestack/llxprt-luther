@@ -143,7 +143,10 @@ pub(crate) fn select_rewind_checkpoint(
 ) -> Result<Checkpoint, ContinuationError> {
     let (step, expected_ts) = match target {
         RewindTarget::ToStep(step) => (step.clone(), None),
-        RewindTarget::ToCheckpoint(id) => parse_checkpoint_identity_target(id),
+        RewindTarget::ToCheckpoint(id) => {
+            let (step, ts) = parse_checkpoint_identity_target(id)?;
+            (step, Some(ts))
+        }
     };
     let cp = get_checkpoint_for_step(conn, run_id, &step)?
         .ok_or_else(|| ContinuationError::CheckpointNotFound(format!("{run_id}:{step}")))?;

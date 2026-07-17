@@ -19,9 +19,10 @@ static ARTIFACT_WRITE_COUNTER: AtomicU64 = AtomicU64::new(0);
 use crate::engine::runner::EngineError;
 use crate::engine::transition::StepOutcome;
 use crate::engine::{EngineRunner, RunContext, RunOutcome};
+#[cfg(test)]
+use crate::persistence::leases::update_lease_status;
 use crate::persistence::leases::{
-    get_lease_for_issue, get_leases_for_issues, try_claim, update_lease_status,
-    update_lease_status_conditional, LeaseStatus,
+    get_lease_for_issue, get_leases_for_issues, try_claim, LeaseStatus,
 };
 use crate::persistence::{
     get_run_with_conn, load_checkpoint_with_conn, upsert_wait_state, write_wait_state_artifact,

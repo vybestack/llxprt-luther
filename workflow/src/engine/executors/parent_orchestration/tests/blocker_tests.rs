@@ -86,8 +86,16 @@ fn start_child_workflow_skips_dispatch_when_lease_advances_before_cas() {
     // must be rejected (the observed status is no longer Claimed), dispatch
     // must be skipped, and the step must return Wait so the orchestrator
     // re-evaluates on the next pass.
+    //
+    // The stale snapshot is retained *before* mutating the durable row so the
+    // CAS path receives the pre-mutation view, exercising exact owner fencing.
     let (state, conn, lease) = cas_harness();
     let child = lease.issue_number;
+    // Retain the original snapshot before any mutation.
+    let lease_snapshot = get_lease_for_issue(&conn, &state.repo, child)
+        .unwrap()
+        .unwrap();
+    assert_eq!(lease_snapshot.status, LeaseStatus::Claimed);
     // A concurrent writer flips the lease to Running with a foreign run id.
     update_lease_status(
         &conn,
@@ -96,9 +104,6 @@ fn start_child_workflow_skips_dispatch_when_lease_advances_before_cas() {
         Some("concurrent-run"),
     )
     .unwrap();
-    let lease_snapshot = get_lease_for_issue(&conn, &state.repo, child)
-        .unwrap()
-        .unwrap();
     let runner = LaunchTrackingRunner::new();
     let query = MockQuery {
         issue: None,
@@ -126,6 +131,59 @@ fn start_child_workflow_skips_dispatch_when_lease_advances_before_cas() {
     assert!(
         !runner.launched.load(std::sync::atomic::Ordering::SeqCst),
         "the runner must not be invoked when the CAS is rejected"
+    );
+}
+
+#[test]
+fn start_child_workflow_rejects_foreign_run_id_same_status() {
+    // Owner fencing: even when the durable lease is still in the same Claimed
+    // status, a foreign run id assigned by a concurrent writer must cause the
+    // CAS to reject the dispatch. The observed snapshot carries the foreign
+    // run id, and `claim_running_lease_cas` keys on it via `expected_run_id`.
+    let (state, conn, lease) = cas_harness();
+    let child = lease.issue_number;
+    // Retain the original snapshot before mutation.
+    let original = get_lease_for_issue(&conn, &state.repo, child)
+        .unwrap()
+        .unwrap();
+    assert_eq!(original.status, LeaseStatus::Claimed);
+    assert!(original.run_id.is_none());
+    // A concurrent writer keeps the status as Claimed but assigns a run id.
+    update_lease_status(
+        &conn,
+        &lease.lease_id,
+        LeaseStatus::Claimed,
+        Some("foreign-run"),
+    )
+    .unwrap();
+    // The stale snapshot still sees the pre-mutation Claimed/null state.
+    let runner = LaunchTrackingRunner::new();
+    let query = MockQuery {
+        issue: None,
+        children: Vec::new(),
+        pr: None,
+    };
+    let mut context = StepContext::new(state.artifact_root.join("work"), "run-parent".to_string());
+
+    let outcome = start_child_workflow(
+        &mut context,
+        &state,
+        &query,
+        &runner,
+        child,
+        &original,
+        &conn,
+    )
+    .unwrap();
+
+    assert_eq!(
+        outcome,
+        StepOutcome::Wait,
+        "a foreign-owner CAS must skip dispatch and wait for re-evaluation"
+    );
+    assert!(
+        !runner.launched.load(std::sync::atomic::Ordering::SeqCst),
+        "the runner must not be invoked when the CAS rejects a foreign owner"
     );
 }
 
@@ -242,6 +300,10 @@ fn resume_child_workflow_skips_dispatch_when_lease_advances_before_cas() {
     // Running with a foreign run id before resume_child_workflow's CAS runs.
     // The CAS must be rejected (the observed status is no longer
     // ReadyToResume), dispatch must be skipped, and the step must return Wait.
+    //
+    // The stale snapshot is retained *before* mutating the durable row so the
+    // CAS path receives the pre-mutation ReadyToResume view, exercising exact
+    // owner fencing against a concurrent writer.
     let (state, conn, lease) = cas_harness();
     let child = lease.issue_number;
     let run_id = "original-child-run";
@@ -253,6 +315,10 @@ fn resume_child_workflow_skips_dispatch_when_lease_advances_before_cas() {
         Some(run_id),
     )
     .unwrap();
+    // Retain the stale snapshot before mutation.
+    let lease_snapshot = get_lease_for_issue(&conn, &state.repo, child)
+        .unwrap()
+        .unwrap();
     // A concurrent writer flips it to Running with a foreign run id.
     update_lease_status(
         &conn,
@@ -261,9 +327,6 @@ fn resume_child_workflow_skips_dispatch_when_lease_advances_before_cas() {
         Some("concurrent-run"),
     )
     .unwrap();
-    let lease_snapshot = get_lease_for_issue(&conn, &state.repo, child)
-        .unwrap()
-        .unwrap();
     let runner = LaunchTrackingRunner::new();
     let query = MockQuery {
         issue: None,
@@ -332,6 +395,67 @@ fn resume_child_workflow_missing_run_id_fails_lease() {
         .unwrap()
         .unwrap();
     assert_eq!(final_lease.status, LeaseStatus::Failed);
+}
+
+#[test]
+fn resume_missing_run_id_does_not_overwrite_foreign_owner() {
+    // Stale malformed-resume repair fencing: a stale ReadyToResume snapshot
+    // with no run_id must not overwrite a durable lease that a concurrent
+    // writer has already advanced to a foreign owner. The conditional failure
+    // must be a no-op, preserving the durable state.
+    let (state, conn, lease) = cas_harness();
+    let child = lease.issue_number;
+    // Set up ReadyToResume with no run_id (the malformed case).
+    update_lease_status(&conn, &lease.lease_id, LeaseStatus::ReadyToResume, None).unwrap();
+    // Retain the stale snapshot before mutation.
+    let stale_snapshot = get_lease_for_issue(&conn, &state.repo, child)
+        .unwrap()
+        .unwrap();
+    // A concurrent writer advances to Running with a foreign run id.
+    update_lease_status(
+        &conn,
+        &lease.lease_id,
+        LeaseStatus::Running,
+        Some("foreign-owner"),
+    )
+    .unwrap();
+    let runner = LaunchTrackingRunner::new();
+    let query = MockQuery {
+        issue: None,
+        children: Vec::new(),
+        pr: None,
+    };
+    let mut context = StepContext::new(state.artifact_root.join("work"), "run-parent".to_string());
+
+    let outcome = resume_child_workflow(
+        &mut context,
+        &state,
+        &query,
+        &runner,
+        child,
+        &stale_snapshot,
+        &conn,
+    )
+    .unwrap();
+
+    assert_eq!(outcome, StepOutcome::Wait);
+    assert!(
+        !runner.launched.load(std::sync::atomic::Ordering::SeqCst),
+        "the runner must not be invoked"
+    );
+    let final_lease = get_lease_for_issue(&conn, &state.repo, child)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        final_lease.status,
+        LeaseStatus::Running,
+        "the concurrent writer's durable state must be preserved"
+    );
+    assert_eq!(
+        final_lease.run_id.as_deref(),
+        Some("foreign-owner"),
+        "the foreign owner must not be overwritten"
+    );
 }
 
 #[test]

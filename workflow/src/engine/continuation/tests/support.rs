@@ -32,7 +32,9 @@ pub(super) fn seed_run(conn: &Connection, run_id: &str, status: RunStatus, curre
     md.repository = Some("vybestack/llxprt-code".to_string());
     md.issue_number = Some(2133);
     md.pr_number = Some(2138);
-    md.workspace_path = Some("/tmp/ws".to_string());
+    let workspace = std::env::temp_dir().join(format!("luther-continuation-{run_id}"));
+    std::fs::create_dir_all(&workspace).expect("create continuation test workspace");
+    md.workspace_path = Some(workspace.to_string_lossy().into_owned());
     persist_run_with_conn(conn, &md).expect("persist run");
     // Seed the issue lease that backs this run's claim. `acquire_continuation_lease`
     // rejects missing leases when repository+issue identity is present, so every
@@ -95,6 +97,7 @@ pub(super) fn request(run_id: &str, kind: ContinuationKind, force: bool) -> Cont
         run_id: run_id.to_string(),
         kind,
         force,
+        trusted_internal: false,
     }
 }
 

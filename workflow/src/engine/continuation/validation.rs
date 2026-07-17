@@ -140,7 +140,10 @@ pub(super) fn check_workspace(metadata: &RunMetadata) -> SafetyCheck {
         Some(path) if Path::new(path).is_dir() => {
             pass("workspace", format!("workspace_path={path}"))
         }
-        Some(path) => pass("workspace", format!("workspace_path={path}")),
+        Some(path) => fail(
+            "workspace",
+            format!("workspace_path={path} is missing or not a directory"),
+        ),
         None if metadata.is_cleanup_failure_abandonment() => fail(
             "workspace",
             "cleanup-abandonment recovery requires an explicit preserved workspace",
