@@ -91,6 +91,7 @@ impl StepExecutor for TraceReplayExecutor {
 /// `e2e_workflow_integration::setup_registry`).
 const STEP_TYPES: &[&str] = &[
     "shell",
+    "failure_cleanup",
     "verify",
     "llxprt",
     "workflow_auth_preflight",
@@ -130,8 +131,18 @@ fn run_replay(trace: &SmokeTrace) -> Result<RunOutcome, EngineError> {
     let fixture_root = std::path::PathBuf::from("tests/fixtures");
     let workflow_type = resolve_workflow_type(&trace.workflow_type_id, &fixture_root)
         .expect("Failed to load workflow type from trace");
-    let config = resolve_workflow_config(&trace.config_id, &fixture_root)
+    let mut config = resolve_workflow_config(&trace.config_id, &fixture_root)
         .expect("Failed to load workflow config from trace");
+    if config.variables.contains_key("work_dir") {
+        config.variables.insert(
+            "work_dir".to_string(),
+            std::env::temp_dir()
+                .join("luther-smoke-replay-workspaces")
+                .join(uuid::Uuid::new_v4().to_string())
+                .display()
+                .to_string(),
+        );
+    }
     let registry = build_registry(trace);
     let instance = WorkflowInstance::create(workflow_type, config);
     let mut runner = EngineRunner::new(instance, registry).expect("Failed to create EngineRunner");
@@ -163,7 +174,7 @@ fn test_replay_success_trace() {
 }
 
 /// Replays the `create_plan -> fatal -> abandon_and_log` route and asserts the
-/// terminal outcome matches the recorded failure at `abandon_and_log`.
+/// terminal outcome preserves the original `create_plan` failure identity.
 /// @requirement:REQ-SMOKE-REPLAY-002
 #[test]
 fn test_replay_failure_trace() {
@@ -171,10 +182,11 @@ fn test_replay_failure_trace() {
 
     let result = run_replay(&trace).expect("replay should not error");
     match &result {
-        RunOutcome::Failure { step_id, .. } => {
-            assert_eq!(step_id, "abandon_and_log", "Expected failure at terminal");
+        RunOutcome::Failure { step_id, reason } => {
+            assert_eq!(step_id, "create_plan", "Expected original failed step");
+            assert!(reason.contains("failure cleanup step abandon_and_log ended with fatal"));
         }
-        other => panic!("Expected Failure at abandon_and_log, got {other:?}"),
+        other => panic!("Expected preserved create_plan failure, got {other:?}"),
     }
     assert!(
         trace.final_outcome.matches_run_outcome(&result),

@@ -128,7 +128,7 @@ pub struct Checkpoint {
 /// @plan:PLAN-20260404-INITIAL-RUNTIME.P08
 /// @plan:PLAN-20260408-LLXPRT-FIRST.P12
 /// @requirement:REQ-EARS-PERSIST-002,REQ-LF-LOOP-005
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct StateSnapshot {
     /// Current retry count for the current step.
     pub retry_count: u32,

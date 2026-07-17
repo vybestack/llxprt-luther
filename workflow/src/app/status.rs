@@ -279,6 +279,9 @@ pub fn run_metadata_to_json(md: &luther_workflow::persistence::RunMetadata) -> s
         "process_stale": md.is_process_stale(),
         "child_pids": md.child_pids,
         "stale_child_pids": md.are_child_pids_stale(),
+        "failure_cleanup": md.failure_cleanup,
+        "failed_work_step": md.failure_cleanup.as_ref().map(|state| &state.failed_step),
+        "failed_work_reason": md.failure_cleanup.as_ref().map(|state| &state.failure_reason),
         "scope_control": scope_json,
     })
 }

@@ -253,6 +253,14 @@ pub fn print_runs_show_info(md: &RunMetadata) {
         md.previous_outcome.as_deref().unwrap_or("(none)")
     );
     println!("  Next step: {}", next_step_label(md));
+    if let Some(failure) = &md.failure_cleanup {
+        println!();
+        println!("Work Failure:");
+        println!("  Failed step: {}", failure.failed_step);
+        println!("  Reason: {}", failure.failure_reason);
+        println!("  Cleanup step: {}", failure.cleanup_step);
+        println!("  Cleanup succeeded: {}", failure.cleanup_succeeded);
+    }
 }
 
 /// Render the Paths + Processes sections of `runs show` (issue #51).

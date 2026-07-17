@@ -6,8 +6,8 @@
   "captured_at": "2026-06-11T12:05:00Z",
   "final_outcome": {
     "kind": "failure",
-    "step_id": "abandon_and_log",
-    "reason": "Fatal error occurred"
+    "step_id": "create_plan",
+    "reason": "failure cleanup step abandon_and_log ended with fatal; original failure: fatal outcome at create_plan"
   },
   "events": [
     {

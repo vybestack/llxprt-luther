@@ -48,6 +48,8 @@ pub enum GraphErrorCategory {
     MissingLoopLimit,
     /// A terminal step declares an outgoing transition.
     TerminalHasOutgoing,
+    /// A failure-cleanup step does not declare terminal semantics.
+    InvalidFailureCleanup,
     /// A `post_pr_iteration_guard` step omits a positive remediation cap.
     MissingRemediationCap,
 }
@@ -92,6 +94,7 @@ pub fn validate_workflow_graph(workflow: &WorkflowType) -> Result<(), Vec<GraphV
     validate_required_collectors_present_and_reachable(workflow, &mut errors);
     validate_loop_back_limits(workflow, &mut errors);
     validate_terminal_steps(workflow, &mut errors);
+    validate_failure_cleanup_steps(workflow, &mut errors);
     validate_pr_remediation_caps(workflow, &mut errors);
 
     if errors.is_empty() {
@@ -447,6 +450,71 @@ fn validate_terminal_steps(workflow: &WorkflowType, errors: &mut Vec<GraphValida
     }
 }
 
+/// Require the typed failure-cleanup role to be terminal. Runtime preserves the
+/// causal failure only for this exact contract, so accepting a non-terminal
+/// declaration would allow cleanup success to erase the failed-run identity.
+fn validate_failure_cleanup_steps(workflow: &WorkflowType, errors: &mut Vec<GraphValidationError>) {
+    for step in &workflow.steps {
+        if step.step_type != "failure_cleanup" {
+            continue;
+        }
+        if step.terminal != Some(true) {
+            errors.push(GraphValidationError {
+                step_id: Some(step.step_id.clone()),
+                detail: format!(
+                    "failure_cleanup step '{}' must declare terminal = true",
+                    step.step_id
+                ),
+                category: GraphErrorCategory::InvalidFailureCleanup,
+            });
+        }
+        if workflow
+            .steps
+            .first()
+            .is_some_and(|initial| initial.step_id == step.step_id)
+        {
+            errors.push(GraphValidationError {
+                step_id: Some(step.step_id.clone()),
+                detail: format!(
+                    "failure_cleanup step '{}' must not be the initial step",
+                    step.step_id
+                ),
+                category: GraphErrorCategory::InvalidFailureCleanup,
+            });
+        }
+        let incoming = workflow
+            .transitions
+            .iter()
+            .filter(|transition| transition.to == step.step_id)
+            .collect::<Vec<_>>();
+        if incoming.is_empty() {
+            errors.push(GraphValidationError {
+                step_id: Some(step.step_id.clone()),
+                detail: format!(
+                    "failure_cleanup step '{}' requires at least one incoming failure transition",
+                    step.step_id
+                ),
+                category: GraphErrorCategory::InvalidFailureCleanup,
+            });
+        }
+        for transition in incoming {
+            if !matches!(
+                transition.condition.as_deref(),
+                Some("fatal" | "retryable" | "fixable")
+            ) {
+                errors.push(GraphValidationError {
+                    step_id: Some(step.step_id.clone()),
+                    detail: format!(
+                        "failure_cleanup step '{}' requires an explicit failure outcome transition from '{}'",
+                        step.step_id, transition.from
+                    ),
+                    category: GraphErrorCategory::InvalidFailureCleanup,
+                });
+            }
+        }
+    }
+}
+
 /// Reject `post_pr_iteration_guard` steps without a positive remediation cap.
 ///
 /// The `max_post_pr_remediation_iterations` parameter must be present and a
@@ -598,6 +666,21 @@ mod tests {
         let errors = validate_workflow_graph(&wf).unwrap_err();
         assert!(errors.iter().any(|e| {
             e.category == GraphErrorCategory::UnreachableStep && e.detail.contains("'c'")
+        }));
+    }
+
+    #[test]
+    fn failure_cleanup_without_incoming_failure_route_is_rejected() {
+        let mut cleanup = step("cleanup");
+        cleanup.step_type = "failure_cleanup".to_string();
+        cleanup.terminal = Some(true);
+        let wf = workflow(vec![step("a"), cleanup], vec![]);
+        let errors = validate_workflow_graph(&wf).unwrap_err();
+        assert!(errors.iter().any(|error| {
+            error.category == GraphErrorCategory::InvalidFailureCleanup
+                && error
+                    .detail
+                    .contains("at least one incoming failure transition")
         }));
     }
 

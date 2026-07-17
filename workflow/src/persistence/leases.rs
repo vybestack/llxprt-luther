@@ -20,6 +20,7 @@ pub enum LeaseStatus {
     Completed,
     Failed,
     Abandoned,
+    CleanupAbandoned,
     Stale,
 }
 
@@ -54,6 +55,7 @@ impl LeaseStatus {
             LeaseStatus::Completed => "completed",
             LeaseStatus::Failed => "failed",
             LeaseStatus::Abandoned => "abandoned",
+            LeaseStatus::CleanupAbandoned => "cleanup_abandoned",
             LeaseStatus::Stale => "stale",
         }
     }
@@ -84,6 +86,7 @@ impl std::str::FromStr for LeaseStatus {
             "completed" => Ok(LeaseStatus::Completed),
             "failed" => Ok(LeaseStatus::Failed),
             "abandoned" => Ok(LeaseStatus::Abandoned),
+            "cleanup_abandoned" => Ok(LeaseStatus::CleanupAbandoned),
             "stale" => Ok(LeaseStatus::Stale),
             _ => Err(format!("Unknown lease status: {s}")),
         }
@@ -463,9 +466,10 @@ pub fn update_lease_status_conditional(
     let now = Utc::now().to_rfc3339();
     let status_str = status.as_str();
     let mut params: Vec<&dyn rusqlite::ToSql> =
-        Vec::with_capacity(4 + expected_statuses.len() + usize::from(expected_run_id.is_some()));
+        Vec::with_capacity(5 + expected_statuses.len() + usize::from(expected_run_id.is_some()));
     params.push(&status_str);
     params.push(&new_run_id);
+    params.push(&now);
     params.push(&now);
     params.push(&lease_id);
     let expected_placeholders = sql_placeholders(expected_statuses.len());
@@ -482,7 +486,8 @@ pub fn update_lease_status_conditional(
         "UPDATE issue_leases
          SET status = ?,
              run_id = COALESCE(?, run_id),
-             updated_at = ?
+             updated_at = ?,
+             heartbeat_at = ?
          WHERE lease_id = ? AND status IN ({expected_placeholders}){ownership_guard}"
     );
     let changed = conn.execute(&sql, params.as_slice())?;
@@ -548,15 +553,20 @@ pub fn update_lease_status_conditional_outcome(
     Ok(outcome)
 }
 
-/// Refresh a lease's heartbeat timestamp to keep it from going stale.
-/// @plan:PLAN-20260415-DAEMON-DISCOVERY.P02
-pub fn touch_lease_heartbeat(conn: &Connection, lease_id: &str) -> SqliteResult<()> {
+/// Refresh a lease's heartbeat timestamp only while the caller still owns an
+/// actively running lease.
+pub fn touch_owned_running_lease_heartbeat(
+    conn: &Connection,
+    lease_id: &str,
+    expected_run_id: &str,
+) -> SqliteResult<bool> {
     let now = Utc::now().to_rfc3339();
-    conn.execute(
-        "UPDATE issue_leases SET heartbeat_at = ?1, updated_at = ?1 WHERE lease_id = ?2",
-        params![now, lease_id],
+    let changed = conn.execute(
+        "UPDATE issue_leases SET heartbeat_at = ?1, updated_at = ?1
+         WHERE lease_id = ?2 AND run_id = ?3 AND status = ?4",
+        params![now, lease_id, expected_run_id, LeaseStatus::Running],
     )?;
-    Ok(())
+    Ok(changed == 1)
 }
 
 /// Collect rows produced by a prepared statement into a `Vec<IssueLease>`.

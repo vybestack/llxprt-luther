@@ -46,6 +46,7 @@ pub enum LaunchOutcome {
 pub enum WorkflowLaunchResult {
     CompletedSuccess,
     CompletedFailure,
+    CleanupAbandoned,
     SuspendedExternalWait,
 }
 
@@ -161,12 +162,35 @@ pub fn finish_lease_after_result(
 ) -> Result<LaunchOutcome, rusqlite::Error> {
     match result {
         Ok(WorkflowLaunchResult::CompletedSuccess) => {
-            update_lease_status(conn, lease_id, LeaseStatus::Completed, Some(run_id))?;
-            Ok(launched(run_id, true))
+            finalize_terminal_lease(conn, lease_id, run_id, LeaseStatus::Completed, true)
         }
         Ok(WorkflowLaunchResult::CompletedFailure) => {
-            update_lease_status(conn, lease_id, LeaseStatus::Failed, Some(run_id))?;
-            Ok(launched(run_id, false))
+            finalize_terminal_lease(conn, lease_id, run_id, LeaseStatus::Failed, false)
+        }
+        Ok(WorkflowLaunchResult::CleanupAbandoned) => {
+            match update_lease_status_conditional_outcome(
+                conn,
+                lease_id,
+                LeaseStatus::CleanupAbandoned,
+                &[LeaseStatus::Running, LeaseStatus::CleanupAbandoned],
+                None,
+                Some(run_id),
+            )? {
+                ConditionalLeaseStatusOutcome::Applied => Ok(launched(run_id, false)),
+                ConditionalLeaseStatusOutcome::Rejected {
+                    current_status,
+                    current_run_id,
+                } => Ok(LaunchOutcome::LeaseStatePreserved {
+                    run_id: run_id.to_string(),
+                    current_status: Some(current_status),
+                    current_run_id,
+                }),
+                ConditionalLeaseStatusOutcome::Missing => Ok(LaunchOutcome::LeaseStatePreserved {
+                    run_id: run_id.to_string(),
+                    current_status: None,
+                    current_run_id: None,
+                }),
+            }
         }
         Ok(WorkflowLaunchResult::SuspendedExternalWait) => {
             match update_lease_status_conditional_outcome(
@@ -204,6 +228,46 @@ fn launched(run_id: &str, success: bool) -> LaunchOutcome {
     LaunchOutcome::Launched {
         run_id: run_id.to_string(),
         success,
+    }
+}
+
+/// Finalize a terminal `Completed`/`Failed` transition with an exact-owner
+/// `Running` CAS so a stale launcher returning from a long engine call cannot
+/// overwrite a newer durable state written by the poller or a concurrent
+/// reclaim.
+///
+/// The CAS only applies when the lease is exactly `Running` **and** owned by
+/// `run_id`. A rejected (status advanced, owner changed) or missing lease
+/// yields [`LaunchOutcome::LeaseStatePreserved`], preserving the durable state.
+fn finalize_terminal_lease(
+    conn: &Connection,
+    lease_id: &str,
+    run_id: &str,
+    target_status: LeaseStatus,
+    success: bool,
+) -> Result<LaunchOutcome, rusqlite::Error> {
+    match update_lease_status_conditional_outcome(
+        conn,
+        lease_id,
+        target_status,
+        &[LeaseStatus::Running],
+        Some(run_id),
+        Some(run_id),
+    )? {
+        ConditionalLeaseStatusOutcome::Applied => Ok(launched(run_id, success)),
+        ConditionalLeaseStatusOutcome::Rejected {
+            current_status,
+            current_run_id,
+        } => Ok(LaunchOutcome::LeaseStatePreserved {
+            run_id: run_id.to_string(),
+            current_status: Some(current_status),
+            current_run_id,
+        }),
+        ConditionalLeaseStatusOutcome::Missing => Ok(LaunchOutcome::LeaseStatePreserved {
+            run_id: run_id.to_string(),
+            current_status: None,
+            current_run_id: None,
+        }),
     }
 }
 
@@ -306,6 +370,19 @@ pub fn claim_and_launch(
     )
 }
 
+/// Prepare a ready-to-resume lease for dispatch by validating durable state
+/// before acquiring ownership.
+///
+/// All fallible reads (claim receipt, run metadata/workflow type) are performed
+/// and validated **before** the conditional lease acquisition. Once the CAS
+/// transitions the lease to `Running`, no fallible operation remains — the
+/// `ClaimedLaunch` is constructed from values already loaded. This eliminates
+/// the transaction-blocker window where a post-acquisition read failure would
+/// strand the lease in `Running` without compensation.
+///
+/// The CAS acquires only when the lease is exactly `ReadyToResume` **and**
+/// owned by the expected `run_id`, so a concurrent writer that reassigned the
+/// lease cannot be overwritten by this stale preparation.
 pub fn prepare_resume_lease(
     lease: &IssueLease,
     conn: &Connection,
@@ -314,18 +391,48 @@ pub fn prepare_resume_lease(
         update_lease_status(conn, &lease.lease_id, LeaseStatus::Failed, None)?;
         return Ok(Err(SkipReason::InvalidLeaseState));
     };
-    update_lease_status(conn, &lease.lease_id, LeaseStatus::Running, Some(&run_id))?;
+
+    // Load and validate the claim receipt before any state mutation.
+    let Some(receipt) =
+        crate::persistence::claim_metadata::get_claim_metadata(conn, &lease.lease_id)?
+    else {
+        return Ok(Err(SkipReason::InvalidLeaseState));
+    };
+
+    // Load and validate run metadata/workflow type before the CAS acquisition
+    // so no fallible read remains after the lease is acquired. A missing or
+    // corrupt run row skips the resume without touching the lease; a DB error
+    // propagates before any write occurs.
+    let Some(workflow_type_id) = workflow_type_id_for_resume(conn, &run_id)? else {
+        return Ok(Err(SkipReason::InvalidLeaseState));
+    };
+
+    // Acquire exact ReadyToResume ownership via conditional update. The
+    // expected_run_id guard rejects a stale writer whose run_id was superseded
+    // by a concurrent reclaim, preserving the durable ReadyToResume state.
+    let acquired = update_lease_status_conditional_outcome(
+        conn,
+        &lease.lease_id,
+        LeaseStatus::Running,
+        &[LeaseStatus::ReadyToResume],
+        Some(&run_id),
+        Some(&run_id),
+    )?;
+    if !matches!(acquired, ConditionalLeaseStatusOutcome::Applied) {
+        return Ok(Err(SkipReason::InvalidLeaseState));
+    }
+
     Ok(Ok(ClaimedLaunch {
         lease_id: lease.lease_id.clone(),
         request: LaunchRequest {
             config_id: lease.config_id.clone(),
-            workflow_type_id: workflow_type_id_for_resume(conn, &run_id)?,
+            workflow_type_id: Some(workflow_type_id),
             run_id,
             repo: lease.issue_repo.clone(),
             issue_number: lease.issue_number,
-            daemon_managed_claim: false,
-            claim_assignment_added: false,
-            claim_label_added: false,
+            daemon_managed_claim: true,
+            claim_assignment_added: receipt.assignment_added,
+            claim_label_added: receipt.label_added,
             // Resumes reuse persisted RunMetadata paths; do not synthesize new
             // per-run paths for a resumed run. @plan:issue-117
             work_dir: None,
@@ -949,6 +1056,397 @@ mod tests {
             outcome,
             LaunchOutcome::LeaseStatePreserved {
                 run_id: "missing-run".to_string(),
+                current_status: None,
+                current_run_id: None,
+            }
+        );
+    }
+
+    // ---- prepare_resume_lease transaction-safety tests (issue-137) ----
+
+    /// Seed a `ReadyToResume` lease for `issue_number` owned by `run_id`,
+    /// including a claim-metadata receipt and a run row with `workflow_type`.
+    /// Returns the lease id so the caller can query durable state afterwards.
+    fn seed_ready_to_resume(
+        c: &Connection,
+        issue_number: u64,
+        run_id: &str,
+        workflow_type: &str,
+    ) -> String {
+        let lease = try_claim(c, "o/r", issue_number, "cfg").unwrap().unwrap();
+        update_lease_status(c, &lease.lease_id, LeaseStatus::Running, Some(run_id)).unwrap();
+        crate::persistence::claim_metadata::upsert_claim_metadata(
+            c,
+            &crate::persistence::claim_metadata::ClaimMetadataReceipt {
+                lease_id: lease.lease_id.clone(),
+                assignee: "bot".to_string(),
+                label: "claimed".to_string(),
+                assignment_added: true,
+                label_added: false,
+                cleanup_pending: false,
+            },
+        )
+        .unwrap();
+        let metadata = crate::persistence::RunMetadata::new(run_id, workflow_type, "cfg");
+        crate::persistence::persist_run_with_conn(c, &metadata).unwrap();
+        update_lease_status(c, &lease.lease_id, LeaseStatus::ReadyToResume, Some(run_id)).unwrap();
+        lease.lease_id
+    }
+
+    #[test]
+    fn resume_preparation_acquires_ready_to_resume_lease() {
+        let c = conn();
+        let lease_id = seed_ready_to_resume(&c, 20, "resume-ok", "wf-type");
+        let lease = get_lease_for_issue(&c, "o/r", 20).unwrap().unwrap();
+        let claimed = prepare_resume_lease(&lease, &c)
+            .unwrap()
+            .expect("should acquire");
+        assert_eq!(claimed.lease_id, lease_id);
+        assert_eq!(claimed.request.run_id, "resume-ok");
+        assert_eq!(claimed.request.workflow_type_id.as_deref(), Some("wf-type"));
+        assert!(claimed.request.daemon_managed_claim);
+        assert!(claimed.request.claim_assignment_added);
+        assert!(!claimed.request.claim_label_added);
+        let updated = get_lease_for_issue(&c, "o/r", 20).unwrap().unwrap();
+        assert_eq!(updated.status, LeaseStatus::Running);
+    }
+
+    #[test]
+    fn resume_preparation_skips_when_run_metadata_missing() {
+        // Issue-137: a missing run row must skip the resume *before* the CAS
+        // acquisition, leaving the lease in ReadyToResume rather than
+        // stranding it in Running without a valid workflow type.
+        let c = conn();
+        let lease = try_claim(&c, "o/r", 21, "cfg").unwrap().unwrap();
+        update_lease_status(
+            &c,
+            &lease.lease_id,
+            LeaseStatus::Running,
+            Some("no-metadata"),
+        )
+        .unwrap();
+        crate::persistence::claim_metadata::upsert_claim_metadata(
+            &c,
+            &crate::persistence::claim_metadata::ClaimMetadataReceipt {
+                lease_id: lease.lease_id.clone(),
+                assignee: "bot".to_string(),
+                label: "claimed".to_string(),
+                assignment_added: true,
+                label_added: false,
+                cleanup_pending: false,
+            },
+        )
+        .unwrap();
+        update_lease_status(
+            &c,
+            &lease.lease_id,
+            LeaseStatus::ReadyToResume,
+            Some("no-metadata"),
+        )
+        .unwrap();
+
+        let lease = get_lease_for_issue(&c, "o/r", 21).unwrap().unwrap();
+        let result = prepare_resume_lease(&lease, &c).unwrap();
+        assert!(result.is_err(), "missing run metadata must skip the resume");
+
+        let durable = get_lease_for_issue(&c, "o/r", 21).unwrap().unwrap();
+        assert_eq!(
+            durable.status,
+            LeaseStatus::ReadyToResume,
+            "the lease must remain ReadyToResume, not stranded in Running"
+        );
+    }
+
+    #[test]
+    fn resume_preparation_skips_when_run_metadata_corrupt() {
+        // Issue-137: a corrupt run row (unparseable status) must cause
+        // workflow_type_id_for_resume to fail, and the error must propagate
+        // *before* the CAS acquisition so the lease stays ReadyToResume.
+        let c = conn();
+        seed_ready_to_resume(&c, 22, "corrupt-meta", "wf-type");
+        // Corrupt the run status to an unparseable value so that
+        // get_run_with_conn returns a decode error.
+        c.execute(
+            "UPDATE runs SET status = 'not-a-valid-status' WHERE run_id = 'corrupt-meta'",
+            [],
+        )
+        .unwrap();
+
+        let lease = get_lease_for_issue(&c, "o/r", 22).unwrap().unwrap();
+        let result = prepare_resume_lease(&lease, &c);
+        assert!(
+            result.is_err(),
+            "a corrupt run row must propagate a DB decode error"
+        );
+
+        let durable = get_lease_for_issue(&c, "o/r", 22).unwrap().unwrap();
+        assert_eq!(
+            durable.status,
+            LeaseStatus::ReadyToResume,
+            "the lease must remain ReadyToResume when run metadata is corrupt"
+        );
+    }
+
+    #[test]
+    fn resume_preparation_preserves_ready_to_resume_on_stale_cas() {
+        // Issue-137: a stale CAS (the lease was advanced away from
+        // ReadyToResume by a concurrent writer) must skip the resume and leave
+        // the durable state intact.
+        let c = conn();
+        seed_ready_to_resume(&c, 23, "stale-cas", "wf-type");
+        // Simulate a concurrent writer advancing the lease to Completed before
+        // prepare_resume_lease runs its CAS.
+        let lease = get_lease_for_issue(&c, "o/r", 23).unwrap().unwrap();
+        update_lease_status(
+            &c,
+            &lease.lease_id,
+            LeaseStatus::Completed,
+            Some("stale-cas"),
+        )
+        .unwrap();
+
+        let result = prepare_resume_lease(&lease, &c).unwrap();
+        assert!(
+            result.is_err(),
+            "a stale CAS must skip the resume rather than launch"
+        );
+
+        let durable = get_lease_for_issue(&c, "o/r", 23).unwrap().unwrap();
+        assert_eq!(
+            durable.status,
+            LeaseStatus::Completed,
+            "the durable Completed state must be preserved by the stale CAS rejection"
+        );
+    }
+
+    #[test]
+    fn resume_preparation_skips_when_claim_receipt_missing() {
+        // A lease without a claim-metadata receipt cannot be safely resumed
+        // because the claim-ownership flags are unknown. The resume must skip
+        // before any acquisition.
+        let c = conn();
+        let lease = try_claim(&c, "o/r", 24, "cfg").unwrap().unwrap();
+        update_lease_status(
+            &c,
+            &lease.lease_id,
+            LeaseStatus::Running,
+            Some("no-receipt"),
+        )
+        .unwrap();
+        // Deliberately do NOT write claim_metadata.
+        let metadata = crate::persistence::RunMetadata::new("no-receipt", "wf-type", "cfg");
+        crate::persistence::persist_run_with_conn(&c, &metadata).unwrap();
+        update_lease_status(
+            &c,
+            &lease.lease_id,
+            LeaseStatus::ReadyToResume,
+            Some("no-receipt"),
+        )
+        .unwrap();
+
+        let lease = get_lease_for_issue(&c, "o/r", 24).unwrap().unwrap();
+        let result = prepare_resume_lease(&lease, &c).unwrap();
+        assert!(
+            result.is_err(),
+            "a missing claim receipt must skip the resume"
+        );
+
+        let durable = get_lease_for_issue(&c, "o/r", 24).unwrap().unwrap();
+        assert_eq!(
+            durable.status,
+            LeaseStatus::ReadyToResume,
+            "the lease must remain ReadyToResume when the receipt is missing"
+        );
+    }
+
+    #[test]
+    fn resume_preparation_skips_when_workflow_type_empty() {
+        // A run row with an empty workflow_type_id cannot resolve a workflow,
+        // so the resume must skip before acquisition.
+        let c = conn();
+        let lease = try_claim(&c, "o/r", 25, "cfg").unwrap().unwrap();
+        update_lease_status(&c, &lease.lease_id, LeaseStatus::Running, Some("empty-wf")).unwrap();
+        crate::persistence::claim_metadata::upsert_claim_metadata(
+            &c,
+            &crate::persistence::claim_metadata::ClaimMetadataReceipt {
+                lease_id: lease.lease_id.clone(),
+                assignee: "bot".to_string(),
+                label: "claimed".to_string(),
+                assignment_added: true,
+                label_added: false,
+                cleanup_pending: false,
+            },
+        )
+        .unwrap();
+        let metadata = crate::persistence::RunMetadata::new("empty-wf", "", "cfg");
+        crate::persistence::persist_run_with_conn(&c, &metadata).unwrap();
+        update_lease_status(
+            &c,
+            &lease.lease_id,
+            LeaseStatus::ReadyToResume,
+            Some("empty-wf"),
+        )
+        .unwrap();
+
+        let lease = get_lease_for_issue(&c, "o/r", 25).unwrap().unwrap();
+        let result = prepare_resume_lease(&lease, &c).unwrap();
+        assert!(
+            result.is_err(),
+            "an empty workflow_type_id must skip the resume"
+        );
+
+        let durable = get_lease_for_issue(&c, "o/r", 25).unwrap().unwrap();
+        assert_eq!(
+            durable.status,
+            LeaseStatus::ReadyToResume,
+            "the lease must remain ReadyToResume when the workflow type is empty"
+        );
+    }
+
+    // ---- CompletedSuccess/CompletedFailure exact-owner Running CAS (issue-137) ----
+
+    #[test]
+    fn stale_success_does_not_overwrite_terminal_lease() {
+        // Issue-137: a stale CompletedSuccess result whose run_id no longer
+        // owns the lease must not overwrite a newer durable terminal state.
+        let c = conn();
+        let claimed = claim_for_launch(&issue(30), &cfg(2), &c, "cfg", &DaemonPathBases::default())
+            .unwrap()
+            .unwrap();
+        // Simulate a concurrent writer advancing the lease to Failed with the
+        // same run_id before the stale launcher returns CompletedSuccess.
+        update_lease_status(
+            &c,
+            &claimed.lease_id,
+            LeaseStatus::Failed,
+            Some(&claimed.request.run_id),
+        )
+        .unwrap();
+
+        let outcome = finish_lease_after_result(
+            &c,
+            &claimed.lease_id,
+            &claimed.request.run_id,
+            Ok(WorkflowLaunchResult::CompletedSuccess),
+        )
+        .unwrap();
+
+        assert_eq!(
+            outcome,
+            LaunchOutcome::LeaseStatePreserved {
+                run_id: claimed.request.run_id.clone(),
+                current_status: Some(LeaseStatus::Failed),
+                current_run_id: Some(claimed.request.run_id.clone()),
+            },
+            "a stale CompletedSuccess must not overwrite a terminal Failed lease"
+        );
+        let lease = get_lease_for_issue(&c, "o/r", 30).unwrap().unwrap();
+        assert_eq!(
+            lease.status,
+            LeaseStatus::Failed,
+            "the durable Failed state must be preserved"
+        );
+    }
+
+    #[test]
+    fn stale_failure_does_not_overwrite_terminal_lease() {
+        // Issue-137: a stale CompletedFailure result whose run_id no longer
+        // owns the lease must not overwrite a newer durable terminal state.
+        let c = conn();
+        let claimed = claim_for_launch(&issue(31), &cfg(2), &c, "cfg", &DaemonPathBases::default())
+            .unwrap()
+            .unwrap();
+        // Simulate a concurrent writer advancing the lease to Completed with
+        // the same run_id before the stale launcher returns CompletedFailure.
+        update_lease_status(
+            &c,
+            &claimed.lease_id,
+            LeaseStatus::Completed,
+            Some(&claimed.request.run_id),
+        )
+        .unwrap();
+
+        let outcome = finish_lease_after_result(
+            &c,
+            &claimed.lease_id,
+            &claimed.request.run_id,
+            Ok(WorkflowLaunchResult::CompletedFailure),
+        )
+        .unwrap();
+
+        assert_eq!(
+            outcome,
+            LaunchOutcome::LeaseStatePreserved {
+                run_id: claimed.request.run_id.clone(),
+                current_status: Some(LeaseStatus::Completed),
+                current_run_id: Some(claimed.request.run_id.clone()),
+            },
+            "a stale CompletedFailure must not overwrite a terminal Completed lease"
+        );
+        let lease = get_lease_for_issue(&c, "o/r", 31).unwrap().unwrap();
+        assert_eq!(
+            lease.status,
+            LeaseStatus::Completed,
+            "the durable Completed state must be preserved"
+        );
+    }
+
+    #[test]
+    fn stale_success_on_wrong_owner_preserves_lease() {
+        // Issue-137: when the lease run_id was superseded by a concurrent
+        // reclaim, the stale success result must not apply.
+        let c = conn();
+        let claimed = claim_for_launch(&issue(32), &cfg(2), &c, "cfg", &DaemonPathBases::default())
+            .unwrap()
+            .unwrap();
+        // Simulate a concurrent reclaim assigning a new run_id while leaving
+        // the status Running.
+        update_lease_status(
+            &c,
+            &claimed.lease_id,
+            LeaseStatus::Running,
+            Some("new-owner-run"),
+        )
+        .unwrap();
+
+        let outcome = finish_lease_after_result(
+            &c,
+            &claimed.lease_id,
+            &claimed.request.run_id,
+            Ok(WorkflowLaunchResult::CompletedSuccess),
+        )
+        .unwrap();
+
+        assert_eq!(
+            outcome,
+            LaunchOutcome::LeaseStatePreserved {
+                run_id: claimed.request.run_id.clone(),
+                current_status: Some(LeaseStatus::Running),
+                current_run_id: Some("new-owner-run".to_string()),
+            },
+            "a stale success must not apply when the owner changed"
+        );
+        let lease = get_lease_for_issue(&c, "o/r", 32).unwrap().unwrap();
+        assert_eq!(lease.status, LeaseStatus::Running);
+        assert_eq!(lease.run_id.as_deref(), Some("new-owner-run"));
+    }
+
+    #[test]
+    fn success_on_missing_lease_reports_preserved() {
+        // Issue-137: a terminal result for a missing lease must report
+        // LeaseStatePreserved rather than silently succeeding.
+        let c = conn();
+        let outcome = finish_lease_after_result(
+            &c,
+            "missing-lease-success",
+            "run-missing-success",
+            Ok(WorkflowLaunchResult::CompletedSuccess),
+        )
+        .unwrap();
+        assert_eq!(
+            outcome,
+            LaunchOutcome::LeaseStatePreserved {
+                run_id: "run-missing-success".to_string(),
                 current_status: None,
                 current_run_id: None,
             }

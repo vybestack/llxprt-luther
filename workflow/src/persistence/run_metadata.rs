@@ -1,7 +1,9 @@
 /// @plan:PLAN-20260404-INITIAL-RUNTIME.P05
 /// Run metadata persistence - structures for tracking workflow run state and identifiers.
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 
+use crate::persistence::checkpoint::StateSnapshot;
 use crate::workflow::schema::WorkflowRunRef;
 
 /// Status of a workflow run.
@@ -118,6 +120,45 @@ impl RunStatus {
     }
 }
 
+/// Durable provenance for a failed work step followed by successful cleanup.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FailureCleanupState {
+    pub schema_version: u32,
+    pub failed_step: String,
+    pub failure_outcome: String,
+    pub failure_reason: String,
+    pub failed_checkpoint_id: String,
+    #[serde(default)]
+    pub failed_state_snapshot: StateSnapshot,
+    pub cleanup_step: String,
+    pub cleanup_succeeded: bool,
+    pub captured_at: DateTime<Utc>,
+    pub cleanup_completed_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub recovery_consumed_at: Option<DateTime<Utc>>,
+}
+
+impl FailureCleanupState {
+    pub const SCHEMA_VERSION: u32 = 1;
+
+    #[must_use]
+    pub fn is_complete(&self) -> bool {
+        self.schema_version == Self::SCHEMA_VERSION
+            && !self.failed_step.is_empty()
+            && !self.failure_outcome.is_empty()
+            && !self.failure_reason.is_empty()
+            && !self.failed_checkpoint_id.is_empty()
+            && !self.cleanup_step.is_empty()
+            && self.cleanup_succeeded
+            && self.cleanup_completed_at.is_some()
+    }
+
+    #[must_use]
+    pub fn recovery_is_available(&self) -> bool {
+        self.is_complete() && self.recovery_consumed_at.is_none()
+    }
+}
+
 /// Metadata for a workflow run persisted to storage.
 /// Contains all identifiers needed to reconstruct the run context.
 /// @plan:PLAN-20260404-INITIAL-RUNTIME.P05
@@ -162,6 +203,8 @@ pub struct RunMetadata {
     pub process_pid: Option<u32>,
     /// PIDs of child/agent processes (JSON array TEXT).
     pub child_pids: Vec<u32>,
+    /// Original failed-work provenance when a failure-cleanup terminal ran.
+    pub failure_cleanup: Option<FailureCleanupState>,
 }
 
 impl RunMetadata {
@@ -194,7 +237,18 @@ impl RunMetadata {
             head_sha: None,
             process_pid: None,
             child_pids: Vec::new(),
+            failure_cleanup: None,
         }
+    }
+
+    /// True only for an explicitly evidenced cleanup-after-failure terminal.
+    #[must_use]
+    pub fn is_cleanup_failure_abandonment(&self) -> bool {
+        self.status == RunStatus::Abandoned
+            && self
+                .failure_cleanup
+                .as_ref()
+                .is_some_and(FailureCleanupState::is_complete)
     }
 
     /// Mark the run as started (Running status).
@@ -377,18 +431,27 @@ pub fn init_runs_table(conn: &rusqlite::Connection) -> Result<(), rusqlite::Erro
             pr_number INTEGER,
             head_sha TEXT,
             process_pid INTEGER,
-            child_pids TEXT
+            child_pids TEXT,
+            failure_cleanup TEXT
         )",
         [],
     )?;
-    migrate_runs_table(conn);
+    migrate_runs_table(conn)?;
     Ok(())
 }
 
 /// Idempotently add new columns to a pre-existing `runs` table.
-/// Ignores "duplicate column" errors so it is safe to run repeatedly.
+/// Existing columns are discovered before DDL so real migration failures are
+/// propagated rather than mistaken for harmless duplicate-column errors.
 /// @plan:PLAN-20260404-INITIAL-RUNTIME.P05
-pub fn migrate_runs_table(conn: &rusqlite::Connection) {
+pub fn migrate_runs_table(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
+    let existing = {
+        let mut statement = conn.prepare("PRAGMA table_info(runs)")?;
+        let columns = statement
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<rusqlite::Result<std::collections::HashSet<_>>>()?;
+        columns
+    };
     let columns = [
         "previous_step TEXT",
         "previous_outcome TEXT",
@@ -402,11 +465,15 @@ pub fn migrate_runs_table(conn: &rusqlite::Connection) {
         "head_sha TEXT",
         "process_pid INTEGER",
         "child_pids TEXT",
+        "failure_cleanup TEXT",
     ];
-    for col in columns {
-        // Ignore errors (e.g. duplicate column) so the migration is idempotent.
-        let _ = conn.execute(&format!("ALTER TABLE runs ADD COLUMN {}", col), []);
+    for column in columns {
+        let name = column.split_whitespace().next().unwrap_or_default();
+        if !existing.contains(name) {
+            conn.execute(&format!("ALTER TABLE runs ADD COLUMN {column}"), [])?;
+        }
     }
+    Ok(())
 }
 
 #[cfg(test)]

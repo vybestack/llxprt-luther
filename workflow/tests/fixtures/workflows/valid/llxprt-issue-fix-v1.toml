@@ -762,8 +762,9 @@ max_stale_artifact_retries = 2
 
 [[steps]]
 step_id = "abandon_and_log"
-step_type = "shell"
+step_type = "failure_cleanup"
 description = "Comment on issue, remove label, unassign on failure"
+terminal = true
 
 [steps.parameters]
 command = """
@@ -781,9 +782,14 @@ case "$ISSUE_NUM" in
     ;;
 esac
 ABANDON_BODY_FILE="$(mktemp "${TMPDIR:-/tmp}/luther-abandon.XXXXXX")"
-trap 'rm -f "$ABANDON_BODY_FILE"' EXIT
-printf '%s\n' "Luther abandoning this issue: workflow failed at step {current_step_id}." > "$ABANDON_BODY_FILE"
-gh issue comment "$ISSUE_NUM" --repo {target_repo} --body-file "$ABANDON_BODY_FILE"
+COMMENTS_FILE="$(mktemp "${TMPDIR:-/tmp}/luther-comments.XXXXXX")"
+trap 'rm -f "$ABANDON_BODY_FILE" "$COMMENTS_FILE"' EXIT
+ABANDON_MARKER="<!-- luther-failure-cleanup:{run_id}:{failed_work_step} -->"
+printf '%s\n' "$ABANDON_MARKER" "Luther abandoning this issue: workflow failed at step {failed_work_step} with outcome {failed_work_outcome}. Detailed diagnostics remain in the run artifacts." > "$ABANDON_BODY_FILE"
+gh issue view "$ISSUE_NUM" --repo {target_repo} --json comments --jq '.comments[].body' > "$COMMENTS_FILE"
+if ! grep -Fq "$ABANDON_MARKER" "$COMMENTS_FILE"; then
+  gh issue comment "$ISSUE_NUM" --repo {target_repo} --body-file "$ABANDON_BODY_FILE"
+fi
 if [ "{daemon_managed_claim}" != "true" ] || [ "{claim_label_added}" = "true" ]; then
   gh issue edit "$ISSUE_NUM" --repo {target_repo} --remove-label "{luther_label}"
 fi

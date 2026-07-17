@@ -488,15 +488,16 @@ fn persist_claim_ownership(
     ownership: ClaimOwnership,
     cleanup_pending: bool,
 ) -> Result<(), rusqlite::Error> {
-    let (Some(assignee), Some(label)) = (&config.claim_assignee, &config.claim_label) else {
-        return Ok(());
-    };
+    // Persist ownership for every lease, even when the config has zero or one
+    // optional claim fields, so the receipt always carries the authoritative
+    // cleanup flags. `unwrap_or_default` keeps empty assignee/label for
+    // configs that do not configure them.
     upsert_claim_metadata(
         conn,
         &ClaimMetadataReceipt {
             lease_id: lease_id.to_owned(),
-            assignee: assignee.clone(),
-            label: label.clone(),
+            assignee: config.claim_assignee.clone().unwrap_or_default(),
+            label: config.claim_label.clone().unwrap_or_default(),
             assignment_added: ownership.assignment_added,
             label_added: ownership.label_added,
             cleanup_pending,

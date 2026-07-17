@@ -195,3 +195,303 @@ fn print_checkpoints_human_handles_empty_and_populated() {
     let cps = vec![sample_checkpoint("run-y", "step-b")];
     print_checkpoints_human("run-y", &cps);
 }
+
+// --- finalize_continuation_lease coverage ---
+
+use luther_workflow::persistence::{
+    create_lease, get_lease_for_issue, get_run_with_conn, persist_run_with_conn,
+    update_lease_status, FailureCleanupState, IssueLease, LeaseStatus, RunStatus,
+};
+
+/// Build an in-memory store with the leases + runs schema initialized.
+fn lease_store() -> SqliteStore {
+    SqliteStore::open_in_memory().expect("open in-memory store")
+}
+
+/// Seed a lease owned by `run_id` in `Running` status for `o/r` issue `issue`.
+fn seed_running_lease(store: &SqliteStore, run_id: &str, issue_number: u64) -> IssueLease {
+    let now = chrono::Utc::now();
+    let lease = IssueLease {
+        lease_id: format!("lease-{run_id}-{issue_number}"),
+        issue_repo: "o/r".to_string(),
+        issue_number,
+        config_id: "cfg".to_string(),
+        run_id: Some(run_id.to_string()),
+        status: LeaseStatus::Running,
+        claimed_at: now,
+        updated_at: now,
+        heartbeat_at: now,
+    };
+    create_lease(store.conn(), &lease).expect("create lease");
+    lease
+}
+
+/// Metadata referencing `o/r` issue `issue`, owned by `run_id`.
+fn issue_metadata(run_id: &str, issue_number: i64) -> RunMetadata {
+    let mut md = RunMetadata::new(run_id, "wf", "cfg");
+    md.repository = Some("o/r".to_string());
+    md.issue_number = Some(issue_number);
+    md
+}
+
+/// A complete `FailureCleanupState` so `is_cleanup_failure_abandonment()` is true.
+fn complete_failure_cleanup() -> FailureCleanupState {
+    let now = chrono::Utc::now();
+    FailureCleanupState {
+        schema_version: FailureCleanupState::SCHEMA_VERSION,
+        failed_step: "remediate".to_string(),
+        failure_outcome: "fatal".to_string(),
+        failure_reason: "agent timed out".to_string(),
+        failed_checkpoint_id: "cp-1".to_string(),
+        failed_state_snapshot: luther_workflow::persistence::StateSnapshot::default(),
+        cleanup_step: "abandon_and_log".to_string(),
+        cleanup_succeeded: true,
+        captured_at: now,
+        cleanup_completed_at: Some(now),
+        recovery_consumed_at: None,
+    }
+}
+
+#[test]
+fn finalize_lease_succeeds_when_runner_already_protected_cleanup_abandoned() {
+    // The runner atomically transitioned the lease to CleanupAbandoned during
+    // failure cleanup. Finalization must be idempotent and succeed.
+    let store = lease_store();
+    let run_id = "cleanup-success";
+    let lease = seed_running_lease(&store, run_id, 200);
+    let mut md = issue_metadata(run_id, 200);
+    md.status = RunStatus::Abandoned;
+    md.failure_cleanup = Some(complete_failure_cleanup());
+    persist_run_with_conn(store.conn(), &md).expect("persist abandoned run");
+
+    // Simulate the runner's protect_failure_cleanup_lease: Running -> CleanupAbandoned.
+    update_lease_status(
+        store.conn(),
+        &lease.lease_id,
+        LeaseStatus::CleanupAbandoned,
+        Some(run_id),
+    )
+    .expect("protect lease");
+
+    let outcome: Result<RunOutcome, luther_workflow::engine::runner::EngineError> =
+        Ok(RunOutcome::Abandoned {
+            step_id: "abandon_and_log".to_string(),
+            reason: "cleanup complete".to_string(),
+        });
+
+    finalize_continuation_lease(&store, &md, run_id, &outcome).expect("idempotent finalization");
+
+    let finalized = get_lease_for_issue(store.conn(), "o/r", 200)
+        .expect("query")
+        .expect("lease present");
+    assert_eq!(finalized.status, LeaseStatus::CleanupAbandoned);
+    assert_eq!(finalized.run_id.as_deref(), Some(run_id));
+}
+
+#[test]
+fn finalize_lease_succeeds_when_still_running_for_cleanup_abandonment() {
+    // The runner has not yet protected the lease; finalization performs the
+    // Running -> CleanupAbandoned transition itself.
+    let store = lease_store();
+    let run_id = "cleanup-running";
+    let lease = seed_running_lease(&store, run_id, 201);
+    let mut md = issue_metadata(run_id, 201);
+    md.status = RunStatus::Abandoned;
+    md.failure_cleanup = Some(complete_failure_cleanup());
+    persist_run_with_conn(store.conn(), &md).expect("persist abandoned run");
+
+    let outcome: Result<RunOutcome, luther_workflow::engine::runner::EngineError> =
+        Ok(RunOutcome::Abandoned {
+            step_id: "abandon_and_log".to_string(),
+            reason: "cleanup complete".to_string(),
+        });
+
+    finalize_continuation_lease(&store, &md, run_id, &outcome).expect("finalization applies");
+
+    let finalized = get_lease_for_issue(store.conn(), "o/r", 201)
+        .expect("query")
+        .expect("lease present");
+    assert_eq!(finalized.status, LeaseStatus::CleanupAbandoned);
+    assert_eq!(finalized.run_id.as_deref(), Some(run_id));
+    let _ = lease;
+}
+
+#[test]
+fn finalize_lease_fails_when_owner_mismatched_even_if_status_matches() {
+    // The lease was reclaimed by a different run while this continuation was
+    // executing. Finalization must be fail-closed, not silently accept the
+    // mismatched owner.
+    let store = lease_store();
+    let run_id = "cleanup-owner-mismatch";
+    let lease = seed_running_lease(&store, run_id, 202);
+    let mut md = issue_metadata(run_id, 202);
+    md.status = RunStatus::Abandoned;
+    md.failure_cleanup = Some(complete_failure_cleanup());
+    persist_run_with_conn(store.conn(), &md).expect("persist abandoned run");
+
+    // A concurrent reclaim superseded ownership to a new run.
+    update_lease_status(
+        store.conn(),
+        &lease.lease_id,
+        LeaseStatus::CleanupAbandoned,
+        Some("run-other"),
+    )
+    .expect("supersede owner");
+
+    let outcome: Result<RunOutcome, luther_workflow::engine::runner::EngineError> =
+        Ok(RunOutcome::Abandoned {
+            step_id: "abandon_and_log".to_string(),
+            reason: "cleanup complete".to_string(),
+        });
+
+    let error = finalize_continuation_lease(&store, &md, run_id, &outcome)
+        .expect_err("mismatched owner must fail closed");
+    assert!(
+        error.contains("not continuation run"),
+        "expected ownership failure, got: {error}"
+    );
+    assert!(
+        error.contains(run_id),
+        "error must reference the continuation run id"
+    );
+
+    // The lease must remain owned by the superseding run.
+    let finalized = get_lease_for_issue(store.conn(), "o/r", 202)
+        .expect("query")
+        .expect("lease present");
+    assert_eq!(finalized.run_id.as_deref(), Some("run-other"));
+}
+
+#[test]
+fn finalize_lease_fails_when_status_drifted_from_expected() {
+    // The lease is owned by this run but has already transitioned to a
+    // terminal Failed status (e.g. by a concurrent path). Finalization for a
+    // cleanup-abandonment outcome must not silently overwrite it.
+    let store = lease_store();
+    let run_id = "cleanup-status-drift";
+    let lease = seed_running_lease(&store, run_id, 203);
+    let mut md = issue_metadata(run_id, 203);
+    md.status = RunStatus::Abandoned;
+    md.failure_cleanup = Some(complete_failure_cleanup());
+    persist_run_with_conn(store.conn(), &md).expect("persist abandoned run");
+
+    // The lease drifted to Failed while still owned by this run.
+    update_lease_status(
+        store.conn(),
+        &lease.lease_id,
+        LeaseStatus::Failed,
+        Some(run_id),
+    )
+    .expect("drift status");
+
+    let outcome: Result<RunOutcome, luther_workflow::engine::runner::EngineError> =
+        Ok(RunOutcome::Abandoned {
+            step_id: "abandon_and_log".to_string(),
+            reason: "cleanup complete".to_string(),
+        });
+
+    let error = finalize_continuation_lease(&store, &md, run_id, &outcome)
+        .expect_err("status drift must fail closed");
+    assert!(
+        error.contains("was not finalized"),
+        "expected finalization failure, got: {error}"
+    );
+
+    let finalized = get_lease_for_issue(store.conn(), "o/r", 203)
+        .expect("query")
+        .expect("lease present");
+    assert_eq!(finalized.status, LeaseStatus::Failed);
+    assert_eq!(finalized.run_id.as_deref(), Some(run_id));
+}
+
+#[test]
+fn finalize_lease_skips_when_no_issue_identity() {
+    // A run without repository/issue identity has no lease to finalize.
+    let store = lease_store();
+    let md = RunMetadata::new("no-issue-run", "wf", "cfg");
+    let outcome: Result<RunOutcome, luther_workflow::engine::runner::EngineError> =
+        Ok(RunOutcome::Success);
+    finalize_continuation_lease(&store, &md, "no-issue-run", &outcome).expect("no-op finalization");
+}
+
+#[test]
+fn finalize_lease_rejects_lease_owned_by_other_run() {
+    let store = lease_store();
+    let lease = seed_running_lease(&store, "run-original", 204);
+    let md = issue_metadata("run-continuation", 204);
+    let outcome: Result<RunOutcome, luther_workflow::engine::runner::EngineError> =
+        Ok(RunOutcome::Success);
+    let error = finalize_continuation_lease(&store, &md, "run-continuation", &outcome)
+        .expect_err("ownership mismatch must fail closed");
+    assert!(error.contains("not continuation run"));
+    let unchanged = get_lease_for_issue(store.conn(), "o/r", 204)
+        .expect("query")
+        .expect("lease present");
+    assert_eq!(unchanged.run_id.as_deref(), Some("run-original"));
+    let _ = lease;
+}
+
+#[test]
+fn finalize_lease_completes_on_success_outcome() {
+    let store = lease_store();
+    let run_id = "success-run";
+    let lease = seed_running_lease(&store, run_id, 205);
+    let md = issue_metadata(run_id, 205);
+    persist_run_with_conn(store.conn(), &md).expect("persist run");
+
+    let outcome: Result<RunOutcome, luther_workflow::engine::runner::EngineError> =
+        Ok(RunOutcome::Success);
+    finalize_continuation_lease(&store, &md, run_id, &outcome).expect("success finalization");
+
+    let finalized = get_lease_for_issue(store.conn(), "o/r", 205)
+        .expect("query")
+        .expect("lease present");
+    assert_eq!(finalized.status, LeaseStatus::Completed);
+    let _ = lease;
+}
+
+#[test]
+fn finalize_lease_fails_when_lease_vanishes_after_conditional_update() {
+    // If the lease row disappears between the conditional update and the
+    // fresh re-read, finalization must fail closed rather than silently
+    // succeed.
+    let store = lease_store();
+    let run_id = "vanish-run";
+    let lease = seed_running_lease(&store, run_id, 206);
+    // Transition the lease out of the expected set so the conditional update
+    // is rejected, then delete the row so the re-read cannot find it.
+    update_lease_status(
+        store.conn(),
+        &lease.lease_id,
+        LeaseStatus::Completed,
+        Some(run_id),
+    )
+    .expect("transition out of expected");
+    store
+        .conn()
+        .execute(
+            "DELETE FROM issue_leases WHERE lease_id = ?1",
+            rusqlite::params![&lease.lease_id],
+        )
+        .expect("delete lease");
+
+    let mut md = issue_metadata(run_id, 206);
+    md.status = RunStatus::Abandoned;
+    md.failure_cleanup = Some(complete_failure_cleanup());
+    persist_run_with_conn(store.conn(), &md).expect("persist run");
+
+    let outcome: Result<RunOutcome, luther_workflow::engine::runner::EngineError> =
+        Ok(RunOutcome::Abandoned {
+            step_id: "abandon_and_log".to_string(),
+            reason: "cleanup complete".to_string(),
+        });
+
+    let error = finalize_continuation_lease(&store, &md, run_id, &outcome)
+        .expect_err("vanished lease must fail closed");
+    assert!(
+        error.contains("missing issue lease"),
+        "expected missing-lease diagnostic, got: {error}"
+    );
+    // Confirm get_run_with_conn is exercised (the abandoned branch loads it).
+    assert!(get_run_with_conn(store.conn(), run_id).unwrap().is_some());
+}

@@ -46,6 +46,15 @@ pub fn prepare_child_resume(
         .as_deref()
         .filter(|step| !step.is_empty())
         .ok_or_else(|| format!("missing current_step for child resume {}", request.run_id))?;
+    let checkpoint = crate::persistence::get_checkpoint_for_step(&conn, &request.run_id, step)
+        .map_err(|err| format!("get child checkpoint: {err}"))?
+        .ok_or_else(|| {
+            format!(
+                "missing checkpoint for child run {} step {step}",
+                request.run_id
+            )
+        })?;
+    let identity = crate::engine::continuation::checkpoint_identity(&checkpoint);
     crate::engine::commit_continuation(
         &conn,
         &crate::engine::ContinuationRequest {
@@ -53,7 +62,7 @@ pub fn prepare_child_resume(
             kind: crate::engine::ContinuationKind::Resume,
             force: true,
         },
-        step,
+        &identity,
     )
     .map(|_| ())
     .map_err(|err| format!("commit child resume: {err}"))

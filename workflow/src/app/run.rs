@@ -1,4 +1,4 @@
-use super::runs::reconstruct_runner;
+use super::runs::reconstruct_runner_with_config;
 use super::status::install_interrupt_handlers;
 use super::wait_state::persist_external_wait_state;
 use luther_workflow::adapters::github::{run_preflight, GithubError, SystemGithubCommandRunner};
@@ -490,7 +490,19 @@ pub fn ensure_daemon_run_dirs(
     request: &luther_workflow::daemon::launcher::LaunchRequest,
 ) -> Result<(), String> {
     ensure_daemon_run_dir("artifact", request.artifact_dir.as_deref())?;
-    ensure_daemon_run_dir("work", request.work_dir.as_deref())
+    ensure_daemon_run_dir("work", request.work_dir.as_deref())?;
+    // Provision the durable `.luther/workspace-owner` marker with the exact run
+    // id so cleanup-failure-abandonment recovery can verify workspace ownership
+    // later. Writing once at workspace creation binds the directory to this run.
+    // Idempotent for the same run id, so it is safe on both launch and resume.
+    if let Some(work_dir) = request.work_dir.as_deref() {
+        luther_workflow::engine::continuation::write_workspace_owner_marker(
+            work_dir,
+            &request.run_id,
+        )
+        .map_err(|e| format!("write workspace owner marker: {e}"))?;
+    }
+    Ok(())
 }
 
 pub fn ensure_daemon_run_dir(kind: &str, path: Option<&std::path::Path>) -> Result<(), String> {
@@ -512,14 +524,41 @@ pub fn resume_daemon_workflow(
     // Daemon-launched resumes use the same hardcoded "config" root as launch_daemon_workflow;
     // CLI `runs resume --config-dir` covers temporary per-run config roots.
     let config_root = std::path::PathBuf::from("config");
-    let wait_config = resolve_workflow_config(&metadata.config_id, &config_root)
+    let mut wait_config = resolve_workflow_config(&metadata.config_id, &config_root)
         .map_err(|e| format!("resolve config '{}': {e}", metadata.config_id))?;
+    apply_daemon_claim_overrides(&mut wait_config, request);
     let config_dir = Some(config_root);
     let step = metadata
         .current_step
         .as_deref()
         .filter(|step| !step.is_empty())
-        .ok_or_else(|| format!("missing current_step for resume of run {}", request.run_id))?;
+        .ok_or_else(|| format!("missing current_step for resume of run {}", request.run_id))?
+        .to_string();
+    let overrides = TargetProfileOverrides {
+        repo: Some(request.repo.clone()),
+        issue: Some(request.issue_number.to_string()),
+        work_dir: request.work_dir.clone(),
+        artifact_dir: request.artifact_dir.clone(),
+    };
+    apply_target_profile_overrides(&mut wait_config, &overrides)
+        .map_err(|e| format!("apply resume overrides: {e}"))?;
+    // Provision workspace dirs and ownership marker on resume too, so the
+    // durable ownership anchor stays current for the resumed run id even when
+    // the original launch did not write it (or the workspace moved).
+    ensure_daemon_run_dirs(request)?;
+    let mut runner = reconstruct_runner_with_config(
+        &metadata,
+        &request.run_id,
+        &db_path,
+        &config_dir,
+        wait_config.clone(),
+    )?;
+    let checkpoint =
+        luther_workflow::persistence::get_checkpoint_for_step(&conn, &request.run_id, &step)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("missing checkpoint for run {} step {step}", request.run_id))?;
+    let checkpoint_identity =
+        luther_workflow::engine::continuation::checkpoint_identity(&checkpoint);
     luther_workflow::engine::commit_continuation(
         &conn,
         &luther_workflow::engine::ContinuationRequest {
@@ -527,10 +566,9 @@ pub fn resume_daemon_workflow(
             kind: luther_workflow::engine::ContinuationKind::Resume,
             force: true,
         },
-        step,
+        &checkpoint_identity,
     )
     .map_err(|e| format!("commit resume: {e}"))?;
-    let mut runner = reconstruct_runner(&metadata, &request.run_id, &db_path, &config_dir)?;
     run_daemon_runner(request, &wait_config, &db_path, &mut runner)
 }
 
@@ -549,7 +587,39 @@ pub fn run_daemon_runner(
                 .map_err(|e| format!("persist wait state: {e}"))?;
             Ok(luther_workflow::daemon::launcher::WorkflowLaunchResult::SuspendedExternalWait)
         }
-        Ok(_) => Ok(luther_workflow::daemon::launcher::WorkflowLaunchResult::CompletedFailure),
+        Ok(RunOutcome::Abandoned { .. }) => {
+            let conn = rusqlite::Connection::open(db_path)
+                .map_err(|error| format!("open run registry after abandonment: {error}"))?;
+            let metadata = get_run_with_conn(&conn, &request.run_id)
+                .map_err(|error| format!("load run after abandonment: {error}"))?
+                .ok_or_else(|| {
+                    format!("missing run metadata after abandonment: {}", request.run_id)
+                })?;
+            if metadata.is_cleanup_failure_abandonment() {
+                Ok(luther_workflow::daemon::launcher::WorkflowLaunchResult::CleanupAbandoned)
+            } else {
+                Ok(luther_workflow::daemon::launcher::WorkflowLaunchResult::CompletedFailure)
+            }
+        }
+        Ok(RunOutcome::Failure { .. }) => {
+            let conn = rusqlite::Connection::open(db_path)
+                .map_err(|error| format!("open run registry after failure: {error}"))?;
+            let metadata = get_run_with_conn(&conn, &request.run_id)
+                .map_err(|error| format!("load run after failure: {error}"))?
+                .ok_or_else(|| format!("missing run metadata after failure: {}", request.run_id))?;
+            if metadata
+                .failure_cleanup
+                .as_ref()
+                .is_some_and(|failure| !failure.cleanup_succeeded)
+            {
+                Ok(luther_workflow::daemon::launcher::WorkflowLaunchResult::CleanupAbandoned)
+            } else {
+                Ok(luther_workflow::daemon::launcher::WorkflowLaunchResult::CompletedFailure)
+            }
+        }
+        Ok(RunOutcome::Interrupted { .. }) => {
+            Ok(luther_workflow::daemon::launcher::WorkflowLaunchResult::CompletedFailure)
+        }
         Err(e) => Err(format!("run error: {e}")),
     }
 }

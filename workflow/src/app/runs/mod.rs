@@ -7,9 +7,10 @@ use luther_workflow::engine::instance::WorkflowInstance;
 use luther_workflow::engine::runner::{EngineRunner, RunOutcome};
 use luther_workflow::monitor::heartbeat::{read_all_heartbeats, MonitorState};
 use luther_workflow::persistence::{
-    list_artifacts, load_events, persist_run_with_conn, RunMetadata, RunStatus, SqliteStore,
+    list_artifacts, load_events, RunMetadata, RunStatus, SqliteStore,
 };
 use luther_workflow::workflow::config_loader::{resolve_workflow_config, resolve_workflow_type};
+use luther_workflow::workflow::schema::WorkflowConfig;
 use luther_workflow::workflow::target_profile::{
     apply_target_profile_overrides, target_profile_validation_required, validate_target_profile,
 };
@@ -80,8 +81,21 @@ pub fn reconstruct_runner(
     let config_root = config_dir
         .as_deref()
         .unwrap_or(std::path::Path::new("config"));
-    let mut config = resolve_workflow_config(&md.config_id, config_root)
+    let config = resolve_workflow_config(&md.config_id, config_root)
         .map_err(|e| format!("resolve config '{}': {e}", md.config_id))?;
+    reconstruct_runner_with_config(md, run_id, db_path, config_dir, config)
+}
+
+pub fn reconstruct_runner_with_config(
+    md: &RunMetadata,
+    run_id: &str,
+    db_path: &std::path::Path,
+    config_dir: &Option<std::path::PathBuf>,
+    mut config: WorkflowConfig,
+) -> Result<EngineRunner, String> {
+    let config_root = config_dir
+        .as_deref()
+        .unwrap_or(std::path::Path::new("config"));
     // Re-apply the original run's effective runtime overrides so the resumed
     // interpolation context (target_repo, issue_number, work_dir, artifact_dir)
     // matches the original target/workspace/artifacts rather than static config
@@ -148,6 +162,103 @@ pub fn plan_continuation_or_exit(
     plan
 }
 
+fn continuation_lease(
+    store: &SqliteStore,
+    metadata: &RunMetadata,
+) -> Result<Option<luther_workflow::persistence::IssueLease>, rusqlite::Error> {
+    let Some(repository) = metadata.repository.as_deref() else {
+        return Ok(None);
+    };
+    let Some(issue_number) = metadata
+        .issue_number
+        .or(metadata.pr_number)
+        .and_then(|number| u64::try_from(number).ok())
+    else {
+        return Ok(None);
+    };
+    luther_workflow::persistence::get_lease_for_issue(store.conn(), repository, issue_number)
+}
+
+fn finalize_continuation_lease(
+    store: &SqliteStore,
+    metadata: &RunMetadata,
+    run_id: &str,
+    outcome: &Result<RunOutcome, luther_workflow::engine::runner::EngineError>,
+) -> Result<(), String> {
+    use luther_workflow::persistence::LeaseStatus;
+    let has_issue_identity =
+        metadata.repository.is_some() && metadata.issue_number.or(metadata.pr_number).is_some();
+    let Some(lease) = continuation_lease(store, metadata).map_err(|error| error.to_string())?
+    else {
+        return if has_issue_identity {
+            Err(format!("missing issue lease for continuation run {run_id}"))
+        } else {
+            Ok(())
+        };
+    };
+    // Ownership guard: only the run that owns the lease may finalize it.
+    if lease.run_id.as_deref() != Some(run_id) {
+        return Err(format!(
+            "lease {} belongs to {:?}, not continuation run {}",
+            lease.lease_id, lease.run_id, run_id
+        ));
+    }
+    let status = match outcome {
+        Ok(RunOutcome::Success) => LeaseStatus::Completed,
+        Ok(RunOutcome::WaitingExternal { .. }) => LeaseStatus::WaitingExternal,
+        Ok(RunOutcome::Abandoned { .. }) => {
+            let current = luther_workflow::persistence::get_run_with_conn(store.conn(), run_id)
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| format!("missing continued run metadata for {run_id}"))?;
+            if current.is_cleanup_failure_abandonment() {
+                LeaseStatus::CleanupAbandoned
+            } else {
+                LeaseStatus::Abandoned
+            }
+        }
+        _ => LeaseStatus::Failed,
+    };
+    // When the runner has already atomically protected the lease as
+    // CleanupAbandoned (via protect_failure_cleanup_lease), the durable state
+    // is CleanupAbandoned rather than Running. Including CleanupAbandoned in
+    // the expected set makes the conditional update idempotent in that case,
+    // mirroring the runner's own transition guard.
+    let mut expected_statuses = vec![LeaseStatus::Running];
+    if status == LeaseStatus::CleanupAbandoned {
+        expected_statuses.push(LeaseStatus::CleanupAbandoned);
+    }
+    let finalized = luther_workflow::persistence::update_lease_status_conditional(
+        store.conn(),
+        &lease.lease_id,
+        status,
+        &expected_statuses,
+        None,
+        Some(run_id),
+    )
+    .map_err(|error| error.to_string())?;
+    if finalized {
+        return Ok(());
+    }
+    // The conditional update did not apply — re-read the fresh current lease
+    // and validate exact owner + status for idempotent success. Any ownership
+    // or status drift is fail-closed with diagnostics rather than silently
+    // accepted.
+    let current = continuation_lease(store, metadata)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| format!("lease {} vanished during finalization", lease.lease_id))?;
+    if current.lease_id == lease.lease_id
+        && current.run_id.as_deref() == Some(run_id)
+        && current.status == status
+    {
+        return Ok(());
+    }
+    Err(format!(
+        "lease {} was not finalized for continuation run {} \
+         (current status: {}, owner: {:?}, expected status: {})",
+        lease.lease_id, run_id, current.status, current.run_id, status
+    ))
+}
+
 /// Commit a planned continuation (re-stamp resume point + reopen run) and
 /// execute the reconstructed runner, writing the result artifact.
 /// @plan:PLAN-20260623-LUTHER-CONTINUATION
@@ -158,6 +269,12 @@ pub fn commit_and_execute(
     plan: &luther_workflow::engine::continuation::ContinuationPlan,
     config_dir: &Option<std::path::PathBuf>,
 ) {
+    let continuation_had_lease = continuation_lease(store, md)
+        .unwrap_or_else(|error| {
+            eprintln!("Error: failed to inspect continuation lease: {error}");
+            process::exit(1);
+        })
+        .is_some();
     let step = plan
         .selected
         .as_ref()
@@ -180,7 +297,11 @@ pub fn commit_and_execute(
             process::exit(1);
         }
     };
-    if let Err(e) = luther_workflow::engine::commit_continuation(store.conn(), request, &step) {
+    if let Err(e) = luther_workflow::engine::commit_continuation(
+        store.conn(),
+        request,
+        &plan.checkpoint_identity,
+    ) {
         eprintln!("Error: failed to reopen run '{}': {e}", request.run_id);
         process::exit(1);
     }
@@ -191,22 +312,45 @@ pub fn commit_and_execute(
     );
     install_interrupt_handlers(runner.interrupt_handle());
     let outcome = runner.run();
-    if let Err(ref e) = outcome {
-        let mut restored = md.clone();
-        restored.updated_at = Some(chrono::Utc::now());
-        if let Err(persist_err) = persist_run_with_conn(store.conn(), &restored) {
-            eprintln!(
-                "Warning: failed to restore run '{}' after continuation error {e}: {persist_err}",
+    if let Err(ref error) = outcome {
+        eprintln!(
+            "Run '{}' stopped after continuation error without rolling back durable progress: {error}",
+            request.run_id
+        );
+        let mut current =
+            luther_workflow::persistence::get_run_with_conn(store.conn(), &request.run_id)
+                .unwrap_or_else(|persist_error| {
+                    eprintln!(
+                "Error: failed to load continuation failure state for '{}': {persist_error}",
                 request.run_id
             );
-        } else {
-            eprintln!(
-                "Run '{}' restored to status '{}' after continuation error: {e}",
-                request.run_id, restored.status
+                    process::exit(1);
+                })
+                .unwrap_or_else(|| {
+                    eprintln!(
+                "Error: missing run metadata while persisting continuation failure for '{}'",
+                request.run_id
             );
+                    process::exit(1);
+                });
+        current.mark_failed();
+        if let Err(persist_error) =
+            luther_workflow::persistence::persist_run_with_conn(store.conn(), &current)
+        {
+            eprintln!(
+                "Error: failed to persist continuation failure for '{}': {persist_error}",
+                request.run_id
+            );
+            process::exit(1);
         }
     }
     write_continuation_result(&plan.artifact_dir, &request.kind, &step, &outcome);
+    if continuation_had_lease {
+        if let Err(error) = finalize_continuation_lease(store, md, &request.run_id, &outcome) {
+            eprintln!("Error: failed to finalize continuation lease: {error}");
+            process::exit(1);
+        }
+    }
     report_continuation_outcome(&request.run_id, &step, outcome);
 }
 
@@ -399,7 +543,11 @@ pub fn handle_runs_rewind(args: &luther_workflow::cli::RunsRewindArgs) {
         .as_ref()
         .map(|c| c.step_id.clone())
         .unwrap_or_default();
-    if let Err(e) = luther_workflow::engine::commit_continuation(store.conn(), &request, &step) {
+    if let Err(e) = luther_workflow::engine::commit_continuation(
+        store.conn(),
+        &request,
+        &plan.checkpoint_identity,
+    ) {
         eprintln!("Error: failed to set resume point: {e}");
         process::exit(1);
     }

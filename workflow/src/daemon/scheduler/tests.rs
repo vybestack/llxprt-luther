@@ -90,6 +90,7 @@ fn conn() -> Connection {
     crate::persistence::sqlite::init_runs_schema(&c).unwrap();
     init_leases_table(&c).unwrap();
     crate::persistence::wait_state::init_wait_states_table(&c).unwrap();
+    crate::persistence::claim_metadata::init_claim_metadata_table(&c).unwrap();
     crate::persistence::checkpoint::save_checkpoint_with_conn(
         &c,
         &crate::persistence::checkpoint::Checkpoint::new("run-wait", "watch_pr_checks"),
@@ -175,6 +176,20 @@ where
         PollDecision::still_waiting(record)
     }
 }
+fn seed_claim_receipt(conn: &Connection, lease_id: &str) {
+    crate::persistence::claim_metadata::upsert_claim_metadata(
+        conn,
+        &crate::persistence::claim_metadata::ClaimMetadataReceipt {
+            lease_id: lease_id.to_string(),
+            assignee: String::new(),
+            label: String::new(),
+            assignment_added: false,
+            label_added: false,
+            cleanup_pending: false,
+        },
+    )
+    .unwrap();
+}
 
 /// Seed a complete, pollable external wait using the production-path
 /// `persist_external_wait` function, establishing the full invariant:
@@ -183,6 +198,7 @@ fn seed_external_wait(conn: &Connection, run_id: &str, issue_number: u64) {
     let lease = try_claim(conn, "o/r", issue_number, "cfg")
         .unwrap()
         .unwrap();
+    seed_claim_receipt(conn, &lease.lease_id);
     update_lease_status(conn, &lease.lease_id, LeaseStatus::Running, Some(run_id)).unwrap();
     crate::persistence::persist_run_with_conn(
         conn,
@@ -894,4 +910,166 @@ fn lease_state_preserved_details_are_bounded_and_structured() {
             current_run_id: Some("run-current-0".to_string()),
         }
     );
+}
+
+// ---- Issue-137: launch->wait->poll->resume lifecycle with zero/one claim fields ----
+
+/// A launcher that suspends on first launch and completes on resume, modelling
+/// the external-wait lifecycle. It records the resume request so tests can
+/// verify the claim ownership flags were reconstructed from the receipt.
+struct SuspendThenCompleteLauncher {
+    resume_requests: Mutex<Vec<LaunchRequest>>,
+}
+
+impl SuspendThenCompleteLauncher {
+    fn new() -> Self {
+        Self {
+            resume_requests: Mutex::new(Vec::new()),
+        }
+    }
+}
+
+impl WorkflowLauncher for SuspendThenCompleteLauncher {
+    fn launch(&self, _request: &LaunchRequest) -> Result<WorkflowLaunchResult, String> {
+        Ok(WorkflowLaunchResult::SuspendedExternalWait)
+    }
+    fn resume(&self, request: &LaunchRequest) -> Result<WorkflowLaunchResult, String> {
+        self.resume_requests.lock().unwrap().push(request.clone());
+        Ok(WorkflowLaunchResult::CompletedSuccess)
+    }
+}
+
+/// Build a [`DiscoveryConfig`] with specified claim fields and `max_concurrent_runs`.
+fn cfg_with_claim(
+    max: u32,
+    claim_assignee: Option<&str>,
+    claim_label: Option<&str>,
+) -> DiscoveryConfig {
+    DiscoveryConfig {
+        claim_assignee: claim_assignee.map(str::to_string),
+        claim_label: claim_label.map(str::to_string),
+        ..cfg(max)
+    }
+}
+
+/// Build a scheduler target for a config with the given claim fields.
+fn target_with_claim(
+    config_id: &str,
+    max: u32,
+    claim_assignee: Option<&str>,
+    claim_label: Option<&str>,
+) -> SchedulerTarget {
+    SchedulerTarget::new(
+        config_id.to_string(),
+        cfg_with_claim(max, claim_assignee, claim_label),
+        DaemonPathBases::default(),
+        BTreeMap::new(),
+    )
+}
+
+/// Verify the complete launch->wait->poll->resume lifecycle works for a
+/// config with the given claim fields. The receipt must be persisted at claim
+/// time so the resume path can reconstruct ownership, regardless of how many
+/// claim fields are configured.
+fn run_launch_wait_poll_resume_lifecycle(
+    claim_assignee: Option<&str>,
+    claim_label: Option<&str>,
+    issue_number: u64,
+) {
+    let c = conn();
+    let q = MockQuery {
+        issues: vec![issue(issue_number)],
+    };
+    let launcher = SuspendThenCompleteLauncher::new();
+    let target = target_with_claim("cfg", 1, claim_assignee, claim_label);
+
+    // Pass 1: launch -> suspend at external wait.
+    let poller_suspend = ScriptedPoller::new(Vec::new());
+    let summary1 = run_single_target_once(&target, &q, &c, &launcher, &poller_suspend);
+    assert_eq!(
+        summary1.launched + summary1.suspended,
+        1,
+        "first pass must launch exactly one issue"
+    );
+    assert_eq!(
+        summary1.suspended, 1,
+        "first pass must suspend at the external wait"
+    );
+
+    // The lease must now be WaitingExternal and have a persisted receipt
+    // (even with zero/one claim fields).
+    let lease = get_lease_for_issue(&c, "o/r", issue_number)
+        .unwrap()
+        .expect("lease must exist after launch");
+    assert_eq!(lease.status, LeaseStatus::WaitingExternal);
+    let run_id = lease.run_id.clone().expect("run_id must be set");
+    let receipt = crate::persistence::claim_metadata::get_claim_metadata(&c, &lease.lease_id)
+        .unwrap()
+        .expect("a receipt must be persisted for the lease");
+    assert_eq!(receipt.lease_id, lease.lease_id);
+
+    // Simulate the production engine persisting the external wait: the engine
+    // writes run metadata, a checkpoint, and a wait_states row before
+    // returning SuspendedExternalWait. The mock launcher cannot do this.
+    let metadata = crate::persistence::RunMetadata::new(&run_id, "wf", "cfg");
+    crate::persistence::persist_run_with_conn(&c, &metadata).unwrap();
+    crate::persistence::checkpoint::save_checkpoint_with_conn(
+        &c,
+        &crate::persistence::checkpoint::Checkpoint::new(&run_id, "watch_pr_checks"),
+    )
+    .unwrap();
+    let mut wait = WaitStateRecord::new(&run_id, "cfg");
+    wait.lease_id = Some(lease.lease_id.clone());
+    wait.repository = "o/r".to_string();
+    wait.issue_number = issue_number;
+    wait.resume_step = "watch_pr_checks".to_string();
+    crate::persistence::persist_external_wait(&c, &wait).unwrap();
+
+    // Pass 2: poll classifies ready-to-resume -> resume -> complete.
+    let poller_resume = ScriptedPoller::new(vec![PollClassification::ReadyToResume]);
+    let summary2 = run_single_target_once(&target, &q, &c, &launcher, &poller_resume);
+    assert_eq!(
+        summary2.polls_applied, 1,
+        "the external wait must be polled"
+    );
+    assert_eq!(
+        summary2.resumed, 1,
+        "the resumed run must complete successfully"
+    );
+
+    // The resume request must carry the reconstructed claim ownership flags.
+    let resume_requests = launcher.resume_requests.lock().unwrap();
+    assert_eq!(resume_requests.len(), 1, "exactly one resume must occur");
+    assert_eq!(resume_requests[0].run_id, run_id);
+    assert!(
+        resume_requests[0].daemon_managed_claim,
+        "resume request must mark the claim as daemon-managed"
+    );
+
+    // The lease must now be Completed.
+    let final_lease = get_lease_for_issue(&c, "o/r", issue_number)
+        .unwrap()
+        .expect("lease must exist after resume");
+    assert_eq!(
+        final_lease.status,
+        LeaseStatus::Completed,
+        "the lease must reach Completed after a successful resume"
+    );
+}
+
+#[test]
+fn launch_wait_poll_resume_with_zero_claim_fields() {
+    // Issue-137: the full launch->wait->poll->resume lifecycle must work when
+    // the config has no claim_assignee and no claim_label. Previously,
+    // acquire_lease_with_receipt skipped persisting a receipt when neither
+    // field was set, so prepare_resume_lease would skip the resume and strand
+    // the lease permanently in WaitingExternal/ReadyToResume.
+    run_launch_wait_poll_resume_lifecycle(None, None, 160);
+}
+
+#[test]
+fn launch_wait_poll_resume_with_one_claim_field() {
+    // Issue-137: the full launch->wait->poll->resume lifecycle must work when
+    // the config has exactly one optional claim field (assignee but no label).
+    run_launch_wait_poll_resume_lifecycle(Some("acoliver"), None, 161);
 }

@@ -421,7 +421,7 @@ fn resume_terminal_failed_run_rewinds_before_terminal_and_skips_terminal() {
     );
     let selected = plan.selected.as_ref().expect("selected").step_id.clone();
     assert_eq!(selected, "collect_ci_failures");
-    let reopened = commit_continuation(&conn, &request, &selected).expect("commit");
+    let reopened = commit_continuation(&conn, &request, &plan.checkpoint_identity).expect("commit");
     assert_eq!(reopened.status, RunStatus::Running);
     let newest = load_checkpoint_with_conn(&conn, run_id).unwrap().unwrap();
     assert_eq!(newest.step_id, "collect_ci_failures");
@@ -618,7 +618,7 @@ fn reconstruction_preserves_reopened_metadata_and_history() {
             plan.validation.failure_reasons()
         );
         let step = plan.selected.as_ref().expect("selected").step_id.clone();
-        commit_continuation(&conn, &request, &step).expect("commit");
+        commit_continuation(&conn, &request, &plan.checkpoint_identity).expect("commit");
         step
     };
     assert_eq!(resume_step, "collect_ci_failures");

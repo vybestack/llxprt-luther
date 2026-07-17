@@ -37,8 +37,11 @@ pub(super) fn open_initialized_connection(db_path: &Path) -> Result<Connection, 
     crate::persistence::checkpoint::init_checkpoint_table(&conn).map_err(|e| {
         EngineError::PersistenceError(format!("Failed to initialize checkpoint schema: {e}"))
     })?;
-    crate::persistence::run_metadata::init_runs_table(&conn).map_err(|e| {
+    crate::persistence::sqlite::init_runs_schema_serialized(&conn).map_err(|e| {
         EngineError::PersistenceError(format!("Failed to initialize runs schema: {e}"))
+    })?;
+    crate::persistence::leases::init_leases_table(&conn).map_err(|e| {
+        EngineError::PersistenceError(format!("Failed to initialize lease schema: {e}"))
     })?;
 
     Ok(conn)

@@ -83,7 +83,10 @@ pub fn apply_child_run_state(
         get_lease_for_issue(conn, &state.repo, child.issue_number).map_err(sql_error)?
     {
         match lease.status {
-            LeaseStatus::Failed | LeaseStatus::Abandoned | LeaseStatus::Stale
+            LeaseStatus::Failed
+            | LeaseStatus::Abandoned
+            | LeaseStatus::CleanupAbandoned
+            | LeaseStatus::Stale
                 if issue.state.eq_ignore_ascii_case("open") =>
             {
                 child.terminal_state = ChildIssueStatus::FailedRun;
@@ -100,7 +103,10 @@ pub fn apply_child_run_state(
                     child.terminal_state = ChildIssueStatus::ActiveRun;
                 }
             }
-            LeaseStatus::Failed | LeaseStatus::Abandoned | LeaseStatus::Stale => {}
+            LeaseStatus::Failed
+            | LeaseStatus::Abandoned
+            | LeaseStatus::CleanupAbandoned
+            | LeaseStatus::Stale => {}
             LeaseStatus::Pending | LeaseStatus::Completed => {}
         }
     }
@@ -413,6 +419,7 @@ pub fn start_child_workflow(
             lease,
             lease.status,
             lease.run_id.as_deref(),
+            &request.run_id,
         ) {
             return parent_error(format!(
                 "{err}; failed to restore child lease {}: {restore_err}",
@@ -428,6 +435,7 @@ pub fn start_child_workflow(
                 lease,
                 lease.status,
                 lease.run_id.as_deref(),
+                &request.run_id,
             ) {
                 return parent_error(format!(
                     "{err}; failed to restore child lease {} after metadata error: {restore_err}",
@@ -484,9 +492,13 @@ pub fn resume_child_workflow(
     )
     .map_err(sql_error)?;
     let result = runner.resume_child(&request).map_err(|err| {
-        if let Err(restore_err) =
-            restore_child_lease_after_runner_error(conn, lease, lease.status, Some(&run_id))
-        {
+        if let Err(restore_err) = restore_child_lease_after_runner_error(
+            conn,
+            lease,
+            lease.status,
+            Some(&run_id),
+            &request.run_id,
+        ) {
             return parent_error(format!(
                 "{err}; failed to restore child lease {}: {restore_err}",
                 lease.lease_id
@@ -496,9 +508,13 @@ pub fn resume_child_workflow(
     })?;
     let (run_status, pr) = post_launch_metadata(state, query, runner, child, lease, &request)
         .map_err(|err| {
-            if let Err(restore_err) =
-                restore_child_lease_after_runner_error(conn, lease, lease.status, Some(&run_id))
-            {
+            if let Err(restore_err) = restore_child_lease_after_runner_error(
+                conn,
+                lease,
+                lease.status,
+                Some(&run_id),
+                &request.run_id,
+            ) {
                 return parent_error(format!(
                     "{err}; failed to restore child lease {} after metadata error: {restore_err}",
                     lease.lease_id
@@ -527,8 +543,25 @@ pub fn restore_child_lease_after_runner_error(
     lease: &crate::persistence::leases::IssueLease,
     status: LeaseStatus,
     run_id: Option<&str>,
+    expected_running_run_id: &str,
 ) -> Result<(), EngineError> {
-    update_lease_status(conn, &lease.lease_id, status, run_id).map_err(sql_error)
+    let restored = crate::persistence::update_lease_status_conditional(
+        conn,
+        &lease.lease_id,
+        status,
+        &[LeaseStatus::Running],
+        run_id,
+        Some(expected_running_run_id),
+    )
+    .map_err(sql_error)?;
+    if restored {
+        Ok(())
+    } else {
+        Err(parent_error(format!(
+            "child lease {} changed owner or status; stale error compensation was rejected",
+            lease.lease_id
+        )))
+    }
 }
 
 pub fn post_launch_metadata(

@@ -86,8 +86,18 @@ fn load_workflow_from_toml(
     let fixture_root = std::path::PathBuf::from("tests/fixtures");
     let workflow_type = resolve_workflow_type(workflow_type_id, &fixture_root)
         .expect("Failed to load workflow type");
-    let config =
+    let mut config =
         resolve_workflow_config(config_id, &fixture_root).expect("Failed to load workflow config");
+    if config.variables.contains_key("work_dir") {
+        config.variables.insert(
+            "work_dir".to_string(),
+            std::env::temp_dir()
+                .join("luther-e2e-workspaces")
+                .join(uuid::Uuid::new_v4().to_string())
+                .display()
+                .to_string(),
+        );
+    }
     (workflow_type, config)
 }
 
@@ -103,6 +113,7 @@ fn setup_registry(outcomes: HashMap<String, Vec<StepOutcome>>) -> ExecutorRegist
     registry.register("workflow_auth_preflight", Box::new(executor.clone()));
     registry.register("command_manifest_group", Box::new(executor.clone()));
     for step_type in [
+        "failure_cleanup",
         "task_charter",
         "scope_measure",
         "github_pr_identity",
@@ -371,10 +382,10 @@ fn test_fatal_at_select_issue_routes_to_abandon_and_log() {
     let result = runner.run();
 
     // Fatal should route to abandon_and_log via transition table
-    // The workflow should complete (Success) because abandon_and_log is the terminal step
+    // Successful cleanup must preserve the original failed-work terminal identity
     assert!(
-        matches!(result, Ok(RunOutcome::Success)),
-        "Expected Success (fatal routed to abandon_and_log), got {result:?}"
+        matches!(result, Ok(RunOutcome::Abandoned { ref step_id, .. }) if step_id == "select_issue"),
+        "Expected Abandoned preserving select_issue failure, got {result:?}"
     );
 }
 
@@ -404,8 +415,8 @@ fn test_fatal_at_setup_workspace_routes_to_abandon_and_log() {
     let result = runner.run();
 
     assert!(
-        matches!(result, Ok(RunOutcome::Success)),
-        "Expected Success (fatal routed to abandon_and_log), got {result:?}"
+        matches!(result, Ok(RunOutcome::Abandoned { ref step_id, .. }) if step_id == "setup_workspace"),
+        "Expected Abandoned preserving setup_workspace failure, got {result:?}"
     );
 }
 
@@ -428,8 +439,8 @@ fn test_fatal_at_fetch_issue_routes_to_abandon_and_log() {
     let result = runner.run();
 
     assert!(
-        matches!(result, Ok(RunOutcome::Success)),
-        "Expected Success (fatal routed to abandon_and_log), got {result:?}"
+        matches!(result, Ok(RunOutcome::Abandoned { ref step_id, .. }) if step_id == "fetch_issue"),
+        "Expected Abandoned preserving fetch_issue failure, got {result:?}"
     );
 }
 
@@ -455,8 +466,8 @@ fn test_fatal_at_implement_routes_to_abandon_and_log() {
     let result = runner.run();
 
     assert!(
-        matches!(result, Ok(RunOutcome::Success)),
-        "Expected Success (fatal routed to abandon_and_log), got {result:?}"
+        matches!(result, Ok(RunOutcome::Abandoned { ref step_id, .. }) if step_id == "implement"),
+        "Expected Abandoned preserving implement failure, got {result:?}"
     );
 }
 
@@ -856,11 +867,16 @@ fn test_config_variables_injected_into_context() {
 /// @requirement:REQ-LF-FAIL-005
 #[test]
 fn test_run_completion_records_metadata() {
-    let (workflow_type, config) = load_workflow_from_toml("llxprt-issue-fix-v1", "llxprt-code");
+    let (workflow_type, mut config) = load_workflow_from_toml("llxprt-issue-fix-v1", "llxprt-code");
 
-    // Create temp database
-    let temp_dir = std::env::temp_dir();
-    let db_path = temp_dir.join(format!("test_e2e_{}.db", uuid::Uuid::new_v4()));
+    // Keep persistent ownership markers isolated across concurrent test/coverage
+    // processes rather than sharing the fixture's production-like workspace.
+    let temp_dir = tempfile::tempdir().expect("temp run directory");
+    config.variables.insert(
+        "work_dir".to_string(),
+        temp_dir.path().join("workspace").display().to_string(),
+    );
+    let db_path = temp_dir.path().join("checkpoints.db");
 
     let registry = setup_registry(HashMap::new());
     let instance = WorkflowInstance::create(workflow_type, config);

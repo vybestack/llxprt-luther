@@ -36,6 +36,26 @@ pub struct StepContext {
     pub namespaced_vars: HashMap<String, HashMap<String, String>>,
 }
 
+fn is_checkpointable_context_key(key: &str) -> bool {
+    matches!(
+        key,
+        "issue_number"
+            | "primary_issue_number"
+            | "issue_title"
+            | "pr_number"
+            | "owner"
+            | "repo"
+            | "repository"
+            | "current_branch"
+            | "base_branch"
+            | "existing_pr_number"
+            | "head_ref"
+            | "head_sha"
+            | "base_ref"
+            | "base_sha"
+    )
+}
+
 impl StepContext {
     /// Create a new `StepContext` with the given `work_dir` and `run_id`.
     /// Stores work_dir and run_id in variables for bare key access (REQ-LF-CTX-004).
@@ -59,6 +79,59 @@ impl StepContext {
             step_order: Vec::new(),
             namespaced_vars: HashMap::new(),
         }
+    }
+
+    /// Capture non-secret execution context needed to safely reconstruct a failed step.
+    #[must_use]
+    pub fn checkpoint_values(&self) -> HashMap<String, serde_json::Value> {
+        let mut values = HashMap::new();
+        for (key, value) in &self.variables {
+            if is_checkpointable_context_key(key) {
+                values.insert(key.clone(), serde_json::Value::String(value.clone()));
+            }
+        }
+        let namespaced_vars: HashMap<_, _> = self
+            .namespaced_vars
+            .iter()
+            .map(|(step, variables)| {
+                let variables: HashMap<String, String> = variables
+                    .iter()
+                    .filter(|(key, _)| is_checkpointable_context_key(key))
+                    .map(|(key, value)| (key.clone(), value.clone()))
+                    .collect();
+                (step.clone(), variables)
+            })
+            .collect();
+        values.insert(
+            "__namespaced_vars".to_string(),
+            serde_json::to_value(namespaced_vars).unwrap_or_default(),
+        );
+        values.insert(
+            "__step_order".to_string(),
+            serde_json::to_value(&self.step_order).unwrap_or_default(),
+        );
+        values
+    }
+
+    /// Restore non-secret values captured by [`Self::checkpoint_values`].
+    pub fn restore_checkpoint_values(
+        &mut self,
+        mut values: HashMap<String, serde_json::Value>,
+    ) -> Result<(), serde_json::Error> {
+        if let Some(value) = values.remove("__namespaced_vars") {
+            self.namespaced_vars = serde_json::from_value(value)?;
+        }
+        if let Some(value) = values.remove("__step_order") {
+            self.step_order = serde_json::from_value(value)?;
+        }
+        for (key, value) in values {
+            if is_checkpointable_context_key(&key) {
+                if let Some(value) = value.as_str() {
+                    self.variables.insert(key, value.to_string());
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Get a context value by key.
@@ -358,6 +431,10 @@ impl ExecutorRegistry {
     fn register_core_executors(&mut self) {
         self.register("shell", Box::new(crate::engine::executors::ShellExecutor));
         self.register(
+            "failure_cleanup",
+            Box::new(crate::engine::executors::ShellExecutor),
+        );
+        self.register(
             "write_file",
             Box::new(crate::engine::executors::WriteFileExecutor),
         );
@@ -530,6 +607,53 @@ mod tests {
             interpolate_string("issue{issue_number}", &context),
             "issue4"
         );
+    }
+
+    #[test]
+    fn checkpoint_values_round_trip_safe_context_and_redact_outputs_and_secrets() {
+        let mut context = StepContext::new(PathBuf::from("/tmp/work"), "run-1".to_string());
+        context.set_current_step_id("shell");
+        context.set("issue_number", "137");
+        context.set("issue_title", "Preserve failed identity");
+        context.set("head_sha", "abcdef");
+        context.set("base_sha", "123456");
+        context.set("github_token", "flat-secret");
+        context.set("api_key", "namespaced-secret");
+        context.set("stdout", "raw output secret");
+        context.set("stderr", "raw error secret");
+
+        let values = context.checkpoint_values();
+        let serialized = serde_json::to_string(&values).expect("serialize checkpoint context");
+        assert!(serialized.contains("137"));
+        assert!(!serialized.contains("flat-secret"));
+        assert!(!serialized.contains("namespaced-secret"));
+        assert!(!serialized.contains("raw output secret"));
+        assert!(!serialized.contains("raw error secret"));
+
+        let mut restored = StepContext::new(PathBuf::from("/tmp/other"), "run-2".to_string());
+        restored
+            .restore_checkpoint_values(values)
+            .expect("restore checkpoint context");
+        assert_eq!(
+            restored.get("issue_number").map(String::as_str),
+            Some("137")
+        );
+        assert_eq!(
+            restored.get("shell.issue_number").map(String::as_str),
+            Some("137")
+        );
+        assert_eq!(
+            restored.get("issue_title").map(String::as_str),
+            Some("Preserve failed identity")
+        );
+        assert_eq!(restored.get("head_sha").map(String::as_str), Some("abcdef"));
+        assert_eq!(restored.get("base_sha").map(String::as_str), Some("123456"));
+        assert_eq!(restored.work_dir(), &PathBuf::from("/tmp/other"));
+        assert_eq!(restored.run_id(), "run-2");
+        assert!(restored.get("github_token").is_none());
+        assert!(restored.get("shell.api_key").is_none());
+        assert!(restored.get("shell.stdout").is_none());
+        assert!(restored.get("shell.stderr").is_none());
     }
 
     #[test]

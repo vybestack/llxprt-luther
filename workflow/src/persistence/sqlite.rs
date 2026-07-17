@@ -48,7 +48,8 @@ impl SqliteStore {
     /// @plan:PLAN-20260404-INITIAL-RUNTIME.P05
     /// @requirement:REQ-EARS-PERSIST-001,REQ-EARS-SCALE-002
     fn init_schema(&self) -> SqliteResult<()> {
-        init_runs_schema(&self.conn)
+        init_runs_schema_serialized(&self.conn)?;
+        super::leases::init_leases_table(&self.conn)
     }
 
     /// Persist a new run metadata record.
@@ -170,7 +171,8 @@ impl<'a> SqliteStoreRef<'a> {
 const RUN_SELECT_COLUMNS: &str =
     "run_id, workflow_type_id, config_id, status, created_at, updated_at, current_step, \
      previous_step, previous_outcome, next_step_candidates, log_path, artifact_root, \
-     workspace_path, repository, issue_number, pr_number, head_sha, process_pid, child_pids";
+     workspace_path, repository, issue_number, pr_number, head_sha, process_pid, child_pids, \
+     failure_cleanup";
 
 /// Initialize the runs schema on the given connection (table + migration).
 /// @plan:PLAN-20260404-INITIAL-RUNTIME.P05
@@ -195,12 +197,22 @@ pub fn init_runs_schema(conn: &Connection) -> SqliteResult<()> {
             pr_number INTEGER,
             head_sha TEXT,
             process_pid INTEGER,
-            child_pids TEXT
+            child_pids TEXT,
+            failure_cleanup TEXT
         )",
         [],
     )?;
-    migrate_runs_table(conn);
+    migrate_runs_table(conn)?;
     Ok(())
+}
+
+/// Initialize the runs schema while holding an immediate write transaction.
+/// This serializes legacy-column inspection and DDL across concurrent openers.
+pub fn init_runs_schema_serialized(conn: &Connection) -> SqliteResult<()> {
+    conn.busy_timeout(std::time::Duration::from_secs(5))?;
+    let tx = rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?;
+    init_runs_schema(&tx)?;
+    tx.commit()
 }
 
 /// Persist a run record (insert or update) using a borrowed connection.
@@ -210,8 +222,8 @@ pub fn persist_run_with_conn(conn: &Connection, metadata: &RunMetadata) -> Sqlit
         "INSERT INTO runs (run_id, workflow_type_id, config_id, status, created_at, updated_at, \
             current_step, previous_step, previous_outcome, next_step_candidates, log_path, \
             artifact_root, workspace_path, repository, issue_number, pr_number, head_sha, \
-            process_pid, child_pids)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)
+            process_pid, child_pids, failure_cleanup)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)
          ON CONFLICT(run_id) DO UPDATE SET
             workflow_type_id = excluded.workflow_type_id,
             config_id = excluded.config_id,
@@ -230,7 +242,8 @@ pub fn persist_run_with_conn(conn: &Connection, metadata: &RunMetadata) -> Sqlit
             pr_number = excluded.pr_number,
             head_sha = excluded.head_sha,
             process_pid = excluded.process_pid,
-            child_pids = excluded.child_pids",
+            child_pids = excluded.child_pids,
+            failure_cleanup = excluded.failure_cleanup",
         params![
             metadata.run_id,
             metadata.workflow_type_id,
@@ -251,6 +264,12 @@ pub fn persist_run_with_conn(conn: &Connection, metadata: &RunMetadata) -> Sqlit
             metadata.head_sha,
             metadata.process_pid,
             serialize_pid_list(&metadata.child_pids),
+            metadata
+                .failure_cleanup
+                .as_ref()
+                .map(serde_json::to_string)
+                .transpose()
+                .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?,
         ],
     )?;
     Ok(())
@@ -608,6 +627,17 @@ fn map_run_row(row: &rusqlite::Row<'_>) -> SqliteResult<RunMetadata> {
         head_sha: row.get(16)?,
         process_pid: row.get::<_, Option<i64>>(17)?.map(|p| p as u32),
         child_pids: deserialize_pid_list(row.get::<_, Option<String>>(18)?),
+        failure_cleanup: row
+            .get::<_, Option<String>>(19)?
+            .map(|raw| serde_json::from_str(&raw))
+            .transpose()
+            .map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    19,
+                    rusqlite::types::Type::Text,
+                    Box::new(error),
+                )
+            })?,
     })
 }
 

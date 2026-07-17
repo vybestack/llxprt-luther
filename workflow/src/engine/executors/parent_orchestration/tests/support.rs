@@ -78,6 +78,132 @@ impl GithubIssueQuery for MockQuery {
     }
 }
 
+/// A mock query that records side-effecting GitHub operations so tests can
+/// assert zero side effects on stale child finalization paths.
+///
+/// The recorded calls are returned via [`RecordingMockQuery::take`] so each
+/// test can inspect the operations performed by the code under test. By
+/// sharing the recording cell, the mock can be passed by reference (as
+/// `&dyn GithubIssueQuery`) while still exposing the recorded operations.
+pub(super) struct RecordingMockQuery {
+    issue: Option<GithubIssue>,
+    children: Vec<GithubSubIssue>,
+    pr: Option<GithubIssuePrState>,
+    operations: std::sync::Arc<std::sync::Mutex<Vec<RecordedGithubOperation>>>,
+}
+
+/// A side-effecting GitHub operation recorded by [`RecordingMockQuery`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum RecordedGithubOperation {
+    CommentIssue { number: u64, body: String },
+    RemoveLabel { number: u64, label: String },
+}
+
+impl RecordingMockQuery {
+    /// Create a new recording query with no issue/PR data and an empty
+    /// recording cell.
+    pub(super) fn new() -> Self {
+        Self {
+            issue: None,
+            children: Vec::new(),
+            pr: None,
+            operations: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+        }
+    }
+
+    /// Take ownership of the recorded operations, leaving the cell empty.
+    pub(super) fn take(&self) -> Vec<RecordedGithubOperation> {
+        std::mem::take(&mut *self.operations.lock().unwrap())
+    }
+}
+
+impl Default for RecordingMockQuery {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl GithubIssueQuery for RecordingMockQuery {
+    fn list_issues(
+        &self,
+        _repo: &str,
+        _include_labels: &[String],
+        _states: &[String],
+    ) -> Result<Vec<GithubIssue>, GithubError> {
+        Ok(Vec::new())
+    }
+
+    fn has_open_pr_for_issue(&self, _repo: &str, _number: u64) -> Result<bool, GithubError> {
+        Ok(false)
+    }
+
+    fn list_milestones(&self, _repo: &str) -> Result<Vec<String>, GithubError> {
+        Ok(Vec::new())
+    }
+
+    fn get_issue(&self, _repo: &str, _number: u64) -> Result<Option<GithubIssue>, GithubError> {
+        Ok(self.issue.clone())
+    }
+
+    fn list_sub_issues(
+        &self,
+        _repo: &str,
+        _number: u64,
+    ) -> Result<Vec<GithubSubIssue>, GithubError> {
+        Ok(self.children.clone())
+    }
+
+    fn get_parent_issue(
+        &self,
+        _repo: &str,
+        _number: u64,
+    ) -> Result<Option<GithubParentIssue>, GithubError> {
+        Ok(None)
+    }
+
+    fn add_label(&self, _repo: &str, _number: u64, _label: &str) -> Result<(), GithubError> {
+        Ok(())
+    }
+
+    fn remove_label(&self, _repo: &str, number: u64, label: &str) -> Result<(), GithubError> {
+        self.operations
+            .lock()
+            .unwrap()
+            .push(RecordedGithubOperation::RemoveLabel {
+                number,
+                label: label.to_string(),
+            });
+        Ok(())
+    }
+
+    fn pr_state_for_issue(
+        &self,
+        _repo: &str,
+        _number: u64,
+    ) -> Result<Option<GithubIssuePrState>, GithubError> {
+        Ok(self.pr.clone())
+    }
+
+    fn comment_issue(&self, _repo: &str, number: u64, body: &str) -> Result<(), GithubError> {
+        self.operations
+            .lock()
+            .unwrap()
+            .push(RecordedGithubOperation::CommentIssue {
+                number,
+                body: body.to_string(),
+            });
+        Ok(())
+    }
+
+    fn close_issue(&self, _repo: &str, _number: u64) -> Result<(), GithubError> {
+        Ok(())
+    }
+
+    fn enable_pr_auto_merge(&self, _repo: &str, _pr_number: u64) -> Result<(), GithubError> {
+        Ok(())
+    }
+}
+
 pub(super) fn issue(number: u64, state: &str) -> GithubIssue {
     GithubIssue {
         number,
