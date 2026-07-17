@@ -290,21 +290,8 @@ pub fn commit_and_execute(
         .db_path()
         .map(Path::to_path_buf)
         .unwrap_or_else(|| luther_workflow::runtime_paths::get_data_dir().join("checkpoints.db"));
-    let mut runner = match reconstruct_runner(md, &request.run_id, &db_path, config_dir) {
-        Ok(runner) => runner,
-        Err(e) => {
-            eprintln!("Error: {e}");
-            process::exit(1);
-        }
-    };
-    if let Err(e) = luther_workflow::engine::commit_continuation(
-        store.conn(),
-        request,
-        &plan.checkpoint_identity,
-    ) {
-        eprintln!("Error: failed to reopen run '{}': {e}", request.run_id);
-        process::exit(1);
-    }
+    let mut runner = reconstruct_runner_or_exit(md, &request.run_id, &db_path, config_dir);
+    commit_continuation_or_exit(store, request, &plan.checkpoint_identity);
     println!(
         "Reopened run '{}' at step '{step}' (continuation: {})",
         request.run_id,
@@ -313,36 +300,7 @@ pub fn commit_and_execute(
     install_interrupt_handlers(runner.interrupt_handle());
     let outcome = runner.run();
     if let Err(ref error) = outcome {
-        eprintln!(
-            "Run '{}' stopped after continuation error without rolling back durable progress: {error}",
-            request.run_id
-        );
-        let mut current =
-            luther_workflow::persistence::get_run_with_conn(store.conn(), &request.run_id)
-                .unwrap_or_else(|persist_error| {
-                    eprintln!(
-                "Error: failed to load continuation failure state for '{}': {persist_error}",
-                request.run_id
-            );
-                    process::exit(1);
-                })
-                .unwrap_or_else(|| {
-                    eprintln!(
-                "Error: missing run metadata while persisting continuation failure for '{}'",
-                request.run_id
-            );
-                    process::exit(1);
-                });
-        current.mark_failed();
-        if let Err(persist_error) =
-            luther_workflow::persistence::persist_run_with_conn(store.conn(), &current)
-        {
-            eprintln!(
-                "Error: failed to persist continuation failure for '{}': {persist_error}",
-                request.run_id
-            );
-            process::exit(1);
-        }
+        persist_continuation_failure(store, &request.run_id, error);
     }
     write_continuation_result(&plan.artifact_dir, &request.kind, &step, &outcome);
     if continuation_had_lease {
@@ -352,6 +310,66 @@ pub fn commit_and_execute(
         }
     }
     report_continuation_outcome(&request.run_id, &step, outcome);
+}
+
+fn reconstruct_runner_or_exit(
+    md: &RunMetadata,
+    run_id: &str,
+    db_path: &Path,
+    config_dir: &Option<std::path::PathBuf>,
+) -> EngineRunner {
+    match reconstruct_runner(md, run_id, db_path, config_dir) {
+        Ok(runner) => runner,
+        Err(e) => {
+            eprintln!("Error: {e}");
+            process::exit(1);
+        }
+    }
+}
+
+fn commit_continuation_or_exit(
+    store: &SqliteStore,
+    request: &luther_workflow::engine::ContinuationRequest,
+    checkpoint_identity: &str,
+) {
+    if let Err(e) =
+        luther_workflow::engine::commit_continuation(store.conn(), request, checkpoint_identity)
+    {
+        eprintln!("Error: failed to reopen run '{}': {e}", request.run_id);
+        process::exit(1);
+    }
+}
+
+fn persist_continuation_failure(store: &SqliteStore, run_id: &str, error: &impl std::fmt::Display) {
+    eprintln!(
+        "Run '{}' stopped after continuation error without rolling back durable progress: {error}",
+        run_id
+    );
+    let mut current = luther_workflow::persistence::get_run_with_conn(store.conn(), run_id)
+        .unwrap_or_else(|persist_error| {
+            eprintln!(
+                "Error: failed to load continuation failure state for '{}': {persist_error}",
+                run_id
+            );
+            process::exit(1);
+        })
+        .unwrap_or_else(|| {
+            eprintln!(
+                "Error: missing run metadata while persisting continuation failure for '{}'",
+                run_id
+            );
+            process::exit(1);
+        });
+    current.mark_failed();
+    if let Err(persist_error) =
+        luther_workflow::persistence::persist_run_with_conn(store.conn(), &current)
+    {
+        eprintln!(
+            "Error: failed to persist continuation failure for '{}': {persist_error}",
+            run_id
+        );
+        process::exit(1);
+    }
 }
 
 /// Write the `resume-result.json` / `retry-result.json` artifact.

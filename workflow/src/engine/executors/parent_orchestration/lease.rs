@@ -4,24 +4,6 @@ use crate::persistence::leases::{
     update_lease_status_conditional_outcome, ConditionalLeaseStatusOutcome,
 };
 
-#[derive(Clone, Debug, Default, serde::Deserialize, serde::Serialize)]
-pub(super) struct ParentOrchestrationRollup {
-    pub(super) parent_issue_number: u64,
-    pub(super) children: Vec<ChildRollupEntry>,
-}
-
-#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
-pub(super) struct ChildRollupEntry {
-    pub(super) child_issue_number: u64,
-    pub(super) child_run_id: Option<String>,
-    pub(super) child_artifact_dir: Option<String>,
-    pub(super) pr_number: Option<u64>,
-    pub(super) pr_state: Option<String>,
-    pub(super) merge_sha: Option<String>,
-    pub(super) outcome: Option<String>,
-    pub(super) non_actionable_reason: Option<String>,
-}
-
 pub fn bool_context(context: &StepContext, primary: &str, fallback: &str) -> bool {
     bool_context_default(context, primary, fallback, false)
 }
@@ -544,68 +526,6 @@ pub fn record_blocked_child(
     Ok(StepOutcome::Fixable)
 }
 
-pub fn child_launch_request(state: &OrchestrationState, child: u64) -> ChildWorkflowLaunchRequest {
-    let stamp = Utc::now().timestamp_millis();
-    child_request_with_run_id(
-        state,
-        child,
-        format!("parent{}-child{}-{stamp}", state.parent_issue_number, child),
-    )
-}
-
-pub fn child_resume_request(
-    state: &OrchestrationState,
-    child: u64,
-    run_id: String,
-) -> ChildWorkflowLaunchRequest {
-    child_request_with_run_id(state, child, run_id)
-}
-
-pub fn child_request_with_run_id(
-    state: &OrchestrationState,
-    child: u64,
-    run_id: String,
-) -> ChildWorkflowLaunchRequest {
-    let artifact_dir = state
-        .artifact_dir
-        .as_ref()
-        .map(|base| child_artifact_dir(base, child, &run_id));
-    // Derive an isolated workspace directory per child issue and run rather
-    // than reusing the parent's `work_dir`. Each child workflow gets its own
-    // persisted worktree so concurrent children and relaunches do not stomp
-    // on a shared parent workspace, and the durable workspace-owner marker can
-    // be bound to the child run id without cross-run conflicts.
-    let work_dir = state
-        .work_dir
-        .as_ref()
-        .map(|base| child_work_dir(base, child, &run_id));
-    ChildWorkflowLaunchRequest {
-        workflow_type_id: state.child_workflow_type_id.clone(),
-        config_id: state.child_config_id.clone(),
-        run_id,
-        repo: state.repo.clone(),
-        issue_number: child,
-        work_dir,
-        artifact_dir,
-        config_root: state.config_root.clone(),
-    }
-}
-
-pub fn child_artifact_dir(base: &Path, child: u64, run_id: &str) -> PathBuf {
-    base.join(format!("issue-{child}")).join(run_id)
-}
-
-/// Derive an isolated persisted workspace directory for a child run.
-///
-/// Mirrors the per-child/per-run layout already used for artifact directories,
-/// so each child issue and each relaunch of that child gets its own workspace
-/// tree under the parent `work_dir` base rather than sharing it.
-pub fn child_work_dir(base: &Path, child: u64, run_id: &str) -> PathBuf {
-    base.join("children")
-        .join(format!("issue-{child}"))
-        .join(run_id)
-}
-
 pub fn mark_child_lease_completed(
     state: &OrchestrationState,
     child: u64,
@@ -885,75 +805,6 @@ pub fn write_launch_artifact(state: &OrchestrationState, value: Value) -> Result
     write_json(&state.artifact_root, "child-run-launch.json", &value)
 }
 
-pub fn update_rollup(
-    state: &OrchestrationState,
-    child: u64,
-    run_id: Option<&str>,
-    outcome: &str,
-    pr: Option<&GithubIssuePrState>,
-) -> Result<(), EngineError> {
-    let mut rollup = read_rollup(&state.artifact_root)?;
-    rollup.parent_issue_number = state.parent_issue_number;
-    rollup
-        .children
-        .retain(|entry| entry.child_issue_number != child);
-    rollup.children.push(ChildRollupEntry {
-        child_issue_number: child,
-        child_run_id: run_id.map(str::to_string),
-        child_artifact_dir: run_id.and_then(|run_id| {
-            state.artifact_dir.as_ref().map(|base| {
-                child_artifact_dir(base, child, run_id)
-                    .to_string_lossy()
-                    .to_string()
-            })
-        }),
-        pr_number: pr.map(|state| state.number),
-        pr_state: pr.map(|state| state.state.clone()),
-        merge_sha: pr.and_then(|state| state.merge_commit_sha.clone()),
-        outcome: Some(outcome.to_string()),
-        non_actionable_reason: non_actionable_reason_for_outcome(outcome),
-    });
-    rollup
-        .children
-        .sort_by_key(|entry| entry.child_issue_number);
-    write_json(
-        &state.artifact_root,
-        "parent-orchestration-rollup.json",
-        &rollup,
-    )
-}
-
-pub fn non_actionable_reason_for_outcome(outcome: &str) -> Option<String> {
-    match outcome {
-        "non_actionable_child" => Some("child issue is explicitly non-actionable".to_string()),
-        "non_actionable_child_lease" => {
-            Some("child lease is already terminal outside the parent orchestrator".to_string())
-        }
-        _ => None,
-    }
-}
-
-pub fn rollup_has_outcome(
-    state: &OrchestrationState,
-    child: u64,
-    outcome: &str,
-) -> Result<bool, EngineError> {
-    let rollup = read_rollup(&state.artifact_root)?;
-    Ok(rollup.children.iter().any(|entry| {
-        entry.child_issue_number == child && entry.outcome.as_deref() == Some(outcome)
-    }))
-}
-
-pub fn read_rollup(artifact_root: &Path) -> Result<ParentOrchestrationRollup, EngineError> {
-    let path = artifact_root.join("parent-orchestration-rollup.json");
-
-    if path.exists() {
-        read_json(&path)
-    } else {
-        Ok(ParentOrchestrationRollup::default())
-    }
-}
-
 pub fn child_is_complete(child: &ChildIssueState) -> bool {
     matches!(child.terminal_state, ChildIssueStatus::Merged)
 }
@@ -984,57 +835,4 @@ pub fn parent_summary_evaluation_json(evaluation: &Value) -> String {
             "Parent orchestration evaluation serialization failed; diagnostic context could not be encoded as JSON: {err}"
         ),
     }
-}
-
-pub fn resume_child_process(
-    request: &ChildWorkflowLaunchRequest,
-) -> Result<ChildWorkflowRunResult, String> {
-    run_child_workflow(request, ChildRunMode::Resume)
-}
-
-pub fn launch_child_process(
-    request: &ChildWorkflowLaunchRequest,
-) -> Result<ChildWorkflowRunResult, String> {
-    run_child_workflow(request, ChildRunMode::Launch)
-}
-
-pub enum ChildRunMode {
-    Launch,
-    Resume,
-}
-
-pub fn run_child_workflow(
-    request: &ChildWorkflowLaunchRequest,
-    mode: ChildRunMode,
-) -> Result<ChildWorkflowRunResult, String> {
-    let config_root = &request.config_root;
-    let config_id = validated_child_id(&request.config_id, "config id")?;
-    let workflow_type_id = validated_child_id(&request.workflow_type_id, "type id")?;
-    let mut config = resolve_workflow_config(config_id, config_root)
-        .map_err(|err| format!("resolve child config '{config_id}': {err}"))?;
-    let workflow_type = resolve_workflow_type(workflow_type_id, config_root)
-        .map_err(|err| format!("resolve child workflow type: {err}"))?;
-    apply_child_overrides(&mut config, request)?;
-    let db_path = crate::runtime_paths::get_data_dir().join("checkpoints.db");
-    if let Some(work_dir) = request.work_dir.as_deref() {
-        std::fs::create_dir_all(work_dir)
-            .map_err(|err| format!("create child work_dir '{}': {err}", work_dir.display()))?;
-        crate::engine::continuation::write_workspace_owner_marker(work_dir, &request.run_id)
-            .map_err(|err| format!("write child workspace owner marker: {err}"))?;
-    }
-    let run_context = child_run_context(&config, request)?;
-    let instance =
-        WorkflowInstance::create_with_run_id(workflow_type, config.clone(), &request.run_id);
-    let mut runner = EngineRunner::with_db_path_and_context(
-        instance,
-        crate::engine::executor::ExecutorRegistry::with_defaults(),
-        &db_path,
-        run_context,
-    )
-    .map_err(|err| err.to_string())?;
-    if matches!(mode, ChildRunMode::Resume) {
-        prepare_child_resume(&db_path, request)?;
-    }
-    let outcome = runner.run().map_err(|err| err.to_string())?;
-    child_result_from_run_outcome(outcome, request, &config, &db_path)
 }

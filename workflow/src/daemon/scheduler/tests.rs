@@ -9,6 +9,8 @@ use crate::persistence::leases::{
 use crate::persistence::wait_state::WaitStateRecord;
 use std::sync::Mutex;
 
+mod artifacts;
+mod poll_skips;
 mod scheduling;
 
 fn blocked_artifact_root() -> (tempfile::TempDir, std::path::PathBuf) {
@@ -279,6 +281,29 @@ fn simulate_replacement_wait_row(
     crate::persistence::persist_external_wait(conn, &record).unwrap();
 }
 
+/// Simulate the production engine persisting a suspended external wait after
+/// the mock launcher returns `SuspendedExternalWait`. Writes the run metadata,
+/// checkpoint, and wait_states row that the real engine would persist, then
+/// delegates to [`simulate_replacement_wait_row`] for the wait_states row.
+fn persist_engine_suspended_wait(
+    conn: &Connection,
+    run_id: &str,
+    lease_id: &str,
+    issue_number: u64,
+) {
+    crate::persistence::persist_run_with_conn(
+        conn,
+        &crate::persistence::RunMetadata::new(run_id, "wf", "cfg"),
+    )
+    .unwrap();
+    crate::persistence::checkpoint::save_checkpoint_with_conn(
+        conn,
+        &crate::persistence::checkpoint::Checkpoint::new(run_id, "watch_pr_checks"),
+    )
+    .unwrap();
+    simulate_replacement_wait_row(conn, run_id, lease_id, issue_number);
+}
+
 struct InterruptedClaimQuery {
     issue: Mutex<GithubIssue>,
 }
@@ -486,432 +511,6 @@ fn terminal_poll_does_not_regress_to_waiting_on_concurrent_suspend() {
     assert_eq!(final_lease.status, LeaseStatus::Failed);
 }
 
-#[test]
-fn orphaned_wait_is_observable_without_blocking_another_valid_wait() {
-    let c = conn();
-    seed_orphaned_external_wait(&c, "run-orphan", 139);
-    seed_external_wait(&c, "run-valid", 140);
-    let poller = ScriptedPoller::new(vec![
-        PollClassification::StillWaiting,
-        PollClassification::StillWaiting,
-    ]);
-
-    let summary = poll_due_waits(&c, &poller).unwrap();
-
-    assert_eq!(summary.pollable_waits, 2);
-    assert_eq!(summary.polls_applied, 1, "valid wait must still be applied");
-    assert_eq!(summary.skipped_polls, 1);
-    assert_eq!(summary.skipped_poll_details_dropped, 0);
-    assert!(summary.skipped_poll_details.iter().any(|detail| {
-        detail.run_id == "run-orphan" && detail.reason == SkippedPollReason::RunMissing
-    }));
-    let valid_wait = crate::persistence::wait_state::get_wait_state(&c, "run-valid")
-        .unwrap()
-        .unwrap();
-    assert_eq!(valid_wait.poll_count, 1);
-}
-
-#[test]
-fn skipped_poll_details_are_capped_per_pass_with_dropped_count() {
-    let c = conn();
-    let skipped_total = MAX_SKIPPED_POLL_DETAILS + 3;
-    for index in 0..skipped_total {
-        seed_orphaned_external_wait(&c, &format!("run-orphan-{index:03}"), 1_000 + index as u64);
-    }
-    let poller = ScriptedPoller::new(vec![PollClassification::StillWaiting; skipped_total]);
-
-    let summary = poll_due_waits(&c, &poller).unwrap();
-
-    assert_eq!(summary.skipped_polls, skipped_total);
-    assert_eq!(summary.skipped_poll_details.len(), MAX_SKIPPED_POLL_DETAILS);
-    assert_eq!(summary.skipped_poll_details_dropped, 3);
-}
-
-#[test]
-fn poll_skip_for_concurrent_lease_transition_is_observable_in_summary() {
-    // OCR 3565653883: a benign concurrent poll skip (lease already advanced)
-    // must be visible in RunSummary via skipped_polls and skipped_poll_details,
-    // not silently swallowed and not counted in polls_applied.
-    let c = conn();
-    seed_external_wait(&c, "run-skip-lease", 140);
-
-    // The poller side-effect simulates a concurrent writer advancing the
-    // lease to ReadyToResume between the poll list and the apply.
-    let poller = RacingPoller {
-        side_effect: |record| {
-            let lease_id = record.lease_id.as_deref().unwrap();
-            update_lease_status(
-                &c,
-                lease_id,
-                LeaseStatus::ReadyToResume,
-                Some(&record.run_id),
-            )
-            .unwrap();
-        },
-    };
-
-    let q = MockQuery { issues: vec![] };
-    let l = RepeatedSuspendLauncher;
-    let target = pollable_target();
-
-    let summary = run_single_target_once(&target, &q, &c, &l, &poller);
-
-    assert_eq!(
-        summary.polls_applied, 0,
-        "a rejected poll must not count as applied"
-    );
-    assert_eq!(
-        summary.skipped_polls, 1,
-        "a rejected poll must be counted as skipped"
-    );
-    assert_eq!(summary.skipped_poll_details.len(), 1);
-    let detail = &summary.skipped_poll_details[0];
-    assert_eq!(detail.run_id, "run-skip-lease");
-    assert_eq!(detail.reason, SkippedPollReason::LeaseTransitionRejected);
-    assert_eq!(
-        detail.lease_transition_reason,
-        Some("lease_still_waiting_transition_rejected: lease has advanced past waiting or owned by another run")
-    );
-}
-
-#[test]
-fn poll_skip_for_concurrent_wait_state_transition_is_observable_in_summary() {
-    // OCR 3565653883: a benign concurrent wait-state skip must also be
-    // observable in RunSummary.
-    let c = conn();
-    seed_external_wait(&c, "run-skip-wait", 141);
-
-    // The poller side-effect deletes the wait-states row so
-    // update_wait_state_after_poll returns false.
-    let poller = RacingPoller {
-        side_effect: |record| {
-            crate::persistence::wait_state::delete_wait_state(&c, &record.run_id).unwrap();
-        },
-    };
-
-    let q = MockQuery { issues: vec![] };
-    let l = RepeatedSuspendLauncher;
-    let target = pollable_target();
-
-    let summary = run_single_target_once(&target, &q, &c, &l, &poller);
-
-    assert_eq!(summary.polls_applied, 0);
-    assert_eq!(summary.skipped_polls, 1);
-    assert_eq!(summary.skipped_poll_details.len(), 1);
-    let detail = &summary.skipped_poll_details[0];
-    assert_eq!(detail.run_id, "run-skip-wait");
-    assert_eq!(
-        detail.reason,
-        SkippedPollReason::WaitStateConcurrentTransition
-    );
-}
-
-#[test]
-fn still_waiting_poll_does_not_regress_completed_lease_to_waiting() {
-    // OCR 3565653889: a still-waiting poll must not pull a terminal lease
-    // back to WaitingExternal. The expected-status list for
-    // apply_still_waiting is WaitingExternal only, so a Completed lease
-    // must cause LeaseTransitionRejected, which surfaces as a skipped
-    // poll in RunSummary.
-    let c = conn();
-    seed_external_wait(&c, "run-completed", 142);
-
-    // The poller side-effect advances the lease to Completed, simulating a
-    // concurrent terminal transition while a stale poller pass runs.
-    let poller = RacingPoller {
-        side_effect: |record| {
-            let lease_id = record.lease_id.as_deref().unwrap();
-            update_lease_status(&c, lease_id, LeaseStatus::Completed, Some(&record.run_id))
-                .unwrap();
-        },
-    };
-
-    let q = MockQuery { issues: vec![] };
-    let l = RepeatedSuspendLauncher;
-    let target = pollable_target();
-
-    let summary = run_single_target_once(&target, &q, &c, &l, &poller);
-
-    assert_eq!(summary.polls_applied, 0);
-    assert_eq!(summary.skipped_polls, 1);
-    // The lease must remain Completed, not regress to WaitingExternal.
-    let final_lease = get_lease_for_issue(&c, "o/r", 142).unwrap().unwrap();
-    assert_eq!(
-        final_lease.status,
-        LeaseStatus::Completed,
-        "a Completed lease must not regress to WaitingExternal"
-    );
-}
-
-#[test]
-fn poll_skip_for_run_status_concurrent_transition_is_observable_in_summary() {
-    // OCR 3565653883 / issue-131: a benign concurrent poll skip where the
-    // run is already terminal (stale poller's status update rejected) must
-    // be visible in RunSummary via skipped_polls and skipped_poll_details
-    // with reason RunStatusConcurrentTransition, not silently swallowed and
-    // not counted in polls_applied.
-    let c = conn();
-    seed_external_wait(&c, "run-skip-status", 143);
-
-    // The poller side-effect advances the run to a terminal status
-    // (Completed) between the poll list and the apply, so the stale poller's
-    // conditional status update is rejected.
-    let poller = RacingPoller {
-        side_effect: |record| {
-            let mut run = crate::persistence::RunMetadata::new(&record.run_id, "wf", "cfg");
-            run.status = crate::persistence::RunStatus::Completed;
-            crate::persistence::sqlite::persist_run_with_conn(&c, &run).unwrap();
-        },
-    };
-
-    let q = MockQuery { issues: vec![] };
-    let l = RepeatedSuspendLauncher;
-    let target = pollable_target();
-
-    let summary = run_single_target_once(&target, &q, &c, &l, &poller);
-
-    assert_eq!(
-        summary.polls_applied, 0,
-        "a rejected poll must not count as applied"
-    );
-    assert_eq!(
-        summary.skipped_polls, 1,
-        "a rejected poll must be counted as skipped"
-    );
-    assert_eq!(summary.skipped_poll_details.len(), 1);
-    let detail = &summary.skipped_poll_details[0];
-    assert_eq!(detail.run_id, "run-skip-status");
-    assert_eq!(
-        detail.reason,
-        SkippedPollReason::RunStatusConcurrentTransition
-    );
-    assert_eq!(detail.step_id, "watch_pr_checks");
-}
-
-#[test]
-fn poll_artifact_warning_is_observable_in_summary() {
-    // OCR artifact aggregation: when a committed poll decision's
-    // post-commit artifact write fails, the warning must be visible in
-    // RunSummary via artifact_warnings, and the poll must still count as
-    // applied (the DB committed). The artifact_warning must carry the
-    // run_id, phase, and error string.
-    // We seed a complete pollable wait (including run metadata) and set an
-    // invalid artifact root so the post-commit artifact write fails.
-    let c = conn();
-    seed_external_wait(&c, "run-artifact", 144);
-
-    // A regular file cannot contain the per-run artifact directory on any
-    // supported platform, so the write fails without relying on permissions.
-    let (_artifact_temp, blocked_root) = blocked_artifact_root();
-    let _env_guard = super::super::test_env::ArtifactEnvGuard::lock_and_set(&blocked_root);
-
-    let poller = ScriptedPoller::new(vec![PollClassification::StillWaiting]);
-    let q = MockQuery { issues: vec![] };
-    let l = RepeatedSuspendLauncher;
-    let target = pollable_target();
-
-    let summary = run_single_target_once(&target, &q, &c, &l, &poller);
-
-    // The poll must count as applied (DB committed).
-    assert_eq!(
-        summary.polls_applied, 1,
-        "the committed poll must count as applied even with artifact warnings"
-    );
-    // The artifact warning must be visible.
-    assert!(
-        !summary.artifact_warnings.is_empty(),
-        "artifact warnings must be recorded in RunSummary when post-commit writes fail"
-    );
-    let warning = &summary.artifact_warnings[0];
-    assert_eq!(
-        warning.run_id, "run-artifact",
-        "artifact warning must carry the correct run_id"
-    );
-    assert!(
-        !warning.error.is_empty(),
-        "artifact warning must carry a non-empty error string"
-    );
-}
-
-#[test]
-fn dual_artifact_failure_aggregates_all_warnings_in_summary() {
-    // CodeRabbit finding: when BOTH the PR-check snapshot write AND the
-    // poll-result artifact write fail on the same committed poll, both
-    // warnings must be collected and propagated into RunSummary — not just
-    // the first. Previously, the early return on snapshot failure dropped
-    // the poll-artifacts error when both paths failed.
-    // We seed a PrChecks wait kind with an invalid artifact_root in the
-    // wait_condition so the snapshot write is attempted and fails, and set
-    // LUTHER_ARTIFACTS_ROOT to an invalid path so the poll-result artifact
-    // also fails.
-    let c = conn();
-    seed_external_wait(&c, "run-dual", 145);
-    // Mutate the seeded wait-state to trigger the PR-check snapshot path.
-    // The snapshot write needs: wait_kind=PrChecks, artifact_root in
-    // wait_condition, pr_number, head_sha, and a valid repo format.
-    let mut ws = crate::persistence::wait_state::get_wait_state(&c, "run-dual")
-        .unwrap()
-        .expect("wait-state must exist after seeding");
-    ws.wait_kind = crate::persistence::wait_state::WaitKind::PrChecks;
-    ws.pr_number = Some(9);
-    ws.head_sha = Some("head-dual".to_string());
-    let (_snapshot_temp, blocked_snapshot_root) = blocked_artifact_root();
-    ws.wait_condition = serde_json::json!({
-        "artifact_root": blocked_snapshot_root,
-        "head_ref": "feature",
-        "base_ref": "main",
-        "base_sha": "base-dual"
-    });
-    crate::persistence::wait_state::upsert_wait_state(&c, &ws).unwrap();
-
-    // Use a separate regular-file blocker for the poll-result path so both
-    // writes fail independently on every supported platform.
-    let (_artifact_temp, blocked_artifact_root) = blocked_artifact_root();
-    let _env_guard = super::super::test_env::ArtifactEnvGuard::lock_and_set(&blocked_artifact_root);
-
-    let poller = ScriptedPoller::new(vec![PollClassification::StillWaiting]);
-    let q = MockQuery { issues: vec![] };
-    let l = RepeatedSuspendLauncher;
-    let target = pollable_target();
-
-    let summary = run_single_target_once(&target, &q, &c, &l, &poller);
-
-    // The poll must count as applied (DB committed).
-    assert_eq!(
-        summary.polls_applied, 1,
-        "the committed poll must count as applied even with dual artifact warnings"
-    );
-    // Both artifact warnings must be collected — not just the first.
-    assert_eq!(
-        summary.artifact_warnings.len(),
-        2,
-        "dual artifact failure must aggregate exactly one warning per failed artifact phase: {:?}",
-        summary.artifact_warnings
-    );
-    // Verify both phases are represented.
-    let phases: Vec<_> = summary.artifact_warnings.iter().map(|w| w.phase).collect();
-    assert!(
-        phases.contains(&crate::daemon::poller::ArtifactPhase::PrCheckSnapshot),
-        "the PrCheckSnapshot phase must be among the aggregated warnings: {:?}",
-        phases
-    );
-    assert!(
-        phases.contains(&crate::daemon::poller::ArtifactPhase::PollResult),
-        "the PollResult phase must be among the aggregated warnings: {:?}",
-        phases
-    );
-    // All warnings must carry the correct run_id.
-    for warning in &summary.artifact_warnings {
-        assert_eq!(
-            warning.run_id, "run-dual",
-            "all aggregated warnings must carry the correct run_id"
-        );
-        assert!(
-            !warning.error.is_empty(),
-            "all aggregated warnings must carry a non-empty error string"
-        );
-    }
-}
-
-#[test]
-fn ready_poll_aggregates_each_failed_poll_artifact_write() {
-    let c = conn();
-    seed_external_wait(&c, "run-three-artifacts", 146);
-    let (_artifact_temp, blocked_root) = blocked_artifact_root();
-    let _env_guard = super::super::test_env::ArtifactEnvGuard::lock_and_set(&blocked_root);
-
-    let poller = ScriptedPoller::new(vec![PollClassification::ReadyToResume]);
-    let q = MockQuery { issues: vec![] };
-    let l = RepeatedSuspendLauncher;
-    let target = pollable_target();
-
-    let summary = run_single_target_once(&target, &q, &c, &l, &poller);
-
-    assert_eq!(summary.polls_applied, 1);
-    assert_eq!(
-        summary.artifact_warnings.len(),
-        3,
-        "poll-result, wait-state, and resume-decision failures must each be observable: {:?}",
-        summary.artifact_warnings
-    );
-    let phases: Vec<_> = summary
-        .artifact_warnings
-        .iter()
-        .map(|warning| warning.phase)
-        .collect();
-    for expected in [
-        crate::daemon::poller::ArtifactPhase::PollResult,
-        crate::daemon::poller::ArtifactPhase::WaitState,
-        crate::daemon::poller::ArtifactPhase::ResumeDecision,
-    ] {
-        assert!(
-            phases.contains(&expected),
-            "missing artifact phase: {expected:?}"
-        );
-    }
-    assert!(summary
-        .artifact_warnings
-        .iter()
-        .all(|warning| { warning.run_id == "run-three-artifacts" && !warning.error.is_empty() }));
-}
-
-#[test]
-fn artifact_warning_details_are_capped_per_pass_with_dropped_count() {
-    let mut summary = RunSummary::default();
-    for index in 0..(MAX_ARTIFACT_WARNING_DETAILS + 3) {
-        summary.record_artifact_warning(ArtifactWarningDetail {
-            run_id: format!("run-warning-{index}"),
-            phase: crate::daemon::poller::ArtifactPhase::PollResult,
-            error: "disk full".to_string(),
-        });
-    }
-
-    assert_eq!(
-        summary.artifact_warnings.len(),
-        MAX_ARTIFACT_WARNING_DETAILS
-    );
-    assert_eq!(summary.artifact_warnings_dropped, 3);
-    assert_eq!(
-        summary.artifact_warning_count(),
-        MAX_ARTIFACT_WARNING_DETAILS + 3
-    );
-    assert_eq!(summary.artifact_warnings[0].run_id, "run-warning-0");
-}
-
-#[test]
-fn lease_state_preserved_details_are_bounded_and_structured() {
-    let mut summary = RunSummary::default();
-    for index in 0..(MAX_LEASE_STATE_PRESERVED_DETAILS + 3) {
-        record_outcome(
-            LaunchOutcome::LeaseStatePreserved {
-                run_id: format!("run-stale-{index}"),
-                current_status: Some(LeaseStatus::ReadyToResume),
-                current_run_id: Some(format!("run-current-{index}")),
-            },
-            false,
-            &mut summary,
-        );
-    }
-
-    assert_eq!(
-        summary.lease_states_preserved,
-        MAX_LEASE_STATE_PRESERVED_DETAILS + 3
-    );
-    assert_eq!(
-        summary.lease_state_preserved_details.len(),
-        MAX_LEASE_STATE_PRESERVED_DETAILS
-    );
-    assert_eq!(summary.lease_state_preserved_details_dropped, 3);
-    assert_eq!(
-        summary.lease_state_preserved_details[0],
-        LeaseStatePreservedDetail {
-            run_id: "run-stale-0".to_string(),
-            current_status: Some(LeaseStatus::ReadyToResume),
-            current_run_id: Some("run-current-0".to_string()),
-        }
-    );
-}
-
 // ---- Issue-137: launch->wait->poll->resume lifecycle with zero/one claim fields ----
 
 /// A launcher that suspends on first launch and completes on resume, modelling
@@ -1008,26 +607,19 @@ fn run_launch_wait_poll_resume_lifecycle(
         .expect("a receipt must be persisted for the lease");
     assert_eq!(receipt.lease_id, lease.lease_id);
 
-    // Simulate the production engine persisting the external wait: the engine
-    // writes run metadata, a checkpoint, and a wait_states row before
-    // returning SuspendedExternalWait. The mock launcher cannot do this.
-    let metadata = crate::persistence::RunMetadata::new(&run_id, "wf", "cfg");
-    crate::persistence::persist_run_with_conn(&c, &metadata).unwrap();
-    crate::persistence::checkpoint::save_checkpoint_with_conn(
-        &c,
-        &crate::persistence::checkpoint::Checkpoint::new(&run_id, "watch_pr_checks"),
-    )
-    .unwrap();
-    let mut wait = WaitStateRecord::new(&run_id, "cfg");
-    wait.lease_id = Some(lease.lease_id.clone());
-    wait.repository = "o/r".to_string();
-    wait.issue_number = issue_number;
-    wait.resume_step = "watch_pr_checks".to_string();
-    crate::persistence::persist_external_wait(&c, &wait).unwrap();
+    // Simulate the production engine persisting the external wait. The mock
+    // launcher cannot do this, so persist_engine_suspended_wait writes the
+    // run metadata, checkpoint, and wait_states row.
+    persist_engine_suspended_wait(&c, &run_id, &lease.lease_id, issue_number);
 
     // Pass 2: poll classifies ready-to-resume -> resume -> complete.
-    let poller_resume = ScriptedPoller::new(vec![PollClassification::ReadyToResume]);
-    let summary2 = run_single_target_once(&target, &q, &c, &launcher, &poller_resume);
+    let summary2 = run_single_target_once(
+        &target,
+        &q,
+        &c,
+        &launcher,
+        &ScriptedPoller::new(vec![PollClassification::ReadyToResume]),
+    );
     assert_eq!(
         summary2.polls_applied, 1,
         "the external wait must be polled"
