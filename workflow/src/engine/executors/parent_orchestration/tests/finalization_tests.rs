@@ -526,6 +526,21 @@ fn idempotent_same_owner_failure_allows_side_effects() {
 
     let outcome = finish_child_launch(&state, &mut context, &query, &conn, completion).unwrap();
     assert_eq!(outcome, StepOutcome::Fixable);
+    assert_eq!(
+        query.take(),
+        vec![
+            RecordedGithubOperation::RemoveLabel {
+                number: child,
+                label: state.luther_label.clone(),
+            },
+            RecordedGithubOperation::CommentIssue {
+                number: state.parent_issue_number,
+                body: format!(
+                    "Parent orchestration is paused because child issue #{child} reached a terminal failed workflow state."
+                ),
+            },
+        ]
+    );
 
     // Side effects ARE applied on an idempotent same-owner match.
     let launch_path = state.artifact_root.join("child-run-launch.json");

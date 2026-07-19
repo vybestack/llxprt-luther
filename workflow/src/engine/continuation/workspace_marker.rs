@@ -421,19 +421,30 @@ fn marker_identity_changed(before: &std::fs::Metadata, after: &std::fs::Metadata
 }
 
 /// Revalidate the workspace root identity after canonicalization: re-check the
-/// original path is not a symlink (closing the TOCTOU window between the initial
-/// `reject_symlinked_workspace_root` and the canonicalize call) and confirm the
-/// observed path resolves to the same inode as the canonical root. This detects
-/// a swap of the workspace root for a symlink or a different directory that
-/// occurred between the initial check and now. Fails closed on any change.
-fn revalidate_workspace_root_identity(
+/// original path is not a symlink or non-directory (closing the TOCTOU window
+/// between the initial `reject_symlinked_workspace_root` and the canonicalize
+/// call) and confirm the observed path resolves to the same inode as the
+/// canonical root. This detects a swap of the workspace root for a symlink or a
+/// different directory that occurred between the initial check and now. Fails
+/// closed on any change.
+///
+/// The observed path is inspected with `symlink_metadata` so a TOCTOU swap to a
+/// symlink is observed on this exact snapshot rather than being silently
+/// followed to its target by `metadata`. Critically, a symlink that resolves
+/// back to the canonical root would be followed by `metadata` and compare equal
+/// to the canonical root's inode — silently passing. Using `symlink_metadata`
+/// observes the link itself, so the symlink is rejected before the identity
+/// comparison.
+pub(super) fn revalidate_workspace_root_identity(
     observed_workspace: &Path,
     canonical_workspace: &Path,
 ) -> Option<String> {
-    if let Some(reason) = reject_symlinked_workspace_root(observed_workspace) {
-        return Some(reason);
-    }
-    let observed_meta = match std::fs::metadata(observed_workspace) {
+    // Snapshot the observed path with symlink_metadata so a TOCTOU swap to a
+    // symlink (including a symlink that resolves back to the canonical root)
+    // is observed as a symlink on this snapshot rather than followed to its
+    // target by `metadata`. A symlink followed to the canonical root would
+    // otherwise compare equal to the canonical root and silently pass.
+    let observed_meta = match std::fs::symlink_metadata(observed_workspace) {
         Ok(meta) => meta,
         Err(err) => {
             return Some(format!(
@@ -441,6 +452,18 @@ fn revalidate_workspace_root_identity(
             ));
         }
     };
+    if observed_meta.file_type().is_symlink() {
+        return Some(format!(
+            "workspace root became a symlink during verification: {observed_display}",
+            observed_display = observed_workspace.display()
+        ));
+    }
+    if !observed_meta.is_dir() {
+        return Some(format!(
+            "workspace root is not a directory during verification: {observed_display}",
+            observed_display = observed_workspace.display()
+        ));
+    }
     let canonical_meta = match std::fs::symlink_metadata(canonical_workspace) {
         Ok(meta) => meta,
         Err(err) => {

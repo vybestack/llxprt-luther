@@ -27,6 +27,8 @@ mod paths;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod transaction_tests;
 
 pub use lease_finalization::finish_lease_after_result;
 pub use paths::{DaemonPathBases, PerRunPaths};

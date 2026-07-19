@@ -10,7 +10,8 @@
 use rusqlite::Connection;
 
 use crate::persistence::leases::{
-    update_lease_status_conditional_outcome, ConditionalLeaseStatusOutcome, LeaseStatus,
+    update_lease_status_conditional, update_lease_status_conditional_outcome,
+    ConditionalLeaseStatusOutcome, LeaseStatus,
 };
 
 use super::{LaunchOutcome, WorkflowLaunchResult};
@@ -157,13 +158,24 @@ fn finalize_terminal_lease(
 /// The engine may have committed `WaitingExternal` before the error (e.g. it
 /// persisted the wait state, then the launch wrapper hit a downstream
 /// failure). We must neither strand capacity by leaving a `Running` lease nor
-/// mark a genuinely waiting run `Failed`. The complete invariant check
-/// (`has_pollable_external_wait`) verifies that run status, wait row, and
-/// lease are all consistently `WaitingExternal`. If the check itself fails
-/// (DB or decode error), compensate to `Failed` rather than propagating — a
-/// `Running` lease is never an acceptable terminal state. The invariant-check
-/// error itself is logged as a diagnostic but does not propagate; the
-/// authoritative compensation write that follows propagates via `?`.
+/// mark a genuinely waiting run `Failed`.
+///
+/// The complete invariant check (`has_pollable_external_wait`) verifies that
+/// run status, wait row, and lease are all consistently `WaitingExternal`. If
+/// the check itself fails (DB or decode error), compensate to `Failed` rather
+/// than propagating — a `Running` lease is never an acceptable terminal state.
+/// The invariant-check error itself is logged as a diagnostic but does not
+/// propagate; the authoritative compensation write that follows propagates via
+/// `?`.
+///
+/// **Atomicity (F3):** The invariant inspection and the compensation
+/// conditional write execute under a single SQLite `IMMEDIATE` transaction so
+/// no concurrent writer (e.g. the poller advancing the lease or classifying it
+/// ready) can change the observed state between the read and the write. This
+/// closes the TOCTOU window that existed when the read and the write ran in
+/// separate transactions. A complete `WaitingExternal` invariant is preserved
+/// (kept waiting); an exact-owner `Running` lease or an incomplete
+/// `WaitingExternal` invariant is compensated to `Failed`.
 ///
 /// Every branch uses a conditional lease update so the poller's concurrent
 /// terminal or ready classification cannot be overwritten by this stale
@@ -179,42 +191,82 @@ fn compensate_lease_after_launch_error(
     error: &str,
 ) -> Result<LaunchOutcome, rusqlite::Error> {
     eprintln!("workflow launch failed for run {run_id}: {error}");
-    let (target_status, applied_outcome) = match crate::persistence::has_pollable_external_wait(
-        conn, run_id,
-    ) {
-        Ok(true) => (
-            LeaseStatus::WaitingExternal,
-            LaunchOutcome::WaitingExternal {
-                run_id: run_id.to_string(),
-            },
-        ),
-        Ok(false) => (LeaseStatus::Failed, launched(run_id, false)),
+    // F3: the invariant inspection and the compensation write execute under
+    // one IMMEDIATE transaction so a concurrent poller cannot change the
+    // observed state between the read and the write. A SELECT error (e.g. a
+    // dropped table) does not abort a SQLite transaction, so the compensation
+    // write can still proceed in the same transaction.
+    let tx = rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?;
+    let target_status = match crate::persistence::has_pollable_external_wait(&tx, run_id) {
+        Ok(true) => LeaseStatus::WaitingExternal,
+        Ok(false) => LeaseStatus::Failed,
         Err(check_error) => {
             eprintln!(
                 "external-wait invariant check failed for run {run_id}, compensating lease to Failed: {check_error}"
             );
-            (LeaseStatus::Failed, launched(run_id, false))
+            LeaseStatus::Failed
         }
     };
-
-    match update_lease_status_conditional_outcome(
-        conn,
+    let applied = update_lease_status_conditional(
+        &tx,
         lease_id,
         target_status,
         &[LeaseStatus::Running, LeaseStatus::WaitingExternal],
         Some(run_id),
         Some(run_id),
-    )? {
-        ConditionalLeaseStatusOutcome::Applied => Ok(applied_outcome),
-        ConditionalLeaseStatusOutcome::Rejected {
-            current_status,
-            current_run_id,
-        } => Ok(LaunchOutcome::LeaseStatePreserved {
-            run_id: run_id.to_string(),
-            current_status: Some(current_status),
-            current_run_id,
-        }),
-        ConditionalLeaseStatusOutcome::Missing => Ok(LaunchOutcome::LeaseStatePreserved {
+    )?;
+    let outcome = if applied {
+        match target_status {
+            LeaseStatus::WaitingExternal => LaunchOutcome::WaitingExternal {
+                run_id: run_id.to_string(),
+            },
+            _ => launched(run_id, false),
+        }
+    } else {
+        classify_rejected_or_missing(&tx, lease_id, run_id)?
+    };
+    tx.commit()?;
+    Ok(outcome)
+}
+
+/// Classify a rejected/missing lease within the caller's transaction.
+///
+/// Reads the durable lease row to distinguish a rejection (the lease exists
+/// but its status/owner did not match the expected set) from a missing lease.
+/// This mirrors [`update_lease_status_conditional_outcome`]'s classification
+/// but runs inside the caller's already-open transaction so the read is
+/// serialized with the conditional write that preceded it.
+///
+/// [`update_lease_status_conditional_outcome`]: crate::persistence::leases::update_lease_status_conditional_outcome
+fn classify_rejected_or_missing(
+    tx: &rusqlite::Transaction<'_>,
+    lease_id: &str,
+    run_id: &str,
+) -> Result<LaunchOutcome, rusqlite::Error> {
+    use rusqlite::OptionalExtension;
+    let current: Option<(String, Option<String>)> = tx
+        .query_row(
+            "SELECT status, run_id FROM issue_leases WHERE lease_id = ?1",
+            rusqlite::params![lease_id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+        )
+        .optional()?;
+    match current {
+        Some((status_string, current_run_id)) => {
+            let current_status = status_string.parse::<LeaseStatus>().map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    0,
+                    rusqlite::types::Type::Text,
+                    Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, error)),
+                )
+            })?;
+            Ok(LaunchOutcome::LeaseStatePreserved {
+                run_id: run_id.to_string(),
+                current_status: Some(current_status),
+                current_run_id,
+            })
+        }
+        None => Ok(LaunchOutcome::LeaseStatePreserved {
             run_id: run_id.to_string(),
             current_status: None,
             current_run_id: None,

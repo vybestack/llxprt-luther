@@ -120,6 +120,13 @@ impl StepContext {
     /// payload cannot inject disallowed keys (tokens, shell output, etc.) into
     /// the live context. Malformed JSON values fail closed with the underlying
     /// serde error rather than silently substituting an empty context.
+    ///
+    /// An allowlisted top-level checkpoint key with a non-string value (e.g. a
+    /// JSON number for `issue_number`) fails closed: `checkpoint_values` only
+    /// ever produces strings for allowlisted keys, so a non-string value is a
+    /// corruption signal that must be rejected rather than silently dropped.
+    /// Malformed values under disallowed keys are still ignored, so a
+    /// corrupted persisted payload cannot poison the restore path.
     pub fn restore_checkpoint_values(
         &mut self,
         mut values: HashMap<String, serde_json::Value>,
@@ -142,9 +149,12 @@ impl StepContext {
         }
         for (key, value) in values {
             if is_checkpointable_context_key(&key) {
-                if let Some(value) = value.as_str() {
-                    self.variables.insert(key, value.to_string());
-                }
+                let restored = value.as_str().ok_or_else(|| {
+                    serde::de::Error::custom(format!(
+                        "checkpoint value for allowlisted key '{key}' is not a string"
+                    ))
+                })?;
+                self.variables.insert(key, restored.to_string());
             }
         }
         Ok(())
@@ -784,5 +794,97 @@ mod tests {
             result.is_err(),
             "malformed __namespaced_vars must fail closed, got: {result:?}"
         );
+    }
+
+    #[test]
+    fn restore_checkpoint_values_rejects_non_string_allowlisted_top_level_value() {
+        // An allowlisted top-level checkpoint key (e.g. `issue_number`) must
+        // only ever carry a string value: `checkpoint_values` only produces
+        // strings for allowlisted keys. A non-string value (e.g. a JSON number)
+        // is a corruption signal and must fail closed rather than be silently
+        // dropped — otherwise a corrupted persisted payload could cause a run
+        // to resume with a missing identity anchor.
+        let mut payload: HashMap<String, serde_json::Value> = HashMap::new();
+        payload.insert(
+            "issue_number".to_string(),
+            serde_json::Value::Number(serde_json::Number::from(42u64)),
+        );
+
+        let mut context =
+            StepContext::new(PathBuf::from("/tmp/work"), "run-non-string".to_string());
+        let result = context.restore_checkpoint_values(payload);
+        let error = result
+            .expect_err("a non-string value for an allowlisted checkpoint key must fail closed");
+        assert!(
+            error.to_string().contains("issue_number"),
+            "error should name the offending key, got: {error}"
+        );
+        assert!(
+            error.to_string().contains("not a string"),
+            "error should explain the value is not a string, got: {error}"
+        );
+        // No partial restore: the corrupted key must not enter the live context.
+        assert!(context.get("issue_number").is_none());
+    }
+
+    #[test]
+    fn restore_checkpoint_values_still_ignores_malformed_disallowed_keys() {
+        // A malformed value under a *disallowed* key must still be ignored, so
+        // a corrupted persisted payload cannot poison the restore path. Only
+        // allowlisted keys are validated for type; disallowed keys are dropped
+        // before any type check.
+        let mut payload: HashMap<String, serde_json::Value> = HashMap::new();
+        payload.insert(
+            "github_token".to_string(),
+            serde_json::Value::Number(serde_json::Number::from(42u64)),
+        );
+        payload.insert(
+            "issue_number".to_string(),
+            serde_json::Value::String("137".into()),
+        );
+
+        let mut context =
+            StepContext::new(PathBuf::from("/tmp/work"), "run-disallowed".to_string());
+        context
+            .restore_checkpoint_values(payload)
+            .expect("malformed disallowed keys must not fail the restore");
+
+        // Allowlisted key is restored; disallowed key is dropped silently.
+        assert_eq!(context.get("issue_number").map(String::as_str), Some("137"));
+        assert!(context.get("github_token").is_none());
+    }
+
+    #[test]
+    fn restore_checkpoint_values_rejects_non_string_for_each_allowlisted_key() {
+        // Every allowlisted top-level checkpoint key must reject a non-string
+        // value, so the fail-closed behavior is uniform across the allowlist.
+        for key in [
+            "primary_issue_number",
+            "issue_title",
+            "pr_number",
+            "owner",
+            "repo",
+            "repository",
+            "current_branch",
+            "base_branch",
+            "existing_pr_number",
+            "head_ref",
+            "head_sha",
+            "base_ref",
+            "base_sha",
+        ] {
+            let mut payload: HashMap<String, serde_json::Value> = HashMap::new();
+            payload.insert(
+                key.to_string(),
+                serde_json::Value::Number(serde_json::Number::from(42u64)),
+            );
+            let mut context =
+                StepContext::new(PathBuf::from("/tmp/work"), "run-each-key".to_string());
+            let result = context.restore_checkpoint_values(payload);
+            assert!(
+                result.is_err(),
+                "non-string value for allowlisted key '{key}' must fail closed, got: {result:?}"
+            );
+        }
     }
 }

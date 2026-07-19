@@ -725,3 +725,226 @@ fn finalize_lease_failure_idempotent_when_already_failed() {
     assert_eq!(finalized.run_id.as_deref(), Some(run_id));
     let _ = lease;
 }
+
+// --- post-run maintenance independence (persistence failure cannot leave
+//     the continuation lease Running or suppress artifacts) ---
+
+/// Drop the `runs` table so subsequent `persist_run_with_conn` calls fail with
+/// a SQL error, simulating an unrecoverable persistence failure.
+fn break_runs_table(store: &SqliteStore) {
+    store
+        .conn()
+        .execute("DROP TABLE runs", rusqlite::params![])
+        .expect("drop runs table");
+}
+
+/// A runner engine error used to drive `persist_continuation_failure`.
+fn sample_engine_error() -> luther_workflow::engine::runner::EngineError {
+    luther_workflow::engine::runner::EngineError::StepExecutionError {
+        step_id: "remediate".to_string(),
+        message: "agent crashed".to_string(),
+    }
+}
+
+#[test]
+fn persist_continuation_failure_returns_err_when_persistence_fails() {
+    // When the durable store rejects the failure-state write, the function must
+    // surface the error as `Err` rather than exiting, so the caller can still
+    // attempt lease finalization and artifact writing.
+    let store = lease_store();
+    let run_id = "persist-fail-run";
+    let md = issue_metadata(run_id, 300);
+    persist_run_with_conn(store.conn(), &md).expect("seed run");
+
+    break_runs_table(&store);
+
+    let error = sample_engine_error();
+    let result = persist_continuation_failure(&store, run_id, &error);
+    let diagnostic = result.expect_err("persistence failure must be surfaced");
+    assert!(
+        diagnostic.contains("failed to load continuation failure state"),
+        "expected load diagnostic, got: {diagnostic}"
+    );
+    assert!(
+        diagnostic.contains(run_id),
+        "diagnostic must reference the run id"
+    );
+}
+
+#[test]
+fn persist_continuation_failure_returns_err_when_run_missing() {
+    // A missing run record must surface as `Err` (not exit), allowing the
+    // caller to continue with lease finalization and artifact writing.
+    let store = lease_store();
+    let error = sample_engine_error();
+    let diagnostic = persist_continuation_failure(&store, "never-existed", &error)
+        .expect_err("missing run must surface an error");
+    assert!(
+        diagnostic.contains("missing run metadata"),
+        "expected missing-metadata diagnostic, got: {diagnostic}"
+    );
+}
+
+#[test]
+fn persist_continuation_failure_marks_run_failed_on_success() {
+    // On the happy path, the run record is flipped to Failed and persisted.
+    let store = lease_store();
+    let run_id = "persist-ok-run";
+    let mut md = issue_metadata(run_id, 301);
+    md.status = RunStatus::Running;
+    persist_run_with_conn(store.conn(), &md).expect("seed run");
+
+    let error = sample_engine_error();
+    persist_continuation_failure(&store, run_id, &error).expect("happy path persists failure");
+
+    let persisted = get_run_with_conn(store.conn(), run_id)
+        .expect("query")
+        .expect("run present");
+    assert_eq!(persisted.status, RunStatus::Failed);
+}
+
+#[test]
+fn post_run_persistence_failure_does_not_block_lease_finalization() {
+    // This is the core invariant of the fix: even when persisting the
+    // failed-state fails, lease finalization must still be attempted (and
+    // succeed), so the continuation lease is never left stuck in `Running`.
+    // We simulate the post-run maintenance flow from `commit_and_execute`:
+    // collect maintenance errors independently, then assert the lease was
+    // finalized despite the persistence failure.
+    let store = lease_store();
+    let run_id = "post-run-persist-fail";
+    let lease = seed_running_lease(&store, run_id, 310);
+    let mut md = issue_metadata(run_id, 310);
+    md.status = RunStatus::Running;
+    persist_run_with_conn(store.conn(), &md).expect("seed run");
+
+    // Simulate the runner erroring and the durable store rejecting the write.
+    break_runs_table(&store);
+
+    let outcome: Result<RunOutcome, luther_workflow::engine::runner::EngineError> =
+        Err(sample_engine_error());
+
+    // Mirror the independent-action ordering introduced in commit_and_execute.
+    let mut maintenance_errors: Vec<String> = Vec::new();
+    if let Err(ref error) = outcome {
+        if let Err(maintenance_error) = persist_continuation_failure(&store, run_id, error) {
+            maintenance_errors.push(maintenance_error);
+        }
+    }
+    // Lease finalization is attempted regardless of the persistence failure.
+    // Note: the `runs` table is dropped, but `issue_leases` is intact, so
+    // finalization can still succeed for the plain Err -> Failed mapping (it
+    // does not load run metadata for the Err branch).
+    if let Err(error) = finalize_continuation_lease(&store, &md, run_id, &outcome) {
+        maintenance_errors.push(format!("failed to finalize continuation lease: {error}"));
+    }
+
+    // The persistence failure must be reported, but lease finalization must
+    // have succeeded (no lease error aggregated).
+    assert_eq!(
+        maintenance_errors.len(),
+        1,
+        "expected exactly the persistence failure, got: {maintenance_errors:?}"
+    );
+    assert!(
+        maintenance_errors[0].contains("failed to load continuation failure state"),
+        "expected load diagnostic, got: {}",
+        maintenance_errors[0]
+    );
+
+    // The lease must have transitioned out of Running to Failed despite the
+    // persistence failure.
+    let finalized = get_lease_for_issue(store.conn(), "o/r", 310)
+        .expect("query")
+        .expect("lease present");
+    assert_eq!(finalized.status, LeaseStatus::Failed);
+    assert_eq!(finalized.run_id.as_deref(), Some(run_id));
+    let _ = lease;
+}
+
+#[test]
+fn post_run_aggregates_multiple_maintenance_failures() {
+    // When both persistence and lease finalization fail, both errors must be
+    // aggregated and reported distinctly (neither suppresses the other).
+    let store = lease_store();
+    let run_id = "multi-maintenance-fail";
+    let lease = seed_running_lease(&store, run_id, 311);
+    let mut md = issue_metadata(run_id, 311);
+    md.status = RunStatus::Running;
+    persist_run_with_conn(store.conn(), &md).expect("seed run");
+
+    // Break persistence (drops `runs`) and pre-advance the lease to a status
+    // outside the expected set so finalization also fails. Recreate a minimal
+    // `runs` table-less state: persistence will fail on the missing table, and
+    // the lease is transitioned to Completed (not in expectedstatuses for an
+    // Err outcome which maps to Failed).
+    break_runs_table(&store);
+    update_lease_status(
+        store.conn(),
+        &lease.lease_id,
+        LeaseStatus::Completed,
+        Some(run_id),
+    )
+    .expect("drift lease status");
+
+    let outcome: Result<RunOutcome, luther_workflow::engine::runner::EngineError> =
+        Err(sample_engine_error());
+
+    let mut maintenance_errors: Vec<String> = Vec::new();
+    if let Err(ref error) = outcome {
+        if let Err(maintenance_error) = persist_continuation_failure(&store, run_id, error) {
+            maintenance_errors.push(maintenance_error);
+        }
+    }
+    if let Err(error) = finalize_continuation_lease(&store, &md, run_id, &outcome) {
+        maintenance_errors.push(format!("failed to finalize continuation lease: {error}"));
+    }
+
+    assert_eq!(
+        maintenance_errors.len(),
+        2,
+        "expected both maintenance failures aggregated, got: {maintenance_errors:?}"
+    );
+    assert!(
+        maintenance_errors[0].contains("failed to load continuation failure state"),
+        "first error should be the persistence failure: {}",
+        maintenance_errors[0]
+    );
+    assert!(
+        maintenance_errors[1].contains("failed to finalize continuation lease"),
+        "second error should be the lease finalization failure: {}",
+        maintenance_errors[1]
+    );
+
+    // `report_aggregated_maintenance_errors` must emit both distinctly and not
+    // panic / exit. (Stderr side effects are exercised but not asserted.)
+    report_aggregated_maintenance_errors(run_id, &maintenance_errors);
+}
+
+#[test]
+fn report_aggregated_maintenance_errors_handles_empty_and_populated() {
+    // No errors: the function is a no-op (must not print a header).
+    report_aggregated_maintenance_errors("none-run", &[]);
+    // Multiple errors: each is reported distinctly with a count header.
+    let errors = vec![
+        "failed to persist continuation failure for 'x': boom".to_string(),
+        "failed to finalize continuation lease: drifted".to_string(),
+    ];
+    report_aggregated_maintenance_errors("multi-run", &errors);
+}
+
+#[test]
+fn continuation_outcome_exit_code_is_zero_for_success() {
+    let outcome: Result<RunOutcome, luther_workflow::engine::runner::EngineError> =
+        Ok(RunOutcome::Success);
+    let code = continuation_outcome_exit_code("ok-run", "step", &outcome);
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn continuation_outcome_exit_code_is_one_for_runner_error() {
+    let outcome: Result<RunOutcome, luther_workflow::engine::runner::EngineError> =
+        Err(sample_engine_error());
+    let code = continuation_outcome_exit_code("err-run", "step", &outcome);
+    assert_eq!(code, 1);
+}

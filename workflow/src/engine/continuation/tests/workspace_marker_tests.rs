@@ -739,3 +739,70 @@ fn write_fails_after_root_replaced_with_symlink() {
     assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
     assert!(err.to_string().contains("symlink"));
 }
+
+/// Regression: a TOCTOU swap of the workspace root to a symlink that resolves
+/// *back to the canonical root* must be rejected. The earlier implementation
+/// revalidated with `metadata`, which follows symlinks. A symlink whose target
+/// is the canonical root itself would be followed, compare equal to the
+/// canonical root's inode, and silently pass. The fix uses `symlink_metadata`
+/// on the observed path so the symlink is observed on the snapshot before any
+/// identity comparison. This test constructs exactly that adversarial swap:
+/// after a successful verify on the real root, the observed path is replaced
+/// with a symlink to the canonical root, and verify must reject it.
+#[cfg(unix)]
+#[test]
+fn verify_rejects_symlink_to_canonical_root_swap() {
+    let real = tempfile::tempdir().expect("real workspace");
+    let run_id = "run-symlink-to-canonical";
+    write_workspace_owner_marker(real.path(), run_id).expect("write to real root");
+    // Baseline: the real root verifies successfully.
+    assert!(verify_workspace_ownership_marker(real.path(), run_id).is_none());
+
+    // Canonicalize the real root so we can build a symlink that resolves back
+    // to the canonical path, then swap the observed path for that symlink.
+    let canonical = real
+        .path()
+        .canonicalize()
+        .expect("canonicalize real workspace");
+    // Replace the observed workspace path with a symlink to the canonical root.
+    // `write_workspace_owner_marker`/`verify_workspace_ownership_marker` take
+    // `&Path`, so to model an in-place TOCTOU swap of the path the caller
+    // supplied, we create a symlink that points back at the canonical root and
+    // verify through it. Because the symlink resolves to the canonical root,
+    // `metadata` would follow it and compare equal to the canonical root — the
+    // exact regression this test guards against. `symlink_metadata` observes
+    // the symlink on the snapshot and rejects.
+    let link_parent = tempfile::tempdir().expect("link parent");
+    let symlink_to_canonical = link_parent.path().join("ws-symlink-to-canonical");
+    std::os::unix::fs::symlink(&canonical, &symlink_to_canonical).unwrap();
+
+    let reason = verify_workspace_ownership_marker(&symlink_to_canonical, run_id);
+    assert!(
+        reason.is_some(),
+        "verify through a symlinked root must fail even when the symlink resolves to the canonical root"
+    );
+    let detail = reason.unwrap();
+    assert!(
+        detail.contains("symlink"),
+        "expected symlink rejection, got: {detail}"
+    );
+}
+
+/// Regression for the same TOCTOU fix applied to the directory-type revalidate:
+/// if the observed workspace root is replaced with a non-directory entry during
+/// verification, the snapshot observed via `symlink_metadata` must reject it.
+#[cfg(unix)]
+#[test]
+fn verify_rejects_non_directory_workspace_root() {
+    // Build a regular-file path and attempt to verify it: a regular file is not
+    // a directory and must be rejected by the post-canonicalize revalidate.
+    let file_parent = tempfile::tempdir().expect("file parent");
+    let file_workspace = file_parent.path().join("ws-file");
+    std::fs::write(&file_workspace, b"not-a-directory").expect("write file");
+
+    let reason = verify_workspace_ownership_marker(&file_workspace, "run-non-dir");
+    assert!(
+        reason.is_some(),
+        "verify through a non-directory workspace root must fail"
+    );
+}

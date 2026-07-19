@@ -446,17 +446,32 @@ pub fn commit_and_execute(
     );
     install_interrupt_handlers(runner.interrupt_handle());
     let outcome = runner.run();
+    // Post-run maintenance is performed independently so a failure in one
+    // action cannot skip or suppress the others. Concretely, a persistence
+    // failure while recording the failed-state must not leave the continuation
+    // lease stuck in `Running` nor suppress the result artifact. Maintenance
+    // errors are aggregated and reported after all actions are attempted.
+    // @plan:PLAN-20260623-LUTHER-CONTINUATION
+    let mut maintenance_errors: Vec<String> = Vec::new();
     if let Err(ref error) = outcome {
-        persist_continuation_failure(store, &request.run_id, error);
+        if let Err(maintenance_error) = persist_continuation_failure(store, &request.run_id, error)
+        {
+            maintenance_errors.push(maintenance_error);
+        }
     }
     write_continuation_result(&plan.artifact_dir, &request.kind, &step, &outcome);
     if continuation_had_lease {
         if let Err(error) = finalize_continuation_lease(store, md, &request.run_id, &outcome) {
-            eprintln!("Error: failed to finalize continuation lease: {error}");
-            process::exit(1);
+            maintenance_errors.push(format!("failed to finalize continuation lease: {error}"));
         }
     }
-    report_continuation_outcome(&request.run_id, &step, outcome);
+    report_aggregated_maintenance_errors(&request.run_id, &maintenance_errors);
+    report_continuation_outcome(
+        &request.run_id,
+        &step,
+        outcome,
+        !maintenance_errors.is_empty(),
+    );
 }
 
 fn reconstruct_runner_or_exit(
@@ -487,35 +502,54 @@ fn commit_continuation_or_exit(
     }
 }
 
-fn persist_continuation_failure(store: &SqliteStore, run_id: &str, error: &impl std::fmt::Display) {
+/// Persist the failed-state metadata for a continuation run that errored.
+///
+/// Returns `Err(diagnostic)` when the run metadata cannot be loaded, is
+/// missing, or cannot be persisted back. Returning an error (rather than
+/// exiting) lets the caller attempt the remaining maintenance actions —
+/// result artifact writing and lease finalization — so a persistence failure
+/// cannot leave the continuation lease stuck in `Running` or suppress the
+/// result artifact. @plan:PLAN-20260623-LUTHER-CONTINUATION
+fn persist_continuation_failure(
+    store: &SqliteStore,
+    run_id: &str,
+    error: &impl std::fmt::Display,
+) -> Result<(), String> {
     eprintln!(
         "Run '{}' stopped after continuation error without rolling back durable progress: {error}",
         run_id
     );
     let mut current = luther_workflow::persistence::get_run_with_conn(store.conn(), run_id)
-        .unwrap_or_else(|persist_error| {
-            eprintln!(
-                "Error: failed to load continuation failure state for '{}': {persist_error}",
-                run_id
-            );
-            process::exit(1);
-        })
-        .unwrap_or_else(|| {
-            eprintln!(
-                "Error: missing run metadata while persisting continuation failure for '{}'",
-                run_id
-            );
-            process::exit(1);
-        });
+        .map_err(|persist_error| {
+            format!("failed to load continuation failure state for '{run_id}': {persist_error}")
+        })?
+        .ok_or_else(|| {
+            format!("missing run metadata while persisting continuation failure for '{run_id}'")
+        })?;
     current.mark_failed();
-    if let Err(persist_error) =
-        luther_workflow::persistence::persist_run_with_conn(store.conn(), &current)
-    {
-        eprintln!(
-            "Error: failed to persist continuation failure for '{}': {persist_error}",
-            run_id
-        );
-        process::exit(1);
+    luther_workflow::persistence::persist_run_with_conn(store.conn(), &current).map_err(
+        |persist_error| {
+            format!("failed to persist continuation failure for '{run_id}': {persist_error}")
+        },
+    )
+}
+
+/// Report aggregated post-run maintenance errors (failed-state persistence,
+/// lease finalization) to stderr. Each error is printed distinctly so the
+/// operator can diagnose every failure even when multiple actions failed.
+/// This never exits: the continuation outcome is reported afterwards so the
+/// process exit code reflects the run result rather than the first
+/// maintenance failure. @plan:PLAN-20260623-LUTHER-CONTINUATION
+fn report_aggregated_maintenance_errors(run_id: &str, errors: &[String]) {
+    if errors.is_empty() {
+        return;
+    }
+    eprintln!(
+        "Error: {count} post-run maintenance failure(s) for continuation run '{run_id}':",
+        count = errors.len()
+    );
+    for error in errors {
+        eprintln!("  - {error}");
     }
 }
 
@@ -542,37 +576,60 @@ pub fn write_continuation_result(
 }
 
 /// Print a human summary of a continuation run and exit with its code.
+///
+/// When `maintenance_failed` is true, the exit code is escalated to non-zero
+/// so that a post-run maintenance failure (e.g. lease finalization) is never
+/// silently masked by a successful outcome code. The outcome summary is still
+/// printed so outcome reporting remains independent of maintenance status.
 /// @plan:PLAN-20260623-LUTHER-CONTINUATION
 pub fn report_continuation_outcome(
     run_id: &str,
     step: &str,
     outcome: Result<RunOutcome, luther_workflow::engine::runner::EngineError>,
+    maintenance_failed: bool,
 ) {
+    let code = continuation_outcome_exit_code(run_id, step, &outcome);
+    process::exit(if maintenance_failed && code == 0 {
+        1
+    } else {
+        code
+    });
+}
+
+/// Print the human summary for a continuation outcome and return its exit code
+/// without exiting. Split from [`report_continuation_outcome`] so callers can
+/// escalate the exit code after aggregating maintenance failures.
+/// @plan:PLAN-20260623-LUTHER-CONTINUATION
+fn continuation_outcome_exit_code(
+    run_id: &str,
+    step: &str,
+    outcome: &Result<RunOutcome, luther_workflow::engine::runner::EngineError>,
+) -> i32 {
     match outcome {
         Ok(RunOutcome::Success) => {
             println!("Run '{run_id}' completed after continuation.");
-            process::exit(0);
+            0
         }
         Ok(RunOutcome::WaitingExternal { step_id, reason }) => {
             println!("Run '{run_id}' is waiting at '{step_id}': {reason}");
             println!("Resume with: luther-workflow runs resume {run_id}");
-            process::exit(0);
+            0
         }
         Ok(RunOutcome::Interrupted { step_id }) => {
             println!("Run '{run_id}' interrupted at '{step_id}' (can be resumed).");
-            process::exit(130);
+            130
         }
         Ok(RunOutcome::Abandoned { step_id, reason }) => {
             eprintln!("Run '{run_id}' abandoned at '{step_id}': {reason}");
-            process::exit(1);
+            1
         }
         Ok(RunOutcome::Failure { step_id, reason }) => {
             eprintln!("Run '{run_id}' failed at '{step_id}': {reason}");
-            process::exit(1);
+            1
         }
         Err(e) => {
             eprintln!("Run '{run_id}' continuation from '{step}' errored: {e}");
-            process::exit(1);
+            1
         }
     }
 }
