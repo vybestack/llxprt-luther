@@ -259,6 +259,7 @@ fn luther_dir_is_claimable(path: &Path, run_id: &str) -> std::io::Result<bool> {
 }
 
 fn workspace_is_owned_after_claim(workspace: &Path, run_id: &str) -> std::io::Result<bool> {
+    inspect_existing_marker(&workspace_owner_marker_path(workspace), run_id)?;
     for entry in std::fs::read_dir(workspace)? {
         let entry = entry?;
         if entry.file_name() != ".luther" {

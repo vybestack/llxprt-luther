@@ -3531,10 +3531,16 @@ fn install_setup_test_commands(fake_bin: &std::path::Path, global_config: &std::
     let mut permissions = std::fs::metadata(&fake_gh).unwrap().permissions();
     permissions.set_mode(0o755);
     std::fs::set_permissions(&fake_gh, permissions).unwrap();
-    let real_git = String::from_utf8(Command::new("which").arg("git").output().unwrap().stdout)
-        .unwrap()
-        .trim()
-        .to_string();
+    let real_git = String::from_utf8(
+        Command::new("sh")
+            .args(["-c", "command -v git"])
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap()
+    .trim()
+    .to_string();
     let fake_git = fake_bin.join("git");
     std::fs::write(
         &fake_git,
