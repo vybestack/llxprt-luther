@@ -160,7 +160,9 @@ pub fn provision_workspace_owner_marker(workspace: &Path, run_id: &str) -> std::
             Err(error)
                 if matches!(
                     error.kind(),
-                    std::io::ErrorKind::NotFound | std::io::ErrorKind::AlreadyExists
+                    std::io::ErrorKind::NotFound
+                        | std::io::ErrorKind::AlreadyExists
+                        | std::io::ErrorKind::InvalidData
                 ) =>
             {
                 if inspect_existing_marker(&workspace_owner_marker_path(workspace), run_id).is_ok()
