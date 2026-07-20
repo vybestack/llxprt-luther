@@ -121,18 +121,41 @@ fn invalid_repo_fails_with_repo_variable_name() {
 }
 
 #[test]
-fn shell_unsafe_repo_fails_validation() {
+fn repo_override_validates_github_slug_boundaries() {
+    let mut config = test_config();
+    apply_target_profile_overrides(
+        &mut config,
+        &TargetProfileOverrides {
+            repo: Some("valid-owner/repo_name.with-dashes".to_string()),
+            ..TargetProfileOverrides::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        config.variables["target_repo"],
+        "valid-owner/repo_name.with-dashes"
+    );
+    assert_eq!(config.variables["repository_owner"], "valid-owner");
+    assert_eq!(config.variables["repository_name"], "repo_name.with-dashes");
+
     for repo in [
         "owner/repo'$(touch-pwned)",
         "owner/repo name",
         " owner/repo",
+        "dotted.owner/repo",
+        "/repo",
+        "owner/",
+        "owner/repo/extra",
     ] {
         let mut config = test_config();
-        let overrides = TargetProfileOverrides {
-            repo: Some(repo.to_string()),
-            ..TargetProfileOverrides::default()
-        };
-        let error = apply_target_profile_overrides(&mut config, &overrides).unwrap_err();
+        let error = apply_target_profile_overrides(
+            &mut config,
+            &TargetProfileOverrides {
+                repo: Some(repo.to_string()),
+                ..TargetProfileOverrides::default()
+            },
+        )
+        .unwrap_err();
         assert!(error.message.contains("target_repo"), "{error}");
     }
 }

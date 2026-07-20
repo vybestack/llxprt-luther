@@ -102,6 +102,10 @@ unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OB
 export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_NOSYSTEM=1
 cd "{work_dir}"
 EXPECTED_ORIGIN='https://github.com/{target_repo}.git'
+if [ -e .luther ] && { [ -L .luther ] || [ ! -d .luther ]; }; then
+  echo "Workspace ownership directory must be a real directory" >&2
+  exit 1
+fi
 if [ -f .luther/workspace-owner ] && [ ! -L .luther/workspace-owner ]; then
   if ! printf %s '{run_id}' | cmp -s - .luther/workspace-owner; then
     echo "Workspace ownership marker does not exactly match this run" >&2
@@ -113,6 +117,10 @@ elif [ "{daemon_managed_claim}" = "true" ]; then
 fi
 if [ -e .git ] && { [ -L .git ] || [ ! -d .git ]; }; then
   echo "Workspace Git metadata must be a real directory" >&2
+  exit 1
+fi
+if [ -d .git ] && find .git -type l -print -quit | grep -q .; then
+  echo "Workspace Git metadata may not contain symlinks" >&2
   exit 1
 fi
 if [ ! -d .git ] && find . -mindepth 1 -maxdepth 1 ! -name .luther -print -quit | grep -q .; then
@@ -127,14 +135,6 @@ if [ -n "$ORIGIN_URL" ] && [ "$ORIGIN_URL" != "$EXPECTED_ORIGIN" ]; then
   echo "Workspace origin does not match target repository" >&2
   exit 1
 fi
-if [ -e .luther ] && { [ -L .luther ] || [ ! -d .luther ]; }; then
-  echo "Workspace ownership directory must be a real directory" >&2
-  exit 1
-fi
-if find .git -type l -print -quit | grep -q .; then
-  echo "Workspace Git metadata may not contain symlinks" >&2
-  exit 1
-fi
 rm -f .git/config .git/objects/info/alternates
 cat > .git/config <<EOF
 [core]
@@ -142,6 +142,7 @@ cat > .git/config <<EOF
 	filemode = true
 	bare = false
 	logallrefupdates = true
+	hooksPath = /dev/null
 [remote "origin"]
 	url = $EXPECTED_ORIGIN
 	fetch = +refs/heads/*:refs/remotes/origin/*
@@ -160,7 +161,9 @@ else
   EXISTING_PR_NUMBER="0"
   EXISTING_PR_URL=""
 fi
-git -c core.hooksPath=/dev/null reset --hard 1>&2
+if git rev-parse --verify -q HEAD >/dev/null; then
+  git -c core.hooksPath=/dev/null reset --hard 1>&2
+fi
 if [ "$EXISTING_PR_NUMBER" != "0" ] && git rev-parse --verify origin/issue{issue_number} >/dev/null 2>&1; then
   git -c core.hooksPath=/dev/null checkout -B issue{issue_number} origin/issue{issue_number} 1>&2
 else

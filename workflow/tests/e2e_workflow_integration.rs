@@ -3520,6 +3520,7 @@ fn run_test_git(cwd: &std::path::Path, args: &[&str]) {
     );
 }
 
+#[cfg(unix)]
 fn install_setup_test_commands(fake_bin: &std::path::Path, global_config: &std::path::Path) {
     use std::os::unix::fs::PermissionsExt;
     use std::process::Command;
@@ -3550,6 +3551,7 @@ fn install_setup_test_commands(fake_bin: &std::path::Path, global_config: &std::
     std::fs::set_permissions(&fake_git, permissions).unwrap();
 }
 
+#[cfg(unix)]
 #[test]
 fn dogfood_setup_initializes_marker_owned_workspace_in_place() {
     use std::process::Command;
