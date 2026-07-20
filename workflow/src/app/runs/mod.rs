@@ -439,6 +439,7 @@ pub fn commit_and_execute(
         .unwrap_or_else(|| luther_workflow::runtime_paths::get_data_dir().join("checkpoints.db"));
     let mut runner = reconstruct_runner_or_exit(md, &request.run_id, &db_path, config_dir);
     commit_continuation_or_exit(store, request, &plan.checkpoint_identity);
+    write_committed_checkpoint_artifacts(store, request, plan, &step);
     println!(
         "Reopened run '{}' at step '{step}' (continuation: {})",
         request.run_id,
@@ -499,6 +500,50 @@ fn commit_continuation_or_exit(
     {
         eprintln!("Error: failed to reopen run '{}': {e}", request.run_id);
         process::exit(1);
+    }
+}
+fn write_committed_checkpoint_artifacts(
+    store: &SqliteStore,
+    request: &luther_workflow::engine::ContinuationRequest,
+    plan: &luther_workflow::engine::continuation::ContinuationPlan,
+    step_id: &str,
+) {
+    let current = match luther_workflow::persistence::get_checkpoint_for_step(
+        store.conn(),
+        &request.run_id,
+        step_id,
+    ) {
+        Ok(Some(checkpoint)) => checkpoint,
+        Ok(None) => {
+            eprintln!(
+                "Warning: committed continuation checkpoint for run '{}' step '{}' was not found",
+                request.run_id, step_id
+            );
+            return;
+        }
+        Err(error) => {
+            eprintln!(
+                "Warning: failed to load committed continuation checkpoint for run '{}': {error}",
+                request.run_id
+            );
+            return;
+        }
+    };
+    let artifact = luther_workflow::engine::continuation::committed_selection_artifact(
+        &plan.checkpoint_identity,
+        &current,
+    );
+    for name in ["checkpoint-selection.json", "checkpoint-commit.json"] {
+        if let Err(error) = luther_workflow::engine::continuation::write_json_artifact(
+            &plan.artifact_dir,
+            name,
+            &artifact,
+        ) {
+            eprintln!(
+                "Warning: failed to write committed continuation artifact '{}': {error}",
+                plan.artifact_dir.join(name).display()
+            );
+        }
     }
 }
 

@@ -14,11 +14,10 @@ use super::{checkpoint_identity, ContinuationKind, ContinuationRequest};
 /// Architecturally typed authorization distinguishing operator-initiated
 /// continuations from trusted-internal engine resumptions.
 ///
-/// This type exists so a non-`SAFE_RERUN_STEPS` step can be resumed by the
-/// engine only when the resumption is provably bound to an exact persisted
-/// durable wait for the same run. It is never constructable from a CLI
-/// `--force` flag, so operator safety is preserved: `Operator` authorization
-/// remains subject to every rerun-safety rule and cannot bypass `safe_step`.
+/// This type permits a non-`SAFE_RERUN_STEPS` step only when continuation is
+/// bound to an exact durable current wait for the same run. It is never
+/// constructable from a CLI `--force` flag, so ambiguous replays continue to
+/// fail closed.
 ///
 /// @plan:PLAN-20260623-LUTHER-CONTINUATION
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -27,6 +26,13 @@ pub enum ResumeAuthorization {
     /// Subject to all rerun-safety rules; `--force` does not bypass
     /// `safe_step`.
     Operator,
+    /// Operator authorization for the exact current waiting checkpoint. This
+    /// is not a generic force bypass: run status, current step, checkpoint
+    /// status, and exact identity are all revalidated transactionally.
+    OperatorCurrentWait {
+        checkpoint_identity: String,
+        run_id: String,
+    },
     /// Engine-internal authorization bound to an exact persisted waiting
     /// checkpoint identity and run. Permits resuming a valid durable wait
     /// whose step is not in `SAFE_RERUN_STEPS` without exposing a generic
@@ -52,18 +58,32 @@ impl ResumeAuthorization {
     /// @plan:PLAN-20260623-LUTHER-CONTINUATION
     fn for_resume(
         conn: &Connection,
+        metadata: &RunMetadata,
         request: &ContinuationRequest,
         checkpoint: &Checkpoint,
     ) -> ResumeAuthorization {
+        if !matches!(request.kind, ContinuationKind::Resume) {
+            return ResumeAuthorization::Operator;
+        }
+        let identity = checkpoint_identity(checkpoint);
+        if !request.trusted_internal
+            && metadata.current_step.as_deref() == Some(checkpoint.step_id.as_str())
+            && metadata.status == RunStatus::WaitingExternal
+            && checkpoint.state_snapshot.status == crate::persistence::CHECKPOINT_STATUS_WAITING
+        {
+            return ResumeAuthorization::OperatorCurrentWait {
+                checkpoint_identity: identity,
+                run_id: request.run_id.clone(),
+            };
+        }
         // TrustedInternalWait requires an explicit internal-trust capability
         // (`request.trusted_internal`) in addition to a matching durable wait
         // state. This ensures an ordinary CLI `runs resume` cannot infer
         // internal trust from durable wait state alone — only the daemon
         // launcher and parent-orchestration child-resume paths set this flag.
-        if !matches!(request.kind, ContinuationKind::Resume) || !request.trusted_internal {
+        if !request.trusted_internal {
             return ResumeAuthorization::Operator;
         }
-        let identity = checkpoint_identity(checkpoint);
         let trusted = crate::persistence::get_wait_state(conn, &request.run_id)
             .ok()
             .flatten()
@@ -85,12 +105,16 @@ impl ResumeAuthorization {
     /// Whether this authorization permits resuming `checkpoint` despite its
     /// step not being in `SAFE_RERUN_STEPS`.
     ///
-    /// Only a [`ResumeAuthorization::TrustedInternalWait`] bound to the exact
-    /// checkpoint identity and run authorizes the bypass;
-    /// [`ResumeAuthorization::Operator`] never does.
+    /// Only a typed grant bound to the exact checkpoint identity and run
+    /// authorizes the bypass. Generic [`ResumeAuthorization::Operator`]
+    /// authorization never does.
     fn permits_non_safe_rerun(&self, checkpoint: &Checkpoint) -> bool {
         match self {
-            ResumeAuthorization::TrustedInternalWait {
+            ResumeAuthorization::OperatorCurrentWait {
+                checkpoint_identity: bound_identity,
+                run_id: bound_run_id,
+            }
+            | ResumeAuthorization::TrustedInternalWait {
                 checkpoint_identity: bound_identity,
                 run_id: bound_run_id,
             } => {
@@ -141,6 +165,6 @@ pub(super) fn checkpoint_is_authorized(
         .is_some_and(|failure| checkpoint_identity(checkpoint) == failure.failed_checkpoint_id)
         || authorizes_cleanup_resume(metadata, request, checkpoint);
     authorized_failed_checkpoint
-        || ResumeAuthorization::for_resume(conn, request, checkpoint)
+        || ResumeAuthorization::for_resume(conn, metadata, request, checkpoint)
             .permits_non_safe_rerun(checkpoint)
 }

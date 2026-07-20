@@ -77,6 +77,21 @@ pub(super) fn validation_artifact(validation: &ContinuationValidation) -> Value 
 
 pub(super) fn selection_artifact(cp: &Checkpoint) -> Value {
     json!({
+        "phase": "planned",
+        "step_id": cp.step_id,
+        "checkpoint_id": checkpoint_identity(cp),
+        "status": cp.state_snapshot.status,
+        "timestamp": cp.timestamp.to_rfc3339(),
+        "loop_count": cp.state_snapshot.loop_count,
+        "retry_count": cp.state_snapshot.retry_count,
+    })
+}
+
+/// JSON body identifying the exact checkpoint produced by continuation commit.
+pub fn committed_selection_artifact(planned_checkpoint_id: &str, cp: &Checkpoint) -> Value {
+    json!({
+        "phase": "committed",
+        "planned_checkpoint_id": planned_checkpoint_id,
         "step_id": cp.step_id,
         "checkpoint_id": checkpoint_identity(cp),
         "status": cp.state_snapshot.status,

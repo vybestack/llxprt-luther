@@ -42,10 +42,10 @@ pub use trace::{
     export_trace, load_trace, save_trace, SmokeTrace, TraceEvent, TraceOutcome, SCHEMA_VERSION,
 };
 pub use wait_state::{
-    delete_wait_state, get_wait_state, has_pollable_external_wait, init_wait_states_table,
-    list_pollable_wait_states, list_wait_states, persist_external_wait,
-    update_wait_state_after_poll, upsert_wait_state, ExternalWaitError, WaitKind, WaitStateRecord,
-    WaitStateWriteError,
+    delete_wait_state, delete_wait_state_for_suspension, get_wait_state,
+    has_pollable_external_wait, init_wait_states_table, list_pollable_wait_states,
+    list_wait_states, persist_external_wait, update_wait_state_after_poll, upsert_wait_state,
+    ExternalWaitError, WaitKind, WaitStateRecord, WaitStateWriteError,
 };
 
 use rusqlite::Connection;
