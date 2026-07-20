@@ -14,19 +14,30 @@ fn workspace_owner_marker_path(workspace: &Path) -> PathBuf {
     workspace.join(".luther").join("workspace-owner")
 }
 
-/// Reject a symlinked workspace root: a symlinked root could redirect every
-/// subsequent path operation (including the `.luther` directory and the marker)
-/// to an attacker-controlled location. The check must happen *before*
-/// canonicalization, because `canonicalize` transparently resolves symlinks
-/// and would silently accept the redirected root. Uses `symlink_metadata` so
-/// the link itself is inspected rather than its target.
+/// Reject symlinks in every existing workspace path component before marker
+/// operations can follow a redirected ancestor. macOS's `/tmp` and `/var` are
+/// fixed system aliases, so those two roots are the only accepted symlinks.
 fn reject_symlinked_workspace_root(workspace: &Path) -> Option<String> {
-    if let Ok(meta) = std::fs::symlink_metadata(workspace) {
-        if meta.file_type().is_symlink() {
-            return Some(format!(
-                "workspace root is a symlink and must be a real directory: {workspace_display}",
-                workspace_display = workspace.display()
-            ));
+    for component in workspace.ancestors() {
+        match std::fs::symlink_metadata(component) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                #[cfg(target_os = "macos")]
+                if component == Path::new("/tmp") || component == Path::new("/var") {
+                    continue;
+                }
+                return Some(format!(
+                    "workspace path contains a symlink and must use real directories: {}",
+                    component.display()
+                ));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Some(format!(
+                    "workspace path component cannot be inspected: {}: {error}",
+                    component.display()
+                ));
+            }
         }
     }
     None
@@ -140,6 +151,148 @@ fn ensure_luther_dir(workspace: &Path) -> std::io::Result<PathBuf> {
 /// when a run's workspace is created.
 ///
 /// @plan:PLAN-20260623-LUTHER-CONTINUATION
+/// Provision ownership only for an empty workspace or an interrupted marker
+/// publication containing no state except `.luther/.workspace-owner.tmp.*`.
+pub fn provision_workspace_owner_marker(workspace: &Path, run_id: &str) -> std::io::Result<()> {
+    for _ in 0..100 {
+        match provision_workspace_owner_marker_once(workspace, run_id) {
+            Ok(()) => return Ok(()),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound
+                        | std::io::ErrorKind::AlreadyExists
+                        | std::io::ErrorKind::InvalidData
+                ) =>
+            {
+                let marker = workspace_owner_marker_path(workspace);
+                match inspect_existing_marker(&marker, run_id) {
+                    Ok(()) => return Ok(()),
+                    Err(marker_error) if marker_exists(&marker) => return Err(marker_error),
+                    Err(_) => {}
+                }
+                std::thread::yield_now();
+                continue;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    provision_workspace_owner_marker_once(workspace, run_id)
+}
+
+fn provision_workspace_owner_marker_once(workspace: &Path, run_id: &str) -> std::io::Result<()> {
+    if let Some(reason) = reject_symlinked_workspace_root(workspace) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            reason,
+        ));
+    }
+    std::fs::create_dir_all(workspace)?;
+    if let Some(reason) = reject_symlinked_workspace_root(workspace) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            reason,
+        ));
+    }
+    let marker = workspace_owner_marker_path(workspace);
+    match std::fs::symlink_metadata(&marker) {
+        Ok(_) => return inspect_existing_marker(&marker, run_id),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    if !workspace_is_claimable(workspace, run_id)? {
+        if marker_exists(&marker) {
+            return inspect_existing_marker(&marker, run_id);
+        }
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            format!(
+                "refusing to claim pre-existing non-empty workspace without ownership marker: {}",
+                workspace.display()
+            ),
+        ));
+    }
+    write_workspace_owner_marker(workspace, run_id)?;
+    if !workspace_is_owned_after_claim(workspace, run_id)? {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "workspace changed while ownership was being established: {}",
+                workspace.display()
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn workspace_is_claimable(workspace: &Path, run_id: &str) -> std::io::Result<bool> {
+    for entry in std::fs::read_dir(workspace)? {
+        let entry = entry?;
+        if entry.file_name() != ".luther" || !luther_dir_is_claimable(&entry.path(), run_id)? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn luther_dir_is_claimable(path: &Path, run_id: &str) -> std::io::Result<bool> {
+    let metadata = std::fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Ok(false);
+    }
+    for entry in std::fs::read_dir(path)? {
+        let entry = entry?;
+        let name_is_temp = entry
+            .file_name()
+            .to_str()
+            .is_some_and(|value| value.starts_with(".workspace-owner.tmp."));
+        let metadata = std::fs::symlink_metadata(entry.path())?;
+        if !name_is_temp || metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Ok(false);
+        }
+        if std::fs::read_to_string(entry.path())? != run_id {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn workspace_is_owned_after_claim(workspace: &Path, run_id: &str) -> std::io::Result<bool> {
+    inspect_existing_marker(&workspace_owner_marker_path(workspace), run_id)?;
+    for entry in std::fs::read_dir(workspace)? {
+        let entry = entry?;
+        if entry.file_name() != ".luther" {
+            return Ok(false);
+        }
+        let metadata = std::fs::symlink_metadata(entry.path())?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Ok(false);
+        }
+        for luther_entry in std::fs::read_dir(entry.path())? {
+            let luther_entry = luther_entry?;
+            if luther_entry.file_name() == "workspace-owner" {
+                if inspect_existing_marker(&luther_entry.path(), run_id).is_err() {
+                    return Ok(false);
+                }
+                continue;
+            }
+            let is_temp = luther_entry
+                .file_name()
+                .to_str()
+                .is_some_and(|value| value.starts_with(".workspace-owner.tmp."));
+            let metadata = std::fs::symlink_metadata(luther_entry.path())?;
+            if !is_temp
+                || metadata.file_type().is_symlink()
+                || !metadata.is_file()
+                || std::fs::read_to_string(luther_entry.path())? != run_id
+            {
+                return Ok(false);
+            }
+        }
+    }
+    Ok(true)
+}
+
 pub fn write_workspace_owner_marker(workspace: &Path, run_id: &str) -> std::io::Result<()> {
     let luther = ensure_luther_dir(workspace)?;
     let marker = workspace_owner_marker_path(workspace);
@@ -257,8 +410,7 @@ fn inspect_existing_marker(marker: &Path, run_id: &str) -> std::io::Result<()> {
         ));
     }
     let existing = std::fs::read_to_string(marker)?;
-    let trimmed = existing.trim();
-    if trimmed.is_empty() {
+    if existing.trim().is_empty() {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             format!(
@@ -267,10 +419,10 @@ fn inspect_existing_marker(marker: &Path, run_id: &str) -> std::io::Result<()> {
             ),
         ));
     }
-    if trimmed != run_id {
+    if existing != run_id {
         return Err(std::io::Error::new(
             std::io::ErrorKind::AlreadyExists,
-            format!("workspace owner marker belongs to run '{trimmed}' not '{run_id}'",),
+            format!("workspace owner marker belongs to run '{existing}' not '{run_id}'",),
         ));
     }
     Ok(())
@@ -292,7 +444,7 @@ fn inspect_existing_marker(marker: &Path, run_id: &str) -> std::io::Result<()> {
 /// that occurs between the type check and the read.
 ///
 /// @plan:PLAN-20260623-LUTHER-CONTINUATION
-pub(crate) fn verify_workspace_ownership_marker(workspace: &Path, run_id: &str) -> Option<String> {
+pub fn verify_workspace_ownership_marker(workspace: &Path, run_id: &str) -> Option<String> {
     // Reject a symlinked workspace root *before* canonicalization. Canonicalize
     // would silently resolve the symlink and accept the redirected root, so the
     // link itself must be inspected first.
@@ -481,19 +633,17 @@ pub(super) fn revalidate_workspace_root_identity(
 /// Evaluate marker contents: reject empty content and a foreign owner; trust an
 /// exact-owner match.
 fn evaluate_marker_contents(contents: &str, run_id: &str, marker: &Path) -> Option<String> {
-    let trimmed = contents.trim();
-    if trimmed.is_empty() {
+    if contents.trim().is_empty() {
         return Some(format!(
             "workspace ownership marker is empty: {marker_display}",
             marker_display = marker.display()
         ));
     }
-    if trimmed == run_id {
+    if contents == run_id {
         None
     } else {
         Some(format!(
-            "workspace ownership marker belongs to run '{marker_owner}' not '{run_id}'",
-            marker_owner = trimmed
+            "workspace ownership marker belongs to run '{contents}' not '{run_id}'"
         ))
     }
 }

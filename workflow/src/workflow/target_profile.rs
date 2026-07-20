@@ -711,11 +711,21 @@ fn template_variables(config: &WorkflowConfig) -> HashMap<String, String> {
 }
 
 fn split_target_repo(repo: &str) -> Result<(&str, &str)> {
-    let trimmed = repo.trim();
-    let Some((owner, name)) = trimmed.split_once('/') else {
+    let Some((owner, name)) = repo.split_once('/') else {
         return Err(invalid_repo_error(repo));
     };
-    if owner.is_empty() || name.is_empty() || name.contains('/') {
+    let valid_owner = !owner.is_empty()
+        && owner.starts_with(|ch: char| ch.is_ascii_alphanumeric())
+        && owner.ends_with(|ch: char| ch.is_ascii_alphanumeric())
+        && owner
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '-');
+    let valid_name = !name.is_empty()
+        && !name.contains('/')
+        && name
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '.' || ch == '_');
+    if !valid_owner || !valid_name {
         return Err(invalid_repo_error(repo));
     }
     Ok((owner, name))

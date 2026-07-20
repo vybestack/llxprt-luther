@@ -48,7 +48,7 @@ pub use validation::validate_continuation;
 // cfg(test)-gated so the non-test public API is unchanged.
 #[cfg(test)]
 pub(crate) use selection::{select_rewind_checkpoint, TERMINAL_STEP};
-pub(crate) use workspace_marker::verify_workspace_ownership_marker;
+pub use workspace_marker::verify_workspace_ownership_marker;
 
 /// Steps that are safe to re-run because they are external-wait or otherwise
 /// idempotent. Continuation onto any other step requires `--force`.
@@ -323,7 +323,7 @@ pub fn prepare_continuation(
 // Re-export the workspace owner marker provisioning API (used by workspace
 // creation call sites) so external `crate::engine::continuation::...` paths keep
 // resolving after the marker logic moved into a submodule.
-pub use workspace_marker::write_workspace_owner_marker;
+pub use workspace_marker::{provision_workspace_owner_marker, write_workspace_owner_marker};
 
 #[cfg(test)]
 mod tests;

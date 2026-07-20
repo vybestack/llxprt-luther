@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex};
 use luther_workflow::engine::executor::{
     interpolate_string, ExecutorRegistry, StepContext, StepExecutor,
 };
+use luther_workflow::engine::executors::ShellExecutor;
 use luther_workflow::engine::instance::WorkflowInstance;
 use luther_workflow::engine::runner::{EngineError, EngineRunner, RunOutcome};
 use luther_workflow::engine::transition::StepOutcome;
@@ -3504,6 +3505,152 @@ fn production_and_fixture_llxprt_luther_dogfood_are_equivalent() {
     let fixture_json = serde_json::from_str::<serde_json::Value>(&fixture_json)
         .expect("parse fixture dogfood workflow JSON");
     assert_eq!(production, fixture_json);
+}
+
+fn run_test_git(cwd: &std::path::Path, args: &[&str]) {
+    let output = std::process::Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .output()
+        .expect("run git");
+    assert!(
+        output.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[cfg(unix)]
+fn install_setup_test_commands(fake_bin: &std::path::Path, global_config: &std::path::Path) {
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::Command;
+
+    std::fs::create_dir_all(fake_bin).unwrap();
+    let fake_gh = fake_bin.join("gh");
+    std::fs::write(&fake_gh, "#!/bin/sh\nexit 1\n").unwrap();
+    let mut permissions = std::fs::metadata(&fake_gh).unwrap().permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&fake_gh, permissions).unwrap();
+    let real_git = String::from_utf8(
+        Command::new("sh")
+            .args(["-c", "command -v git"])
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap()
+    .trim()
+    .to_string();
+    let fake_git = fake_bin.join("git");
+    std::fs::write(
+        &fake_git,
+        format!(
+            "#!/bin/sh\ncase \" $* \" in\n  *\" fetch \"*) GIT_CONFIG_GLOBAL='{}' exec '{}' \"$@\" ;;\n  *) exec '{}' \"$@\" ;;\nesac\n",
+            global_config.display(),
+            real_git,
+            real_git
+        ),
+    )
+    .unwrap();
+    let mut permissions = std::fs::metadata(&fake_git).unwrap().permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&fake_git, permissions).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn dogfood_setup_initializes_marker_owned_workspace_in_place() {
+    use std::process::Command;
+
+    let temp = tempfile::tempdir().expect("temp root");
+    let source = temp.path().join("source");
+    let remote = temp.path().join("remote.git");
+    let workspace = temp.path().join("workspace");
+    let artifacts = temp.path().join("artifacts");
+    std::fs::create_dir_all(&source).unwrap();
+    run_test_git(&source, &["init", "--initial-branch=main"]);
+    run_test_git(&source, &["config", "user.name", "Luther Test"]);
+    run_test_git(&source, &["config", "user.email", "luther@example.invalid"]);
+    std::fs::write(source.join("README.md"), "fixture\n").unwrap();
+    run_test_git(&source, &["add", "README.md"]);
+    run_test_git(&source, &["commit", "-m", "fixture"]);
+    let output = Command::new("git")
+        .args(["clone", "--bare"])
+        .arg(&source)
+        .arg(&remote)
+        .output()
+        .expect("create bare remote");
+    assert!(output.status.success(), "create bare remote failed");
+
+    luther_workflow::engine::continuation::provision_workspace_owner_marker(
+        &workspace,
+        "run-setup-contract",
+    )
+    .unwrap();
+
+    let global_config = temp.path().join("gitconfig");
+    let remote_url = format!("file://{}", remote.canonicalize().unwrap().display());
+    let output = Command::new("git")
+        .args(["config", "--file"])
+        .arg(&global_config)
+        .arg(format!("url.{remote_url}.insteadOf"))
+        .arg("https://github.com/owner/repo.git")
+        .output()
+        .expect("write URL rewrite");
+    assert!(output.status.success(), "write URL rewrite failed");
+
+    let fake_bin = temp.path().join("bin");
+    install_setup_test_commands(&fake_bin, &global_config);
+
+    let workflow = load_workflow_toml("config/workflows/llxprt-luther-dogfood-v1.toml");
+    let setup = workflow
+        .steps
+        .iter()
+        .find(|step| step.step_id == "setup_workspace")
+        .expect("setup_workspace step");
+    let mut params = setup.parameters.clone().expect("setup parameters");
+    let command = params
+        .get("command")
+        .and_then(serde_json::Value::as_str)
+        .expect("setup command");
+    let command = format!("export PATH=\"{}:$PATH\"\n{command}", fake_bin.display());
+    params["command"] = serde_json::Value::String(command);
+
+    let mut context = StepContext::new(workspace.clone(), "run-setup-contract".to_string());
+    context.set("work_dir", &workspace.to_string_lossy());
+    context.set("artifact_dir", &artifacts.to_string_lossy());
+    context.set("target_repo", "owner/repo");
+    context.set("issue_number", "150");
+    context.set("base_branch", "main");
+    context.set("daemon_managed_claim", "true");
+
+    let outcome = ShellExecutor
+        .execute(&mut context, &params)
+        .expect("execute shipped setup command");
+    assert_eq!(
+        outcome,
+        StepOutcome::Success,
+        "diagnostic={:?} json_parse_error={:?} stdout={:?} stderr={:?} exit={:?}",
+        context.get("diagnostic"),
+        context.get("json_parse_error"),
+        context.get("stdout"),
+        context.get("stderr"),
+        context.get("exit_code")
+    );
+    assert!(workspace.join(".git").is_dir());
+    assert_eq!(
+        std::fs::read_to_string(workspace.join(".luther/workspace-owner")).unwrap(),
+        "run-setup-contract"
+    );
+    assert_eq!(
+        std::fs::read_to_string(workspace.join("README.md")).unwrap(),
+        "fixture\n"
+    );
+
+    let outcome = ShellExecutor
+        .execute(&mut context, &params)
+        .expect("repeat shipped setup command");
+    assert_eq!(outcome, StepOutcome::Success);
 }
 
 #[test]

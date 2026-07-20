@@ -96,21 +96,82 @@ description = "Ensure repo is checked out, create issue branch, create artifact 
 output_format = "json"
 context_map = { existing_pr_number = "existing_pr_number", existing_pr_url = "existing_pr_url" }
 command = """
-set -euo pipefail
+set -eu
 
-if [ ! -d "{work_dir}/.git" ]; then
-  git clone https://github.com/{target_repo}.git {work_dir}
+unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_INDEX_FILE GIT_CONFIG_COUNT GIT_CONFIG_PARAMETERS GIT_PROXY_COMMAND GIT_SSH GIT_SSH_COMMAND
+export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_NOSYSTEM=1
+cd "{work_dir}"
+EXPECTED_ORIGIN='https://github.com/{target_repo}.git'
+if [ -e .luther ] && { [ -L .luther ] || [ ! -d .luther ]; }; then
+  echo "Workspace ownership directory must be a real directory" >&2
+  exit 1
 fi
-
-cd {work_dir}
-if ! git fsck --connectivity-only >/dev/null 2>&1; then
-  cd "$(dirname "{work_dir}")"
-  rm -rf "{work_dir}"
-  git clone https://github.com/{target_repo}.git "{work_dir}"
-  cd "{work_dir}"
+if [ -e .luther/workspace-owner ] || [ -L .luther/workspace-owner ]; then
+  if [ -L .luther/workspace-owner ] || [ ! -f .luther/workspace-owner ]; then
+    echo "Workspace ownership marker must be a regular file" >&2
+    exit 1
+  fi
+  if ! printf %s '{run_id}' | cmp -s - .luther/workspace-owner; then
+    echo "Workspace ownership marker does not exactly match this run" >&2
+    exit 1
+  fi
+elif [ "{daemon_managed_claim}" = "true" ]; then
+  echo "Daemon-managed workspace has no regular ownership marker" >&2
+  exit 1
 fi
-
-git fetch --prune origin
+if [ -e .git ] && { [ -L .git ] || [ ! -d .git ]; }; then
+  echo "Workspace Git metadata must be a real directory" >&2
+  exit 1
+fi
+if [ -d .git ]; then
+  GIT_SYMLINK=$(find .git -type l -print -quit) || {
+    echo "Unable to inspect workspace Git metadata" >&2
+    exit 1
+  }
+  if [ -n "$GIT_SYMLINK" ]; then
+    echo "Workspace Git metadata may not contain symlinks" >&2
+    exit 1
+  fi
+fi
+if [ ! -d .git ]; then
+  UNEXPECTED_ENTRY=$(find . -mindepth 1 -maxdepth 1 ! -name .luther -print -quit) || {
+    echo "Unable to inspect owned workspace" >&2
+    exit 1
+  }
+  if [ -n "$UNEXPECTED_ENTRY" ]; then
+    echo "Owned workspace contains unexpected pre-repository state" >&2
+    exit 1
+  fi
+fi
+if [ ! -d .git ]; then
+  git -c core.hooksPath=/dev/null init 1>&2
+fi
+ORIGIN_URL=$(git config --get remote.origin.url || true)
+if [ -n "$ORIGIN_URL" ] && [ "$ORIGIN_URL" != "$EXPECTED_ORIGIN" ]; then
+  echo "Workspace origin does not match target repository" >&2
+  exit 1
+fi
+rm -f .git/config .git/objects/info/alternates
+cat > .git/config <<EOF
+[core]
+	repositoryformatversion = 0
+	filemode = true
+	bare = false
+	logallrefupdates = true
+	hooksPath = /dev/null
+[remote "origin"]
+	url = $EXPECTED_ORIGIN
+	fetch = +refs/heads/*:refs/remotes/origin/*
+EOF
+if ! git -c core.hooksPath=/dev/null fsck --connectivity-only >/dev/null 2>&1; then
+  echo "Workspace repository failed connectivity verification" >&2
+  exit 1
+fi
+git -c core.hooksPath=/dev/null fetch --prune origin
+REPLACE_DELETIONS=$(git -c core.hooksPath=/dev/null for-each-ref --format='delete %(refname)' refs/replace)
+if [ -n "$REPLACE_DELETIONS" ]; then
+  printf '%s\n' "$REPLACE_DELETIONS" | git -c core.hooksPath=/dev/null update-ref --stdin
+fi
 EXISTING_PR_JSON=$(gh pr view issue{issue_number} --repo {target_repo} --json number,url,state,isDraft 2>/dev/null || true)
 if [ -n "$EXISTING_PR_JSON" ] && [ "$(echo "$EXISTING_PR_JSON" | jq -r '.state')" = "OPEN" ] && [ "$(echo "$EXISTING_PR_JSON" | jq -r '.isDraft')" = "false" ]; then
   EXISTING_PR_NUMBER=$(echo "$EXISTING_PR_JSON" | jq -r '.number')
@@ -119,13 +180,15 @@ else
   EXISTING_PR_NUMBER="0"
   EXISTING_PR_URL=""
 fi
-git reset --hard 1>&2
+if git rev-parse --verify -q HEAD >/dev/null; then
+  git -c core.hooksPath=/dev/null reset --hard 1>&2
+fi
 if [ "$EXISTING_PR_NUMBER" != "0" ] && git rev-parse --verify origin/issue{issue_number} >/dev/null 2>&1; then
-  git checkout -B issue{issue_number} origin/issue{issue_number} 1>&2
+  git -c core.hooksPath=/dev/null checkout -B issue{issue_number} origin/issue{issue_number} 1>&2
 else
-  git checkout {base_branch} 1>&2
-  git reset --hard origin/{base_branch} 1>&2
-  git checkout -B issue{issue_number} 1>&2
+  git -c core.hooksPath=/dev/null checkout {base_branch} 1>&2
+  git -c core.hooksPath=/dev/null reset --hard origin/{base_branch} 1>&2
+  git -c core.hooksPath=/dev/null checkout -B issue{issue_number} 1>&2
 fi
 
 mkdir -p {artifact_dir}

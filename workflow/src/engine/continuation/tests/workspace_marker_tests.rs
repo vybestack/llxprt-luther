@@ -590,6 +590,21 @@ fn marker_republication_same_owner_preserves_bytes() {
     assert_eq!(count_temp_files(workspace), 0, "no temp on idempotent path");
 }
 
+#[test]
+fn marker_republication_rejects_trailing_newline() {
+    let dir = tempfile::tempdir().expect("workspace");
+    let workspace = dir.path();
+    let marker = workspace.join(".luther").join("workspace-owner");
+    std::fs::create_dir_all(marker.parent().unwrap()).unwrap();
+    std::fs::write(&marker, "exact-owner\n").unwrap();
+    let err = write_workspace_owner_marker(workspace, "exact-owner")
+        .expect_err("non-exact marker bytes must be rejected");
+    assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
+    let reason = verify_workspace_ownership_marker(workspace, "exact-owner")
+        .expect("verification must reject non-exact marker bytes");
+    assert!(reason.contains("belongs to run"), "{reason}");
+}
+
 /// After publication, a foreign-marker substitution (different owner) must be
 /// detected by re-publication and rejected without overwriting the foreign
 /// marker.
@@ -607,6 +622,47 @@ fn marker_republication_rejects_foreign_owner_without_overwrite() {
     // The foreign content is preserved (no overwrite).
     assert_eq!(std::fs::read_to_string(&marker).unwrap(), "owner-impostor");
     assert_eq!(count_temp_files(workspace), 0, "no temp on rejection path");
+}
+
+#[test]
+fn provision_marker_is_concurrently_idempotent_for_same_owner() {
+    let dir = tempfile::tempdir().expect("workspace");
+    let workspace = std::sync::Arc::new(dir.path().to_path_buf());
+    let mut threads = Vec::new();
+    for _ in 0..12 {
+        let workspace = std::sync::Arc::clone(&workspace);
+        threads.push(std::thread::spawn(move || {
+            crate::engine::continuation::provision_workspace_owner_marker(
+                &workspace,
+                "concurrent-owner",
+            )
+        }));
+    }
+    for thread in threads {
+        thread
+            .join()
+            .expect("provision thread")
+            .expect("same-owner provision");
+    }
+    assert!(verify_workspace_ownership_marker(&workspace, "concurrent-owner").is_none());
+}
+
+#[cfg(unix)]
+#[test]
+fn provision_rejects_symlinked_ancestor() {
+    let root = tempfile::tempdir().expect("root");
+    let redirected = tempfile::tempdir().expect("redirect target");
+    let link = root.path().join("redirect");
+    std::os::unix::fs::symlink(redirected.path(), &link).unwrap();
+    let workspace = link.join("child");
+    let error =
+        crate::engine::continuation::provision_workspace_owner_marker(&workspace, "ancestor-owner")
+            .expect_err("symlinked ancestor must be rejected");
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    assert!(!redirected
+        .path()
+        .join("child/.luther/workspace-owner")
+        .exists());
 }
 
 // ---------------------------------------------------------------------------

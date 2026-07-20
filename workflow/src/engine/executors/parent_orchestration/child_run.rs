@@ -25,7 +25,11 @@ pub fn apply_child_overrides(
         artifact_dir: request.artifact_dir.clone(),
     };
     apply_target_profile_overrides(config, &overrides)
-        .map_err(|err| format!("apply child target overrides: {err}"))
+        .map_err(|err| format!("apply child target overrides: {err}"))?;
+    config
+        .variables
+        .insert("daemon_managed_claim".to_string(), "true".to_string());
+    Ok(())
 }
 
 pub fn prepare_child_resume(
@@ -41,6 +45,19 @@ pub fn prepare_child_resume(
                 request.run_id
             )
         })?;
+    let persisted_workspace = metadata.workspace_path.as_deref().ok_or_else(|| {
+        format!(
+            "missing workspace_path for child workflow resume {}",
+            request.run_id
+        )
+    })?;
+    if request.work_dir.as_deref().and_then(Path::to_str) != Some(persisted_workspace) {
+        return Err(format!(
+            "child resume workspace mismatch for {}: request does not match persisted metadata",
+            request.run_id
+        ));
+    }
+    verify_existing_workspace_owner_marker(Path::new(persisted_workspace), &request.run_id)?;
     if metadata
         .current_step
         .as_deref()
