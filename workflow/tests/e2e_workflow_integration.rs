@@ -3473,7 +3473,11 @@ fn dogfood_scope_control_dominates_mutation_and_push() {
         let transition = workflow
             .transitions
             .iter()
-            .find(|transition| transition.from == from && transition.to == to)
+            .find(|transition| {
+                transition.from == from
+                    && transition.to == to
+                    && transition.condition.as_deref() == Some("success")
+            })
             .unwrap_or_else(|| panic!("missing {from} to {to}"));
         assert_eq!(transition.max_iterations, Some(iterations));
     }
