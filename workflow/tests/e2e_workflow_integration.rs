@@ -3630,7 +3630,7 @@ fn dogfood_setup_initializes_marker_owned_workspace_in_place() {
     assert_eq!(
         outcome,
         StepOutcome::Success,
-        "diagnostic={:?} json_error={:?} stdout={:?} stderr={:?} exit={:?}",
+        "diagnostic={:?} json_parse_error={:?} stdout={:?} stderr={:?} exit={:?}",
         context.get("diagnostic"),
         context.get("json_parse_error"),
         context.get("stdout"),

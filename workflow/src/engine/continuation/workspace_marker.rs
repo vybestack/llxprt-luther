@@ -165,12 +165,11 @@ pub fn provision_workspace_owner_marker(workspace: &Path, run_id: &str) -> std::
                         | std::io::ErrorKind::InvalidData
                 ) =>
             {
-                if inspect_existing_marker(&workspace_owner_marker_path(workspace), run_id).is_ok()
-                {
-                    return Ok(());
-                }
-                if workspace_owner_marker_path(workspace).exists() {
-                    return Err(error);
+                let marker = workspace_owner_marker_path(workspace);
+                match inspect_existing_marker(&marker, run_id) {
+                    Ok(()) => return Ok(()),
+                    Err(marker_error) if marker_exists(&marker) => return Err(marker_error),
+                    Err(_) => {}
                 }
                 std::thread::yield_now();
                 continue;
