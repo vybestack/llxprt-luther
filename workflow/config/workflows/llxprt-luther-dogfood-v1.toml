@@ -119,9 +119,15 @@ if [ -e .git ] && { [ -L .git ] || [ ! -d .git ]; }; then
   echo "Workspace Git metadata must be a real directory" >&2
   exit 1
 fi
-if [ -d .git ] && find .git -type l -print -quit | grep -q .; then
-  echo "Workspace Git metadata may not contain symlinks" >&2
-  exit 1
+if [ -d .git ]; then
+  GIT_SYMLINK=$(find .git -type l -print -quit) || {
+    echo "Unable to inspect workspace Git metadata" >&2
+    exit 1
+  }
+  if [ -n "$GIT_SYMLINK" ]; then
+    echo "Workspace Git metadata may not contain symlinks" >&2
+    exit 1
+  fi
 fi
 if [ ! -d .git ]; then
   UNEXPECTED_ENTRY=$(find . -mindepth 1 -maxdepth 1 ! -name .luther -print -quit) || {
