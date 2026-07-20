@@ -297,6 +297,14 @@ workflow_path_patterns = [".github/workflows/**"]
 required_scopes = ["workflow"]
 
 [[steps]]
+step_id = "task_charter"
+step_type = "task_charter"
+description = "Freeze scope-control task charter before mutable implementation"
+
+[steps.parameters]
+artifact_dir = "{artifact_dir}"
+
+[[steps]]
 step_id = "implement"
 step_type = "llxprt"
 description = "Invoke llxprt to implement the plan"
@@ -396,6 +404,21 @@ required_path_regex = "^([.]github/workflows/|workflow/(config/|tests/|src/|docs
 failure_message = "No Luther workflow/config/test/doc diff found and no reusable open PR exists"
 existing_pr_number = "{setup_workspace.existing_pr_number}"
 
+[[steps]]
+step_id = "scope_measure"
+step_type = "scope_measure"
+description = "Measure patch growth and enforce the scope barrier after implementation"
+
+[steps.parameters]
+artifact_dir = "{artifact_dir}"
+
+[[steps]]
+step_id = "scope_measure_pre_push"
+step_type = "scope_measure"
+description = "Enforce the scope barrier on the final patch before push"
+
+[steps.parameters]
+artifact_dir = "{artifact_dir}"
 
 [[steps]]
 step_id = "remediate"
@@ -875,7 +898,13 @@ to = "setup_workspace"
 
 [[transitions]]
 from = "setup_workspace"
+to = "task_charter"
+
+[[transitions]]
+from = "task_charter"
 to = "route_pr_path"
+condition = "success"
+max_iterations = 1
 
 [[transitions]]
 from = "route_pr_path"
@@ -951,7 +980,14 @@ condition = "success"
 
 [[transitions]]
 from = "implement"
+to = "scope_measure"
+condition = "success"
+
+[[transitions]]
+from = "scope_measure"
 to = "run_tests"
+condition = "success"
+max_iterations = 2
 
 [[transitions]]
 from = "implement"
@@ -996,8 +1032,15 @@ max_iterations = 2
 
 [[transitions]]
 from = "workflow_auth_preflight_pre_push"
+to = "scope_measure_pre_push"
+condition = "success"
+max_iterations = 2
+
+[[transitions]]
+from = "scope_measure_pre_push"
 to = "push_changes"
 condition = "success"
+max_iterations = 2
 
 [[transitions]]
 from = "push_changes"
@@ -1196,6 +1239,24 @@ condition = "fatal"
 from = "evaluate_plan"
 to = "abandon_and_log"
 condition = "fatal"
+
+[[transitions]]
+from = "task_charter"
+to = "abandon_and_log"
+condition = "fatal"
+max_iterations = 1
+
+[[transitions]]
+from = "scope_measure"
+to = "abandon_and_log"
+condition = "fatal"
+max_iterations = 1
+
+[[transitions]]
+from = "scope_measure_pre_push"
+to = "abandon_and_log"
+condition = "fatal"
+max_iterations = 1
 
 [[transitions]]
 from = "implement"

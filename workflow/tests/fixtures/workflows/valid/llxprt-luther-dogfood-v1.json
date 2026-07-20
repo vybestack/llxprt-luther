@@ -139,6 +139,14 @@
       }
     },
     {
+      "step_id": "task_charter",
+      "step_type": "task_charter",
+      "description": "Freeze scope-control task charter before mutable implementation",
+      "parameters": {
+        "artifact_dir": "{artifact_dir}"
+      }
+    },
+    {
       "step_id": "implement",
       "step_type": "llxprt",
       "description": "Invoke llxprt to implement the plan",
@@ -158,7 +166,7 @@
         "min_runtime_before_success_seconds": 60,
         "stdout_file": "{artifact_dir}/implement-stdout.txt",
         "stderr_file": "{artifact_dir}/implement-stderr.txt",
-        "prompt": "Do not use subagents. Do not ask questions. Read the current issue in {artifact_dir}/issue.md and the approved plan in {artifact_dir}/plan.md, then implement that plan.\nCRITICAL WORKING METHOD \u2014 write first, read minimally:\n- The approved plan already lists the exact files and line references you need. Trust the plan. Do NOT try to fully understand the entire codebase before writing.\n- Your FIRST tool action after reading the plan MUST be to create or modify a file (write the new file skeleton, or make the first concrete edit). Do not spend the early part of this step reading: a long sequence of read-only file inspections with no writes is the primary failure mode of this step and is forbidden.\n- Read at most a handful of targeted file ranges, and only to confirm an exact API signature or the specific lines you are about to edit. If you find yourself reading a fourth or fifth file before your first write, stop reading and start writing instead.\n- Build incrementally: create the file(s) with an initial version early so a non-empty git diff exists, then iterate to fill in details. It is far better to have a scoped, compiling first draft than to keep reading.\n- You have a generous time budget, but exploration does not count as progress. Only written edits do.\nMake the smallest source/config/test changes needed to fix Luther issue #{issue_number}. You MUST leave a non-empty git diff in {work_dir}; if no files are changed, this step is not complete. Do not modify package lockfiles, generated notice files, .luther files, or unrelated files.\nThe required source and test scope is whatever the approved plan identifies for this issue. If the plan and issue disagree, follow the issue text and update only files directly relevant to the current issue.\nAdd or update focused tests and fixtures when the issue or approved plan requires them. Do not apply requirements from a different issue; for issue #{issue_number}, completion means the changed files directly satisfy the current issue text and approved plan, whether those are source, config, fixture, or test files.\nREPOSITORY CONVENTIONS THE VERIFICATION GATE ENFORCES (honor these as you write, because the gate runs clippy with -D warnings and a strict test suite):\n- Clippy denies too_many_lines: every function, INCLUDING test functions, must stay at or under 100 lines. If a new or edited fn would exceed 100 lines, split it into helper functions or smaller #[test] cases before finishing. Also honor the other strict lints (cognitive_complexity, too_many_arguments, type_complexity).\n- Fixture parity and fixture validity: the directories workflow/tests/fixtures/workflows/valid and workflow/tests/fixtures/workflow-configs/valid require a matching .json fixture for every .toml fixture (and vice versa); a parity test fails otherwise. Existing resolvable workflow fixtures outside valid/ (for example workflow/tests/fixtures/workflows/issue-fix-v1.toml) must also remain valid when you add validation rules. Whenever you add a validation rule, update every production workflow, every valid fixture, and every existing resolvable test fixture that the rule now constrains. Whenever you add a .toml fixture under a valid/ directory, add the equivalent .json fixture in the same step. Put intentionally invalid fixtures under an invalid/ directory instead of valid/. If you add a new workflow step type, register a fixture executor wherever integration tests construct a test-only ExecutorRegistry, and update explicit step-count assertions/fixtures that load the affected production workflow.\nDo not run full project verification commands such as cargo test, cargo build, or cargo clippy. The workflow runs configured checks after this step. You may run narrowly targeted tests/checks related to the files you changed.\nIf a shell command you wrote fails because of quoting, heredoc, or syntax problems, correct the command and continue. Do not treat agent-authored shell syntax mistakes as implementation or workflow system errors while simple corrected shell commands still work.\nWhen editing workflow shell commands, keep command lines statically allowlisted and shell-safe. Do not insert raw profile-provided shell snippets or arbitrary command templates into workflow command strings; use structured argv/path variables or source-code executor support instead.\nTreat file-size, complexity, clippy, or structural-guardrail failures as design feedback, not as obstacles to bypass. Fix the underlying structure: split code into semantic mod submodules with cohesive responsibilities (named after the responsibility, not a line offset) and the narrowest viable visibility (private, pub(crate), or pub(super)), with focused tests co-located with the code. Do not split files by line count. Do not use include!() to reassemble Rust source modules. Do not create part_N, core_N, tail, misc, utils, or support buckets unless the name describes a real domain concept. Do not add new lint-disable/suppression attributes or change complexity/size thresholds merely to make a module fit; the only exception is following an existing neighboring pattern that already uses the same suppression for the same reason. If a submodule is still oversized, prefer splitting it further along a real responsibility seam; only reuse an existing neighboring suppression for the same reason as a last resort when no such seam exists, and never introduce a brand-new suppression or threshold change.\n\nIf {artifact_dir}/implementation-evaluation.md exists, treat it as a required remediation checklist and address every unresolved item before finishing this step. Do not stop after partially addressing the feedback.\nBefore responding, inspect git diff --stat and git diff. If the diff does not match the current issue and approved plan, continue working or remove the unrelated changes before finishing. Remove any accidental temporary files in {work_dir} before finishing.\nFinish as soon as source/test edits are present and you have inspected the diff. Do not keep iterating on targeted tests after making a scoped diff; the workflow will run deterministic verification and remediation steps. Finish with exactly IMPLEMENTATION_COMPLETE on its own line, followed by a concise truthful summary of the changes and verification you performed, then exit.\n",
+        "prompt": "Do not use subagents. Do not ask questions. Read the current issue in {artifact_dir}/issue.md and the approved plan in {artifact_dir}/plan.md, then implement that plan.\nCRITICAL WORKING METHOD — write first, read minimally:\n- The approved plan already lists the exact files and line references you need. Trust the plan. Do NOT try to fully understand the entire codebase before writing.\n- Your FIRST tool action after reading the plan MUST be to create or modify a file (write the new file skeleton, or make the first concrete edit). Do not spend the early part of this step reading: a long sequence of read-only file inspections with no writes is the primary failure mode of this step and is forbidden.\n- Read at most a handful of targeted file ranges, and only to confirm an exact API signature or the specific lines you are about to edit. If you find yourself reading a fourth or fifth file before your first write, stop reading and start writing instead.\n- Build incrementally: create the file(s) with an initial version early so a non-empty git diff exists, then iterate to fill in details. It is far better to have a scoped, compiling first draft than to keep reading.\n- You have a generous time budget, but exploration does not count as progress. Only written edits do.\nMake the smallest source/config/test changes needed to fix Luther issue #{issue_number}. You MUST leave a non-empty git diff in {work_dir}; if no files are changed, this step is not complete. Do not modify package lockfiles, generated notice files, .luther files, or unrelated files.\nThe required source and test scope is whatever the approved plan identifies for this issue. If the plan and issue disagree, follow the issue text and update only files directly relevant to the current issue.\nAdd or update focused tests and fixtures when the issue or approved plan requires them. Do not apply requirements from a different issue; for issue #{issue_number}, completion means the changed files directly satisfy the current issue text and approved plan, whether those are source, config, fixture, or test files.\nREPOSITORY CONVENTIONS THE VERIFICATION GATE ENFORCES (honor these as you write, because the gate runs clippy with -D warnings and a strict test suite):\n- Clippy denies too_many_lines: every function, INCLUDING test functions, must stay at or under 100 lines. If a new or edited fn would exceed 100 lines, split it into helper functions or smaller #[test] cases before finishing. Also honor the other strict lints (cognitive_complexity, too_many_arguments, type_complexity).\n- Fixture parity and fixture validity: the directories workflow/tests/fixtures/workflows/valid and workflow/tests/fixtures/workflow-configs/valid require a matching .json fixture for every .toml fixture (and vice versa); a parity test fails otherwise. Existing resolvable workflow fixtures outside valid/ (for example workflow/tests/fixtures/workflows/issue-fix-v1.toml) must also remain valid when you add validation rules. Whenever you add a validation rule, update every production workflow, every valid fixture, and every existing resolvable test fixture that the rule now constrains. Whenever you add a .toml fixture under a valid/ directory, add the equivalent .json fixture in the same step. Put intentionally invalid fixtures under an invalid/ directory instead of valid/. If you add a new workflow step type, register a fixture executor wherever integration tests construct a test-only ExecutorRegistry, and update explicit step-count assertions/fixtures that load the affected production workflow.\nDo not run full project verification commands such as cargo test, cargo build, or cargo clippy. The workflow runs configured checks after this step. You may run narrowly targeted tests/checks related to the files you changed.\nIf a shell command you wrote fails because of quoting, heredoc, or syntax problems, correct the command and continue. Do not treat agent-authored shell syntax mistakes as implementation or workflow system errors while simple corrected shell commands still work.\nWhen editing workflow shell commands, keep command lines statically allowlisted and shell-safe. Do not insert raw profile-provided shell snippets or arbitrary command templates into workflow command strings; use structured argv/path variables or source-code executor support instead.\nTreat file-size, complexity, clippy, or structural-guardrail failures as design feedback, not as obstacles to bypass. Fix the underlying structure: split code into semantic mod submodules with cohesive responsibilities (named after the responsibility, not a line offset) and the narrowest viable visibility (private, pub(crate), or pub(super)), with focused tests co-located with the code. Do not split files by line count. Do not use include!() to reassemble Rust source modules. Do not create part_N, core_N, tail, misc, utils, or support buckets unless the name describes a real domain concept. Do not add new lint-disable/suppression attributes or change complexity/size thresholds merely to make a module fit; the only exception is following an existing neighboring pattern that already uses the same suppression for the same reason. If a submodule is still oversized, prefer splitting it further along a real responsibility seam; only reuse an existing neighboring suppression for the same reason as a last resort when no such seam exists, and never introduce a brand-new suppression or threshold change.\n\nIf {artifact_dir}/implementation-evaluation.md exists, treat it as a required remediation checklist and address every unresolved item before finishing this step. Do not stop after partially addressing the feedback.\nBefore responding, inspect git diff --stat and git diff. If the diff does not match the current issue and approved plan, continue working or remove the unrelated changes before finishing. Remove any accidental temporary files in {work_dir} before finishing.\nFinish as soon as source/test edits are present and you have inspected the diff. Do not keep iterating on targeted tests after making a scoped diff; the workflow will run deterministic verification and remediation steps. Finish with exactly IMPLEMENTATION_COMPLETE on its own line, followed by a concise truthful summary of the changes and verification you performed, then exit.\n",
         "outcome_on_stdout": {
           "IMPLEMENTATION_COMPLETE": "success",
           "REMEDIATION_SYSTEM_ERROR": "fatal",
@@ -208,6 +216,22 @@
           "failure_message": "No Luther workflow/config/test/doc diff found and no reusable open PR exists",
           "existing_pr_number": "{setup_workspace.existing_pr_number}"
         }
+      }
+    },
+    {
+      "step_id": "scope_measure",
+      "step_type": "scope_measure",
+      "description": "Measure patch growth and enforce the scope barrier after implementation",
+      "parameters": {
+        "artifact_dir": "{artifact_dir}"
+      }
+    },
+    {
+      "step_id": "scope_measure_pre_push",
+      "step_type": "scope_measure",
+      "description": "Enforce the scope barrier on the final patch before push",
+      "parameters": {
+        "artifact_dir": "{artifact_dir}"
       }
     },
     {
@@ -586,7 +610,13 @@
     },
     {
       "from": "setup_workspace",
-      "to": "route_pr_path"
+      "to": "task_charter"
+    },
+    {
+      "from": "task_charter",
+      "to": "route_pr_path",
+      "condition": "success",
+      "max_iterations": 1
     },
     {
       "from": "route_pr_path",
@@ -662,7 +692,14 @@
     },
     {
       "from": "implement",
-      "to": "run_tests"
+      "to": "scope_measure",
+      "condition": "success"
+    },
+    {
+      "from": "scope_measure",
+      "to": "run_tests",
+      "condition": "success",
+      "max_iterations": 2
     },
     {
       "from": "implement",
@@ -707,8 +744,15 @@
     },
     {
       "from": "workflow_auth_preflight_pre_push",
+      "to": "scope_measure_pre_push",
+      "condition": "success",
+      "max_iterations": 2
+    },
+    {
+      "from": "scope_measure_pre_push",
       "to": "push_changes",
-      "condition": "success"
+      "condition": "success",
+      "max_iterations": 2
     },
     {
       "from": "push_changes",
@@ -900,6 +944,24 @@
       "from": "evaluate_plan",
       "to": "abandon_and_log",
       "condition": "fatal"
+    },
+    {
+      "from": "task_charter",
+      "to": "abandon_and_log",
+      "condition": "fatal",
+      "max_iterations": 1
+    },
+    {
+      "from": "scope_measure",
+      "to": "abandon_and_log",
+      "condition": "fatal",
+      "max_iterations": 1
+    },
+    {
+      "from": "scope_measure_pre_push",
+      "to": "abandon_and_log",
+      "condition": "fatal",
+      "max_iterations": 1
     },
     {
       "from": "implement",
