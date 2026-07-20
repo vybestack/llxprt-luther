@@ -2277,14 +2277,6 @@ fn dogfood_plan_gate_blocks_rejected_plan_artifacts() {
     assert!(workflow_type
         .transitions
         .iter()
-        .any(
-            |transition| transition.from == "workflow_auth_preflight_plan"
-                && transition.to == "implement"
-                && transition.condition.as_deref() == Some("success")
-        ));
-    assert!(workflow_type
-        .transitions
-        .iter()
         .any(|transition| transition.from == "plan_gate"
             && transition.to == "prepare_plan"
             && transition.condition.as_deref() == Some("fixable")));
@@ -3413,6 +3405,105 @@ fn production_and_fixture_llxprt_issue_fix_v1_are_equivalent() {
     );
     load_workflow_toml("config/workflows/llxprt-issue-fix-v1.toml");
     load_workflow_toml("tests/fixtures/workflows/valid/llxprt-issue-fix-v1.toml");
+}
+
+#[test]
+fn dogfood_scope_control_dominates_mutation_and_push() {
+    let workflow = load_workflow_toml("config/workflows/llxprt-luther-dogfood-v1.toml");
+    for (step_id, step_type) in [
+        ("task_charter", "task_charter"),
+        ("scope_measure", "scope_measure"),
+        ("scope_measure_pre_push", "scope_measure"),
+    ] {
+        let step = workflow
+            .steps
+            .iter()
+            .find(|step| step.step_id == step_id)
+            .unwrap_or_else(|| panic!("missing {step_id} step"));
+        assert_eq!(step.step_type, step_type);
+        assert_eq!(
+            step.parameters
+                .as_ref()
+                .and_then(|params| params.get("artifact_dir"))
+                .and_then(serde_json::Value::as_str),
+            Some("{artifact_dir}")
+        );
+    }
+    for (from, to, condition) in [
+        ("setup_workspace", "task_charter", Some("success")),
+        ("task_charter", "route_pr_path", Some("success")),
+        ("workflow_auth_preflight_plan", "implement", Some("success")),
+        ("implement", "scope_measure", Some("success")),
+        ("scope_measure", "run_tests", Some("success")),
+        (
+            "workflow_auth_preflight_pre_push",
+            "scope_measure_pre_push",
+            Some("success"),
+        ),
+        ("scope_measure_pre_push", "push_changes", Some("success")),
+    ] {
+        assert!(workflow.transitions.iter().any(|transition| {
+            transition.from == from
+                && transition.to == to
+                && transition.condition.as_deref() == condition
+        }));
+    }
+    for step_id in ["task_charter", "scope_measure", "scope_measure_pre_push"] {
+        let fatal = workflow
+            .transitions
+            .iter()
+            .find(|transition| {
+                transition.from == step_id
+                    && transition.to == "abandon_and_log"
+                    && transition.condition.as_deref() == Some("fatal")
+            })
+            .unwrap_or_else(|| panic!("missing fatal route for {step_id}"));
+        assert_eq!(fatal.max_iterations, Some(1));
+    }
+    for (from, to, iterations) in [
+        ("task_charter", "route_pr_path", 1),
+        ("scope_measure", "run_tests", 2),
+        (
+            "workflow_auth_preflight_pre_push",
+            "scope_measure_pre_push",
+            2,
+        ),
+        ("scope_measure_pre_push", "push_changes", 2),
+    ] {
+        let transition = workflow
+            .transitions
+            .iter()
+            .find(|transition| {
+                transition.from == from
+                    && transition.to == to
+                    && transition.condition.as_deref() == Some("success")
+            })
+            .unwrap_or_else(|| panic!("missing {from} to {to}"));
+        assert_eq!(transition.max_iterations, Some(iterations));
+    }
+}
+
+#[test]
+fn production_and_fixture_llxprt_luther_dogfood_are_equivalent() {
+    let production = std::fs::read_to_string("config/workflows/llxprt-luther-dogfood-v1.toml")
+        .expect("read production dogfood workflow TOML");
+    let fixture =
+        std::fs::read_to_string("tests/fixtures/workflows/valid/llxprt-luther-dogfood-v1.toml")
+            .expect("read fixture dogfood workflow TOML");
+    assert_eq!(
+        production, fixture,
+        "fixture dogfood workflow TOML must mirror production TOML exactly"
+    );
+
+    let production =
+        toml::from_str::<toml::Value>(&production).expect("parse production dogfood workflow TOML");
+    let production = serde_json::to_value(production).expect("serialize production workflow");
+    let fixture_json =
+        std::fs::read_to_string("tests/fixtures/workflows/valid/llxprt-luther-dogfood-v1.json")
+            .expect("read fixture dogfood workflow JSON");
+    let fixture_json = serde_json::from_str::<serde_json::Value>(&fixture_json)
+        .expect("parse fixture dogfood workflow JSON");
+    assert_eq!(production, fixture_json);
 }
 
 #[test]
