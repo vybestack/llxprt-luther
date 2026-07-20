@@ -3421,9 +3421,16 @@ fn dogfood_scope_control_dominates_mutation_and_push() {
             .find(|step| step.step_id == step_id)
             .unwrap_or_else(|| panic!("missing {step_id} step"));
         assert_eq!(step.step_type, step_type);
+        assert_eq!(
+            step.parameters
+                .as_ref()
+                .and_then(|params| params.get("artifact_dir"))
+                .and_then(serde_json::Value::as_str),
+            Some("{artifact_dir}")
+        );
     }
     for (from, to, condition) in [
-        ("setup_workspace", "task_charter", None),
+        ("setup_workspace", "task_charter", Some("success")),
         ("task_charter", "route_pr_path", Some("success")),
         ("workflow_auth_preflight_plan", "implement", Some("success")),
         ("implement", "scope_measure", Some("success")),
@@ -3442,11 +3449,33 @@ fn dogfood_scope_control_dominates_mutation_and_push() {
         }));
     }
     for step_id in ["task_charter", "scope_measure", "scope_measure_pre_push"] {
-        assert!(workflow.transitions.iter().any(|transition| {
-            transition.from == step_id
-                && transition.to == "abandon_and_log"
-                && transition.condition.as_deref() == Some("fatal")
-        }));
+        let fatal = workflow
+            .transitions
+            .iter()
+            .find(|transition| {
+                transition.from == step_id
+                    && transition.to == "abandon_and_log"
+                    && transition.condition.as_deref() == Some("fatal")
+            })
+            .unwrap_or_else(|| panic!("missing fatal route for {step_id}"));
+        assert_eq!(fatal.max_iterations, Some(1));
+    }
+    for (from, to, iterations) in [
+        ("task_charter", "route_pr_path", 1),
+        ("scope_measure", "run_tests", 2),
+        (
+            "workflow_auth_preflight_pre_push",
+            "scope_measure_pre_push",
+            2,
+        ),
+        ("scope_measure_pre_push", "push_changes", 2),
+    ] {
+        let transition = workflow
+            .transitions
+            .iter()
+            .find(|transition| transition.from == from && transition.to == to)
+            .unwrap_or_else(|| panic!("missing {from} to {to}"));
+        assert_eq!(transition.max_iterations, Some(iterations));
     }
 }
 
