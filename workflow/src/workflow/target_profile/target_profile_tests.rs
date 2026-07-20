@@ -121,6 +121,23 @@ fn invalid_repo_fails_with_repo_variable_name() {
 }
 
 #[test]
+fn shell_unsafe_repo_fails_validation() {
+    for repo in [
+        "owner/repo'$(touch-pwned)",
+        "owner/repo name",
+        " owner/repo",
+    ] {
+        let mut config = test_config();
+        let overrides = TargetProfileOverrides {
+            repo: Some(repo.to_string()),
+            ..TargetProfileOverrides::default()
+        };
+        let error = apply_target_profile_overrides(&mut config, &overrides).unwrap_err();
+        assert!(error.message.contains("target_repo"), "{error}");
+    }
+}
+
+#[test]
 fn unresolved_path_templates_fail_before_execution() {
     let mut config = test_config();
     config.variables.insert(

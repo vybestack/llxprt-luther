@@ -116,27 +116,45 @@ impl super::EngineRunner {
         Ok(())
     }
 
+    fn verify_failure_cleanup_workspace(
+        &self,
+        outcome: &StepOutcome,
+        next_step: Option<&str>,
+    ) -> Result<(), EngineError> {
+        if !next_step.is_some_and(|next| {
+            *outcome != StepOutcome::Success && self.is_failure_cleanup_step(next)
+        }) {
+            return Ok(());
+        }
+        let Some(workspace) = self.context.get("work_dir").map(std::path::Path::new) else {
+            return Ok(());
+        };
+        let marker_exists =
+            std::fs::symlink_metadata(workspace.join(".luther/workspace-owner")).is_ok();
+        let ownership_required = self
+            .context
+            .get("daemon_managed_claim")
+            .is_some_and(|value| value == "true");
+        if marker_exists || ownership_required {
+            if let Some(reason) = crate::engine::continuation::verify_workspace_ownership_marker(
+                workspace,
+                &self.instance.run_id,
+            ) {
+                return Err(EngineError::PersistenceError(format!(
+                    "verify workspace ownership before failure cleanup: {reason}"
+                )));
+            }
+        }
+        Ok(())
+    }
+
     pub(super) fn persist_step_result(
         &mut self,
         current_step_id: &str,
         outcome: &StepOutcome,
         next_step: Option<&str>,
     ) -> Result<(), EngineError> {
-        if next_step.is_some_and(|next| {
-            *outcome != StepOutcome::Success && self.is_failure_cleanup_step(next)
-        }) {
-            if let Some(workspace) = self.context.get("work_dir").map(std::path::Path::new) {
-                crate::engine::continuation::write_workspace_owner_marker(
-                    workspace,
-                    &self.instance.run_id,
-                )
-                .map_err(|error| {
-                    EngineError::PersistenceError(format!(
-                        "establish workspace ownership before failure cleanup: {error}"
-                    ))
-                })?;
-            }
-        }
+        self.verify_failure_cleanup_workspace(outcome, next_step)?;
         let checkpoint = self.create_checkpoint(current_step_id, "completed");
         let failure = next_step
             .filter(|next| *outcome != StepOutcome::Success && self.is_failure_cleanup_step(next))

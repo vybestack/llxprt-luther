@@ -30,10 +30,8 @@ pub(super) fn write_child_workspace_owner_marker(
     workspace: &Path,
     run_id: &str,
 ) -> Result<(), String> {
-    std::fs::create_dir_all(workspace)
-        .map_err(|err| format!("create child work_dir '{}': {err}", workspace.display()))?;
-    crate::engine::continuation::write_workspace_owner_marker(workspace, run_id)
-        .map_err(|err| format!("write child workspace owner marker: {err}"))
+    crate::engine::continuation::provision_workspace_owner_marker(workspace, run_id)
+        .map_err(|err| format!("provision child workspace owner marker: {err}"))
 }
 
 pub fn child_launch_request(state: &OrchestrationState, child: u64) -> ChildWorkflowLaunchRequest {

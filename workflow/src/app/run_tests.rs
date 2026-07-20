@@ -170,3 +170,115 @@ fn ensure_daemon_run_dir_creates_directory() {
     assert!(nested.is_dir());
     let _ = std::fs::remove_dir_all(&base);
 }
+
+fn daemon_launch_request(
+    base: &std::path::Path,
+    run_id: &str,
+) -> luther_workflow::daemon::launcher::LaunchRequest {
+    luther_workflow::daemon::launcher::LaunchRequest {
+        config_id: "llxprt-luther".to_string(),
+        workflow_type_id: Some("llxprt-luther-dogfood-v1".to_string()),
+        run_id: run_id.to_string(),
+        repo: "vybestack/llxprt-luther".to_string(),
+        issue_number: 150,
+        daemon_managed_claim: true,
+        claim_assignment_added: true,
+        claim_label_added: true,
+        work_dir: Some(base.join("work")),
+        artifact_dir: Some(base.join("artifacts")),
+    }
+}
+
+fn unique_daemon_test_dir(name: &str) -> std::path::PathBuf {
+    std::env::temp_dir().join(format!(
+        "{name}-{}-{}",
+        std::process::id(),
+        chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+    ))
+}
+
+#[test]
+fn ensure_daemon_run_dirs_creates_owned_marker_workspace() {
+    let base = unique_daemon_test_dir("daemon-owned-workspace");
+    let request = daemon_launch_request(&base, "run-owned");
+    ensure_daemon_run_dirs(&request).expect("prepare owned daemon workspace");
+    let work = request.work_dir.as_deref().unwrap();
+    assert_eq!(
+        std::fs::read_to_string(work.join(".luther/workspace-owner")).unwrap(),
+        "run-owned"
+    );
+    assert!(!work.join(".git").exists());
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+#[test]
+fn ensure_daemon_run_dirs_claims_preexisting_empty_workspace() {
+    let base = unique_daemon_test_dir("daemon-empty-workspace");
+    let request = daemon_launch_request(&base, "run-owned");
+    let work = request.work_dir.as_deref().unwrap();
+    std::fs::create_dir_all(work).unwrap();
+    ensure_daemon_run_dirs(&request).expect("claim empty workspace after interrupted creation");
+    assert_eq!(
+        std::fs::read_to_string(work.join(".luther/workspace-owner")).unwrap(),
+        "run-owned"
+    );
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+#[test]
+fn ensure_daemon_run_dirs_rejects_foreign_nonempty_workspace() {
+    let base = unique_daemon_test_dir("daemon-foreign-repo");
+    let request = daemon_launch_request(&base, "run-owned");
+    let work = request.work_dir.as_deref().unwrap();
+    std::fs::create_dir_all(work).unwrap();
+    std::fs::write(work.join("foreign.txt"), "not Luther-owned").unwrap();
+    let error = ensure_daemon_run_dirs(&request).unwrap_err();
+    assert!(error.contains("without ownership marker"), "{error}");
+    assert!(!work.join(".luther/workspace-owner").exists());
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+#[test]
+fn ensure_daemon_run_dirs_rejects_mismatched_owner() {
+    let base = unique_daemon_test_dir("daemon-owner-mismatch");
+    let request = daemon_launch_request(&base, "run-expected");
+    let work = request.work_dir.as_deref().unwrap();
+    std::fs::create_dir_all(work.join(".luther")).unwrap();
+    std::fs::write(work.join(".luther/workspace-owner"), "run-foreign").unwrap();
+    let error = ensure_daemon_run_dirs(&request).unwrap_err();
+    assert!(error.contains("run-foreign"), "{error}");
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+#[test]
+fn ensure_daemon_run_dirs_reuses_exact_owned_workspace() {
+    let base = unique_daemon_test_dir("daemon-owned-reuse");
+    let request = daemon_launch_request(&base, "run-owned");
+    ensure_daemon_run_dirs(&request).unwrap();
+    ensure_daemon_run_dirs(&request).expect("same owner can reuse workspace");
+    let work = request.work_dir.as_deref().unwrap();
+    assert_eq!(
+        std::fs::read_to_string(work.join(".luther/workspace-owner")).unwrap(),
+        "run-owned"
+    );
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+#[test]
+fn ensure_daemon_run_dirs_recovers_marker_publication_temp() {
+    let base = unique_daemon_test_dir("daemon-owner-temp");
+    let request = daemon_launch_request(&base, "run-owned");
+    let work = request.work_dir.as_deref().unwrap();
+    std::fs::create_dir_all(work.join(".luther")).unwrap();
+    std::fs::write(
+        work.join(".luther/.workspace-owner.tmp.interrupted"),
+        "run-owned",
+    )
+    .unwrap();
+    ensure_daemon_run_dirs(&request).expect("recover marker publication temp");
+    assert_eq!(
+        std::fs::read_to_string(work.join(".luther/workspace-owner")).unwrap(),
+        "run-owned"
+    );
+    let _ = std::fs::remove_dir_all(&base);
+}

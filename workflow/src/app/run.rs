@@ -133,6 +133,7 @@ pub async fn handle_run_command(args: &luther_workflow::cli::RunArgs) {
     apply_run_target_overrides(args, &workflow_type, &mut config);
 
     let run_id = run_ref.run_id;
+    validate_cli_run_id(&run_id);
     println!("Starting workflow run: {run_id}");
     println!("  Workflow type: {}", workflow_type.workflow_type_id);
     println!("  Config: {}", config.config_id);
@@ -155,6 +156,17 @@ pub async fn handle_run_command(args: &luther_workflow::cli::RunArgs) {
             eprintln!("\nWorkflow execution error: {e}");
             process::exit(1);
         }
+    }
+}
+
+fn validate_cli_run_id(run_id: &str) {
+    if run_id.is_empty()
+        || !run_id
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
+    {
+        eprintln!("Error: run id must contain only ASCII letters, digits, '-' or '_'");
+        process::exit(1);
     }
 }
 
@@ -490,19 +502,15 @@ pub fn ensure_daemon_run_dirs(
     request: &luther_workflow::daemon::launcher::LaunchRequest,
 ) -> Result<(), String> {
     ensure_daemon_run_dir("artifact", request.artifact_dir.as_deref())?;
-    ensure_daemon_run_dir("work", request.work_dir.as_deref())?;
-    // Provision the durable `.luther/workspace-owner` marker with the exact run
-    // id so cleanup-failure-abandonment recovery can verify workspace ownership
-    // later. Writing once at workspace creation binds the directory to this run.
-    // Idempotent for the same run id, so it is safe on both launch and resume.
-    if let Some(work_dir) = request.work_dir.as_deref() {
-        luther_workflow::engine::continuation::write_workspace_owner_marker(
-            work_dir,
-            &request.run_id,
-        )
-        .map_err(|e| format!("write workspace owner marker: {e}"))?;
-    }
-    Ok(())
+    ensure_daemon_workspace(request.work_dir.as_deref(), &request.run_id)
+}
+
+fn ensure_daemon_workspace(work_dir: Option<&std::path::Path>, run_id: &str) -> Result<(), String> {
+    let Some(work_dir) = work_dir else {
+        return Ok(());
+    };
+    luther_workflow::engine::continuation::provision_workspace_owner_marker(work_dir, run_id)
+        .map_err(|e| format!("provision workspace owner marker: {e}"))
 }
 
 pub fn ensure_daemon_run_dir(kind: &str, path: Option<&std::path::Path>) -> Result<(), String> {
@@ -527,6 +535,17 @@ pub fn resume_daemon_workflow(
     let mut wait_config = resolve_workflow_config(&metadata.config_id, &config_root)
         .map_err(|e| format!("resolve config '{}': {e}", metadata.config_id))?;
     apply_daemon_claim_overrides(&mut wait_config, request);
+    let workspace = metadata.workspace_path.as_deref().ok_or_else(|| {
+        format!(
+            "missing workspace_path for resume of run {}",
+            request.run_id
+        )
+    })?;
+    luther_workflow::engine::continuation::verify_workspace_ownership_marker(
+        std::path::Path::new(workspace),
+        &request.run_id,
+    )
+    .map_or(Ok(()), Err)?;
     let config_dir = Some(config_root);
     if metadata
         .current_step

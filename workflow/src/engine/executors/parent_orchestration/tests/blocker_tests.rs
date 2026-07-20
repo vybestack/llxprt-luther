@@ -625,7 +625,7 @@ fn launch_child_process_marker_writing_rejects_foreign_owner() {
     write_child_workspace_owner_marker(&work_dir, first_run).unwrap();
     let err = write_child_workspace_owner_marker(&work_dir, second_run).unwrap_err();
     assert!(
-        err.contains("write child workspace owner marker"),
+        err.contains("provision child workspace owner marker"),
         "expected a foreign-owner rejection, got: {err}"
     );
 
