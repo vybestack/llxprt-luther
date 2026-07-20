@@ -106,7 +106,11 @@ if [ -e .luther ] && { [ -L .luther ] || [ ! -d .luther ]; }; then
   echo "Workspace ownership directory must be a real directory" >&2
   exit 1
 fi
-if [ -f .luther/workspace-owner ] && [ ! -L .luther/workspace-owner ]; then
+if [ -e .luther/workspace-owner ] || [ -L .luther/workspace-owner ]; then
+  if [ -L .luther/workspace-owner ] || [ ! -f .luther/workspace-owner ]; then
+    echo "Workspace ownership marker must be a regular file" >&2
+    exit 1
+  fi
   if ! printf %s '{run_id}' | cmp -s - .luther/workspace-owner; then
     echo "Workspace ownership marker does not exactly match this run" >&2
     exit 1
