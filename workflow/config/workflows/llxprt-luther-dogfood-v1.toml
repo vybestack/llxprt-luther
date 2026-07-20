@@ -96,7 +96,7 @@ description = "Ensure repo is checked out, create issue branch, create artifact 
 output_format = "json"
 context_map = { existing_pr_number = "existing_pr_number", existing_pr_url = "existing_pr_url" }
 command = """
-set -euo pipefail
+set -eu
 
 unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_INDEX_FILE GIT_CONFIG_COUNT GIT_CONFIG_PARAMETERS GIT_PROXY_COMMAND GIT_SSH GIT_SSH_COMMAND
 export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_NOSYSTEM=1
