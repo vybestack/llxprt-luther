@@ -233,6 +233,14 @@ fn ready_lease_resumes_via_ready_lease_collection_without_poller_input() {
         Some("run-parent-61"),
     )
     .expect("mark parent ready");
+    conn.execute(
+        "INSERT INTO claim_metadata (
+            lease_id, assignee, label, assignment_added, label_added,
+            cleanup_pending, updated_at
+         ) VALUES (?1, '', '', 0, 0, 0, datetime('now'))",
+        [&lease.lease_id],
+    )
+    .expect("persist daemon claim receipt");
     let mut metadata = luther_workflow::persistence::RunMetadata::new(
         "run-parent-61",
         "parent-issue-orchestrator-v1",

@@ -1,22 +1,8 @@
 use super::*;
 
-#[derive(Clone, Debug, Default, serde::Deserialize, serde::Serialize)]
-pub(super) struct ParentOrchestrationRollup {
-    pub(super) parent_issue_number: u64,
-    pub(super) children: Vec<ChildRollupEntry>,
-}
-
-#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
-pub(super) struct ChildRollupEntry {
-    pub(super) child_issue_number: u64,
-    pub(super) child_run_id: Option<String>,
-    pub(super) child_artifact_dir: Option<String>,
-    pub(super) pr_number: Option<u64>,
-    pub(super) pr_state: Option<String>,
-    pub(super) merge_sha: Option<String>,
-    pub(super) outcome: Option<String>,
-    pub(super) non_actionable_reason: Option<String>,
-}
+use crate::persistence::leases::{
+    update_lease_status_conditional_outcome, ConditionalLeaseStatusOutcome,
+};
 
 pub fn bool_context(context: &StepContext, primary: &str, fallback: &str) -> bool {
     bool_context_default(context, primary, fallback, false)
@@ -160,6 +146,10 @@ pub fn prepare_child_lease_with_conn(
                     reason: "active_child_lease".to_string(),
                 }
             }
+            LeaseStatus::CleanupAbandoned => ChildLeaseAction::Wait {
+                lease: Some(lease),
+                reason: "cleanup_abandoned_requires_continuation".to_string(),
+            },
             LeaseStatus::Pending | LeaseStatus::Completed => ChildLeaseAction::Wait {
                 lease: Some(lease),
                 reason: "non_actionable_child_lease".to_string(),
@@ -427,11 +417,16 @@ pub fn mark_child_lease_relaunchable(
 ) -> Result<(), EngineError> {
     let conn = daemon_connection()?;
     if let Some(lease) = get_lease_for_issue(&conn, &state.repo, child).map_err(sql_error)? {
-        update_lease_status(
+        let Some(run_id) = lease.run_id.as_deref() else {
+            return Ok(());
+        };
+        crate::persistence::update_lease_status_conditional(
             &conn,
             &lease.lease_id,
             LeaseStatus::Failed,
-            lease.run_id.as_deref(),
+            &[LeaseStatus::Completed, LeaseStatus::Failed],
+            Some(run_id),
+            Some(run_id),
         )
         .map_err(sql_error)?;
     }
@@ -531,48 +526,6 @@ pub fn record_blocked_child(
     Ok(StepOutcome::Fixable)
 }
 
-pub fn child_launch_request(state: &OrchestrationState, child: u64) -> ChildWorkflowLaunchRequest {
-    let stamp = Utc::now().timestamp_millis();
-    child_request_with_run_id(
-        state,
-        child,
-        format!("parent{}-child{}-{stamp}", state.parent_issue_number, child),
-    )
-}
-
-pub fn child_resume_request(
-    state: &OrchestrationState,
-    child: u64,
-    run_id: String,
-) -> ChildWorkflowLaunchRequest {
-    child_request_with_run_id(state, child, run_id)
-}
-
-pub fn child_request_with_run_id(
-    state: &OrchestrationState,
-    child: u64,
-    run_id: String,
-) -> ChildWorkflowLaunchRequest {
-    let artifact_dir = state
-        .artifact_dir
-        .as_ref()
-        .map(|base| child_artifact_dir(base, child, &run_id));
-    ChildWorkflowLaunchRequest {
-        workflow_type_id: state.child_workflow_type_id.clone(),
-        config_id: state.child_config_id.clone(),
-        run_id,
-        repo: state.repo.clone(),
-        issue_number: child,
-        work_dir: state.work_dir.clone(),
-        artifact_dir,
-        config_root: state.config_root.clone(),
-    }
-}
-
-pub fn child_artifact_dir(base: &Path, child: u64, run_id: &str) -> PathBuf {
-    base.join(format!("issue-{child}")).join(run_id)
-}
-
 pub fn mark_child_lease_completed(
     state: &OrchestrationState,
     child: u64,
@@ -580,8 +533,19 @@ pub fn mark_child_lease_completed(
 ) -> Result<(), EngineError> {
     let conn = daemon_connection()?;
     if let Some(lease) = get_lease_for_issue(&conn, &state.repo, child).map_err(sql_error)? {
-        update_lease_status(&conn, &lease.lease_id, LeaseStatus::Completed, Some(run_id))
-            .map_err(sql_error)?;
+        crate::persistence::update_lease_status_conditional(
+            &conn,
+            &lease.lease_id,
+            LeaseStatus::Completed,
+            &[
+                LeaseStatus::Completed,
+                LeaseStatus::Failed,
+                LeaseStatus::ReadyToResume,
+            ],
+            Some(run_id),
+            Some(run_id),
+        )
+        .map_err(sql_error)?;
     }
     Ok(())
 }
@@ -609,18 +573,23 @@ pub fn finish_child_launch(
         ChildWorkflowRunResult::CompletedFailure => "completed_failure",
         ChildWorkflowRunResult::WaitingExternal => "waiting_external",
     };
-    let status = match effective_result {
-        ChildWorkflowRunResult::CompletedSuccess => LeaseStatus::ReadyToResume,
-        ChildWorkflowRunResult::CompletedFailure => LeaseStatus::Failed,
-        ChildWorkflowRunResult::WaitingExternal => LeaseStatus::WaitingExternal,
-    };
-    update_lease_status(
-        conn,
-        &completion.lease.lease_id,
-        status,
-        Some(&completion.request.run_id),
-    )
-    .map_err(sql_error)?;
+    let lease_outcome = advance_child_lease_for_result(conn, &completion, &effective_result)?;
+    if !should_apply_child_finalization_side_effects(&lease_outcome, &effective_result, &completion)
+    {
+        // Stale child finalization: the lease was advanced by a concurrent
+        // writer to a foreign owner, is in an incompatible status (e.g.
+        // Completed or CleanupAbandoned), or the lease row is missing. Stop
+        // before any side effects — artifacts, context mutation, rollup, label
+        // removal, and comments — to avoid duplicating work on a lease we no
+        // longer own or that has already reached a durable terminal state.
+        //
+        // The returned step outcome is derived from the durable lease state in
+        // the rejected CAS outcome, never from the stale process result: the
+        // concurrent writer that won the CAS is authoritative, and the
+        // in-process result may describe a run that no longer corresponds to
+        // the lease's durable owner.
+        return Ok(step_outcome_from_durable_lease(&lease_outcome));
+    }
     write_launch_artifact(
         state,
         json!({
@@ -660,11 +629,155 @@ pub fn finish_child_launch(
     if effective_result == ChildWorkflowRunResult::CompletedFailure {
         record_terminal_child_failure(state, query, &completion)?;
     }
-    Ok(match effective_result {
+    Ok(step_outcome_for_child_result(&effective_result))
+}
+
+/// Conditionally advance a child lease to the outcome-appropriate status,
+/// guarding against overwriting a durable `CleanupAbandoned` protection, and
+/// return the classified conditional outcome so the caller can decide whether
+/// to apply finalization side effects.
+///
+/// When the engine runner detects a failure-cleanup path it protects the lease
+/// by transitioning it to [`LeaseStatus::CleanupAbandoned`] (conditional on the
+/// owned run id). That protection must survive this finalization step: a
+/// reclaimable `Failed` would allow the parent orchestrator (or a competing
+/// daemon) to relaunch a duplicate workflow while the original run's cleanup
+/// artifacts are still owned.
+///
+/// Each effective result maps to a conditional update keyed on the durable run
+/// provenance (`expected_run_id`) and the set of statuses from which that
+/// transition is valid — mirroring the daemon finalization pattern in
+/// [`crate::daemon::launcher::finish_lease_after_result`]. `CleanupAbandoned`
+/// is deliberately excluded from the failure transition's expected set so the
+/// conditional update is a no-op when protection is in place, leaving the
+/// durable lease state intact rather than overwriting it with reclaimable
+/// `Failed`.
+///
+/// The returned [`ConditionalLeaseStatusOutcome`] distinguishes `Applied` from
+/// the rejection variants so the caller can avoid emitting finalization side
+/// effects (artifacts, context mutation, rollup, label removal, comments) for
+/// a lease it no longer owns or that has already reached a foreign terminal
+/// state.
+fn advance_child_lease_for_result(
+    conn: &rusqlite::Connection,
+    completion: &ChildLaunchCompletion<'_>,
+    effective_result: &ChildWorkflowRunResult,
+) -> Result<ConditionalLeaseStatusOutcome, EngineError> {
+    let (status, expected_statuses) = match effective_result {
+        // Failed must not overwrite CleanupAbandoned: the expected set excludes
+        // CleanupAbandoned so a protected lease is left untouched.
+        ChildWorkflowRunResult::CompletedFailure => (
+            LeaseStatus::Failed,
+            &[LeaseStatus::Running, LeaseStatus::Failed][..],
+        ),
+        ChildWorkflowRunResult::CompletedSuccess => (
+            LeaseStatus::ReadyToResume,
+            &[LeaseStatus::Running, LeaseStatus::WaitingExternal][..],
+        ),
+        ChildWorkflowRunResult::WaitingExternal => (
+            LeaseStatus::WaitingExternal,
+            &[LeaseStatus::Running, LeaseStatus::WaitingExternal][..],
+        ),
+    };
+    update_lease_status_conditional_outcome(
+        conn,
+        &completion.lease.lease_id,
+        status,
+        expected_statuses,
+        None,
+        Some(&completion.request.run_id),
+    )
+    .map_err(sql_error)
+}
+
+/// Decide whether finalization side effects (artifacts, context mutation,
+/// rollup, label removal, comments) may be applied after a child lease
+/// conditional transition.
+///
+/// Side effects are only applied when the conditional transition either
+/// succeeded (`Applied`) *or* was idempotently rejected because the lease
+/// already holds the exact same terminal result owned by this same run id.
+/// In every other rejection case — a foreign owner, an incompatible terminal
+/// status (e.g. `Completed`, `CleanupAbandoned`), a missing lease row, or a
+/// stale `CleanupAbandoned` lease — the durable state is authoritative and the
+/// caller must not emit any side effects that would duplicate work on a lease
+/// it no longer owns.
+///
+/// `CleanupAbandoned` is never treated as reclaimable here, even on an
+/// exact-same-owner match: it represents a deliberate, durable protection that
+/// requires explicit continuation and must not be reclaimed via finalization.
+fn should_apply_child_finalization_side_effects(
+    outcome: &ConditionalLeaseStatusOutcome,
+    effective_result: &ChildWorkflowRunResult,
+    completion: &ChildLaunchCompletion<'_>,
+) -> bool {
+    match outcome {
+        ConditionalLeaseStatusOutcome::Applied => true,
+        ConditionalLeaseStatusOutcome::Missing => false,
+        ConditionalLeaseStatusOutcome::Rejected {
+            current_status,
+            current_run_id,
+        } => {
+            // Allow only an exact same-owner idempotent match: the lease
+            // already holds the terminal result this finalization would have
+            // produced, owned by this very run id. Any other owner or any
+            // non-matching terminal status (including CleanupAbandoned) must
+            // suppress side effects.
+            let expected_terminal = match effective_result {
+                ChildWorkflowRunResult::CompletedFailure => LeaseStatus::Failed,
+                ChildWorkflowRunResult::CompletedSuccess => LeaseStatus::ReadyToResume,
+                ChildWorkflowRunResult::WaitingExternal => LeaseStatus::WaitingExternal,
+            };
+            *current_status == expected_terminal
+                && current_run_id.as_deref() == Some(completion.request.run_id.as_str())
+        }
+    }
+}
+
+/// Map a child workflow result to its workflow step outcome.
+fn step_outcome_for_child_result(effective_result: &ChildWorkflowRunResult) -> StepOutcome {
+    match effective_result {
         ChildWorkflowRunResult::CompletedFailure => StepOutcome::Fixable,
         ChildWorkflowRunResult::CompletedSuccess => StepOutcome::Success,
         ChildWorkflowRunResult::WaitingExternal => StepOutcome::Wait,
-    })
+    }
+}
+
+/// Derive a workflow step outcome from durable lease state after a rejected
+/// child finalization CAS.
+///
+/// When a concurrent writer won the compare-and-swap, the in-process child
+/// result is stale: it may describe a run that no longer owns the lease, or a
+/// terminal state a foreign writer has already superseded. The returned step
+/// outcome is therefore derived solely from the durable lease state reported
+/// by the rejected CAS, never from the stale process result.
+///
+/// - `Completed`/`Merged`-equivalent durable states → `Success`
+/// - `Failed`/`Abandoned`/`Stale`/`CleanupAbandoned` → `Fixable` (re-evaluate)
+/// - `Missing` → `Fixable` (the child lease is gone; re-select)
+/// - Active in-progress states (`Running`, `WaitingExternal`, `ReadyToResume`,
+///   `Claimed`) → `Wait` (a concurrent writer is driving the child)
+fn step_outcome_from_durable_lease(outcome: &ConditionalLeaseStatusOutcome) -> StepOutcome {
+    match outcome {
+        ConditionalLeaseStatusOutcome::Applied => {
+            // Should not reach here for a rejected path, but treat as
+            // success-adjacent to avoid masking a completed child.
+            StepOutcome::Success
+        }
+        ConditionalLeaseStatusOutcome::Missing => StepOutcome::Fixable,
+        ConditionalLeaseStatusOutcome::Rejected { current_status, .. } => match current_status {
+            LeaseStatus::Completed => StepOutcome::Success,
+            LeaseStatus::ReadyToResume
+            | LeaseStatus::Running
+            | LeaseStatus::WaitingExternal
+            | LeaseStatus::Claimed
+            | LeaseStatus::Pending => StepOutcome::Wait,
+            LeaseStatus::Failed
+            | LeaseStatus::Abandoned
+            | LeaseStatus::Stale
+            | LeaseStatus::CleanupAbandoned => StepOutcome::Fixable,
+        },
+    }
 }
 
 pub fn record_terminal_child_failure(
@@ -735,75 +848,6 @@ pub fn write_launch_artifact(state: &OrchestrationState, value: Value) -> Result
     write_json(&state.artifact_root, "child-run-launch.json", &value)
 }
 
-pub fn update_rollup(
-    state: &OrchestrationState,
-    child: u64,
-    run_id: Option<&str>,
-    outcome: &str,
-    pr: Option<&GithubIssuePrState>,
-) -> Result<(), EngineError> {
-    let mut rollup = read_rollup(&state.artifact_root)?;
-    rollup.parent_issue_number = state.parent_issue_number;
-    rollup
-        .children
-        .retain(|entry| entry.child_issue_number != child);
-    rollup.children.push(ChildRollupEntry {
-        child_issue_number: child,
-        child_run_id: run_id.map(str::to_string),
-        child_artifact_dir: run_id.and_then(|run_id| {
-            state.artifact_dir.as_ref().map(|base| {
-                child_artifact_dir(base, child, run_id)
-                    .to_string_lossy()
-                    .to_string()
-            })
-        }),
-        pr_number: pr.map(|state| state.number),
-        pr_state: pr.map(|state| state.state.clone()),
-        merge_sha: pr.and_then(|state| state.merge_commit_sha.clone()),
-        outcome: Some(outcome.to_string()),
-        non_actionable_reason: non_actionable_reason_for_outcome(outcome),
-    });
-    rollup
-        .children
-        .sort_by_key(|entry| entry.child_issue_number);
-    write_json(
-        &state.artifact_root,
-        "parent-orchestration-rollup.json",
-        &rollup,
-    )
-}
-
-pub fn non_actionable_reason_for_outcome(outcome: &str) -> Option<String> {
-    match outcome {
-        "non_actionable_child" => Some("child issue is explicitly non-actionable".to_string()),
-        "non_actionable_child_lease" => {
-            Some("child lease is already terminal outside the parent orchestrator".to_string())
-        }
-        _ => None,
-    }
-}
-
-pub fn rollup_has_outcome(
-    state: &OrchestrationState,
-    child: u64,
-    outcome: &str,
-) -> Result<bool, EngineError> {
-    let rollup = read_rollup(&state.artifact_root)?;
-    Ok(rollup.children.iter().any(|entry| {
-        entry.child_issue_number == child && entry.outcome.as_deref() == Some(outcome)
-    }))
-}
-
-pub fn read_rollup(artifact_root: &Path) -> Result<ParentOrchestrationRollup, EngineError> {
-    let path = artifact_root.join("parent-orchestration-rollup.json");
-
-    if path.exists() {
-        read_json(&path)
-    } else {
-        Ok(ParentOrchestrationRollup::default())
-    }
-}
-
 pub fn child_is_complete(child: &ChildIssueState) -> bool {
     matches!(child.terminal_state, ChildIssueStatus::Merged)
 }
@@ -834,51 +878,4 @@ pub fn parent_summary_evaluation_json(evaluation: &Value) -> String {
             "Parent orchestration evaluation serialization failed; diagnostic context could not be encoded as JSON: {err}"
         ),
     }
-}
-
-pub fn resume_child_process(
-    request: &ChildWorkflowLaunchRequest,
-) -> Result<ChildWorkflowRunResult, String> {
-    run_child_workflow(request, ChildRunMode::Resume)
-}
-
-pub fn launch_child_process(
-    request: &ChildWorkflowLaunchRequest,
-) -> Result<ChildWorkflowRunResult, String> {
-    run_child_workflow(request, ChildRunMode::Launch)
-}
-
-pub enum ChildRunMode {
-    Launch,
-    Resume,
-}
-
-pub fn run_child_workflow(
-    request: &ChildWorkflowLaunchRequest,
-    mode: ChildRunMode,
-) -> Result<ChildWorkflowRunResult, String> {
-    let config_root = &request.config_root;
-    let config_id = validated_child_id(&request.config_id, "config id")?;
-    let workflow_type_id = validated_child_id(&request.workflow_type_id, "type id")?;
-    let mut config = resolve_workflow_config(config_id, config_root)
-        .map_err(|err| format!("resolve child config '{config_id}': {err}"))?;
-    let workflow_type = resolve_workflow_type(workflow_type_id, config_root)
-        .map_err(|err| format!("resolve child workflow type: {err}"))?;
-    apply_child_overrides(&mut config, request)?;
-    let db_path = crate::runtime_paths::get_data_dir().join("checkpoints.db");
-    if matches!(mode, ChildRunMode::Resume) {
-        prepare_child_resume(&db_path, request)?;
-    }
-    let run_context = child_run_context(&config, request)?;
-    let instance =
-        WorkflowInstance::create_with_run_id(workflow_type, config.clone(), &request.run_id);
-    let mut runner = EngineRunner::with_db_path_and_context(
-        instance,
-        crate::engine::executor::ExecutorRegistry::with_defaults(),
-        &db_path,
-        run_context,
-    )
-    .map_err(|err| err.to_string())?;
-    let outcome = runner.run().map_err(|err| err.to_string())?;
-    child_result_from_run_outcome(outcome, request, &config, &db_path)
 }

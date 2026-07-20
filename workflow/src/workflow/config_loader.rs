@@ -835,6 +835,8 @@ pub fn build_available_variables(wf: &WorkflowType, config: &WorkflowConfig) -> 
     available.insert("diff_path_normalization".to_string());
     available.insert("run_id".to_string());
     available.insert("current_step_id".to_string());
+    available.insert("failed_work_step".to_string());
+    available.insert("failed_work_outcome".to_string());
     // Statically-declarable step outputs from context_map declarations and
     // from executors that set known context variables at runtime.
     for step in &wf.steps {

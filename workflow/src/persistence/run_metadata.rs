@@ -1,7 +1,9 @@
 /// @plan:PLAN-20260404-INITIAL-RUNTIME.P05
 /// Run metadata persistence - structures for tracking workflow run state and identifiers.
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 
+use crate::persistence::checkpoint::StateSnapshot;
 use crate::workflow::schema::WorkflowRunRef;
 
 /// Status of a workflow run.
@@ -118,6 +120,50 @@ impl RunStatus {
     }
 }
 
+/// Durable provenance for a failed work step followed by successful cleanup.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FailureCleanupState {
+    pub schema_version: u32,
+    pub failed_step: String,
+    pub failure_outcome: String,
+    pub failure_reason: String,
+    pub failed_checkpoint_id: String,
+    /// Snapshot captured at the failed step. Presence is required by the
+    /// versioned contract so persisted JSON missing this field fails closed at
+    /// deserialization rather than silently substituting a default snapshot
+    /// (which would corrupt recovery state). An explicitly empty/default
+    /// `StateSnapshot` is still a legitimate value — only the *field's
+    /// presence* is mandated.
+    pub failed_state_snapshot: StateSnapshot,
+    pub cleanup_step: String,
+    pub cleanup_succeeded: bool,
+    pub captured_at: DateTime<Utc>,
+    pub cleanup_completed_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub recovery_consumed_at: Option<DateTime<Utc>>,
+}
+
+impl FailureCleanupState {
+    pub const SCHEMA_VERSION: u32 = 1;
+
+    #[must_use]
+    pub fn is_complete(&self) -> bool {
+        self.schema_version == Self::SCHEMA_VERSION
+            && !self.failed_step.is_empty()
+            && !self.failure_outcome.is_empty()
+            && !self.failure_reason.is_empty()
+            && !self.failed_checkpoint_id.is_empty()
+            && !self.cleanup_step.is_empty()
+            && self.cleanup_succeeded
+            && self.cleanup_completed_at.is_some()
+    }
+
+    #[must_use]
+    pub fn recovery_is_available(&self) -> bool {
+        self.is_complete() && self.recovery_consumed_at.is_none()
+    }
+}
+
 /// Metadata for a workflow run persisted to storage.
 /// Contains all identifiers needed to reconstruct the run context.
 /// @plan:PLAN-20260404-INITIAL-RUNTIME.P05
@@ -162,6 +208,8 @@ pub struct RunMetadata {
     pub process_pid: Option<u32>,
     /// PIDs of child/agent processes (JSON array TEXT).
     pub child_pids: Vec<u32>,
+    /// Original failed-work provenance when a failure-cleanup terminal ran.
+    pub failure_cleanup: Option<FailureCleanupState>,
 }
 
 impl RunMetadata {
@@ -194,7 +242,18 @@ impl RunMetadata {
             head_sha: None,
             process_pid: None,
             child_pids: Vec::new(),
+            failure_cleanup: None,
         }
+    }
+
+    /// True only for an explicitly evidenced cleanup-after-failure terminal.
+    #[must_use]
+    pub fn is_cleanup_failure_abandonment(&self) -> bool {
+        self.status == RunStatus::Abandoned
+            && self
+                .failure_cleanup
+                .as_ref()
+                .is_some_and(FailureCleanupState::is_complete)
     }
 
     /// Mark the run as started (Running status).
@@ -377,18 +436,27 @@ pub fn init_runs_table(conn: &rusqlite::Connection) -> Result<(), rusqlite::Erro
             pr_number INTEGER,
             head_sha TEXT,
             process_pid INTEGER,
-            child_pids TEXT
+            child_pids TEXT,
+            failure_cleanup TEXT
         )",
         [],
     )?;
-    migrate_runs_table(conn);
+    migrate_runs_table(conn)?;
     Ok(())
 }
 
 /// Idempotently add new columns to a pre-existing `runs` table.
-/// Ignores "duplicate column" errors so it is safe to run repeatedly.
+/// Existing columns are discovered before DDL so real migration failures are
+/// propagated rather than mistaken for harmless duplicate-column errors.
 /// @plan:PLAN-20260404-INITIAL-RUNTIME.P05
-pub fn migrate_runs_table(conn: &rusqlite::Connection) {
+pub fn migrate_runs_table(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
+    let existing = {
+        let mut statement = conn.prepare("PRAGMA table_info(runs)")?;
+        let columns = statement
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<rusqlite::Result<std::collections::HashSet<_>>>()?;
+        columns
+    };
     let columns = [
         "previous_step TEXT",
         "previous_outcome TEXT",
@@ -402,11 +470,15 @@ pub fn migrate_runs_table(conn: &rusqlite::Connection) {
         "head_sha TEXT",
         "process_pid INTEGER",
         "child_pids TEXT",
+        "failure_cleanup TEXT",
     ];
-    for col in columns {
-        // Ignore errors (e.g. duplicate column) so the migration is idempotent.
-        let _ = conn.execute(&format!("ALTER TABLE runs ADD COLUMN {}", col), []);
+    for column in columns {
+        let name = column.split_whitespace().next().unwrap_or_default();
+        if !existing.contains(name) {
+            conn.execute(&format!("ALTER TABLE runs ADD COLUMN {column}"), [])?;
+        }
     }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -530,5 +602,107 @@ mod tests {
         let back = deserialize_pid_list(Some(raw));
         assert_eq!(back, list);
         assert!(deserialize_pid_list(None).is_empty());
+    }
+
+    /// Build a complete `FailureCleanupState` fixture for serialization tests.
+    fn complete_failure_cleanup_fixture() -> FailureCleanupState {
+        let now = chrono::Utc::now();
+        FailureCleanupState {
+            schema_version: FailureCleanupState::SCHEMA_VERSION,
+            failed_step: "remediate".to_string(),
+            failure_outcome: "fatal".to_string(),
+            failure_reason: "agent timed out".to_string(),
+            failed_checkpoint_id: "remediate@2026-01-01T00:00:00Z".to_string(),
+            failed_state_snapshot: StateSnapshot::default(),
+            cleanup_step: "abandon_and_log".to_string(),
+            cleanup_succeeded: true,
+            captured_at: now,
+            cleanup_completed_at: Some(now),
+            recovery_consumed_at: None,
+        }
+    }
+
+    #[test]
+    fn failure_cleanup_state_round_trip_preserves_empty_snapshot() {
+        // An empty/default StateSnapshot is a legitimate value and must survive
+        // serialize/deserialize. The contract requires *presence*, not
+        // non-default content.
+        let original = complete_failure_cleanup_fixture();
+        assert_eq!(original.failed_state_snapshot, StateSnapshot::default());
+
+        let json = serde_json::to_string(&original).expect("serialize");
+        let restored: FailureCleanupState =
+            serde_json::from_str(&json).expect("deserialize round-trip");
+
+        assert_eq!(restored, original);
+    }
+
+    #[test]
+    fn failure_cleanup_state_round_trip_preserves_populated_snapshot() {
+        // A populated StateSnapshot must also round-trip exactly, proving the
+        // field is neither dropped nor silently defaulted.
+        let mut original = complete_failure_cleanup_fixture();
+        original.failed_state_snapshot.retry_count = 3;
+        original.failed_state_snapshot.loop_count = 2;
+        original.failed_state_snapshot.status = "interrupted".to_string();
+        original
+            .failed_state_snapshot
+            .edge_loop_counts
+            .insert("watch:collect".to_string(), 1);
+
+        let json = serde_json::to_string(&original).expect("serialize");
+        let restored: FailureCleanupState =
+            serde_json::from_str(&json).expect("deserialize round-trip");
+
+        assert_eq!(restored, original);
+        assert_eq!(restored.failed_state_snapshot.retry_count, 3);
+    }
+
+    #[test]
+    fn failure_cleanup_state_rejects_missing_failed_state_snapshot() {
+        // Removing the failed_state_snapshot key entirely must fail closed at
+        // deserialization, rather than silently substituting a default.
+        let original = complete_failure_cleanup_fixture();
+        let json = serde_json::to_string(&original).expect("serialize");
+        let mut value: serde_json::Value = serde_json::from_str(&json).expect("parse as value");
+        let obj = value
+            .as_object_mut()
+            .expect("serialized FailureCleanupState must be a JSON object");
+        assert!(
+            obj.remove("failed_state_snapshot").is_some(),
+            "test precondition: field must be present in serialized JSON"
+        );
+        let truncated = serde_json::to_string(&value).expect("re-serialize truncated");
+
+        let result: Result<FailureCleanupState, _> = serde_json::from_str(&truncated);
+        assert!(
+            result.is_err(),
+            "deserialization must fail closed when failed_state_snapshot is absent, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn failure_cleanup_state_rejects_malformed_failed_state_snapshot() {
+        // A structurally invalid failed_state_snapshot value must also fail
+        // closed at deserialization.
+        let original = complete_failure_cleanup_fixture();
+        let json = serde_json::to_string(&original).expect("serialize");
+        let mut value: serde_json::Value = serde_json::from_str(&json).expect("parse as value");
+        let obj = value
+            .as_object_mut()
+            .expect("serialized FailureCleanupState must be a JSON object");
+        // Replace the snapshot with a value that is not a valid StateSnapshot
+        // (retry_count as a string instead of a number).
+        obj.insert(
+            "failed_state_snapshot".to_string(),
+            serde_json::json!({"retry_count": "not-a-number"}),
+        );
+        let malformed = serde_json::to_string(&value).expect("re-serialize malformed");
+
+        let result: Result<FailureCleanupState, _> = serde_json::from_str(&malformed);
+        assert!(
+            result.is_err(),
+            "deserialization must fail closed for a malformed failed_state_snapshot, got: {result:?}"
+        );
     }
 }

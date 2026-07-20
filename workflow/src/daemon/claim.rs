@@ -97,17 +97,17 @@ fn acquire_lease_with_receipt(
     conn.execute_batch("BEGIN IMMEDIATE")?;
     let result = (|| {
         let lease = try_claim(conn, repo, issue_number, config_id)?;
-        if let (Some(lease), Some(assignee), Some(label)) = (
-            lease.as_ref(),
-            config.claim_assignee.as_ref(),
-            config.claim_label.as_ref(),
-        ) {
+        if let Some(lease) = lease.as_ref() {
+            // Persist a receipt for every claimed lease, even when the config
+            // has zero or one optional claim fields. The resume path
+            // (prepare_resume_lease) requires a receipt to reconstruct claim
+            // ownership, so omitting it makes a lease permanently un-resumable.
             upsert_claim_metadata(
                 conn,
                 &ClaimMetadataReceipt {
                     lease_id: lease.lease_id.clone(),
-                    assignee: assignee.clone(),
-                    label: label.clone(),
+                    assignee: config.claim_assignee.clone().unwrap_or_default(),
+                    label: config.claim_label.clone().unwrap_or_default(),
                     assignment_added: false,
                     label_added: false,
                     cleanup_pending: false,
@@ -493,5 +493,56 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM claim_metadata", [], |row| row.get(0))
             .unwrap();
         assert_eq!(receipt_count, 1);
+    }
+
+    #[test]
+    fn claim_with_zero_claim_fields_persists_receipt() {
+        // Issue-137: a lease claimed with no claim_assignee and no claim_label
+        // must still persist a ClaimMetadataReceipt so the resume path can
+        // reconstruct ownership. Without a receipt, prepare_resume_lease skips
+        // the resume, stranding the lease permanently.
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        init_leases_table(&conn).unwrap();
+        let cfg = DiscoveryConfig {
+            repo: Some("owner/repo".to_owned()),
+            claim_assignee: None,
+            claim_label: None,
+            ..DiscoveryConfig::default()
+        };
+        let lease = acquire_lease_with_receipt(&conn, "owner/repo", 50, "cfg", &cfg)
+            .unwrap()
+            .expect("claim should succeed");
+        let receipt = get_claim_metadata(&conn, &lease.lease_id)
+            .unwrap()
+            .expect("a receipt must be persisted even with zero claim fields");
+        assert_eq!(receipt.lease_id, lease.lease_id);
+        assert!(receipt.assignee.is_empty());
+        assert!(receipt.label.is_empty());
+        assert!(!receipt.assignment_added);
+        assert!(!receipt.label_added);
+        assert!(!receipt.cleanup_pending);
+    }
+
+    #[test]
+    fn claim_with_one_claim_field_persists_receipt() {
+        // Issue-137: a lease claimed with exactly one optional claim field
+        // (assignee but no label) must still persist a ClaimMetadataReceipt.
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        init_leases_table(&conn).unwrap();
+        let cfg = DiscoveryConfig {
+            repo: Some("owner/repo".to_owned()),
+            claim_assignee: Some("acoliver".to_owned()),
+            claim_label: None,
+            ..DiscoveryConfig::default()
+        };
+        let lease = acquire_lease_with_receipt(&conn, "owner/repo", 51, "cfg", &cfg)
+            .unwrap()
+            .expect("claim should succeed");
+        let receipt = get_claim_metadata(&conn, &lease.lease_id)
+            .unwrap()
+            .expect("a receipt must be persisted with one claim field");
+        assert_eq!(receipt.lease_id, lease.lease_id);
+        assert_eq!(receipt.assignee, "acoliver");
+        assert!(receipt.label.is_empty());
     }
 }

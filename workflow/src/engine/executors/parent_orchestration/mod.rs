@@ -19,17 +19,17 @@ static ARTIFACT_WRITE_COUNTER: AtomicU64 = AtomicU64::new(0);
 use crate::engine::runner::EngineError;
 use crate::engine::transition::StepOutcome;
 use crate::engine::{EngineRunner, RunContext, RunOutcome};
+#[cfg(test)]
+use crate::persistence::leases::update_lease_status;
 use crate::persistence::leases::{
-    get_lease_for_issue, get_leases_for_issues, try_claim, update_lease_status, LeaseStatus,
+    get_lease_for_issue, get_leases_for_issues, try_claim, LeaseStatus,
 };
 use crate::persistence::{
     get_run_with_conn, load_checkpoint_with_conn, upsert_wait_state, write_wait_state_artifact,
     RunMetadata, RunStatus, WaitKind, WaitStateRecord,
 };
-use crate::workflow::config_loader::{resolve_workflow_config, resolve_workflow_type};
 use crate::workflow::schema::WorkflowConfig;
 use crate::workflow::target_profile::{apply_target_profile_overrides, TargetProfileOverrides};
-
 pub mod model;
 
 use model::{
@@ -275,17 +275,21 @@ impl OrchestrationState {
 
 mod child_run;
 mod child_wait;
+mod child_workflow;
 mod completion;
 mod context;
 mod discovery;
 mod lease;
+mod rollup;
 
 use child_run::*;
 use child_wait::*;
+use child_workflow::*;
 use completion::*;
 use context::*;
 use discovery::*;
 use lease::*;
+use rollup::*;
 
 #[cfg(test)]
 mod tests;

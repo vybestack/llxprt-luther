@@ -37,6 +37,7 @@ fn status_display_fromstr_round_trip() {
         LeaseStatus::Completed,
         LeaseStatus::Failed,
         LeaseStatus::Abandoned,
+        LeaseStatus::CleanupAbandoned,
         LeaseStatus::Stale,
     ] {
         let s = status.to_string();
@@ -96,6 +97,25 @@ fn try_claim_reclaims_terminal_lease() {
         // Exactly one lease row per issue is preserved.
         assert_eq!(list_all_leases(&c).unwrap().len(), 1);
     }
+}
+
+#[test]
+fn cleanup_abandoned_lease_requires_audited_continuation() {
+    let c = conn();
+    let first = try_claim(&c, "o/r", 137, "cfg-a").unwrap().unwrap();
+    update_lease_status(
+        &c,
+        &first.lease_id,
+        LeaseStatus::CleanupAbandoned,
+        Some("run-old"),
+    )
+    .unwrap();
+
+    assert!(LeaseStatus::CleanupAbandoned.blocks_duplicate_work());
+    assert!(try_claim(&c, "o/r", 137, "cfg-b").unwrap().is_none());
+    let fetched = get_lease_for_issue(&c, "o/r", 137).unwrap().unwrap();
+    assert_eq!(fetched.lease_id, first.lease_id);
+    assert_eq!(fetched.run_id.as_deref(), Some("run-old"));
 }
 
 #[test]
@@ -376,13 +396,39 @@ fn touch_heartbeat_updates_timestamp() {
         params![past, &lease.lease_id],
     )
     .unwrap();
+    update_lease_status_conditional(
+        &c,
+        &lease.lease_id,
+        LeaseStatus::Running,
+        &[LeaseStatus::Claimed],
+        Some("run-50"),
+        None,
+    )
+    .unwrap();
     let before = get_lease_for_issue(&c, "o/r", 50).unwrap().unwrap();
-    touch_lease_heartbeat(&c, &lease.lease_id).unwrap();
+    assert!(touch_owned_running_lease_heartbeat(&c, &lease.lease_id, "run-50").unwrap());
     let after = get_lease_for_issue(&c, "o/r", 50).unwrap().unwrap();
     assert!(
         after.heartbeat_at > before.heartbeat_at,
         "heartbeat must advance from the pinned past value to the current time"
     );
+}
+
+#[test]
+fn heartbeat_rejects_stale_owner_and_non_running_lease() {
+    let c = conn();
+    let lease = try_claim(&c, "o/r", 51, "cfg").unwrap().unwrap();
+    assert!(!touch_owned_running_lease_heartbeat(&c, &lease.lease_id, "run-51").unwrap());
+    update_lease_status_conditional(
+        &c,
+        &lease.lease_id,
+        LeaseStatus::Running,
+        &[LeaseStatus::Claimed],
+        Some("run-51"),
+        None,
+    )
+    .unwrap();
+    assert!(!touch_owned_running_lease_heartbeat(&c, &lease.lease_id, "stale-run").unwrap());
 }
 
 #[test]

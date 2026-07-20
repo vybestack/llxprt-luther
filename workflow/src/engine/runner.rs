@@ -12,8 +12,8 @@ use crate::engine::instance::WorkflowInstance;
 use crate::engine::transition::{resolve_transition_schema, StepOutcome};
 use crate::persistence::{
     append_typed_event_with_conn, load_checkpoint_with_conn, persist_run_with_conn,
-    save_checkpoint_with_conn, Checkpoint, EventType, PersistenceError, RunMetadata, RunStatus,
-    StateSnapshot, CHECKPOINT_STATUS_WAITING,
+    save_checkpoint_with_conn, Checkpoint, EventType, FailureCleanupState, PersistenceError,
+    RunMetadata, RunStatus, StateSnapshot,
 };
 use crate::workflow::schema::{StepDef, TransitionDef};
 
@@ -22,8 +22,9 @@ mod target_path_context;
 mod support;
 use support::{
     build_step_context, load_checkpoint_state, open_initialized_connection, preview_for_log,
-    run_outcome_without_transition,
 };
+
+mod failure_cleanup;
 
 /// Contextual metadata for a run: paths and GitHub references.
 /// Used to populate the persistent run registry beyond the core identifiers.
@@ -156,6 +157,8 @@ pub struct EngineRunner {
     run_context: RunContext,
     /// Whether to persist run-registry metadata (only when a real DB path is set).
     persist_registry: bool,
+    /// In-memory causal failure for non-registry runners and immediate cleanup.
+    pending_failure_cleanup: Option<FailureCleanupState>,
 }
 
 impl EngineRunner {
@@ -193,6 +196,7 @@ impl EngineRunner {
             context,
             run_context: RunContext::default(),
             persist_registry: false,
+            pending_failure_cleanup: None,
         })
     }
 
@@ -241,6 +245,7 @@ impl EngineRunner {
             context,
             run_context,
             persist_registry: true,
+            pending_failure_cleanup: None,
         };
 
         // Persist an initial run record so in-flight runs are visible before
@@ -395,16 +400,38 @@ impl EngineRunner {
                 return self.interrupt_at_step(&current_step_id);
             }
 
-            self.prepare_step_start(&current_step_id);
-            let outcome = self.execute_current_step(&current_step_id)?;
-            self.persist_step_outcome(&current_step_id, &outcome)?;
-            self.update_previous_step_metadata(&current_step_id, &outcome);
+            self.prepare_step_start(&current_step_id)?;
+            let outcome = match self.execute_current_step(&current_step_id) {
+                Ok(outcome) => outcome,
+                Err(error @ EngineError::StepExecutionError { .. })
+                    if self.is_registered_step_type(&current_step_id) =>
+                {
+                    self.context.set("diagnostic", &error.to_string());
+                    StepOutcome::Fatal
+                }
+                Err(error @ EngineError::LlxprtBinaryNotFound { .. })
+                | Err(error @ EngineError::LlxprtVersionError { .. })
+                | Err(error @ EngineError::LlxprtProfileError { .. }) => {
+                    self.context.set("diagnostic", &error.to_string());
+                    StepOutcome::Fatal
+                }
+                Err(error) => return Err(error),
+            };
+            let next_step = if outcome == StepOutcome::Abandon {
+                None
+            } else {
+                self.resolve_next_step(&current_step_id, &outcome)?
+            };
+            self.persist_step_result(&current_step_id, &outcome, next_step.as_deref())?;
 
             if outcome == StepOutcome::Abandon {
+                if self.is_failure_cleanup_step(&current_step_id) {
+                    return self.finish_without_transition(&current_step_id, &outcome);
+                }
                 return Ok(self.abandon_at_step(&current_step_id));
             }
 
-            match self.resolve_next_step(&current_step_id, &outcome)? {
+            match next_step {
                 Some(next_step_id) => {
                     if let Some(run_outcome) =
                         self.advance_to_next_step(&mut current_step_id, next_step_id, &outcome)
@@ -418,8 +445,25 @@ impl EngineRunner {
     }
 
     fn resume_from_checkpoint(&mut self) -> Result<(), EngineError> {
+        if let Some(failure) = self
+            .load_metadata()
+            .and_then(|metadata| metadata.failure_cleanup)
+            .filter(|failure| !failure.cleanup_succeeded)
+        {
+            self.context
+                .restore_checkpoint_values(failure.failed_state_snapshot.context.clone())
+                .map_err(|error| EngineError::PersistenceError(error.to_string()))?;
+            self.instance.transition_to(&failure.cleanup_step);
+            self.retry_count = failure.failed_state_snapshot.retry_count;
+            self.edge_loop_counts = failure.failed_state_snapshot.edge_loop_counts.clone();
+            self.pending_failure_cleanup = Some(failure);
+            return Ok(());
+        }
         let conn = self.conn.borrow();
         if let Some(checkpoint) = load_checkpoint_with_conn(&conn, &self.instance.run_id)? {
+            self.context
+                .restore_checkpoint_values(checkpoint.state_snapshot.context.clone())
+                .map_err(|error| EngineError::PersistenceError(error.to_string()))?;
             self.instance.transition_to(&checkpoint.step_id);
             self.retry_count = checkpoint.state_snapshot.retry_count;
             self.edge_loop_counts = checkpoint.state_snapshot.edge_loop_counts.clone();
@@ -449,8 +493,23 @@ impl EngineRunner {
         Ok(run_outcome)
     }
 
-    fn prepare_step_start(&mut self, current_step_id: &str) {
+    fn prepare_step_start(&mut self, current_step_id: &str) -> Result<(), EngineError> {
         self.context.set_current_step_id(current_step_id);
+        if self.is_failure_cleanup_step(current_step_id) {
+            let failure = self
+                .load_metadata()
+                .and_then(|metadata| metadata.failure_cleanup)
+                .or_else(|| self.pending_failure_cleanup.clone())
+                .ok_or_else(|| {
+                    EngineError::PersistenceError(
+                        "failure cleanup cannot start without failed-work provenance".to_string(),
+                    )
+                })?;
+            self.context.set("failed_work_step", &failure.failed_step);
+            self.context
+                .set("failed_work_outcome", &failure.failure_outcome);
+        }
+        self.heartbeat_owned_lease();
         if self.persist_registry {
             if let Some(mut md) = self.load_metadata() {
                 md.set_current_step(current_step_id);
@@ -459,6 +518,43 @@ impl EngineRunner {
             }
             self.record_event(EventType::StepStart, current_step_id, "started", None);
         }
+        Ok(())
+    }
+    fn heartbeat_owned_lease(&self) {
+        let Some(metadata) = self.load_metadata() else {
+            return;
+        };
+        let Some(repository) = metadata.repository.as_deref() else {
+            return;
+        };
+        let Some(issue_number) = metadata
+            .issue_number
+            .or(metadata.pr_number)
+            .and_then(|number| u64::try_from(number).ok())
+        else {
+            return;
+        };
+        let conn = self.conn.borrow();
+        if let Ok(Some(lease)) =
+            crate::persistence::get_lease_for_issue(&conn, repository, issue_number)
+        {
+            if lease.run_id.as_deref() == Some(self.instance.run_id.as_str()) {
+                let _ = crate::persistence::touch_owned_running_lease_heartbeat(
+                    &conn,
+                    &lease.lease_id,
+                    &self.instance.run_id,
+                );
+            }
+        }
+    }
+
+    fn is_registered_step_type(&self, step_id: &str) -> bool {
+        self.instance
+            .workflow_type
+            .steps
+            .iter()
+            .find(|step| step.step_id == step_id)
+            .is_some_and(|step| self.registry.contains_step_type(&step.step_type))
     }
 
     fn execute_current_step(&mut self, current_step_id: &str) -> Result<StepOutcome, EngineError> {
@@ -491,36 +587,6 @@ impl EngineRunner {
         if let Some(value) = self.context.get(key) {
             if !value.is_empty() {
                 eprintln!("[engine] {}: {}", key, preview_for_log(value, 500));
-            }
-        }
-    }
-
-    fn persist_step_outcome(
-        &self,
-        current_step_id: &str,
-        outcome: &StepOutcome,
-    ) -> Result<(), EngineError> {
-        let checkpoint = self.create_checkpoint(current_step_id, "completed");
-        let conn = self.conn.borrow();
-        save_checkpoint_with_conn(&conn, &checkpoint)?;
-        let _ = append_typed_event_with_conn(
-            &conn,
-            &self.instance.run_id,
-            current_step_id,
-            &outcome.to_string(),
-            EventType::StepOutcome,
-            None,
-            chrono::Utc::now(),
-        );
-        Ok(())
-    }
-
-    fn update_previous_step_metadata(&self, current_step_id: &str, outcome: &StepOutcome) {
-        if self.persist_registry {
-            if let Some(mut md) = self.load_metadata() {
-                md.set_previous_step_and_outcome(current_step_id, outcome.to_string());
-                md.set_next_step_candidates(self.compute_next_step_candidates(current_step_id));
-                self.persist_metadata(&md);
             }
         }
     }
@@ -579,46 +645,6 @@ impl EngineRunner {
 
         self.edge_loop_counts.insert(edge_key, current_count + 1);
         None
-    }
-
-    fn finish_without_transition(
-        &self,
-        current_step_id: &str,
-        outcome: &StepOutcome,
-    ) -> Result<RunOutcome, EngineError> {
-        if *outcome == StepOutcome::Wait {
-            return self.pause_for_external_wait(current_step_id);
-        }
-        if *outcome == StepOutcome::Retryable {
-            let run_outcome = RunOutcome::Failure {
-                step_id: current_step_id.to_string(),
-                reason: "Retryable error with no recovery transition".to_string(),
-            };
-            let _ = self.record_run_completion(&run_outcome, current_step_id);
-            return Ok(run_outcome);
-        }
-
-        let run_outcome = run_outcome_without_transition(current_step_id, outcome);
-        let _ = self.record_run_completion(&run_outcome, current_step_id);
-        Ok(run_outcome)
-    }
-
-    /// Persist a resumable `waiting` checkpoint at the current step and return
-    /// a non-advancing `WaitingExternal` outcome. The resume point is the wait
-    /// step itself, so a later resume re-enters it and refreshes external state.
-    /// @plan:PLAN-20260623-LUTHER-CONTINUATION
-    fn pause_for_external_wait(&self, step_id: &str) -> Result<RunOutcome, EngineError> {
-        let checkpoint = self.create_checkpoint(step_id, CHECKPOINT_STATUS_WAITING);
-        {
-            let conn = self.conn.borrow();
-            save_checkpoint_with_conn(&conn, &checkpoint)?;
-        }
-        let run_outcome = RunOutcome::WaitingExternal {
-            step_id: step_id.to_string(),
-            reason: "External condition still pending at watch limit".to_string(),
-        };
-        let _ = self.record_run_completion(&run_outcome, step_id);
-        Ok(run_outcome)
     }
 
     /// Find the transition definition matching the given from step and outcome.
@@ -754,7 +780,7 @@ impl EngineRunner {
         Ok(Some(params))
     }
 
-    /// Export a normalized smoke trace of this run's recorded step/outcome
+    /// Export a normalized smoke trace of the recorded step/outcome sequence
     /// sequence plus the terminal `final_outcome`, suitable for deterministic
     /// offline replay. Borrows the private persistence connection so callers
     /// using the default in-memory `::new()` path can still capture a trace.
@@ -817,7 +843,7 @@ impl EngineRunner {
             retry_count: self.retry_count,
             loop_count: self.loop_count(),
             edge_loop_counts: self.edge_loop_counts.clone(),
-            context: std::collections::HashMap::new(),
+            context: self.context.checkpoint_values(),
             status: status.to_string(),
         };
         Checkpoint::with_snapshot(&self.instance.run_id, step_id, snapshot)
@@ -873,6 +899,9 @@ impl EngineRunner {
         outcome: &RunOutcome,
         final_step_id: &str,
     ) -> Result<(), EngineError> {
+        if !self.persist_registry {
+            return Ok(());
+        }
         // Determine RunStatus based on outcome
         let status = match outcome {
             RunOutcome::Success => RunStatus::Completed,

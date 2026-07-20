@@ -10,22 +10,45 @@
 //! against the same `run_id` and `checkpoints.db` so the standard
 //! newest-checkpoint resume loader naturally picks up the re-stamped point.
 //!
+//! The logic is organized into cohesive submodules for validation, checkpoint
+//! selection, authorization, transactional commit, audit artifacts, and the
+//! durable `.luther/workspace-owner` ownership marker.
+//!
 //! @plan:PLAN-20260623-LUTHER-CONTINUATION
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
-use rusqlite::{Connection, Transaction, TransactionBehavior};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
 
-use crate::persistence::{
-    append_typed_event_with_conn, get_checkpoint_for_step, get_run_with_conn,
-    is_resumable_checkpoint_status, list_checkpoints, load_checkpoint_before_step,
-    persist_run_with_conn, set_resume_point, Checkpoint, EventType, PersistenceError, RunMetadata,
-    RunStatus,
-};
+use crate::persistence::{Checkpoint, PersistenceError, RunMetadata};
 use crate::workflow::target_profile::TargetProfileOverrides;
+
+mod artifacts;
+mod authorization;
+mod commit;
+mod selection;
+mod validation;
+mod workspace_marker;
+
+// Re-export the public API of the submodules so existing callers
+// (`crate::engine::continuation::...` and the `engine` re-exports) are
+// unaffected by the internal split.
+pub use artifacts::{
+    continuation_artifact_dir, request_artifact, result_artifact, result_artifact_name,
+    write_json_artifact,
+};
+pub use authorization::ResumeAuthorization;
+pub use commit::commit_continuation;
+pub use selection::select_checkpoint;
+pub use validation::validate_continuation;
+
+// Test-facing helpers re-exported so the inline test module can reach
+// submodule-internal items they historically called directly. These are
+// cfg(test)-gated so the non-test public API is unchanged.
+#[cfg(test)]
+pub(crate) use selection::{select_rewind_checkpoint, TERMINAL_STEP};
+pub(crate) use workspace_marker::verify_workspace_ownership_marker;
 
 /// Steps that are safe to re-run because they are external-wait or otherwise
 /// idempotent. Continuation onto any other step requires `--force`.
@@ -37,12 +60,6 @@ pub const SAFE_RERUN_STEPS: &[&str] = &[
     "capture_pr_identity",
     "post_pr_iteration_guard",
 ];
-
-/// Retryable external-wait steps selected by `retry --from-failed-step`.
-const RETRYABLE_WAIT_STEPS: &[&str] = &["watch_pr_checks"];
-
-/// Default terminal sink step for PR-followup workflows.
-const TERMINAL_STEP: &str = "post_pr_failure_terminal";
 
 /// Whether the given step id is in the safe-to-rerun whitelist.
 /// @plan:PLAN-20260623-LUTHER-CONTINUATION
@@ -117,6 +134,15 @@ pub struct ContinuationRequest {
     pub run_id: String,
     pub kind: ContinuationKind,
     pub force: bool,
+    /// Explicit internal-trust capability for engine-internal resume paths
+    /// (daemon launcher, parent-orchestration child resume). This is never
+    /// set by CLI handlers, so an operator `runs resume` cannot infer
+    /// `TrustedInternalWait` authorization from durable wait state alone.
+    /// The capability is revalidated against the durable `wait_states` row
+    /// during authorization and inside the commit transaction, failing closed
+    /// to [`ResumeAuthorization::Operator`] when the wait identity does not
+    /// match.
+    pub trusted_internal: bool,
 }
 
 /// Errors that make a continuation impossible to plan or apply.
@@ -160,6 +186,12 @@ impl From<rusqlite::Error> for ContinuationError {
     }
 }
 
+impl From<std::io::Error> for ContinuationError {
+    fn from(err: std::io::Error) -> Self {
+        ContinuationError::Persistence(err.to_string())
+    }
+}
+
 /// A single safety check result.
 /// @plan:PLAN-20260623-LUTHER-CONTINUATION
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -178,7 +210,7 @@ pub struct ContinuationValidation {
 }
 
 impl ContinuationValidation {
-    fn from_checks(checks: Vec<SafetyCheck>) -> Self {
+    pub(super) fn from_checks(checks: Vec<SafetyCheck>) -> Self {
         let ok = checks.iter().all(|c| c.passed);
         Self { ok, checks }
     }
@@ -193,547 +225,105 @@ impl ContinuationValidation {
     }
 }
 
-fn pass(name: &str, detail: impl Into<String>) -> SafetyCheck {
-    SafetyCheck {
-        name: name.to_string(),
-        passed: true,
-        detail: detail.into(),
-    }
-}
-
-fn fail(name: &str, detail: impl Into<String>) -> SafetyCheck {
-    SafetyCheck {
-        name: name.to_string(),
-        passed: false,
-        detail: detail.into(),
-    }
-}
-
-fn check_run_exists(metadata: &Option<RunMetadata>, run_id: &str) -> SafetyCheck {
-    match metadata {
-        Some(_) => pass("run_exists", format!("run {run_id} found in registry")),
-        None => fail("run_exists", format!("run {run_id} not found in registry")),
-    }
-}
-
-fn check_workflow_resolvable(metadata: &RunMetadata) -> SafetyCheck {
-    if metadata.workflow_type_id.is_empty() || metadata.config_id.is_empty() {
-        fail(
-            "workflow_resolvable",
-            "run record is missing workflow_type_id or config_id",
-        )
-    } else {
-        pass(
-            "workflow_resolvable",
-            format!(
-                "workflow_type={} config={}",
-                metadata.workflow_type_id, metadata.config_id
-            ),
-        )
-    }
-}
-
-/// Refuse to reopen terminal non-failed runs (Completed/Merged/Abandoned/
-/// Cancelled). `Failed` is the single intentional terminal exception, encoded in
-/// `RunStatus::is_resumable`. A `Running` run is accepted when its recorded
-/// workflow PID is stale or unrecorded, or when `--force` is specified. Force
-/// overrides even a live Running claim, so operators must only use it after
-/// confirming the recorded process is unrelated; all other terminal refusals
-/// remain non-bypassable.
-/// @plan:PLAN-20260623-LUTHER-CONTINUATION
-fn check_resumable_status(metadata: &RunMetadata, force: bool) -> SafetyCheck {
-    if metadata.status.is_resumable() {
-        pass(
-            "resumable_status",
-            format!("run status {} is resumable", metadata.status),
-        )
-    } else if running_claim_is_available(metadata) {
-        pass(
-            "resumable_status",
-            format!(
-                "run status {} is resumable because recorded workflow PID is stale or unrecorded",
-                metadata.status
-            ),
-        )
-    } else if metadata.status == RunStatus::Running && force {
-        pass(
-            "resumable_status",
-            format!(
-                "run status {} is resumable because --force was specified",
-                metadata.status
-            ),
-        )
-    } else {
-        fail(
-            "resumable_status",
-            format!(
-                "run status {} is not resumable; terminal states other than failed cannot be continued",
-                metadata.status
-            ),
-        )
-    }
-}
-
-/// A continuation must always have a repository plus an issue or PR anchor before
-/// executor dispatch; a repo-only or anchor-less row cannot safely target work.
-/// @plan:PLAN-20260623-LUTHER-CONTINUATION
-fn check_identity_recoverable(metadata: &RunMetadata) -> SafetyCheck {
-    let has_repo = metadata.repository.is_some();
-    let has_anchor = metadata.issue_number.is_some() || metadata.pr_number.is_some();
-    if has_repo && has_anchor {
-        pass(
-            "identity_recoverable",
-            format!(
-                "repository={:?} issue={:?} pr={:?}",
-                metadata.repository, metadata.issue_number, metadata.pr_number
-            ),
-        )
-    } else {
-        fail(
-            "identity_recoverable",
-            format!(
-                "continuation requires a repository plus an issue or PR anchor; got repository={:?} issue={:?} pr={:?}",
-                metadata.repository, metadata.issue_number, metadata.pr_number
-            ),
-        )
-    }
-}
-
-fn check_workspace(metadata: &RunMetadata) -> SafetyCheck {
-    match &metadata.workspace_path {
-        Some(path) => pass("workspace", format!("workspace_path={path}")),
-        None => pass("workspace", "workspace path reconstructable from run id"),
-    }
-}
-
-fn check_checkpoint_exists(selection: &Result<Checkpoint, ContinuationError>) -> SafetyCheck {
-    match selection {
-        Ok(cp) => pass(
-            "checkpoint_exists",
-            format!("selected checkpoint at step {}", cp.step_id),
-        ),
-        Err(err) => fail("checkpoint_exists", err.to_string()),
-    }
-}
-
-fn check_safe_step(step_id: &str, force: bool) -> SafetyCheck {
-    if is_safe_rerun_step(step_id) {
-        pass(
-            "safe_step",
-            format!("step {step_id} is in the safe-rerun whitelist"),
-        )
-    } else if force {
-        pass(
-            "safe_step",
-            format!("step {step_id} is not whitelisted but --force was supplied"),
-        )
-    } else {
-        fail(
-            "safe_step",
-            format!("step {step_id} is not safe to re-run without --force"),
-        )
-    }
-}
-
-/// Validate a continuation request against the issue's checkpoint-safety list.
-/// Returns per-check diagnostics; the caller refuses when `!ok`.
-/// @plan:PLAN-20260623-LUTHER-CONTINUATION
-pub fn validate_continuation(
-    conn: &Connection,
-    request: &ContinuationRequest,
-) -> Result<ContinuationValidation, PersistenceError> {
-    let mut checks = Vec::new();
-    let metadata = get_run_with_conn(conn, &request.run_id)?;
-    checks.push(check_run_exists(&metadata, &request.run_id));
-    let Some(metadata) = metadata else {
-        return Ok(ContinuationValidation::from_checks(checks));
-    };
-    checks.push(check_workflow_resolvable(&metadata));
-    checks.push(check_resumable_status(&metadata, request.force));
-    checks.push(check_identity_recoverable(&metadata));
-    checks.push(check_workspace(&metadata));
-    let selection = select_checkpoint(conn, request, &metadata);
-    checks.push(check_checkpoint_exists(&selection));
-    if let Ok(cp) = &selection {
-        checks.push(check_safe_step(&cp.step_id, request.force));
-    }
-    Ok(ContinuationValidation::from_checks(checks))
-}
-
 /// The stable identity string for a checkpoint: `step_id@rfc3339`.
 /// @plan:PLAN-20260623-LUTHER-CONTINUATION
 pub fn checkpoint_identity(cp: &Checkpoint) -> String {
     format!("{}@{}", cp.step_id, cp.timestamp.to_rfc3339())
 }
 
-fn parse_checkpoint_identity(id: &str) -> (String, Option<DateTime<Utc>>) {
-    match id.split_once('@') {
-        Some((step, ts)) => (
-            step.to_string(),
-            DateTime::parse_from_rfc3339(ts)
-                .ok()
-                .map(|d| d.with_timezone(&Utc)),
-        ),
-        None => (id.to_string(), None),
-    }
-}
-
-fn newest_resumable(checkpoints: &[Checkpoint]) -> Option<Checkpoint> {
-    checkpoints
-        .iter()
-        .rev()
-        .find(|c| is_resumable_checkpoint_status(&c.state_snapshot.status))
-        .cloned()
-}
-
-fn select_resume_checkpoint(
-    conn: &Connection,
-    run_id: &str,
-    metadata: &RunMetadata,
-) -> Result<Checkpoint, ContinuationError> {
-    let checkpoints = list_checkpoints(conn, run_id)?;
-    if checkpoints.is_empty() {
-        return Err(ContinuationError::NoResumableCheckpoint(run_id.to_string()));
-    }
-    if let Some(cp) = newest_resumable(&checkpoints) {
-        return Ok(cp);
-    }
-    // Terminal failed run: rewind to the checkpoint just before the terminal step.
-    let terminal_step = metadata.current_step.as_deref().unwrap_or(TERMINAL_STEP);
-    if let Some(cp) = load_checkpoint_before_step(conn, run_id, terminal_step)? {
-        return Ok(cp);
-    }
-    checkpoints
-        .last()
-        .cloned()
-        .ok_or_else(|| ContinuationError::NoResumableCheckpoint(run_id.to_string()))
-}
-
-fn select_retry_checkpoint(
-    conn: &Connection,
-    run_id: &str,
-    metadata: &RunMetadata,
-    from_failed_step: bool,
-) -> Result<Checkpoint, ContinuationError> {
-    if from_failed_step {
-        let checkpoints = list_checkpoints(conn, run_id)?;
-        if let Some(cp) = checkpoints
-            .iter()
-            .rev()
-            .find(|c| RETRYABLE_WAIT_STEPS.contains(&c.step_id.as_str()))
-            .cloned()
-        {
-            return Ok(cp);
-        }
-        return Err(ContinuationError::NoResumableCheckpoint(format!(
-            "{run_id} has no retryable external-wait checkpoint"
-        )));
-    }
-    select_resume_checkpoint(conn, run_id, metadata)
-}
-
-fn select_rewind_checkpoint(
-    conn: &Connection,
-    run_id: &str,
-    target: &RewindTarget,
-) -> Result<Checkpoint, ContinuationError> {
-    let (step, expected_ts) = match target {
-        RewindTarget::ToStep(step) => (step.clone(), None),
-        RewindTarget::ToCheckpoint(id) => parse_checkpoint_identity(id),
-    };
-    let cp = get_checkpoint_for_step(conn, run_id, &step)?
-        .ok_or_else(|| ContinuationError::CheckpointNotFound(format!("{run_id}:{step}")))?;
-    if let Some(expected) = expected_ts {
-        if cp.timestamp != expected {
-            return Err(ContinuationError::InvalidTarget(format!(
-                "checkpoint timestamp mismatch for {step}: stored {}, requested {}",
-                cp.timestamp.to_rfc3339(),
-                expected.to_rfc3339()
-            )));
-        }
-    }
-    Ok(cp)
-}
-
-/// Select the checkpoint a continuation request should resume from.
-/// @plan:PLAN-20260623-LUTHER-CONTINUATION
-pub fn select_checkpoint(
-    conn: &Connection,
-    request: &ContinuationRequest,
-    metadata: &RunMetadata,
-) -> Result<Checkpoint, ContinuationError> {
-    match &request.kind {
-        ContinuationKind::Resume => select_resume_checkpoint(conn, &request.run_id, metadata),
-        ContinuationKind::Retry { from_failed_step } => {
-            select_retry_checkpoint(conn, &request.run_id, metadata, *from_failed_step)
-        }
-        ContinuationKind::Rewind { target } => {
-            select_rewind_checkpoint(conn, &request.run_id, target)
-        }
-    }
-}
-
-/// Re-stamp the selected checkpoint as the resume point and reopen the run
-/// record, appending an audit event. History (events, prior checkpoint rows)
-/// is preserved.
-/// @plan:PLAN-20260623-LUTHER-CONTINUATION
-pub fn commit_continuation(
-    conn: &Connection,
-    request: &ContinuationRequest,
-    step_id: &str,
-) -> Result<RunMetadata, ContinuationError> {
-    // `conn` is intentionally not reused until `tx` commits or rolls back.
-    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
-    match commit_continuation_in_transaction(&tx, request, step_id) {
-        Ok(metadata) => {
-            tx.commit()?;
-            Ok(metadata)
-        }
-        Err(err) => match tx.rollback() {
-            Ok(()) => Err(err),
-            Err(rollback_err) => {
-                tracing::warn!(
-                    error = %err,
-                    rollback_error = %rollback_err,
-                    "rollback failed after continuation commit error"
-                );
-                Err(ContinuationError::Persistence(format!(
-                    "rollback failed after continuation commit error: original={err}; rollback={rollback_err}"
-                )))
-            }
-        },
-    }
-}
-
-fn commit_continuation_in_transaction(
-    tx: &Transaction<'_>,
-    request: &ContinuationRequest,
-    step_id: &str,
-) -> Result<RunMetadata, ContinuationError> {
-    let metadata = get_run_with_conn(tx, &request.run_id)?
-        .ok_or_else(|| ContinuationError::RunNotFound(request.run_id.clone()))?;
-    ensure_reopen_claim_is_available(&metadata, request)?;
-    set_resume_point(tx, &request.run_id, step_id)?;
-    reopen_run(tx, request, step_id, metadata)
-}
-
-fn reopen_run(
-    conn: &Connection,
-    request: &ContinuationRequest,
-    step_id: &str,
-    mut metadata: RunMetadata,
-) -> Result<RunMetadata, ContinuationError> {
-    let prior_status = metadata.status.to_string();
-    metadata.reopen();
-    metadata.set_current_step(step_id);
-    persist_run_with_conn(conn, &metadata)?;
-    let detail = format!(
-        "continuation={} from_status={prior_status} resume_step={step_id}",
-        request.kind.verb()
-    );
-    append_typed_event_with_conn(
-        conn,
-        &request.run_id,
-        step_id,
-        "reopened",
-        EventType::StepStart,
-        Some(&detail),
-        Utc::now(),
-    )?;
-    Ok(metadata)
-}
-
-fn ensure_reopen_claim_is_available(
-    metadata: &RunMetadata,
-    request: &ContinuationRequest,
-) -> Result<(), ContinuationError> {
-    // This runs inside the IMMEDIATE transaction after re-reading metadata, so
-    // a second concurrent continuation attempt observes the first claim's PID
-    // before deciding whether the Running record is still available.
-    if !reopen_status_is_allowed(metadata) {
+/// Parse a `step_id@rfc3339` checkpoint identity into its step and timestamp.
+/// Returns an error when the `@` separator is absent or the timestamp is not
+/// valid RFC3339, so a malformed `ToCheckpoint` target cannot degrade into a
+/// step-only match that defeats exact checkpoint binding.
+pub(super) fn parse_checkpoint_identity_target(
+    id: &str,
+) -> Result<(String, DateTime<Utc>), ContinuationError> {
+    let Some((step, ts)) = id.split_once('@') else {
         return Err(ContinuationError::InvalidTarget(format!(
-            "run {} status {} is not resumable; terminal states other than failed cannot be continued",
-            request.run_id, metadata.status
+            "checkpoint identity '{id}' is missing the '@' separator"
         )));
-    }
-    if !request.force {
-        if let Some(pid) = live_running_claim_pid(metadata) {
-            return Err(ContinuationError::InvalidTarget(format!(
-                "run {} is already running with live workflow PID {pid}; retry with --force only if that process is unrelated",
-                request.run_id
-            )));
-        }
-    }
-    Ok(())
-}
-
-fn reopen_status_is_allowed(metadata: &RunMetadata) -> bool {
-    metadata.status.is_resumable() || metadata.status == RunStatus::Running
-}
-
-fn running_claim_is_available(metadata: &RunMetadata) -> bool {
-    metadata.status == RunStatus::Running
-        && (metadata.is_process_stale() || metadata.process_pid.is_none())
-}
-
-fn live_running_claim_pid(metadata: &RunMetadata) -> Option<u32> {
-    if metadata.status == RunStatus::Running
-        && metadata.process_pid.is_some()
-        && !metadata.is_process_stale()
-    {
-        metadata.process_pid
-    } else {
-        None
-    }
-}
-
-/// Directory under which continuation artifacts for a run are written.
-/// @plan:PLAN-20260623-LUTHER-CONTINUATION
-pub fn continuation_artifact_dir(metadata: &RunMetadata, run_id: &str) -> PathBuf {
-    let root = metadata.artifact_root.clone().unwrap_or_else(|| {
-        crate::runtime_paths::get_artifacts_root()
-            .to_string_lossy()
-            .to_string()
-    });
-    Path::new(&root).join("continuation").join(run_id)
-}
-
-/// Write a JSON artifact, creating parent directories as needed.
-/// @plan:PLAN-20260623-LUTHER-CONTINUATION
-pub fn write_json_artifact(dir: &Path, name: &str, value: &Value) -> std::io::Result<PathBuf> {
-    std::fs::create_dir_all(dir)?;
-    let path = dir.join(name);
-    let bytes = serde_json::to_vec_pretty(value).unwrap_or_default();
-    std::fs::write(&path, bytes)?;
-    Ok(path)
-}
-
-fn rewind_target_json(kind: &ContinuationKind) -> Value {
-    match kind {
-        ContinuationKind::Rewind { target } => match target {
-            RewindTarget::ToStep(step) => json!({ "to_step": step }),
-            RewindTarget::ToCheckpoint(id) => json!({ "to_checkpoint": id }),
-        },
-        _ => Value::Null,
-    }
-}
-
-/// JSON body of `continuation-request.json`.
-/// @plan:PLAN-20260623-LUTHER-CONTINUATION
-pub fn request_artifact(request: &ContinuationRequest) -> Value {
-    json!({
-        "run_id": request.run_id,
-        "kind": request.kind.verb(),
-        "from_failed_step": matches!(
-            request.kind,
-            ContinuationKind::Retry { from_failed_step: true }
-        ),
-        "rewind_target": rewind_target_json(&request.kind),
-        "force": request.force,
-        "requested_at": Utc::now().to_rfc3339(),
-        "why": "operator-initiated continuation of a failed or waiting run",
-    })
-}
-
-fn validation_artifact(validation: &ContinuationValidation) -> Value {
-    json!({
-        "ok": validation.ok,
-        "checks": validation
-            .checks
-            .iter()
-            .map(|c| json!({ "name": c.name, "passed": c.passed, "detail": c.detail }))
-            .collect::<Vec<_>>(),
-        "validated_at": Utc::now().to_rfc3339(),
-    })
-}
-
-fn selection_artifact(cp: &Checkpoint) -> Value {
-    json!({
-        "step_id": cp.step_id,
-        "checkpoint_id": checkpoint_identity(cp),
-        "status": cp.state_snapshot.status,
-        "timestamp": cp.timestamp.to_rfc3339(),
-        "loop_count": cp.state_snapshot.loop_count,
-        "retry_count": cp.state_snapshot.retry_count,
-    })
-}
-
-/// The result artifact file name for a continuation kind.
-/// @plan:PLAN-20260623-LUTHER-CONTINUATION
-pub fn result_artifact_name(kind: &ContinuationKind) -> &'static str {
-    match kind {
-        ContinuationKind::Retry { .. } => "retry-result.json",
-        _ => "resume-result.json",
-    }
-}
-
-/// JSON body of the `resume-result.json` / `retry-result.json` artifact.
-/// @plan:PLAN-20260623-LUTHER-CONTINUATION
-pub fn result_artifact(
-    kind: &ContinuationKind,
-    status_label: &str,
-    resumed_step: &str,
-    external_state: Option<&str>,
-) -> Value {
-    json!({
-        "kind": kind.verb(),
-        "resumed_step": resumed_step,
-        "status": status_label,
-        "external_state_observed": external_state,
-        "completed_at": Utc::now().to_rfc3339(),
-    })
+    };
+    let parsed = DateTime::parse_from_rfc3339(ts).map_err(|err| {
+        ContinuationError::InvalidTarget(format!(
+            "checkpoint identity '{id}' has an invalid RFC3339 timestamp: {err}"
+        ))
+    })?;
+    Ok((step.to_string(), parsed.with_timezone(&Utc)))
 }
 
 /// Outcome of planning (validating + selecting) a continuation, with the
 /// request/validation/selection artifacts already written.
+///
+/// `checkpoint_identity` binds the prepared plan to the exact checkpoint
+/// (`step_id@rfc3339`) selected at plan time. [`commit_continuation`] compares
+/// this identity inside its `IMMEDIATE` transaction against the freshly
+/// re-selected checkpoint before any lease or run mutation, so a concurrent
+/// same-step checkpoint replacement between plan and commit cannot sneak
+/// through as a stale or substituted resume point.
+///
 /// @plan:PLAN-20260623-LUTHER-CONTINUATION
 #[derive(Debug, Clone)]
 pub struct ContinuationPlan {
     pub validation: ContinuationValidation,
     pub selected: Option<Checkpoint>,
+    /// Exact `step_id@rfc3339` identity of the planned checkpoint. Bound at
+    /// plan time and verified inside `commit_continuation`'s transaction.
+    pub checkpoint_identity: String,
     pub artifact_dir: PathBuf,
 }
 
 /// Validate the request, write request/validation artifacts, and (when valid)
 /// select the checkpoint and write the selection artifact. Does not mutate run
 /// state; call `commit_continuation` after a successful plan.
+///
+/// The returned [`ContinuationPlan`] binds its `checkpoint_identity` to the
+/// exact `step_id@rfc3339` of the selected checkpoint so `commit_continuation`
+/// can verify it inside the transaction.
 /// @plan:PLAN-20260623-LUTHER-CONTINUATION
 pub fn prepare_continuation(
-    conn: &Connection,
+    conn: &rusqlite::Connection,
     request: &ContinuationRequest,
     metadata: &RunMetadata,
 ) -> Result<ContinuationPlan, ContinuationError> {
     let artifact_dir = continuation_artifact_dir(metadata, &request.run_id);
-    let _ = write_json_artifact(
+    write_json_artifact(
         &artifact_dir,
         "continuation-request.json",
         &request_artifact(request),
-    );
+    )?;
     let validation = validate_continuation(conn, request)?;
-    let _ = write_json_artifact(
+    write_json_artifact(
         &artifact_dir,
         "continuation-validation.json",
-        &validation_artifact(&validation),
-    );
+        &artifacts::validation_artifact(&validation),
+    )?;
     if !validation.ok {
         return Ok(ContinuationPlan {
             validation,
             selected: None,
+            checkpoint_identity: String::new(),
             artifact_dir,
         });
     }
     let checkpoint = select_checkpoint(conn, request, metadata)?;
-    let _ = write_json_artifact(
+    let checkpoint_identity = checkpoint_identity(&checkpoint);
+    write_json_artifact(
         &artifact_dir,
         "checkpoint-selection.json",
-        &selection_artifact(&checkpoint),
-    );
+        &artifacts::selection_artifact(&checkpoint),
+    )?;
     Ok(ContinuationPlan {
         validation,
         selected: Some(checkpoint),
+        checkpoint_identity,
         artifact_dir,
     })
 }
+
+// Re-export the workspace owner marker provisioning API (used by workspace
+// creation call sites) so external `crate::engine::continuation::...` paths keep
+// resolving after the marker logic moved into a submodule.
+pub use workspace_marker::write_workspace_owner_marker;
 
 #[cfg(test)]
 mod tests;

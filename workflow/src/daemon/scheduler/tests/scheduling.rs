@@ -13,6 +13,7 @@ impl ExternalWaitPoller for ReadyPoller {
 fn due_wait_states_are_polled_and_resumed_before_new_discovery() {
     let c = conn();
     let lease = try_claim(&c, "o/r", 99, "cfg").unwrap().unwrap();
+    seed_claim_receipt(&c, &lease.lease_id);
     update_lease_status(
         &c,
         &lease.lease_id,
@@ -151,6 +152,7 @@ fn second_pass_prevents_duplicate_launch() {
 fn resumed_waits_participate_in_capacity_accounting() {
     let c = conn();
     let lease = try_claim(&c, "o/r", 99, "cfg").unwrap().unwrap();
+    seed_claim_receipt(&c, &lease.lease_id);
     update_lease_status(
         &c,
         &lease.lease_id,

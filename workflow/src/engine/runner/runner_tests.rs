@@ -1,3 +1,148 @@
+#[test]
+fn public_failure_reason_uses_typed_category_when_safe() {
+    let outcome = StepOutcome::Fatal;
+    let reason = EngineRunner::public_failure_reason("run_llxprt", &outcome, Some("agent_failure"));
+    assert_eq!(reason, "agent_failure (fatal at run_llxprt)");
+    assert!(!reason.contains("diagnostic"));
+}
+
+#[test]
+fn public_failure_reason_falls_back_to_outcome_when_no_category() {
+    let reason = EngineRunner::public_failure_reason("run_llxprt", &StepOutcome::Fatal, None);
+    assert_eq!(reason, "fatal outcome at run_llxprt");
+}
+
+#[test]
+fn public_failure_reason_falls_back_to_outcome_for_unsafe_category() {
+    // Raw diagnostic-style text (uppercase, spaces, special chars) must never
+    // be retained as the public failure reason.
+    let reason = EngineRunner::public_failure_reason(
+        "run_llxprt",
+        &StepOutcome::Fatal,
+        Some("Error: token=abc123 access_token=def456"),
+    );
+    assert_eq!(reason, "fatal outcome at run_llxprt");
+}
+
+#[test]
+fn public_failure_reason_never_carries_raw_secret_text() {
+    // Bearer header in raw diagnostic - must not survive into public reason.
+    let reason = EngineRunner::public_failure_reason(
+        "run_llxprt",
+        &StepOutcome::Fatal,
+        Some("Authorization: Bearer s3cr3t_b34r3r_t0k3n"),
+    );
+    assert_eq!(reason, "fatal outcome at run_llxprt");
+    assert!(!reason.contains("s3cr3t"));
+}
+
+#[test]
+fn safe_failure_category_accepts_known_snake_case_values() {
+    for category in [
+        "process_error",
+        "agent_failure",
+        "no_diff",
+        "idle_timeout",
+        "timeout",
+        "push_failure",
+        "validation_failure",
+    ] {
+        assert!(
+            EngineRunner::is_safe_failure_category(category),
+            "{category} should be a safe category"
+        );
+    }
+}
+
+#[test]
+fn safe_failure_category_rejects_uppercase_and_whitespace() {
+    assert!(!EngineRunner::is_safe_failure_category("Agent_Failure"));
+    assert!(!EngineRunner::is_safe_failure_category("agent failure"));
+    assert!(!EngineRunner::is_safe_failure_category(" agent_failure"));
+    assert!(!EngineRunner::is_safe_failure_category("agent_failure "));
+    assert!(!EngineRunner::is_safe_failure_category("agent	failure"));
+}
+
+#[test]
+fn safe_failure_category_rejects_special_characters() {
+    assert!(!EngineRunner::is_safe_failure_category("token=abc123"));
+    assert!(!EngineRunner::is_safe_failure_category("reason: detail"));
+    assert!(!EngineRunner::is_safe_failure_category("\"quoted\""));
+    assert!(!EngineRunner::is_safe_failure_category("{json: value}"));
+    assert!(!EngineRunner::is_safe_failure_category("user@host"));
+    assert!(!EngineRunner::is_safe_failure_category("query?param=1"));
+}
+
+#[test]
+fn safe_failure_category_rejects_url_and_credential_patterns() {
+    // URL userinfo credentials.
+    assert!(!EngineRunner::is_safe_failure_category(
+        "https://user:pass@host/path"
+    ));
+    // URL query credentials.
+    assert!(!EngineRunner::is_safe_failure_category(
+        "api_key=secret&token=abc"
+    ));
+    // JSON credential field.
+    assert!(!EngineRunner::is_safe_failure_category(
+        "\"password\":\"secret\""
+    ));
+}
+
+#[test]
+fn safe_failure_category_rejects_non_ascii_unicode() {
+    assert!(!EngineRunner::is_safe_failure_category("агент_failure"));
+    assert!(!EngineRunner::is_safe_failure_category("failure_失敗"));
+    assert!(!EngineRunner::is_safe_failure_category("token＝secret"));
+    assert!(!EngineRunner::is_safe_failure_category("café_error"));
+}
+
+#[test]
+fn safe_failure_category_rejects_leading_digits() {
+    assert!(!EngineRunner::is_safe_failure_category("1_error"));
+    assert!(!EngineRunner::is_safe_failure_category("9fatal"));
+}
+
+#[test]
+fn safe_failure_category_rejects_empty_and_unlisted_snake_case() {
+    // The allowlist is explicit: a structurally valid snake_case value that is
+    // not in the allowlist must be rejected. This prevents a secret like
+    // `bearer_abc123` (which would pass a structural snake_case check) from
+    // being persisted as a durable failure category.
+    assert!(!EngineRunner::is_safe_failure_category(""));
+    assert!(!EngineRunner::is_safe_failure_category("bearer_abc123"));
+    assert!(!EngineRunner::is_safe_failure_category("some_new_category"));
+    assert!(
+        !EngineRunner::is_safe_failure_category(&"a".repeat(32)),
+        "even a 32-char snake_case value not in the allowlist must be rejected"
+    );
+}
+
+#[test]
+fn public_failure_reason_rejects_secret_shaped_snake_case_category() {
+    // The explicit allowlist must reject a secret that happens to be valid
+    // snake_case (lowercase + underscores), which the prior structural check
+    // would have accepted. The public failure reason must fall back to the
+    // generic outcome label, never the secret-shaped category.
+    let secret_category = "bearer_s3cr3t_t0k3n_value";
+    // Sanity: this would have passed the old structural check.
+    assert!(secret_category
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_'));
+    // But the explicit allowlist rejects it.
+    assert!(!EngineRunner::is_safe_failure_category(secret_category));
+
+    let reason = EngineRunner::public_failure_reason(
+        "run_llxprt",
+        &StepOutcome::Fatal,
+        Some(secret_category),
+    );
+    assert_eq!(reason, "fatal outcome at run_llxprt");
+    assert!(!reason.contains("bearer"));
+    assert!(!reason.contains("s3cr3t"));
+    assert!(!reason.contains("t0k3n"));
+}
+
 use super::support::preview_for_log;
 use super::*;
 

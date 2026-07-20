@@ -18,8 +18,9 @@ use luther_workflow::engine::{
 use luther_workflow::persistence::checkpoint::init_checkpoint_table;
 use luther_workflow::persistence::run_metadata::init_runs_table;
 use luther_workflow::persistence::{
-    get_run_with_conn, load_checkpoint_with_conn, persist_run_with_conn, save_checkpoint_with_conn,
-    Checkpoint, RunMetadata, RunStatus, StateSnapshot, CHECKPOINT_STATUS_READY_TO_RESUME,
+    create_lease, get_run_with_conn, init_leases_table, load_checkpoint_with_conn,
+    persist_run_with_conn, save_checkpoint_with_conn, Checkpoint, IssueLease, LeaseStatus,
+    RunMetadata, RunStatus, StateSnapshot, CHECKPOINT_STATUS_READY_TO_RESUME,
     CHECKPOINT_STATUS_WAITING,
 };
 use luther_workflow::workflow::schema::{
@@ -232,6 +233,23 @@ fn seed_failed_with_history(db_path: &std::path::Path, run_id: &str, created_at:
     md.issue_number = Some(63);
     md.pr_number = Some(2138);
     md.artifact_root = db_path.parent().map(|p| p.to_string_lossy().to_string());
+    init_leases_table(&conn).expect("leases table");
+    let now = Utc::now();
+    create_lease(
+        &conn,
+        &IssueLease {
+            lease_id: format!("lease-{run_id}"),
+            issue_repo: "vybestack/llxprt-code".to_string(),
+            issue_number: 63,
+            config_id: "continuation-test".to_string(),
+            run_id: Some(run_id.to_string()),
+            status: LeaseStatus::Failed,
+            claimed_at: now,
+            updated_at: now,
+            heartbeat_at: now,
+        },
+    )
+    .expect("persist issue lease");
     persist_run_with_conn(&conn, &md).expect("persist run");
     for (step_id, _) in STEPS {
         let snapshot = StateSnapshot {
@@ -412,6 +430,7 @@ fn resume_terminal_failed_run_rewinds_before_terminal_and_skips_terminal() {
         run_id: run_id.to_string(),
         kind: ContinuationKind::Resume,
         force: false,
+        trusted_internal: false,
     };
     let plan = prepare_continuation(&conn, &request, &md).expect("prepare");
     assert!(
@@ -421,7 +440,7 @@ fn resume_terminal_failed_run_rewinds_before_terminal_and_skips_terminal() {
     );
     let selected = plan.selected.as_ref().expect("selected").step_id.clone();
     assert_eq!(selected, "collect_ci_failures");
-    let reopened = commit_continuation(&conn, &request, &selected).expect("commit");
+    let reopened = commit_continuation(&conn, &request, &plan.checkpoint_identity).expect("commit");
     assert_eq!(reopened.status, RunStatus::Running);
     let newest = load_checkpoint_with_conn(&conn, run_id).unwrap().unwrap();
     assert_eq!(newest.step_id, "collect_ci_failures");
@@ -458,6 +477,7 @@ fn retry_from_failed_step_targets_watch_pr_checks() {
             from_failed_step: true,
         },
         force: false,
+        trusted_internal: false,
     };
     let plan = prepare_continuation(&conn, &request, &md).expect("prepare");
     assert!(plan.validation.ok);
@@ -486,6 +506,7 @@ fn unsafe_rewind_is_rejected_and_writes_validation_artifact() {
             target: RewindTarget::ToStep("implement".to_string()),
         },
         force: false,
+        trusted_internal: false,
     };
     let plan = prepare_continuation(&conn, &request, &md).expect("prepare");
     assert!(
@@ -610,6 +631,7 @@ fn reconstruction_preserves_reopened_metadata_and_history() {
             run_id: run_id.to_string(),
             kind: ContinuationKind::Resume,
             force: false,
+            trusted_internal: false,
         };
         let plan = prepare_continuation(&conn, &request, &md).expect("prepare");
         assert!(
@@ -618,7 +640,7 @@ fn reconstruction_preserves_reopened_metadata_and_history() {
             plan.validation.failure_reasons()
         );
         let step = plan.selected.as_ref().expect("selected").step_id.clone();
-        commit_continuation(&conn, &request, &step).expect("commit");
+        commit_continuation(&conn, &request, &plan.checkpoint_identity).expect("commit");
         step
     };
     assert_eq!(resume_step, "collect_ci_failures");
@@ -650,6 +672,7 @@ fn non_resumable_completed_run_is_refused_without_corrupting_state() {
         run_id: run_id.to_string(),
         kind: ContinuationKind::Resume,
         force: true,
+        trusted_internal: false,
     };
     let plan = prepare_continuation(&conn, &request, &md).expect("prepare");
     assert!(
