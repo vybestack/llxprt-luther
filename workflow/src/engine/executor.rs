@@ -65,6 +65,14 @@ impl StepContext {
     /// @plan:PLAN-20260408-LLXPRT-FIRST.P11
     #[must_use]
     pub fn new(work_dir: PathBuf, run_id: String) -> Self {
+        Self::with_daemon_provenance(work_dir, run_id, false)
+    }
+
+    pub(crate) fn with_daemon_provenance(
+        work_dir: PathBuf,
+        run_id: String,
+        daemon_managed: bool,
+    ) -> Self {
         let mut variables = HashMap::new();
         // Store built-ins as bare keys for backward compatibility
         variables.insert(
@@ -76,7 +84,7 @@ impl StepContext {
         Self {
             work_dir,
             run_id,
-            daemon_managed: false,
+            daemon_managed,
             variables,
             current_step_id: None,
             step_order: Vec::new(),
@@ -219,11 +227,6 @@ impl StepContext {
         }
         // Always store bare key in variables (backward compat + pre-namespace-era bare keys)
         self.variables.insert(key.to_string(), value.to_string());
-    }
-
-    /// Set immutable daemon provenance while constructing runner context.
-    pub(crate) fn set_daemon_managed(&mut self, daemon_managed: bool) {
-        self.daemon_managed = daemon_managed;
     }
 
     /// Whether this context belongs to a trusted daemon-managed claim.

@@ -66,14 +66,15 @@ pub(super) fn build_step_context(
     run_context: Option<&RunContext>,
 ) -> Result<StepContext, EngineError> {
     let work_dir = std::env::temp_dir().join(&instance.run_id);
-    let mut context = StepContext::new(work_dir, instance.run_id.clone());
+    let daemon_managed = run_context.is_some_and(|context| context.daemon_managed);
+    let mut context =
+        StepContext::with_daemon_provenance(work_dir, instance.run_id.clone(), daemon_managed);
 
     for (key, value) in &instance.config.variables {
         context.set(key, value);
     }
     seed_parent_orchestration_config(&mut context, instance);
     if let Some(run_context) = run_context {
-        context.set_daemon_managed(run_context.daemon_managed);
         seed_run_context(&mut context, run_context);
     }
 

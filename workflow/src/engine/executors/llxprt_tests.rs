@@ -148,10 +148,13 @@ fn owned_daemon_workspace_reaches_implementation_after_scope_barrier() {
     });
     persist_charter_and_status(artifacts.path(), &charter).expect("persist charter");
 
-    let mut context = StepContext::new(workspace.path().to_path_buf(), "run-owned".into());
+    let mut context = StepContext::with_daemon_provenance(
+        workspace.path().to_path_buf(),
+        "run-owned".into(),
+        true,
+    );
     context.set_current_step_id("implement");
     context.set("artifact_dir", &artifacts.path().to_string_lossy());
-    context.set_daemon_managed(true);
     context.set(
         "scope_control_policy",
         &serde_json::to_string(&policy).expect("serialize policy"),
