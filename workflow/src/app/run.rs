@@ -147,7 +147,7 @@ pub async fn handle_run_command(args: &luther_workflow::cli::RunArgs) {
         finish_dry_run(&workflow_type, &config);
     }
 
-    let mut runner = create_durable_runner(workflow_type, config, &run_id, &db_path);
+    let mut runner = create_durable_runner(workflow_type, config, &run_id, &db_path, false);
     install_interrupt_handlers(runner.interrupt_handle());
     println!("Executing workflow...");
     match runner.run() {
@@ -375,8 +375,10 @@ pub fn create_durable_runner(
     config: luther_workflow::workflow::schema::WorkflowConfig,
     run_id: &str,
     db_path: &std::path::Path,
+    daemon_managed: bool,
 ) -> EngineRunner {
-    let run_context = build_run_context(&config, run_id);
+    let mut run_context = build_run_context(&config, run_id);
+    run_context.daemon_managed = daemon_managed;
     let instance = WorkflowInstance::create_with_run_id(workflow_type, config, run_id);
     let registry = ExecutorRegistry::with_defaults();
     // Attach the run context up front so the initial persisted `Starting` row
@@ -421,6 +423,7 @@ pub fn build_run_context(
             .to_string()
     }));
     luther_workflow::engine::RunContext {
+        daemon_managed: false,
         log_path,
         artifact_root,
         workspace_path,
@@ -482,7 +485,13 @@ pub fn launch_daemon_workflow(
     ensure_daemon_run_dirs(request)?;
     let db_path = luther_workflow::runtime_paths::get_data_dir().join("checkpoints.db");
     let wait_config = config.clone();
-    let mut runner = create_durable_runner(workflow_type, config, &request.run_id, &db_path);
+    let mut runner = create_durable_runner(
+        workflow_type,
+        config,
+        &request.run_id,
+        &db_path,
+        request.daemon_managed_claim,
+    );
     run_daemon_runner(request, &wait_config, &db_path, &mut runner)
 }
 fn apply_daemon_claim_overrides(

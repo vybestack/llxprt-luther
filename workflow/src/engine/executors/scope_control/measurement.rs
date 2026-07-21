@@ -15,8 +15,9 @@
 //! line-oriented parsing cannot do.
 //!
 //! `git diff HEAD --numstat --no-renames -z` covers both staged and unstaged
-//! tracked changes relative to HEAD. Untracked files are collected separately
-//! via `git ls-files --others --exclude-standard -z`.
+//! tracked changes relative to HEAD. Untracked files are collected with standard
+//! exclusions, while a second no-exclusions pass enumerates `.luther` so ignored
+//! control metadata cannot hide arbitrary agent changes.
 //!
 //! # Binary file semantics
 //!
@@ -34,6 +35,12 @@ use serde::{Deserialize, Serialize};
 use crate::engine::executors::scope_control::model::CanonicalTaskCharter;
 use crate::workflow::schema::ScopeMeasurementConfig;
 
+#[path = "measurement_control_files.rs"]
+mod control_files;
+#[cfg(test)]
+use control_files::parse_z_paths;
+use control_files::{collect_untracked_files, patch_untracked_files};
+
 // ---------------------------------------------------------------------------
 // Errors
 // ---------------------------------------------------------------------------
@@ -45,8 +52,10 @@ pub enum MeasurementError {
     Git { command: String, message: String },
     /// A Git SHA (HEAD) could not be resolved.
     HeadResolution(String),
-    /// Numstat output could not be parsed.
+    /// Git output could not be parsed without losing patch identity.
     Parse(String),
+    /// Trusted engine-owned workspace metadata failed validation.
+    ControlMetadata(String),
 }
 
 impl std::fmt::Display for MeasurementError {
@@ -57,6 +66,7 @@ impl std::fmt::Display for MeasurementError {
             }
             Self::HeadResolution(msg) => write!(f, "failed to resolve HEAD: {msg}"),
             Self::Parse(msg) => write!(f, "failed to parse git output: {msg}"),
+            Self::ControlMetadata(msg) => write!(f, "invalid workspace control metadata: {msg}"),
         }
     }
 }
@@ -325,31 +335,6 @@ fn collect_tracked_changes(
     merge_status_and_numstat(&statuses, &numstats)
 }
 
-/// Collect untracked files via `git ls-files --others --exclude-standard -z`.
-fn collect_untracked_files(work_dir: &Path) -> Result<Vec<String>, MeasurementError> {
-    let output = Command::new("git")
-        .args(["ls-files", "--others", "--exclude-standard", "-z"])
-        .current_dir(work_dir)
-        .output()
-        .map_err(|err| MeasurementError::Git {
-            command: "ls-files --others".into(),
-            message: format!("failed to invoke git: {err}"),
-        })?;
-
-    if !output.status.success() {
-        return Err(MeasurementError::Git {
-            command: "ls-files --others".into(),
-            message: format!(
-                "exit {}: {}",
-                output.status.code().unwrap_or(-1),
-                String::from_utf8_lossy(&output.stderr).trim()
-            ),
-        });
-    }
-
-    Ok(parse_z_paths(&output.stdout))
-}
-
 // ---------------------------------------------------------------------------
 // NUL-safe parsing
 // ---------------------------------------------------------------------------
@@ -364,14 +349,6 @@ fn split_z(data: &[u8]) -> Vec<&[u8]> {
     // segment to avoid phantom entries.
     data.split(|&b| b == 0)
         .filter(|seg| !seg.is_empty())
-        .collect()
-}
-
-/// Parse NUL-terminated paths into owned strings.
-fn parse_z_paths(data: &[u8]) -> Vec<String> {
-    split_z(data)
-        .into_iter()
-        .filter_map(|seg| String::from_utf8(seg.to_vec()).ok())
         .collect()
 }
 
@@ -583,13 +560,25 @@ pub struct PatchMeasurement {
 pub fn compute_measurement(
     data: &GitPatchData,
     charter: &CanonicalTaskCharter,
+    expected_run_id: &str,
+    daemon_managed: bool,
     measurement_config: &ScopeMeasurementConfig,
     work_dir: &Path,
     dependency_diffs: &[(String, Vec<String>)],
 ) -> Result<PatchMeasurement, MeasurementError> {
-    // Merge tracked changes and untracked files into a unified list.
+    if charter.run_id != expected_run_id {
+        return Err(MeasurementError::ControlMetadata(format!(
+            "charter run '{}' does not match active run '{expected_run_id}'",
+            charter.run_id
+        )));
+    }
+
+    // Merge tracked changes and untracked files into a unified list. The one
+    // daemon-owned marker is control-plane state rather than an agent patch,
+    // but it is excluded only after exact ownership verification.
+    let untracked_files = patch_untracked_files(data, work_dir, expected_run_id, daemon_managed)?;
     let mut all_changes: Vec<FileChange> = data.tracked_changes.clone();
-    for untracked in &data.untracked_files {
+    for untracked in &untracked_files {
         all_changes.push(FileChange {
             path: untracked.clone(),
             status: ChangeStatus::Untracked,
@@ -642,6 +631,7 @@ pub fn compute_measurement(
         file_details: all_changes,
     })
 }
+
 fn compute_content_digest(
     work_dir: &Path,
     changes: &[FileChange],

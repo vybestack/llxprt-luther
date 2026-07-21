@@ -125,6 +125,14 @@ fn seed_scope_control_policy(context: &mut StepContext, instance: &WorkflowInsta
 }
 
 fn seed_run_context(context: &mut StepContext, run_context: &RunContext) {
+    context.set(
+        "daemon_managed_claim",
+        if run_context.daemon_managed {
+            "true"
+        } else {
+            "false"
+        },
+    );
     if let Some(workspace_path) = run_context.workspace_path.as_deref() {
         context.set("work_dir", workspace_path);
         context.set("workspace_path", workspace_path);

@@ -31,6 +31,7 @@ mod failure_cleanup;
 /// @plan:PLAN-20260404-INITIAL-RUNTIME.P05
 #[derive(Debug, Clone, Default)]
 pub struct RunContext {
+    pub daemon_managed: bool,
     pub log_path: Option<String>,
     pub artifact_root: Option<String>,
     pub workspace_path: Option<String>,

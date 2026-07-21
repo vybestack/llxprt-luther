@@ -98,6 +98,10 @@ impl StepExecutor for ScopeMeasureExecutor {
         let measurement = compute_measurement(
             &git_data,
             &charter,
+            &run_id,
+            context
+                .get("daemon_managed_claim")
+                .is_some_and(|value| value == "true"),
             &scope_control.measurement,
             &work_dir,
             &dependency_diffs,

@@ -100,6 +100,7 @@ pub fn child_run_context(
         )
     })?;
     Ok(RunContext {
+        daemon_managed: true,
         log_path: None,
         artifact_root: request
             .artifact_dir
