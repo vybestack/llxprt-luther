@@ -218,6 +218,13 @@ impl StepContext {
         self.variables.insert(key.to_string(), value.to_string());
     }
 
+    /// Whether this context belongs to a trusted daemon-managed claim.
+    #[must_use]
+    pub fn daemon_managed_claim(&self) -> bool {
+        self.get("daemon_managed_claim")
+            .is_some_and(|value| value == "true")
+    }
+
     /// Get the working directory.
     #[must_use]
     pub const fn work_dir(&self) -> &PathBuf {

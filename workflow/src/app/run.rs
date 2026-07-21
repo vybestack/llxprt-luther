@@ -1,4 +1,4 @@
-use super::runs::reconstruct_runner_with_config;
+use super::runs::reconstruct_runner_with_daemon_provenance;
 use super::status::install_interrupt_handlers;
 use super::wait_state::persist_external_wait_state;
 use luther_workflow::adapters::github::{run_preflight, GithubError, SystemGithubCommandRunner};
@@ -579,12 +579,13 @@ pub fn resume_daemon_workflow(
     // durable ownership anchor stays current for the resumed run id even when
     // the original launch did not write it (or the workspace moved).
     ensure_daemon_run_dirs(request)?;
-    let mut runner = reconstruct_runner_with_config(
+    let mut runner = reconstruct_runner_with_daemon_provenance(
         &metadata,
         &request.run_id,
         &db_path,
         &config_dir,
         wait_config.clone(),
+        request.daemon_managed_claim,
     )?;
     // Construct the resume request once and derive the checkpoint identity via
     // request-bound `select_checkpoint` rather than a first-by-step lookup. The

@@ -87,7 +87,7 @@ pub fn reconstruct_runner(
     reconstruct_runner_with_config(md, run_id, db_path, config_dir, config)
 }
 
-fn reconstruct_runner_with_daemon_provenance(
+pub(super) fn reconstruct_runner_with_daemon_provenance(
     md: &RunMetadata,
     run_id: &str,
     db_path: &std::path::Path,

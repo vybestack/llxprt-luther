@@ -149,9 +149,7 @@ where
         &git_data,
         charter,
         context.run_id(),
-        context
-            .get("daemon_managed_claim")
-            .is_some_and(|value| value == "true"),
+        context.daemon_managed_claim(),
         &policy.measurement,
         context.work_dir(),
         &dependency_diffs,

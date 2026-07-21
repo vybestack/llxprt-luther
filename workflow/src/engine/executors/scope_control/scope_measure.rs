@@ -99,9 +99,7 @@ impl StepExecutor for ScopeMeasureExecutor {
             &git_data,
             &charter,
             &run_id,
-            context
-                .get("daemon_managed_claim")
-                .is_some_and(|value| value == "true"),
+            context.daemon_managed_claim(),
             &scope_control.measurement,
             &work_dir,
             &dependency_diffs,
