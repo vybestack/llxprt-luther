@@ -114,7 +114,11 @@ fn persist_later_wait(conn: &rusqlite::Connection) -> (crate::persistence::RunMe
 
 fn commit_retry_progress_wait(
     conn: &rusqlite::Connection,
-) -> (crate::engine::continuation::ContinuationRequest, String) {
+) -> (
+    crate::engine::continuation::ContinuationRequest,
+    String,
+    tempfile::TempDir,
+) {
     let workspace = tempfile::tempdir().expect("workspace");
     let (metadata, original_failed_identity) = seed_retry_progress(conn, workspace.path());
     let (progressed, later_wait_identity) = persist_later_wait(conn);
@@ -144,6 +148,7 @@ fn commit_retry_progress_wait(
             .expect("read selection artifact"),
     )
     .expect("parse selection artifact");
+    assert_eq!(selection["step_id"], "implement");
     assert_eq!(selection["checkpoint_id"], later_wait_identity);
     let committed = get_checkpoint_for_step(conn, "cleanup-progress", "implement")
         .expect("query committed checkpoint")
@@ -152,13 +157,13 @@ fn commit_retry_progress_wait(
         committed.state_snapshot.status,
         CHECKPOINT_STATUS_READY_TO_RESUME
     );
-    (resume, checkpoint_identity(&committed))
+    (resume, checkpoint_identity(&committed), workspace)
 }
 
 #[test]
 fn retry_progress_to_later_wait_resumes_current_checkpoint() {
     let conn = test_conn();
-    let (_, committed_identity) = commit_retry_progress_wait(&conn);
+    let (_, committed_identity, _workspace) = commit_retry_progress_wait(&conn);
     let metadata = get_run_with_conn(&conn, "cleanup-progress")
         .expect("query reopened run")
         .expect("reopened run");
@@ -171,7 +176,7 @@ fn retry_progress_to_later_wait_resumes_current_checkpoint() {
 #[test]
 fn interrupted_committed_checkpoint_can_resume_exact_identity() {
     let conn = test_conn();
-    let (resume, committed_identity) = commit_retry_progress_wait(&conn);
+    let (resume, committed_identity, _workspace) = commit_retry_progress_wait(&conn);
     let mut interrupted = get_run_with_conn(&conn, "cleanup-progress")
         .expect("query interrupted run")
         .expect("interrupted run");
