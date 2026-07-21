@@ -66,9 +66,12 @@ pub(super) fn build_step_context(
     run_context: Option<&RunContext>,
 ) -> Result<StepContext, EngineError> {
     let work_dir = std::env::temp_dir().join(&instance.run_id);
-    let daemon_managed = run_context.is_some_and(|context| context.daemon_managed);
-    let mut context =
-        StepContext::with_daemon_provenance(work_dir, instance.run_id.clone(), daemon_managed);
+    let mut context = match run_context {
+        Some(run_context) => {
+            StepContext::from_run_context(work_dir, instance.run_id.clone(), run_context)
+        }
+        None => StepContext::new(work_dir, instance.run_id.clone()),
+    };
 
     for (key, value) in &instance.config.variables {
         context.set(key, value);

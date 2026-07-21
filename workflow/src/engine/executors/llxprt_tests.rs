@@ -99,6 +99,30 @@ fn string_array_param_interpolates_and_defaults() {
 
 #[test]
 fn owned_daemon_workspace_reaches_implementation_after_scope_barrier() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let artifacts = tempfile::tempdir().expect("artifacts");
+    let mut context = owned_daemon_implementation_context(workspace.path(), artifacts.path());
+    let outcome = LlxprtExecutor
+        .execute(
+            &mut context,
+            &json!({
+                "static_content": "agent reached",
+                "success_file": "agent-reached.txt"
+            }),
+        )
+        .expect("execute implementation");
+
+    assert_eq!(outcome, StepOutcome::Success);
+    assert_eq!(
+        std::fs::read_to_string(workspace.path().join("agent-reached.txt")).expect("output"),
+        "agent reached"
+    );
+}
+
+fn owned_daemon_implementation_context(
+    workspace: &std::path::Path,
+    artifacts: &std::path::Path,
+) -> StepContext {
     use crate::engine::continuation::write_workspace_owner_marker;
     use crate::engine::executors::scope_control::{
         normalize_charter, persist_charter_and_status, test_measurement_config, DraftBudget,
@@ -106,15 +130,11 @@ fn owned_daemon_workspace_reaches_implementation_after_scope_barrier() {
     };
     use crate::workflow::schema::ScopeControlConfig;
 
-    let workspace = tempfile::tempdir().expect("workspace");
-    let artifacts = tempfile::tempdir().expect("artifacts");
-    initialize_llxprt_test_repo(workspace.path());
-    std::fs::write(workspace.path().join("README.md"), "base\n").expect("base file");
-    run_llxprt_test_git(workspace.path(), &["add", "README.md"]);
-    run_llxprt_test_git(workspace.path(), &["commit", "-q", "-m", "base"]);
-    let head = llxprt_test_head(workspace.path());
-    write_workspace_owner_marker(workspace.path(), "run-owned").expect("owner marker");
-
+    initialize_llxprt_test_repo(workspace);
+    std::fs::write(workspace.join("README.md"), "base\n").expect("base file");
+    run_llxprt_test_git(workspace, &["add", "README.md"]);
+    run_llxprt_test_git(workspace, &["commit", "-q", "-m", "base"]);
+    write_workspace_owner_marker(workspace, "run-owned").expect("owner marker");
     let policy = ScopeControlConfig {
         enabled: true,
         measurement: test_measurement_config(&["rs"], &[]),
@@ -124,7 +144,7 @@ fn owned_daemon_workspace_reaches_implementation_after_scope_barrier() {
         charter_id: "issue-154".into(),
         issue_number: 154,
         run_id: "run-owned".into(),
-        merge_base: head,
+        merge_base: llxprt_test_head(workspace),
         acceptance_criteria: vec!["implementation executes".into()],
         non_goals: vec!["exclude arbitrary .luther files".into()],
         subsystems: vec![DraftSubsystem {
@@ -146,34 +166,20 @@ fn owned_daemon_workspace_reaches_implementation_after_scope_barrier() {
         },
         mandatory_gates: vec!["test".into()],
     });
-    persist_charter_and_status(artifacts.path(), &charter).expect("persist charter");
-
-    let mut context = StepContext::with_daemon_provenance(
-        workspace.path().to_path_buf(),
-        "run-owned".into(),
-        true,
-    );
+    persist_charter_and_status(artifacts, &charter).expect("persist charter");
+    let run_context = crate::engine::runner::RunContext {
+        daemon_managed: true,
+        ..crate::engine::runner::RunContext::default()
+    };
+    let mut context =
+        StepContext::from_run_context(workspace.to_path_buf(), "run-owned".into(), &run_context);
     context.set_current_step_id("implement");
-    context.set("artifact_dir", &artifacts.path().to_string_lossy());
+    context.set("artifact_dir", &artifacts.to_string_lossy());
     context.set(
         "scope_control_policy",
         &serde_json::to_string(&policy).expect("serialize policy"),
     );
-    let outcome = LlxprtExecutor
-        .execute(
-            &mut context,
-            &json!({
-                "static_content": "agent reached",
-                "success_file": "agent-reached.txt"
-            }),
-        )
-        .expect("execute implementation");
-
-    assert_eq!(outcome, StepOutcome::Success);
-    assert_eq!(
-        std::fs::read_to_string(workspace.path().join("agent-reached.txt")).expect("output"),
-        "agent reached"
-    );
+    context
 }
 
 fn initialize_llxprt_test_repo(workspace: &std::path::Path) {
@@ -183,24 +189,31 @@ fn initialize_llxprt_test_repo(workspace: &std::path::Path) {
 }
 
 fn run_llxprt_test_git(workspace: &std::path::Path, args: &[&str]) {
-    let status = std::process::Command::new("git")
+    let output = std::process::Command::new("git")
         .args(args)
         .current_dir(workspace)
-        .status()
-        .expect("git command");
-    assert!(status.success(), "git command failed: {args:?}");
+        .output()
+        .expect("git command must be available for repository integration tests");
+    assert!(
+        output.status.success(),
+        "git command failed: {args:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 fn llxprt_test_head(workspace: &std::path::Path) -> String {
-    String::from_utf8(
-        std::process::Command::new("git")
-            .args(["rev-parse", "HEAD"])
-            .current_dir(workspace)
-            .output()
-            .expect("git head")
-            .stdout,
-    )
-    .expect("utf8 head")
-    .trim()
-    .to_string()
+    let output = std::process::Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(workspace)
+        .output()
+        .expect("git command must be available for repository integration tests");
+    assert!(
+        output.status.success(),
+        "git rev-parse HEAD failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout)
+        .expect("git head must be UTF-8")
+        .trim()
+        .to_string()
 }

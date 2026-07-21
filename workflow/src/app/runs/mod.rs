@@ -73,6 +73,7 @@ pub fn run_context_from_metadata(
 
 /// Reconstruct a durable runner for an existing run from its persisted metadata.
 /// @plan:PLAN-20260623-LUTHER-CONTINUATION
+#[cfg(test)]
 pub fn reconstruct_runner(
     md: &RunMetadata,
     run_id: &str,
@@ -519,16 +520,18 @@ fn reconstruct_runner_or_exit(
     config_dir: &Option<std::path::PathBuf>,
     daemon_managed: bool,
 ) -> EngineRunner {
-    let reconstruction = if daemon_managed {
-        let config_root = config_dir.as_deref().unwrap_or(Path::new("config"));
-        let config = resolve_workflow_config(&md.config_id, config_root).unwrap_or_else(|error| {
-            eprintln!("Error: resolve config '{}': {error}", md.config_id);
-            process::exit(1);
+    let config_root = config_dir.as_deref().unwrap_or(Path::new("config"));
+    let reconstruction = resolve_workflow_config(&md.config_id, config_root)
+        .map_err(|error| format!("resolve config '{}': {error}", md.config_id))
+        .and_then(|config| {
+            if daemon_managed {
+                reconstruct_runner_with_daemon_provenance(
+                    md, run_id, db_path, config_dir, config, true,
+                )
+            } else {
+                reconstruct_runner_with_config(md, run_id, db_path, config_dir, config)
+            }
         });
-        reconstruct_runner_with_daemon_provenance(md, run_id, db_path, config_dir, config, true)
-    } else {
-        reconstruct_runner(md, run_id, db_path, config_dir)
-    };
     match reconstruction {
         Ok(runner) => runner,
         Err(e) => {

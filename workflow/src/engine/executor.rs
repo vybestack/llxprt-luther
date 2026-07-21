@@ -65,14 +65,18 @@ impl StepContext {
     /// @plan:PLAN-20260408-LLXPRT-FIRST.P11
     #[must_use]
     pub fn new(work_dir: PathBuf, run_id: String) -> Self {
-        Self::with_daemon_provenance(work_dir, run_id, false)
+        Self::build(work_dir, run_id, false)
     }
 
-    pub(crate) fn with_daemon_provenance(
+    pub(crate) fn from_run_context(
         work_dir: PathBuf,
         run_id: String,
-        daemon_managed: bool,
+        run_context: &crate::engine::runner::RunContext,
     ) -> Self {
+        Self::build(work_dir, run_id, run_context.daemon_managed)
+    }
+
+    fn build(work_dir: PathBuf, run_id: String, daemon_managed: bool) -> Self {
         let mut variables = HashMap::new();
         // Store built-ins as bare keys for backward compatibility
         variables.insert(
