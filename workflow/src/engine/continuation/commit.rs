@@ -92,6 +92,12 @@ fn commit_continuation_in_transaction(
                     wait.checkpoint_id
                 )));
             }
+            if wait.resume_step != selected.step_id {
+                return Err(ContinuationError::InvalidTarget(format!(
+                    "durable wait resume step changed before commit: expected {}, found {}",
+                    selected.step_id, wait.resume_step
+                )));
+            }
             if !delete_wait_state_for_suspension(tx, &request.run_id, &wait.suspension_id)? {
                 return Err(ContinuationError::InvalidTarget(
                     "durable wait suspension changed before commit".to_string(),

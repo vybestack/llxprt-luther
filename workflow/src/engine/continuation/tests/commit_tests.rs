@@ -83,9 +83,12 @@ fn commit_rejects_same_step_checkpoint_replacement_after_plan() {
     );
     let error = commit_continuation(&conn, &request, &planned.checkpoint_identity)
         .expect_err("same-step replacement must be rejected");
-    assert!(error
-        .to_string()
-        .contains("continuation checkpoint identity changed before commit"));
+    assert!(
+        error
+            .to_string()
+            .contains("continuation checkpoint identity changed before commit"),
+        "expected same-step replacement error, got: {error}"
+    );
 
     let unchanged = get_run_with_conn(&conn, "current-wait-race")
         .expect("query")
@@ -99,6 +102,52 @@ fn commit_rejects_same_step_checkpoint_replacement_after_plan() {
         lease.status,
         crate::persistence::LeaseStatus::WaitingExternal
     );
+}
+
+#[test]
+fn commit_rejects_wait_with_mismatched_resume_step_without_consuming_it() {
+    let conn = test_conn();
+    seed_run(
+        &conn,
+        "wait-resume-step-race",
+        RunStatus::WaitingExternal,
+        "implement",
+    );
+    seed_checkpoint(
+        &conn,
+        "wait-resume-step-race",
+        "implement",
+        CHECKPOINT_STATUS_WAITING,
+    );
+    let checkpoint = get_checkpoint_for_step(&conn, "wait-resume-step-race", "implement")
+        .expect("checkpoint query")
+        .expect("checkpoint");
+    crate::persistence::init_wait_states_table(&conn).expect("wait table");
+    let mut wait =
+        crate::persistence::WaitStateRecord::new("wait-resume-step-race", "continuation-test");
+    wait.resume_step = "different-step".to_string();
+    wait.checkpoint_id = checkpoint_identity(&checkpoint);
+    crate::persistence::upsert_wait_state(&conn, &wait).expect("persist wait");
+
+    let request = request("wait-resume-step-race", ContinuationKind::Resume, false);
+    let error = commit_continuation(&conn, &request, &checkpoint_identity(&checkpoint))
+        .expect_err("mismatched resume step must fail closed");
+    assert!(
+        error
+            .to_string()
+            .contains("durable wait resume step changed"),
+        "expected resume-step mismatch, got: {error}"
+    );
+    assert!(
+        crate::persistence::get_wait_state(&conn, "wait-resume-step-race")
+            .expect("wait query")
+            .is_some(),
+        "rejected wait must remain durable"
+    );
+    let unchanged = get_run_with_conn(&conn, "wait-resume-step-race")
+        .expect("run query")
+        .expect("run");
+    assert_eq!(unchanged.status, RunStatus::WaitingExternal);
 }
 
 #[test]

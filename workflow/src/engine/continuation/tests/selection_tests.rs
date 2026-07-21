@@ -74,18 +74,24 @@ fn seed_retry_progress(
     let plan = crate::engine::continuation::prepare_continuation(conn, &retry, &metadata)
         .expect("prepare retry");
     assert!(plan.validation.ok);
+    assert_eq!(plan.checkpoint_identity, original);
     crate::engine::continuation::commit_continuation(conn, &retry, &plan.checkpoint_identity)
         .expect("commit retry");
     (metadata, original)
 }
 
-fn persist_later_wait(conn: &rusqlite::Connection) -> crate::persistence::RunMetadata {
+fn persist_later_wait(conn: &rusqlite::Connection) -> (crate::persistence::RunMetadata, String) {
     seed_checkpoint(conn, "cleanup-progress", "remediate", "completed");
     seed_checkpoint(
         conn,
         "cleanup-progress",
         "implement",
         CHECKPOINT_STATUS_WAITING,
+    );
+    let later_identity = checkpoint_identity(
+        &get_checkpoint_for_step(conn, "cleanup-progress", "implement")
+            .expect("query later checkpoint")
+            .expect("later checkpoint"),
     );
     let mut metadata = get_run_with_conn(conn, "cleanup-progress")
         .expect("query")
@@ -100,7 +106,7 @@ fn persist_later_wait(conn: &rusqlite::Connection) -> crate::persistence::RunMet
         Some("cleanup-progress"),
     )
     .expect("wait lease");
-    metadata
+    (metadata, later_identity)
 }
 
 #[test]
@@ -108,7 +114,7 @@ fn retry_progress_to_later_wait_resumes_current_checkpoint() {
     let conn = test_conn();
     let workspace = tempfile::tempdir().expect("workspace");
     let (metadata, original_failed_identity) = seed_retry_progress(&conn, workspace.path());
-    let progressed = persist_later_wait(&conn);
+    let (progressed, later_wait_identity) = persist_later_wait(&conn);
 
     let resume = request("cleanup-progress", ContinuationKind::Resume, false);
     let resume_plan =
@@ -125,6 +131,7 @@ fn retry_progress_to_later_wait_resumes_current_checkpoint() {
         .expect("selected current wait");
     assert_eq!(selected.step_id, "implement");
     assert_eq!(selected.state_snapshot.status, CHECKPOINT_STATUS_WAITING);
+    assert_eq!(resume_plan.checkpoint_identity, later_wait_identity);
     assert_ne!(resume_plan.checkpoint_identity, original_failed_identity);
     let reopened = crate::engine::continuation::commit_continuation(
         &conn,
@@ -148,7 +155,7 @@ fn retry_progress_to_later_wait_resumes_current_checkpoint() {
     )
     .expect("parse selection artifact");
     assert_eq!(selection["step_id"], "implement");
-    assert_eq!(selection["checkpoint_id"], resume_plan.checkpoint_identity);
+    assert_eq!(selection["checkpoint_id"], later_wait_identity);
 }
 
 #[test]

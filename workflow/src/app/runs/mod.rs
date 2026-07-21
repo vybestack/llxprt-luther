@@ -439,7 +439,10 @@ pub fn commit_and_execute(
         .unwrap_or_else(|| luther_workflow::runtime_paths::get_data_dir().join("checkpoints.db"));
     let mut runner = reconstruct_runner_or_exit(md, &request.run_id, &db_path, config_dir);
     commit_continuation_or_exit(store, request, &plan.checkpoint_identity);
-    write_committed_checkpoint_artifacts(store, request, plan, &step);
+    let mut maintenance_errors: Vec<String> = Vec::new();
+    if let Err(error) = write_committed_checkpoint_artifacts(store, request, plan, &step) {
+        maintenance_errors.push(error);
+    }
     println!(
         "Reopened run '{}' at step '{step}' (continuation: {})",
         request.run_id,
@@ -453,7 +456,6 @@ pub fn commit_and_execute(
     // lease stuck in `Running` nor suppress the result artifact. Maintenance
     // errors are aggregated and reported after all actions are attempted.
     // @plan:PLAN-20260623-LUTHER-CONTINUATION
-    let mut maintenance_errors: Vec<String> = Vec::new();
     if let Err(ref error) = outcome {
         if let Err(maintenance_error) = persist_continuation_failure(store, &request.run_id, error)
         {
@@ -507,44 +509,37 @@ fn write_committed_checkpoint_artifacts(
     request: &luther_workflow::engine::ContinuationRequest,
     plan: &luther_workflow::engine::continuation::ContinuationPlan,
     step_id: &str,
-) {
-    let current = match luther_workflow::persistence::get_checkpoint_for_step(
+) -> Result<(), String> {
+    let current = luther_workflow::persistence::get_checkpoint_for_step(
         store.conn(),
         &request.run_id,
         step_id,
-    ) {
-        Ok(Some(checkpoint)) => checkpoint,
-        Ok(None) => {
-            eprintln!(
-                "Warning: committed continuation checkpoint for run '{}' step '{}' was not found",
-                request.run_id, step_id
-            );
-            return;
-        }
-        Err(error) => {
-            eprintln!(
-                "Warning: failed to load committed continuation checkpoint for run '{}': {error}",
-                request.run_id
-            );
-            return;
-        }
-    };
+    )
+    .map_err(|error| {
+        format!(
+            "failed to load committed continuation checkpoint for run '{}': {error}",
+            request.run_id
+        )
+    })?
+    .ok_or_else(|| {
+        format!(
+            "committed continuation checkpoint for run '{}' step '{}' was not found",
+            request.run_id, step_id
+        )
+    })?;
     let artifact = luther_workflow::engine::continuation::committed_selection_artifact(
         &plan.checkpoint_identity,
         &current,
     );
-    for name in ["checkpoint-selection.json", "checkpoint-commit.json"] {
-        if let Err(error) = luther_workflow::engine::continuation::write_json_artifact(
-            &plan.artifact_dir,
-            name,
-            &artifact,
-        ) {
-            eprintln!(
-                "Warning: failed to write committed continuation artifact '{}': {error}",
+    let name = "checkpoint-commit.json";
+    luther_workflow::engine::continuation::write_json_artifact(&plan.artifact_dir, name, &artifact)
+        .map(|_| ())
+        .map_err(|error| {
+            format!(
+                "failed to write committed continuation artifact '{}': {error}",
                 plan.artifact_dir.join(name).display()
-            );
-        }
-    }
+            )
+        })
 }
 
 /// Persist the failed-state metadata for a continuation run that errored.
@@ -819,6 +814,10 @@ pub fn handle_runs_rewind(args: &luther_workflow::cli::RunsRewindArgs) {
         &plan.checkpoint_identity,
     ) {
         eprintln!("Error: failed to set resume point: {e}");
+        process::exit(1);
+    }
+    if let Err(error) = write_committed_checkpoint_artifacts(&store, &request, &plan, &step) {
+        eprintln!("Error: {error}");
         process::exit(1);
     }
     println!(

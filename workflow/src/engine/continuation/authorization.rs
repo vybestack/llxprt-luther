@@ -49,11 +49,12 @@ impl ResumeAuthorization {
     /// Resolve the strongest authorization applicable to resuming `checkpoint`
     /// for `run_id` from the persisted durable wait state.
     ///
-    /// Returns [`ResumeAuthorization::TrustedInternalWait`] only when a
-    /// complete `wait_states` row exists for the exact `run_id`, its
-    /// `checkpoint_id` matches the selected checkpoint identity, and its
-    /// `resume_step` matches the checkpoint's step. Otherwise the caller is
-    /// treated as a plain [`ResumeAuthorization::Operator`].
+    /// For an ordinary Resume, returns [`ResumeAuthorization::OperatorCurrentWait`]
+    /// only when run status, current step, and checkpoint status identify the
+    /// exact current external wait. For trusted internal Resume, returns
+    /// [`ResumeAuthorization::TrustedInternalWait`] only when a complete
+    /// `wait_states` row binds the same run, checkpoint identity, and resume
+    /// step. Otherwise the caller is a plain [`ResumeAuthorization::Operator`].
     ///
     /// @plan:PLAN-20260623-LUTHER-CONTINUATION
     fn for_resume(
