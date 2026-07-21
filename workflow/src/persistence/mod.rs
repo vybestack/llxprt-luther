@@ -87,6 +87,9 @@ pub fn init_database(db_path: &Path) -> Result<(), checkpoint::PersistenceError>
     checkpoint::init_checkpoint_table(&tx).map_err(|e| {
         checkpoint::PersistenceError::Database(format!("Failed to initialize schema: {e}"))
     })?;
+    sqlite::init_runs_schema(&tx).map_err(|e| {
+        checkpoint::PersistenceError::Database(format!("Failed to initialize runs schema: {e}"))
+    })?;
 
     // Initialize issue-lease table (daemon discovery/claiming).
     // @plan:PLAN-20260415-DAEMON-DISCOVERY.P02

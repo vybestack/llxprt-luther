@@ -340,8 +340,17 @@ fn schema_migration_adds_columns() {
         .expect("create old events");
     }
 
-    // Opening via the store / init_database should migrate the schema in place.
+    // Daemon initialization must migrate the run schema before any store or
+    // engine runner opens the database.
     init_database(&db_path).expect("init/migrate");
+    let daemon_conn = Connection::open(&db_path).expect("open daemon connection");
+    let daemon_md = luther_workflow::persistence::get_run_with_conn(&daemon_conn, "old-run")
+        .expect("daemon query")
+        .expect("daemon run exists");
+    assert_eq!(daemon_md.status, RunStatus::Running);
+    assert!(daemon_md.continuation_rearm_checkpoint_id.is_none());
+    drop(daemon_conn);
+
     let store = SqliteStore::open(&db_path).expect("open store");
     let md = store.get_run("old-run").expect("query").expect("exists");
     assert_eq!(md.status, RunStatus::Running);

@@ -208,6 +208,10 @@ pub struct RunMetadata {
     pub process_pid: Option<u32>,
     /// PIDs of child/agent processes (JSON array TEXT).
     pub child_pids: Vec<u32>,
+    /// Exact checkpoint identity most recently rearmed by an operator
+    /// continuation commit. A later checkpoint replacement invalidates this
+    /// grant because its identity no longer matches.
+    pub continuation_rearm_checkpoint_id: Option<String>,
     /// Original failed-work provenance when a failure-cleanup terminal ran.
     pub failure_cleanup: Option<FailureCleanupState>,
 }
@@ -242,6 +246,7 @@ impl RunMetadata {
             head_sha: None,
             process_pid: None,
             child_pids: Vec::new(),
+            continuation_rearm_checkpoint_id: None,
             failure_cleanup: None,
         }
     }
@@ -325,6 +330,21 @@ impl RunMetadata {
     pub fn clear_child_pids(&mut self) {
         self.child_pids.clear();
         self.updated_at = Some(Utc::now());
+    }
+
+    /// Return a currently live workflow process, if one is recorded.
+    #[must_use]
+    pub fn live_workflow_pid(&self) -> Option<u32> {
+        self.process_pid.filter(|pid| !is_pid_stale(*pid))
+    }
+
+    /// Return the first currently live child/agent process, if one is recorded.
+    #[must_use]
+    pub fn live_child_pid(&self) -> Option<u32> {
+        self.child_pids
+            .iter()
+            .copied()
+            .find(|pid| !is_pid_stale(*pid))
     }
 
     /// Whether the workflow process PID is stale (no longer alive).
@@ -437,6 +457,7 @@ pub fn init_runs_table(conn: &rusqlite::Connection) -> Result<(), rusqlite::Erro
             head_sha TEXT,
             process_pid INTEGER,
             child_pids TEXT,
+            continuation_rearm_checkpoint_id TEXT,
             failure_cleanup TEXT
         )",
         [],
@@ -470,6 +491,7 @@ pub fn migrate_runs_table(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
         "head_sha TEXT",
         "process_pid INTEGER",
         "child_pids TEXT",
+        "continuation_rearm_checkpoint_id TEXT",
         "failure_cleanup TEXT",
     ];
     for column in columns {

@@ -172,7 +172,7 @@ const RUN_SELECT_COLUMNS: &str =
     "run_id, workflow_type_id, config_id, status, created_at, updated_at, current_step, \
      previous_step, previous_outcome, next_step_candidates, log_path, artifact_root, \
      workspace_path, repository, issue_number, pr_number, head_sha, process_pid, child_pids, \
-     failure_cleanup";
+     continuation_rearm_checkpoint_id, failure_cleanup";
 
 /// Initialize the runs schema on the given connection (table + migration).
 /// @plan:PLAN-20260404-INITIAL-RUNTIME.P05
@@ -198,6 +198,7 @@ pub fn init_runs_schema(conn: &Connection) -> SqliteResult<()> {
             head_sha TEXT,
             process_pid INTEGER,
             child_pids TEXT,
+            continuation_rearm_checkpoint_id TEXT,
             failure_cleanup TEXT
         )",
         [],
@@ -222,8 +223,8 @@ pub fn persist_run_with_conn(conn: &Connection, metadata: &RunMetadata) -> Sqlit
         "INSERT INTO runs (run_id, workflow_type_id, config_id, status, created_at, updated_at, \
             current_step, previous_step, previous_outcome, next_step_candidates, log_path, \
             artifact_root, workspace_path, repository, issue_number, pr_number, head_sha, \
-            process_pid, child_pids, failure_cleanup)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)
+            process_pid, child_pids, continuation_rearm_checkpoint_id, failure_cleanup)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)
          ON CONFLICT(run_id) DO UPDATE SET
             workflow_type_id = excluded.workflow_type_id,
             config_id = excluded.config_id,
@@ -243,6 +244,7 @@ pub fn persist_run_with_conn(conn: &Connection, metadata: &RunMetadata) -> Sqlit
             head_sha = excluded.head_sha,
             process_pid = excluded.process_pid,
             child_pids = excluded.child_pids,
+            continuation_rearm_checkpoint_id = excluded.continuation_rearm_checkpoint_id,
             failure_cleanup = excluded.failure_cleanup",
         params![
             metadata.run_id,
@@ -264,6 +266,7 @@ pub fn persist_run_with_conn(conn: &Connection, metadata: &RunMetadata) -> Sqlit
             metadata.head_sha,
             metadata.process_pid,
             serialize_pid_list(&metadata.child_pids),
+            metadata.continuation_rearm_checkpoint_id,
             metadata
                 .failure_cleanup
                 .as_ref()
@@ -627,13 +630,14 @@ fn map_run_row(row: &rusqlite::Row<'_>) -> SqliteResult<RunMetadata> {
         head_sha: row.get(16)?,
         process_pid: row.get::<_, Option<i64>>(17)?.map(|p| p as u32),
         child_pids: deserialize_pid_list(row.get::<_, Option<String>>(18)?),
+        continuation_rearm_checkpoint_id: row.get(19)?,
         failure_cleanup: row
-            .get::<_, Option<String>>(19)?
+            .get::<_, Option<String>>(20)?
             .map(|raw| serde_json::from_str(&raw))
             .transpose()
             .map_err(|error| {
                 rusqlite::Error::FromSqlConversionFailure(
-                    19,
+                    20,
                     rusqlite::types::Type::Text,
                     Box::new(error),
                 )

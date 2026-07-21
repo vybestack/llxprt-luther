@@ -35,6 +35,14 @@ pub enum ResumeAuthorization {
         checkpoint_identity: String,
         run_id: String,
     },
+    /// Operator recovery for the exact current checkpoint after a prior
+    /// continuation commit rearmed it but the runner process exited before
+    /// persisting the next checkpoint. This grant is limited to Resume and a
+    /// process-unowned `ready_to_resume` checkpoint in Running or Failed state.
+    OperatorCommittedCheckpoint {
+        checkpoint_identity: String,
+        run_id: String,
+    },
     /// Engine-internal authorization bound to an exact persisted waiting
     /// checkpoint identity and run. Permits resuming a valid durable wait
     /// whose step is not in `SAFE_RERUN_STEPS` without exposing a generic
@@ -79,6 +87,20 @@ impl ResumeAuthorization {
                 run_id: request.run_id.clone(),
             };
         }
+        if !request.trusted_internal
+            && metadata.current_step.as_deref() == Some(checkpoint.step_id.as_str())
+            && matches!(metadata.status, RunStatus::Running | RunStatus::Failed)
+            && metadata.live_workflow_pid().is_none()
+            && metadata.live_child_pid().is_none()
+            && checkpoint.state_snapshot.status
+                == crate::persistence::CHECKPOINT_STATUS_READY_TO_RESUME
+            && metadata.continuation_rearm_checkpoint_id.as_deref() == Some(identity.as_str())
+        {
+            return ResumeAuthorization::OperatorCommittedCheckpoint {
+                checkpoint_identity: identity,
+                run_id: request.run_id.clone(),
+            };
+        }
         // TrustedInternalWait requires an explicit internal-trust capability
         // (`request.trusted_internal`) in addition to a matching durable wait
         // state. This ensures an ordinary CLI `runs resume` cannot infer
@@ -114,6 +136,10 @@ impl ResumeAuthorization {
     fn permits_non_safe_rerun(&self, checkpoint: &Checkpoint) -> bool {
         match self {
             ResumeAuthorization::OperatorCurrentWait {
+                checkpoint_identity: bound_identity,
+                run_id: bound_run_id,
+            }
+            | ResumeAuthorization::OperatorCommittedCheckpoint {
                 checkpoint_identity: bound_identity,
                 run_id: bound_run_id,
             }
