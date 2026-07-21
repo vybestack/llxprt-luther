@@ -148,6 +148,8 @@ where
     compute_measurement(
         &git_data,
         charter,
+        context.run_id(),
+        context.daemon_managed_claim(),
         &policy.measurement,
         context.work_dir(),
         &dependency_diffs,

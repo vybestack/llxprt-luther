@@ -23,6 +23,8 @@ pub struct StepContext {
     work_dir: PathBuf,
     /// Unique identifier for this workflow run
     run_id: String,
+    /// Immutable provenance established by the runner, never by workflow variables.
+    daemon_managed: bool,
     /// Storage for context values: key -> value
     variables: HashMap<String, String>,
     /// Current step ID being executed (for namespaced variable storage)
@@ -63,6 +65,18 @@ impl StepContext {
     /// @plan:PLAN-20260408-LLXPRT-FIRST.P11
     #[must_use]
     pub fn new(work_dir: PathBuf, run_id: String) -> Self {
+        Self::build(work_dir, run_id, false)
+    }
+
+    pub(crate) fn from_run_context(
+        work_dir: PathBuf,
+        run_id: String,
+        run_context: &crate::engine::runner::RunContext,
+    ) -> Self {
+        Self::build(work_dir, run_id, run_context.daemon_managed)
+    }
+
+    fn build(work_dir: PathBuf, run_id: String, daemon_managed: bool) -> Self {
         let mut variables = HashMap::new();
         // Store built-ins as bare keys for backward compatibility
         variables.insert(
@@ -74,6 +88,7 @@ impl StepContext {
         Self {
             work_dir,
             run_id,
+            daemon_managed,
             variables,
             current_step_id: None,
             step_order: Vec::new(),
@@ -216,6 +231,12 @@ impl StepContext {
         }
         // Always store bare key in variables (backward compat + pre-namespace-era bare keys)
         self.variables.insert(key.to_string(), value.to_string());
+    }
+
+    /// Whether this context belongs to a trusted daemon-managed claim.
+    #[must_use]
+    pub const fn daemon_managed_claim(&self) -> bool {
+        self.daemon_managed
     }
 
     /// Get the working directory.

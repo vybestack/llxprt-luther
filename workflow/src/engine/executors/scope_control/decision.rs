@@ -433,6 +433,8 @@ pub fn enforce_scope_barrier(
     let measurement = compute_measurement(
         &git_data,
         &charter,
+        context.run_id(),
+        context.daemon_managed_claim(),
         &scope_control.measurement,
         context.work_dir(),
         &dependency_diffs,

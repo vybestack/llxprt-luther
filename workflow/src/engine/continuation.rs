@@ -49,6 +49,7 @@ pub use validation::validate_continuation;
 #[cfg(test)]
 pub(crate) use selection::{select_rewind_checkpoint, TERMINAL_STEP};
 pub use workspace_marker::verify_workspace_ownership_marker;
+pub(crate) use workspace_marker::WORKSPACE_OWNER_MARKER;
 
 /// Steps intrinsically safe to re-run because they are external-wait or
 /// otherwise idempotent. Other steps require exact typed authorization from a

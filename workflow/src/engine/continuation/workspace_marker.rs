@@ -9,9 +9,11 @@
 
 use std::path::{Path, PathBuf};
 
+pub(crate) const WORKSPACE_OWNER_MARKER: &str = ".luther/workspace-owner";
+
 /// Marker file path recording the owning run id for a workspace.
 fn workspace_owner_marker_path(workspace: &Path) -> PathBuf {
-    workspace.join(".luther").join("workspace-owner")
+    workspace.join(WORKSPACE_OWNER_MARKER)
 }
 
 /// Reject symlinks in every existing workspace path component before marker

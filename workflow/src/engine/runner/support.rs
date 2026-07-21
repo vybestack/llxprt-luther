@@ -66,7 +66,12 @@ pub(super) fn build_step_context(
     run_context: Option<&RunContext>,
 ) -> Result<StepContext, EngineError> {
     let work_dir = std::env::temp_dir().join(&instance.run_id);
-    let mut context = StepContext::new(work_dir, instance.run_id.clone());
+    let mut context = match run_context {
+        Some(run_context) => {
+            StepContext::from_run_context(work_dir, instance.run_id.clone(), run_context)
+        }
+        None => StepContext::new(work_dir, instance.run_id.clone()),
+    };
 
     for (key, value) in &instance.config.variables {
         context.set(key, value);
@@ -125,6 +130,14 @@ fn seed_scope_control_policy(context: &mut StepContext, instance: &WorkflowInsta
 }
 
 fn seed_run_context(context: &mut StepContext, run_context: &RunContext) {
+    context.set(
+        "daemon_managed_claim",
+        if run_context.daemon_managed {
+            "true"
+        } else {
+            "false"
+        },
+    );
     if let Some(workspace_path) = run_context.workspace_path.as_deref() {
         context.set("work_dir", workspace_path);
         context.set("workspace_path", workspace_path);

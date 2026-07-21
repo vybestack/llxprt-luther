@@ -57,6 +57,7 @@ pub fn run_context_from_metadata(
     run_id: &str,
 ) -> luther_workflow::engine::RunContext {
     luther_workflow::engine::RunContext {
+        daemon_managed: false,
         log_path: md
             .log_path
             .clone()
@@ -72,6 +73,7 @@ pub fn run_context_from_metadata(
 
 /// Reconstruct a durable runner for an existing run from its persisted metadata.
 /// @plan:PLAN-20260623-LUTHER-CONTINUATION
+#[cfg(test)]
 pub fn reconstruct_runner(
     md: &RunMetadata,
     run_id: &str,
@@ -86,12 +88,41 @@ pub fn reconstruct_runner(
     reconstruct_runner_with_config(md, run_id, db_path, config_dir, config)
 }
 
+pub(super) fn reconstruct_runner_with_daemon_provenance(
+    md: &RunMetadata,
+    run_id: &str,
+    db_path: &std::path::Path,
+    config_dir: &Option<std::path::PathBuf>,
+    config: WorkflowConfig,
+    daemon_managed: bool,
+) -> Result<EngineRunner, String> {
+    reconstruct_runner_with_config_and_provenance(
+        md,
+        run_id,
+        db_path,
+        config_dir,
+        config,
+        daemon_managed,
+    )
+}
+
 pub fn reconstruct_runner_with_config(
     md: &RunMetadata,
     run_id: &str,
     db_path: &std::path::Path,
     config_dir: &Option<std::path::PathBuf>,
+    config: WorkflowConfig,
+) -> Result<EngineRunner, String> {
+    reconstruct_runner_with_config_and_provenance(md, run_id, db_path, config_dir, config, false)
+}
+
+fn reconstruct_runner_with_config_and_provenance(
+    md: &RunMetadata,
+    run_id: &str,
+    db_path: &std::path::Path,
+    config_dir: &Option<std::path::PathBuf>,
     mut config: WorkflowConfig,
+    daemon_managed: bool,
 ) -> Result<EngineRunner, String> {
     let config_root = config_dir
         .as_deref()
@@ -112,7 +143,8 @@ pub fn reconstruct_runner_with_config(
         validate_target_profile(&config)
             .map_err(|e| format!("invalid continuation profile: {e}"))?;
     }
-    let run_context = run_context_from_metadata(md, run_id);
+    let mut run_context = run_context_from_metadata(md, run_id);
+    run_context.daemon_managed = daemon_managed;
     let mut instance = WorkflowInstance::create_with_run_id(workflow_type, config, run_id);
     if let Some(step) = md.current_step.as_deref().filter(|step| !step.is_empty()) {
         if !instance
@@ -416,12 +448,15 @@ pub fn commit_and_execute(
     plan: &luther_workflow::engine::continuation::ContinuationPlan,
     config_dir: &Option<std::path::PathBuf>,
 ) {
-    let continuation_had_lease = continuation_lease(store, md)
-        .unwrap_or_else(|error| {
-            eprintln!("Error: failed to inspect continuation lease: {error}");
-            process::exit(1);
-        })
-        .is_some();
+    let continuation_lease = continuation_lease(store, md).unwrap_or_else(|error| {
+        eprintln!("Error: failed to inspect continuation lease: {error}");
+        process::exit(1);
+    });
+    let continuation_had_lease = continuation_lease.is_some();
+    let daemon_managed = md.issue_number.is_some()
+        && continuation_lease
+            .as_ref()
+            .is_some_and(|lease| lease.run_id.as_deref() == Some(request.run_id.as_str()));
     let step = plan
         .selected
         .as_ref()
@@ -437,7 +472,8 @@ pub fn commit_and_execute(
         .db_path()
         .map(Path::to_path_buf)
         .unwrap_or_else(|| luther_workflow::runtime_paths::get_data_dir().join("checkpoints.db"));
-    let mut runner = reconstruct_runner_or_exit(md, &request.run_id, &db_path, config_dir);
+    let mut runner =
+        reconstruct_runner_or_exit(md, &request.run_id, &db_path, config_dir, daemon_managed);
     commit_continuation_or_exit(store, request, &plan.checkpoint_identity);
     let mut maintenance_errors: Vec<String> = Vec::new();
     if let Err(error) = write_committed_checkpoint_artifacts(store, request, plan, &step) {
@@ -482,8 +518,21 @@ fn reconstruct_runner_or_exit(
     run_id: &str,
     db_path: &Path,
     config_dir: &Option<std::path::PathBuf>,
+    daemon_managed: bool,
 ) -> EngineRunner {
-    match reconstruct_runner(md, run_id, db_path, config_dir) {
+    let config_root = config_dir.as_deref().unwrap_or(Path::new("config"));
+    let reconstruction = resolve_workflow_config(&md.config_id, config_root)
+        .map_err(|error| format!("resolve config '{}': {error}", md.config_id))
+        .and_then(|config| {
+            if daemon_managed {
+                reconstruct_runner_with_daemon_provenance(
+                    md, run_id, db_path, config_dir, config, true,
+                )
+            } else {
+                reconstruct_runner_with_config(md, run_id, db_path, config_dir, config)
+            }
+        });
+    match reconstruction {
         Ok(runner) => runner,
         Err(e) => {
             eprintln!("Error: {e}");
