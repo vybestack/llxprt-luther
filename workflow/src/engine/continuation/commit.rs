@@ -111,10 +111,11 @@ fn commit_continuation_in_transaction(
         return Err(ContinuationError::InvalidTarget(safety.detail));
     }
     let resume_timestamp = set_resume_point(tx, &request.run_id, &selected.step_id)?;
+    let committed_identity = format!("{}@{}", selected.step_id, resume_timestamp.to_rfc3339());
+    metadata.continuation_rearm_checkpoint_id = Some(committed_identity.clone());
     if let Some(failure) = metadata.failure_cleanup.as_mut() {
         if failure.failed_checkpoint_id == current_identity {
-            failure.failed_checkpoint_id =
-                format!("{}@{}", selected.step_id, resume_timestamp.to_rfc3339());
+            failure.failed_checkpoint_id = committed_identity;
         }
     }
     reopen_run(tx, request, &selected.step_id, metadata)
@@ -179,22 +180,16 @@ fn ensure_reopen_claim_is_available(
         )));
     }
     acquire_continuation_lease(conn, metadata, request)?;
-    if let Some(pid) = metadata
-        .process_pid
-        .filter(|_| metadata.status == RunStatus::Running)
-        .filter(|pid| !crate::persistence::is_pid_stale(*pid))
+    if let Some(pid) = (metadata.status == RunStatus::Running)
+        .then(|| metadata.live_workflow_pid())
+        .flatten()
     {
         return Err(ContinuationError::InvalidTarget(format!(
             "run {} is already running with live workflow PID {pid}",
             request.run_id
         )));
     }
-    if let Some(pid) = metadata
-        .child_pids
-        .iter()
-        .copied()
-        .find(|pid| !crate::persistence::is_pid_stale(*pid))
-    {
+    if let Some(pid) = metadata.live_child_pid() {
         return Err(ContinuationError::InvalidTarget(format!(
             "run {} still has live child PID {pid}",
             request.run_id

@@ -1,10 +1,31 @@
 //! Validation (safety check) tests for continuation requests.
 
 use super::support::*;
-use crate::engine::continuation::{validate_continuation, ContinuationKind, RewindTarget};
-use crate::persistence::{
-    get_run_with_conn, persist_run_with_conn, RunMetadata, RunStatus, CHECKPOINT_STATUS_WAITING,
+use crate::engine::continuation::{
+    checkpoint_identity, validate_continuation, ContinuationKind, RewindTarget,
 };
+use crate::persistence::{
+    get_checkpoint_for_step, get_run_with_conn, persist_run_with_conn, RunMetadata, RunStatus,
+    CHECKPOINT_STATUS_READY_TO_RESUME, CHECKPOINT_STATUS_WAITING,
+};
+
+fn seed_committed_checkpoint(
+    conn: &rusqlite::Connection,
+    run_id: &str,
+    status: RunStatus,
+) -> RunMetadata {
+    seed_run(conn, run_id, status, "implement");
+    seed_checkpoint(conn, run_id, "implement", CHECKPOINT_STATUS_READY_TO_RESUME);
+    let checkpoint = get_checkpoint_for_step(conn, run_id, "implement")
+        .expect("query committed checkpoint")
+        .expect("committed checkpoint");
+    let mut metadata = get_run_with_conn(conn, run_id)
+        .expect("load run")
+        .expect("run exists");
+    metadata.continuation_rearm_checkpoint_id = Some(checkpoint_identity(&checkpoint));
+    persist_run_with_conn(conn, &metadata).expect("persist committed checkpoint provenance");
+    metadata
+}
 
 #[test]
 fn validation_fails_when_run_missing() {
@@ -216,6 +237,124 @@ fn validation_accepts_unrecorded_pid_running_resume_point() {
         "running run with no recorded PID should be resumable; reasons: {:?}",
         validation.failure_reasons()
     );
+}
+
+#[test]
+fn committed_checkpoint_grant_rejects_non_resume_kinds_and_mismatched_state() {
+    let conn = test_conn();
+    let mut metadata = seed_committed_checkpoint(&conn, "committed-negative", RunStatus::Failed);
+
+    for kind in [
+        ContinuationKind::Retry {
+            from_failed_step: false,
+        },
+        ContinuationKind::Rewind {
+            target: RewindTarget::ToStep("implement".to_string()),
+        },
+    ] {
+        let validation = validate_continuation(&conn, &request("committed-negative", kind, true))
+            .expect("validate non-resume kind");
+        assert!(!validation.ok);
+        assert!(validation
+            .failure_reasons()
+            .iter()
+            .any(|reason| reason.contains("safe_step")));
+    }
+
+    metadata.current_step = Some("remediate".to_string());
+    persist_run_with_conn(&conn, &metadata).expect("persist mismatched step");
+    let validation = validate_continuation(
+        &conn,
+        &request("committed-negative", ContinuationKind::Resume, false),
+    )
+    .expect("validate mismatched step");
+    assert!(!validation.ok);
+
+    metadata.current_step = Some("implement".to_string());
+    persist_run_with_conn(&conn, &metadata).expect("restore current step");
+    seed_checkpoint(&conn, "committed-negative", "implement", "completed");
+    let validation = validate_continuation(
+        &conn,
+        &request("committed-negative", ContinuationKind::Resume, false),
+    )
+    .expect("validate completed checkpoint");
+    assert!(!validation.ok);
+    assert!(validation
+        .failure_reasons()
+        .iter()
+        .any(|reason| reason.contains("safe_step")));
+}
+
+#[test]
+fn validation_rejects_live_running_committed_checkpoint() {
+    let conn = test_conn();
+    let mut metadata = seed_committed_checkpoint(&conn, "live-committed", RunStatus::Running);
+    metadata.process_pid = Some(std::process::id());
+    persist_run_with_conn(&conn, &metadata).expect("persist live pid");
+    let validation = validate_continuation(
+        &conn,
+        &request("live-committed", ContinuationKind::Resume, true),
+    )
+    .expect("validate live committed checkpoint");
+    assert!(!validation.ok);
+    assert!(validation
+        .failure_reasons()
+        .iter()
+        .any(|reason| reason.contains("resumable_status")));
+}
+
+#[test]
+fn ready_checkpoint_without_continuation_provenance_is_not_authorized() {
+    let conn = test_conn();
+    seed_run(
+        &conn,
+        "external-wait-failure",
+        RunStatus::Failed,
+        "implement",
+    );
+    seed_checkpoint(
+        &conn,
+        "external-wait-failure",
+        "implement",
+        CHECKPOINT_STATUS_READY_TO_RESUME,
+    );
+    let validation = validate_continuation(
+        &conn,
+        &request("external-wait-failure", ContinuationKind::Resume, false),
+    )
+    .expect("validate unproven ready checkpoint");
+    assert!(!validation.ok);
+    assert!(validation
+        .failure_reasons()
+        .iter()
+        .any(|reason| reason.contains("safe_step")));
+}
+
+#[test]
+fn validation_rejects_failed_committed_checkpoint_with_live_owners() {
+    for child_owner in [false, true] {
+        let conn = test_conn();
+        let run_id = if child_owner {
+            "failed-live-child"
+        } else {
+            "failed-live-workflow"
+        };
+        let mut metadata = seed_committed_checkpoint(&conn, run_id, RunStatus::Failed);
+        if child_owner {
+            metadata.child_pids = vec![std::process::id()];
+        } else {
+            metadata.process_pid = Some(std::process::id());
+        }
+        persist_run_with_conn(&conn, &metadata).expect("persist live owner");
+        let validation =
+            validate_continuation(&conn, &request(run_id, ContinuationKind::Resume, true))
+                .expect("validate live owner");
+        assert!(!validation.ok);
+        assert!(validation
+            .failure_reasons()
+            .iter()
+            .any(|reason| reason.contains("safe_step")));
+    }
 }
 
 #[test]
