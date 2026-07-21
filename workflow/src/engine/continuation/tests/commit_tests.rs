@@ -148,6 +148,13 @@ fn commit_rejects_wait_with_mismatched_resume_step_without_consuming_it() {
         .expect("run query")
         .expect("run");
     assert_eq!(unchanged.status, RunStatus::WaitingExternal);
+    let lease = crate::persistence::get_lease_for_issue(&conn, "vybestack/llxprt-code", 2133)
+        .expect("lease query")
+        .expect("lease");
+    assert_eq!(
+        lease.status,
+        crate::persistence::LeaseStatus::WaitingExternal
+    );
 }
 
 #[test]
