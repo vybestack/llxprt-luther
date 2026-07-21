@@ -35,8 +35,8 @@ mod workspace_marker;
 // (`crate::engine::continuation::...` and the `engine` re-exports) are
 // unaffected by the internal split.
 pub use artifacts::{
-    continuation_artifact_dir, request_artifact, result_artifact, result_artifact_name,
-    write_json_artifact,
+    committed_selection_artifact, continuation_artifact_dir, request_artifact, result_artifact,
+    result_artifact_name, write_json_artifact,
 };
 pub use authorization::ResumeAuthorization;
 pub use commit::commit_continuation;
@@ -50,8 +50,9 @@ pub use validation::validate_continuation;
 pub(crate) use selection::{select_rewind_checkpoint, TERMINAL_STEP};
 pub use workspace_marker::verify_workspace_ownership_marker;
 
-/// Steps that are safe to re-run because they are external-wait or otherwise
-/// idempotent. Continuation onto any other step requires `--force`.
+/// Steps intrinsically safe to re-run because they are external-wait or
+/// otherwise idempotent. Other steps require exact typed authorization from a
+/// durable current wait; `--force` alone never bypasses rerun safety.
 /// @plan:PLAN-20260623-LUTHER-CONTINUATION
 pub const SAFE_RERUN_STEPS: &[&str] = &[
     "watch_pr_checks",

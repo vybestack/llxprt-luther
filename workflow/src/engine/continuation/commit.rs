@@ -13,8 +13,8 @@ use chrono::Utc;
 use rusqlite::{Connection, Transaction, TransactionBehavior};
 
 use crate::persistence::{
-    append_typed_event_with_conn, get_run_with_conn, persist_run_with_conn, set_resume_point,
-    EventType, RunMetadata, RunStatus,
+    append_typed_event_with_conn, delete_wait_state_for_suspension, get_run_with_conn,
+    get_wait_state, persist_run_with_conn, set_resume_point, EventType, RunMetadata, RunStatus,
 };
 
 use super::{
@@ -40,6 +40,7 @@ pub fn commit_continuation(
     bound_identity: &str,
 ) -> Result<RunMetadata, ContinuationError> {
     crate::persistence::leases::init_leases_table(conn)?;
+    crate::persistence::init_wait_states_table(conn)?;
     // `conn` is intentionally not reused until `tx` commits or rolls back.
     let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
     match commit_continuation_in_transaction(&tx, request, bound_identity) {
@@ -82,6 +83,27 @@ fn commit_continuation_in_transaction(
         return Err(ContinuationError::InvalidTarget(format!(
             "continuation checkpoint identity changed before commit: expected {bound_identity}, selected {current_identity}"
         )));
+    }
+    if matches!(request.kind, ContinuationKind::Resume) && !request.trusted_internal {
+        if let Some(wait) = get_wait_state(tx, &request.run_id)? {
+            if wait.checkpoint_id != current_identity {
+                return Err(ContinuationError::InvalidTarget(format!(
+                    "durable wait checkpoint identity changed before commit: expected {current_identity}, found {}",
+                    wait.checkpoint_id
+                )));
+            }
+            if wait.resume_step != selected.step_id {
+                return Err(ContinuationError::InvalidTarget(format!(
+                    "durable wait resume step changed before commit: expected {}, found {}",
+                    selected.step_id, wait.resume_step
+                )));
+            }
+            if !delete_wait_state_for_suspension(tx, &request.run_id, &wait.suspension_id)? {
+                return Err(ContinuationError::InvalidTarget(
+                    "durable wait suspension changed before commit".to_string(),
+                ));
+            }
+        }
     }
     let authorized = checkpoint_is_authorized(tx, &metadata, request, &selected);
     let safety = check_safe_step(&selected.step_id, request.force, authorized);

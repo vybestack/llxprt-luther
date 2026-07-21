@@ -31,6 +31,134 @@ fn forced_retry_selects_preserved_failed_checkpoint() {
 }
 
 #[test]
+fn incomplete_cleanup_selects_preserved_failed_checkpoint() {
+    let conn = test_conn();
+    let workspace = tempfile::tempdir().expect("workspace");
+    let expected = seed_cleanup_abandonment(&conn, "cleanup-incomplete", workspace.path());
+    let mut metadata = get_run_with_conn(&conn, "cleanup-incomplete")
+        .expect("query")
+        .expect("run");
+    metadata.status = crate::persistence::RunStatus::Failed;
+    let failure = metadata.failure_cleanup.as_mut().expect("failure cleanup");
+    failure.cleanup_succeeded = false;
+    failure.cleanup_completed_at = None;
+    failure.recovery_consumed_at = None;
+    crate::persistence::persist_run_with_conn(&conn, &metadata)
+        .expect("persist incomplete cleanup");
+
+    let request = request("cleanup-incomplete", ContinuationKind::Resume, false);
+    let selected = select_checkpoint(&conn, &request, &metadata).expect("select failed checkpoint");
+    assert_eq!(checkpoint_identity(&selected), expected);
+    let validation = crate::engine::continuation::validate_continuation(&conn, &request)
+        .expect("validate incomplete cleanup");
+    assert!(validation.ok, "{:?}", validation.failure_reasons());
+}
+
+fn seed_retry_progress(
+    conn: &rusqlite::Connection,
+    workspace: &std::path::Path,
+) -> (crate::persistence::RunMetadata, String) {
+    let original = seed_cleanup_abandonment(conn, "cleanup-progress", workspace);
+    let mut metadata = get_run_with_conn(conn, "cleanup-progress")
+        .expect("query")
+        .expect("run");
+    metadata.artifact_root = Some(workspace.join("artifacts").to_string_lossy().into_owned());
+    crate::persistence::persist_run_with_conn(conn, &metadata).expect("persist artifact root");
+    let retry = request(
+        "cleanup-progress",
+        ContinuationKind::Retry {
+            from_failed_step: false,
+        },
+        true,
+    );
+    let plan = crate::engine::continuation::prepare_continuation(conn, &retry, &metadata)
+        .expect("prepare retry");
+    assert!(plan.validation.ok);
+    assert_eq!(plan.checkpoint_identity, original);
+    crate::engine::continuation::commit_continuation(conn, &retry, &plan.checkpoint_identity)
+        .expect("commit retry");
+    (metadata, original)
+}
+
+fn persist_later_wait(conn: &rusqlite::Connection) -> (crate::persistence::RunMetadata, String) {
+    seed_checkpoint(conn, "cleanup-progress", "remediate", "completed");
+    seed_checkpoint(
+        conn,
+        "cleanup-progress",
+        "implement",
+        CHECKPOINT_STATUS_WAITING,
+    );
+    let later_identity = checkpoint_identity(
+        &get_checkpoint_for_step(conn, "cleanup-progress", "implement")
+            .expect("query later checkpoint")
+            .expect("later checkpoint"),
+    );
+    let mut metadata = get_run_with_conn(conn, "cleanup-progress")
+        .expect("query")
+        .expect("run");
+    metadata.status = crate::persistence::RunStatus::WaitingExternal;
+    metadata.current_step = Some("implement".to_string());
+    crate::persistence::persist_run_with_conn(conn, &metadata).expect("persist progress");
+    crate::persistence::update_lease_status(
+        conn,
+        "lease-cleanup-progress",
+        crate::persistence::LeaseStatus::WaitingExternal,
+        Some("cleanup-progress"),
+    )
+    .expect("wait lease");
+    (metadata, later_identity)
+}
+
+#[test]
+fn retry_progress_to_later_wait_resumes_current_checkpoint() {
+    let conn = test_conn();
+    let workspace = tempfile::tempdir().expect("workspace");
+    let (metadata, original_failed_identity) = seed_retry_progress(&conn, workspace.path());
+    let (progressed, later_wait_identity) = persist_later_wait(&conn);
+
+    let resume = request("cleanup-progress", ContinuationKind::Resume, false);
+    let resume_plan =
+        crate::engine::continuation::prepare_continuation(&conn, &resume, &progressed)
+            .expect("prepare current wait");
+    assert!(
+        resume_plan.validation.ok,
+        "{:?}",
+        resume_plan.validation.failure_reasons()
+    );
+    let selected = resume_plan
+        .selected
+        .as_ref()
+        .expect("selected current wait");
+    assert_eq!(selected.step_id, "implement");
+    assert_eq!(selected.state_snapshot.status, CHECKPOINT_STATUS_WAITING);
+    assert_eq!(resume_plan.checkpoint_identity, later_wait_identity);
+    assert_ne!(resume_plan.checkpoint_identity, original_failed_identity);
+    let reopened = crate::engine::continuation::commit_continuation(
+        &conn,
+        &resume,
+        &resume_plan.checkpoint_identity,
+    )
+    .expect("commit current wait");
+    assert_eq!(reopened.issue_number, metadata.issue_number);
+    assert_eq!(reopened.workspace_path, metadata.workspace_path);
+    let failure = reopened
+        .failure_cleanup
+        .expect("preserved failure provenance");
+    assert_eq!(failure.failed_step, "remediate");
+    assert_eq!(failure.failure_reason, "agent timed out");
+    assert!(failure.cleanup_succeeded);
+    assert!(failure.recovery_consumed_at.is_some());
+
+    let selection: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(resume_plan.artifact_dir.join("checkpoint-selection.json"))
+            .expect("read selection artifact"),
+    )
+    .expect("parse selection artifact");
+    assert_eq!(selection["step_id"], "implement");
+    assert_eq!(selection["checkpoint_id"], later_wait_identity);
+}
+
+#[test]
 fn cleanup_abandonment_requires_force_and_existing_workspace() {
     let conn = test_conn();
     let workspace = tempfile::tempdir().expect("workspace");

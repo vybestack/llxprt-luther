@@ -79,9 +79,18 @@ pub(super) fn select_failed_cleanup_checkpoint(
     let Some(failure) = metadata.failure_cleanup.as_ref() else {
         return Ok(None);
     };
-    if failure.failed_checkpoint_id.is_empty() {
+    let incomplete_cleanup = !failure.cleanup_succeeded;
+    let completed_recovery_available =
+        metadata.is_cleanup_failure_abandonment() && failure.recovery_is_available();
+    if (!incomplete_cleanup && !completed_recovery_available)
+        || failure.failed_checkpoint_id.is_empty()
+    {
         return Ok(None);
     }
+    // Incomplete cleanup always remains bound to the exact failed checkpoint.
+    // Completed cleanup selects that checkpoint only while its one-shot
+    // terminal recovery is available; after progress, normal selection uses
+    // the run's current durable checkpoint.
     // Verify the persisted checkpoint actually exists and matches the recorded
     // identity before returning it, so a stale or tampered failed_checkpoint_id
     // cannot select an arbitrary resume point.
@@ -109,15 +118,6 @@ pub(super) fn select_retry_checkpoint(
     // retry targets the actual failure point.
     if let Some(cp) = select_failed_cleanup_checkpoint(conn, run_id, metadata)? {
         return Ok(cp);
-    }
-    if let Some(failure) = metadata.failure_cleanup.as_ref().filter(|failure| {
-        metadata.is_cleanup_failure_abandonment() && failure.recovery_is_available()
-    }) {
-        return select_rewind_checkpoint(
-            conn,
-            run_id,
-            &RewindTarget::ToCheckpoint(failure.failed_checkpoint_id.clone()),
-        );
     }
     if from_failed_step {
         let checkpoints = list_checkpoints(conn, run_id)?;
