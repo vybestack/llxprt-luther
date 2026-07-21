@@ -404,31 +404,11 @@ fn initialized_measurement_repo() -> tempfile::TempDir {
     workspace
 }
 
-#[test]
-fn collector_measures_ignored_luther_sibling_and_owned_marker_is_digest_neutral() {
+fn owned_measurement_charter(head: String) -> CanonicalTaskCharter {
     use crate::engine::executors::scope_control::model::{
         normalize_charter, DraftBudget, DraftReviewCaps, DraftSubsystem, TaskCharterDraft,
     };
-
-    let workspace = initialized_measurement_repo();
-    std::fs::write(workspace.path().join(".gitignore"), ".luther/\n").expect("ignore");
-    crate::engine::continuation::write_workspace_owner_marker(workspace.path(), "run-owned")
-        .expect("owner marker");
-    std::fs::write(workspace.path().join(".luther/agent-note"), "agent content")
-        .expect("agent note");
-    let head = resolve_head_sha(workspace.path()).expect("head");
-    let config = test_measurement_config(&["rs"], &[]);
-    let data = SystemGitPatchCollector
-        .collect(workspace.path(), &head, &config)
-        .expect("collect");
-    assert!(data
-        .untracked_files
-        .contains(&WORKSPACE_OWNER_MARKER.to_string()));
-    assert!(data
-        .untracked_files
-        .contains(&".luther/agent-note".to_string()));
-
-    let charter = normalize_charter(&TaskCharterDraft {
+    normalize_charter(&TaskCharterDraft {
         charter_id: "owned".into(),
         issue_number: 154,
         run_id: "run-owned".into(),
@@ -453,7 +433,30 @@ fn collector_measures_ignored_luther_sibling_and_owned_marker_is_digest_neutral(
             max_mutating_remediation_rounds: 1,
         },
         mandatory_gates: vec!["test".into()],
-    });
+    })
+}
+
+#[test]
+fn collector_measures_ignored_luther_sibling_and_owned_marker_is_digest_neutral() {
+    let workspace = initialized_measurement_repo();
+    std::fs::write(workspace.path().join(".gitignore"), ".luther/\n").expect("ignore");
+    crate::engine::continuation::write_workspace_owner_marker(workspace.path(), "run-owned")
+        .expect("owner marker");
+    std::fs::write(workspace.path().join(".luther/agent-note"), "agent content")
+        .expect("agent note");
+    let head = resolve_head_sha(workspace.path()).expect("head");
+    let config = test_measurement_config(&["rs"], &[]);
+    let data = SystemGitPatchCollector
+        .collect(workspace.path(), &head, &config)
+        .expect("collect");
+    assert!(data
+        .untracked_files
+        .contains(&WORKSPACE_OWNER_MARKER.to_string()));
+    assert!(data
+        .untracked_files
+        .contains(&".luther/agent-note".to_string()));
+
+    let charter = owned_measurement_charter(head);
     let first = compute_measurement(
         &data,
         &charter,

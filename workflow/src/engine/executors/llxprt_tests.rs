@@ -108,38 +108,11 @@ fn owned_daemon_workspace_reaches_implementation_after_scope_barrier() {
 
     let workspace = tempfile::tempdir().expect("workspace");
     let artifacts = tempfile::tempdir().expect("artifacts");
-    for args in [
-        vec!["init", "-q"],
-        vec!["config", "user.email", "test@example.com"],
-        vec!["config", "user.name", "Test User"],
-    ] {
-        let status = std::process::Command::new("git")
-            .args(args)
-            .current_dir(workspace.path())
-            .status()
-            .expect("git setup");
-        assert!(status.success());
-    }
+    initialize_llxprt_test_repo(workspace.path());
     std::fs::write(workspace.path().join("README.md"), "base\n").expect("base file");
-    for args in [vec!["add", "README.md"], vec!["commit", "-q", "-m", "base"]] {
-        let status = std::process::Command::new("git")
-            .args(args)
-            .current_dir(workspace.path())
-            .status()
-            .expect("git commit");
-        assert!(status.success());
-    }
-    let head = String::from_utf8(
-        std::process::Command::new("git")
-            .args(["rev-parse", "HEAD"])
-            .current_dir(workspace.path())
-            .output()
-            .expect("git head")
-            .stdout,
-    )
-    .expect("utf8 head")
-    .trim()
-    .to_string();
+    run_llxprt_test_git(workspace.path(), &["add", "README.md"]);
+    run_llxprt_test_git(workspace.path(), &["commit", "-q", "-m", "base"]);
+    let head = llxprt_test_head(workspace.path());
     write_workspace_owner_marker(workspace.path(), "run-owned").expect("owner marker");
 
     let policy = ScopeControlConfig {
@@ -198,4 +171,33 @@ fn owned_daemon_workspace_reaches_implementation_after_scope_barrier() {
         std::fs::read_to_string(workspace.path().join("agent-reached.txt")).expect("output"),
         "agent reached"
     );
+}
+
+fn initialize_llxprt_test_repo(workspace: &std::path::Path) {
+    run_llxprt_test_git(workspace, &["init", "-q"]);
+    run_llxprt_test_git(workspace, &["config", "user.email", "test@example.com"]);
+    run_llxprt_test_git(workspace, &["config", "user.name", "Test User"]);
+}
+
+fn run_llxprt_test_git(workspace: &std::path::Path, args: &[&str]) {
+    let status = std::process::Command::new("git")
+        .args(args)
+        .current_dir(workspace)
+        .status()
+        .expect("git command");
+    assert!(status.success(), "git command failed: {args:?}");
+}
+
+fn llxprt_test_head(workspace: &std::path::Path) -> String {
+    String::from_utf8(
+        std::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(workspace)
+            .output()
+            .expect("git head")
+            .stdout,
+    )
+    .expect("utf8 head")
+    .trim()
+    .to_string()
 }
