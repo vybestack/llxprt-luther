@@ -151,7 +151,7 @@ fn owned_daemon_workspace_reaches_implementation_after_scope_barrier() {
     let mut context = StepContext::new(workspace.path().to_path_buf(), "run-owned".into());
     context.set_current_step_id("implement");
     context.set("artifact_dir", &artifacts.path().to_string_lossy());
-    context.set("daemon_managed_claim", "true");
+    context.set_daemon_managed(true);
     context.set(
         "scope_control_policy",
         &serde_json::to_string(&policy).expect("serialize policy"),

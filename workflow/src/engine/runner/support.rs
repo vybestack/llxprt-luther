@@ -73,6 +73,7 @@ pub(super) fn build_step_context(
     }
     seed_parent_orchestration_config(&mut context, instance);
     if let Some(run_context) = run_context {
+        context.set_daemon_managed(run_context.daemon_managed);
         seed_run_context(&mut context, run_context);
     }
 

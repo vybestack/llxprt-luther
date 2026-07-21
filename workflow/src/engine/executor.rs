@@ -23,6 +23,8 @@ pub struct StepContext {
     work_dir: PathBuf,
     /// Unique identifier for this workflow run
     run_id: String,
+    /// Immutable provenance established by the runner, never by workflow variables.
+    daemon_managed: bool,
     /// Storage for context values: key -> value
     variables: HashMap<String, String>,
     /// Current step ID being executed (for namespaced variable storage)
@@ -74,6 +76,7 @@ impl StepContext {
         Self {
             work_dir,
             run_id,
+            daemon_managed: false,
             variables,
             current_step_id: None,
             step_order: Vec::new(),
@@ -218,11 +221,15 @@ impl StepContext {
         self.variables.insert(key.to_string(), value.to_string());
     }
 
+    /// Set immutable daemon provenance while constructing runner context.
+    pub(crate) fn set_daemon_managed(&mut self, daemon_managed: bool) {
+        self.daemon_managed = daemon_managed;
+    }
+
     /// Whether this context belongs to a trusted daemon-managed claim.
     #[must_use]
-    pub fn daemon_managed_claim(&self) -> bool {
-        self.get("daemon_managed_claim")
-            .is_some_and(|value| value == "true")
+    pub const fn daemon_managed_claim(&self) -> bool {
+        self.daemon_managed
     }
 
     /// Get the working directory.

@@ -44,6 +44,7 @@ fn run_ls_files(work_dir: &Path, args: &[&str]) -> Result<Vec<String>, Measureme
 pub(super) fn parse_z_paths(data: &[u8]) -> Result<Vec<String>, MeasurementError> {
     super::split_z(data)
         .into_iter()
+        .filter(|segment| !segment.is_empty())
         .map(|segment| {
             String::from_utf8(segment.to_vec()).map_err(|err| {
                 MeasurementError::Parse(format!("non-UTF-8 path in ls-files output: {err}"))
@@ -58,10 +59,6 @@ pub(super) fn patch_untracked_files(
     run_id: &str,
     daemon_managed: bool,
 ) -> Result<Vec<String>, MeasurementError> {
-    let marker_is_untracked = data
-        .untracked_files
-        .iter()
-        .any(|path| path == WORKSPACE_OWNER_MARKER);
     if !daemon_managed {
         return Ok(data.untracked_files.clone());
     }
@@ -71,10 +68,6 @@ pub(super) fn patch_untracked_files(
             "cannot exclude untrusted workspace ownership marker: {reason}"
         )));
     }
-    if !marker_is_untracked {
-        return Ok(data.untracked_files.clone());
-    }
-
     Ok(data
         .untracked_files
         .iter()
