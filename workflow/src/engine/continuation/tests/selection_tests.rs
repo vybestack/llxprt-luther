@@ -175,10 +175,9 @@ fn interrupted_committed_checkpoint_can_resume_exact_identity() {
     let mut interrupted = get_run_with_conn(&conn, "cleanup-progress")
         .expect("query interrupted run")
         .expect("interrupted run");
-    interrupted.status = crate::persistence::RunStatus::Failed;
     interrupted.process_pid = None;
     crate::persistence::persist_run_with_conn(&conn, &interrupted)
-        .expect("persist interrupted run");
+        .expect("persist interrupted owner loss");
     crate::persistence::update_lease_status(
         &conn,
         "lease-cleanup-progress",

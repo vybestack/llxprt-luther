@@ -331,6 +331,24 @@ fn ready_checkpoint_without_continuation_provenance_is_not_authorized() {
 }
 
 #[test]
+fn malformed_continuation_provenance_is_not_authorized() {
+    let conn = test_conn();
+    let mut metadata = seed_committed_checkpoint(&conn, "malformed-provenance", RunStatus::Failed);
+    metadata.continuation_rearm_checkpoint_id = Some("not-a-checkpoint-identity".to_string());
+    persist_run_with_conn(&conn, &metadata).expect("persist malformed provenance");
+    let validation = validate_continuation(
+        &conn,
+        &request("malformed-provenance", ContinuationKind::Resume, true),
+    )
+    .expect("validate malformed provenance");
+    assert!(!validation.ok);
+    assert!(validation
+        .failure_reasons()
+        .iter()
+        .any(|reason| reason.contains("safe_step")));
+}
+
+#[test]
 fn validation_rejects_failed_committed_checkpoint_with_live_owners() {
     for child_owner in [false, true] {
         let conn = test_conn();
