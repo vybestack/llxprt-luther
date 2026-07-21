@@ -15,9 +15,10 @@ use super::{checkpoint_identity, ContinuationKind, ContinuationRequest};
 /// continuations from trusted-internal engine resumptions.
 ///
 /// This type permits a non-`SAFE_RERUN_STEPS` step only when continuation is
-/// bound to an exact durable current wait for the same run. It is never
-/// constructable from a CLI `--force` flag, so ambiguous replays continue to
-/// fail closed.
+/// bound to the exact current waiting checkpoint persisted for the same run.
+/// An ordinary operator wait is represented by run metadata plus checkpoint;
+/// when a `wait_states` row exists, commit also validates and consumes its exact
+/// suspension. A CLI `--force` flag cannot construct this authorization.
 ///
 /// @plan:PLAN-20260623-LUTHER-CONTINUATION
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -27,8 +28,9 @@ pub enum ResumeAuthorization {
     /// `safe_step`.
     Operator,
     /// Operator authorization for the exact current waiting checkpoint. This
-    /// is not a generic force bypass: run status, current step, checkpoint
-    /// status, and exact identity are all revalidated transactionally.
+    /// is not a generic force bypass: commit reconstructs authorization from
+    /// fresh transactional run metadata and checkpoint state, then reselects
+    /// and compares the exact checkpoint identity before mutation.
     OperatorCurrentWait {
         checkpoint_identity: String,
         run_id: String,
