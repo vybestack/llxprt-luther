@@ -473,6 +473,14 @@ fn ownership_denied_terminal_rejects_retry_even_with_force() {
             !validation.ok,
             "ownership-denied terminal must reject retry (force={force})"
         );
+        assert!(
+            validation
+                .failure_reasons()
+                .iter()
+                .any(|r| r.contains("ownership denial")),
+            "expected ownership-denied rejection (force={force}), got {:?}",
+            validation.failure_reasons()
+        );
     }
 }
 

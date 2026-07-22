@@ -46,7 +46,7 @@ pub(crate) use anchor::{configure_fchdir_pre_exec, FileIdentity, WorkspaceAnchor
 ///
 /// Retained for direct path-based test scaffolding. Production promotion uses
 /// [`open_git_directory_relative`] to stay anchored to the workspace fd.
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(test)]
 pub(super) fn open_git_directory(workspace: &Path) -> std::io::Result<OwnedFd> {
     let git = workspace.join(".git");
     let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
@@ -311,7 +311,7 @@ fn expected_bootstrap_bytes(run_id: &str) -> Vec<u8> {
 /// Production callers retain a single anchor through verify and promotion via
 /// [`promote_via_anchor`]; this entry point is retained for direct path-based
 /// test scaffolding.
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(test)]
 pub(super) fn promote_via_descriptor(workspace: &Path, run_id: &str) -> std::io::Result<()> {
     let anchor = WorkspaceAnchor::open(workspace)?;
     promote_via_anchor(&anchor, run_id)

@@ -112,7 +112,7 @@ pub(super) fn prepare_child_resume_readonly(
     let workspace = metadata.workspace_path.as_deref().unwrap_or_default();
     verify_existing_workspace_owner_marker(Path::new(workspace), &request.run_id)?;
     require_current_step(&metadata, &request.run_id)?;
-    let checkpoint_identity = select_resume_checkpoint_identity(&conn, request)?;
+    let checkpoint_identity = select_resume_checkpoint_identity(&conn, request, &metadata)?;
     let authorization = prepare_ephemeral_authorization(request)?;
     Ok(PreparedChildResume {
         authorization,
@@ -140,9 +140,13 @@ fn load_and_validate_resume_metadata(
 }
 
 /// Select the resume checkpoint (read-only) and return its identity string.
+/// Uses the already-loaded `metadata` from
+/// [`load_and_validate_resume_metadata`] instead of re-reading the row, so the
+/// validated identity and the checkpoint selection see the exact same row.
 fn select_resume_checkpoint_identity(
     conn: &rusqlite::Connection,
     request: &ChildWorkflowLaunchRequest,
+    metadata: &RunMetadata,
 ) -> Result<String, String> {
     let resume_request = crate::engine::ContinuationRequest {
         run_id: request.run_id.clone(),
@@ -150,11 +154,8 @@ fn select_resume_checkpoint_identity(
         force: true,
         trusted_internal: true,
     };
-    let metadata = get_run_with_conn(conn, &request.run_id)
-        .map_err(|err| format!("get child run metadata for checkpoint: {err}"))?
-        .ok_or_else(|| missing_run_metadata(&request.run_id))?;
     let checkpoint =
-        crate::engine::continuation::select_checkpoint(conn, &resume_request, &metadata)
+        crate::engine::continuation::select_checkpoint(conn, &resume_request, metadata)
             .map_err(|err| format!("select child resume checkpoint: {err}"))?;
     Ok(crate::engine::continuation::checkpoint_identity(
         &checkpoint,

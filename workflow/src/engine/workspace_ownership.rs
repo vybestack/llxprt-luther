@@ -310,8 +310,6 @@ fn marker_state(marker: &Path) -> MarkerState {
 
 /// Reject a marker record at `marker` that is a symlink, a directory, empty, or
 /// belongs to a different run. Returns `None` when the marker is absent or is a
-/// Reject a marker record at `marker` that is a symlink, a directory, empty, or
-/// belongs to a different run. Returns `None` when the marker is absent or is a
 /// valid exact-owner regular file; `Some(reason)` explains any rejection.
 ///
 /// This is the path-based pre-check used by the promotion path before the
@@ -535,6 +533,13 @@ pub fn provision_workspace_ownership(workspace: &Path, run_id: &str) -> std::io:
 /// the workspace path. This closes the TOCTOU window in which a concurrent
 /// attacker could swap the workspace path between verify and promotion.
 pub fn ensure_durable_workspace_ownership(workspace: &Path, run_id: &str) -> std::io::Result<()> {
+    // Reject a symlinked workspace root before canonicalizing, matching the
+    // guards in verify_workspace_ownership and promote_workspace_owner_marker.
+    // canonicalize resolves symlinks, which would silently accept a symlinked
+    // root as if it were a real directory.
+    if let Some(reason) = reject_symlinked_workspace_root(workspace) {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, reason));
+    }
     let canonical_workspace = workspace.canonicalize()?;
     ensure_durable_with_anchor(&canonical_workspace, run_id)
 }

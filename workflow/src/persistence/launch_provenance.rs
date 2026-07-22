@@ -237,9 +237,13 @@ pub fn encode_config_root(config_root: &Path) -> String {
 ///
 /// @plan:PLAN-20260722-ISSUE158-LAUNCH-PROVENANCE
 pub fn decode_config_root(encoded: &str) -> Result<PathBuf, LaunchProvenanceError> {
-    validate_even_hex(encoded)?;
+    // Hex validation applies only on Unix, where the config root is encoded as
+    // even-length hex so arbitrary OS strings (including non-UTF-8 bytes) can
+    // round-trip through the TEXT column. On non-Unix targets the encoding is
+    // the plain path string; validating it as hex would reject every path.
     #[cfg(unix)]
     {
+        validate_even_hex(encoded)?;
         use std::os::unix::ffi::OsStringExt;
         let bytes = encoded
             .as_bytes()
@@ -973,5 +977,16 @@ mod tests {
         let json = serde_json::to_string(&original).expect("serialize");
         let restored: LaunchProvenance = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(restored, original);
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn decode_config_root_returns_plain_path_on_non_unix() {
+        // On non-Unix targets the config root is stored and decoded as a
+        // plain path string, not hex. A path containing non-hex characters
+        // must decode successfully.
+        let plain = "C:\\config\\root";
+        let decoded = decode_config_root(plain).expect("plain path must decode on non-Unix");
+        assert_eq!(decoded, Path::new(plain));
     }
 }

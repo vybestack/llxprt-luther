@@ -332,8 +332,8 @@ fn malformed_or_foreign_workspace_marker_fails_closed() {
     let error = patch_untracked_files(&data, workspace.path(), "run-owned", true)
         .expect_err("foreign marker must fail closed");
     assert!(
-        error.to_string().contains("different-run") || error.to_string().contains("untrusted"),
-        "foreign marker should fail closed, got: {error}"
+        error.to_string().contains("different-run"),
+        "foreign marker should identify the conflicting claim, got: {error}"
     );
 }
 
@@ -350,8 +350,8 @@ fn listed_but_missing_workspace_marker_fails_closed() {
     let error = patch_untracked_files(&data, workspace.path(), "run-owned", true)
         .expect_err("missing marker must fail closed");
     assert!(
-        error.to_string().contains("missing") || error.to_string().contains("untrusted"),
-        "missing marker should fail closed, got: {error}"
+        error.to_string().contains("missing"),
+        "missing marker should fail closed with a missing reason, got: {error}"
     );
 }
 
@@ -368,7 +368,7 @@ fn daemon_measurement_requires_marker_even_when_git_does_not_list_it() {
     let error = patch_untracked_files(&data, workspace.path(), "run-owned", true)
         .expect_err("daemon marker must be verified independently of git output");
     assert!(
-        error.to_string().contains("missing") || error.to_string().contains("untrusted"),
+        error.to_string().contains("missing"),
         "daemon marker must be verified independently of git output, got: {error}"
     );
 }

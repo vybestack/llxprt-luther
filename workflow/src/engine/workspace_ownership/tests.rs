@@ -451,6 +451,10 @@ fn verify_rejects_bootstrap_fifo() {
 #[cfg(unix)]
 #[allow(unsafe_code)]
 fn create_fifo(path: &Path) {
+    // SAFETY: `mkfifo` creates a FIFO at a path inside a fresh temp directory
+    // owned by this test. The path is unique to this invocation, so there is
+    // no aliasing or data race. The C string is built from valid UTF-8 path
+    // bytes via `CString::new`.
     use std::os::unix::ffi::OsStrExt;
     let c_path = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
     let rc = unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) };
@@ -708,4 +712,29 @@ fn concurrent_ensure_durable_results_in_single_exact_durable() {
     let durable = ws.join(".git/luther/workspace-owner");
     assert_eq!(std::fs::read(&durable).unwrap(), b"run-race2");
     assert_eq!(verify_workspace_ownership(&ws, "run-race2"), None);
+}
+
+#[cfg(unix)]
+#[test]
+fn ensure_durable_rejects_symlinked_workspace_root() {
+    use std::os::unix::fs::symlink;
+
+    let dir = tempfile::tempdir().unwrap();
+    let real_ws = dir.path().join("real-ws");
+    // provision_workspace_owner_marker creates the workspace directory and
+    // writes the bootstrap marker; do not pre-create the directory or the
+    // provisioning will refuse to adopt a pre-existing workspace.
+    provision_workspace_owner_marker(&real_ws, "run-A").unwrap();
+    init_git(&real_ws);
+
+    // Symlink the workspace root so that a canonicalize-first implementation
+    // would silently resolve the link and proceed; the guard must reject it.
+    let symlinked_ws = dir.path().join("linked-ws");
+    symlink(&real_ws, &symlinked_ws).unwrap();
+
+    let err = ensure_durable_workspace_ownership(&symlinked_ws, "run-A").unwrap_err();
+    assert!(
+        err.to_string().contains("symlink"),
+        "expected symlink rejection, got: {err}"
+    );
 }

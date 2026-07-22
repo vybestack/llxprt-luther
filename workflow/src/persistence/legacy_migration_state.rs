@@ -261,6 +261,21 @@ pub fn load_migration_state(
     }
 }
 
+/// Whether a `rusqlite::Error` indicates the migration table does not exist.
+/// A missing table means no migration was ever attempted for this database.
+fn is_missing_table_error(error: &rusqlite::Error) -> bool {
+    match error {
+        rusqlite::Error::SqliteFailure(_failure, message) => {
+            // SQLite produces "no such table: legacy_ownership_migrations"
+            // when the migration table has not been initialized.
+            message
+                .as_deref()
+                .is_some_and(|msg| msg.contains("no such table"))
+        }
+        _ => false,
+    }
+}
+
 /// Whether a durable completed migration exists for the given run.
 ///
 /// This is the trust anchor for ordinary resume: the resume trusts the
@@ -286,15 +301,35 @@ pub fn migration_is_durable_completed(conn: &Connection, run_id: &str) -> bool {
 /// resume trust contract (completed migration ⇒ durable trust) is violated.
 /// The operator must re-run `migrate-legacy-ownership` to complete the
 /// transition before resuming.
+///
+/// **Fail-closed:** an unreadable migration state (load error or a malformed
+/// row) returns `true` so [`authorize_daemon_resume`] rejects the resume. Only
+/// a confirmed `Ok(None)` (no pending migration), a confirmed non-pending row,
+/// or a confirmed-absent migration table (no migration was ever attempted)
+/// returns `false`.
+///
+/// [`authorize_daemon_resume`]: crate::engine::continuation::authorization::authorize_daemon_resume
 #[must_use]
 pub fn migration_is_pending(conn: &Connection, run_id: &str) -> bool {
-    matches!(
-        load_migration_state(conn, run_id),
+    match load_migration_state(conn, run_id) {
+        // A loaded pending row means the migration did not reach its durable
+        // completion point: resume must be rejected.
         Ok(Some(MigrationStateRow {
             status: MigrationStatus::Pending,
             ..
-        }))
-    )
+        })) => true,
+        // No row, or a confirmed non-pending status, means there is no pending
+        // migration.
+        Ok(_) => false,
+        // A missing migration table means the migration subsystem was never
+        // initialized for this database (e.g. legacy or test databases).
+        // No migration was ever attempted, so there is nothing pending.
+        Err(error) if is_missing_table_error(&error) => false,
+        // Any other load error (corrupt row, unreadable state) must fail
+        // closed: treat it as pending so authorize_daemon_resume rejects the
+        // resume rather than silently trusting an unreadable state.
+        Err(_) => true,
+    }
 }
 
 #[cfg(test)]
@@ -399,5 +434,59 @@ mod tests {
         let outcome =
             guarded_complete_migration_in_transaction(&conn, "nope", Utc::now()).expect("guard");
         assert_eq!(outcome, GuardedCompletionOutcome::Missing);
+    }
+
+    #[test]
+    fn migration_is_pending_returns_true_for_explicit_pending_row() {
+        let conn = test_conn();
+        let now = Utc::now();
+        persist_migration_intent(&conn, "run-1", "/ws", now).expect("persist intent");
+        assert!(
+            migration_is_pending(&conn, "run-1"),
+            "a pending row must block resume"
+        );
+    }
+
+    #[test]
+    fn migration_is_pending_returns_false_for_completed_row() {
+        let conn = test_conn();
+        let now = Utc::now();
+        persist_migration_intent(&conn, "run-1", "/ws", now).expect("persist intent");
+        guarded_complete_migration_in_transaction(&conn, "run-1", Utc::now()).expect("complete");
+        assert!(
+            !migration_is_pending(&conn, "run-1"),
+            "a completed row must not block resume"
+        );
+    }
+
+    #[test]
+    fn migration_is_pending_returns_false_for_missing_row() {
+        let conn = test_conn();
+        assert!(
+            !migration_is_pending(&conn, "never-seen"),
+            "an absent row must not block resume"
+        );
+    }
+
+    #[test]
+    fn migration_is_pending_fails_closed_on_malformed_status() {
+        // A row with an unrecognized status string causes
+        // load_migration_state to return Err. migration_is_pending must fail
+        // closed (return true) so authorize_daemon_resume rejects the resume
+        // rather than silently trusting an unreadable state.
+        let conn = test_conn();
+        conn.execute(
+            &format!(
+                "INSERT INTO {LEGACY_MIGRATION_TABLE} \
+                 (run_id, workspace_path, intent_at, completed_at, status) \
+                 VALUES ('run-corrupt', '/ws', '2026-01-01T00:00:00Z', NULL, 'bogus')"
+            ),
+            [],
+        )
+        .expect("seed malformed row");
+        assert!(
+            migration_is_pending(&conn, "run-corrupt"),
+            "a malformed row must fail closed (treated as pending)"
+        );
     }
 }

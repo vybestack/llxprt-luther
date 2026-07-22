@@ -9,6 +9,7 @@
 /// - Exit code mapping
 #[allow(unused_imports)]
 use std::collections::HashMap;
+use std::io::Read;
 use std::io::Write;
 use std::process::{Command, Output, Stdio};
 use std::thread;
@@ -184,25 +185,67 @@ fn spawn_and_capture(
         }
     };
 
-    if let Some(data) = stdin_data {
-        if let Some(mut stdin) = child.stdin.take() {
-            if let Err(e) = stdin.write_all(data.as_bytes()) {
-                return Err(EngineError::StepExecutionError {
-                    step_id: "shell".to_string(),
-                    message: format!("Failed to write to stdin: {e}"),
-                });
-            }
-            // stdin is dropped here, which closes the pipe
-        }
-    }
+    // Drain stdout/stderr on dedicated reader threads BEFORE writing stdin
+    // and waiting for the child. Reading only after the process exits can
+    // deadlock if either pipe fills while the child is still running: the
+    // child blocks writing to a full stdout/stderr pipe while it is still
+    // reading stdin, and our `stdin.write_all` blocks because the child never
+    // finishes consuming stdin. Spawning the readers first keeps the pipes
+    // drained while stdin is written and while the child runs to completion.
+    // This mirrors the concurrent-draining pattern used by the feedback
+    // evaluator executor.
+    let stdout_reader = child.stdout.take().map(spawn_pipe_reader);
+    let stderr_reader = child.stderr.take().map(spawn_pipe_reader);
+
+    write_child_stdin(&mut child, stdin_data, &stdout_reader, &stderr_reader)?;
 
     let timeout = params
         .get("timeout_seconds")
         .and_then(serde_json::Value::as_u64)
         .map(Duration::from_secs);
-    match wait_with_optional_timeout(&mut child, timeout) {
-        Ok(WaitResult::Completed(output)) => Ok(Some(output)),
+    finish_child_capture(&mut child, timeout, context, stdout_reader, stderr_reader)
+}
+
+fn write_child_stdin(
+    child: &mut std::process::Child,
+    stdin_data: Option<String>,
+    stdout_reader: &Option<thread::JoinHandle<std::io::Result<Vec<u8>>>>,
+    stderr_reader: &Option<thread::JoinHandle<std::io::Result<Vec<u8>>>>,
+) -> Result<(), EngineError> {
+    let Some(data) = stdin_data else {
+        return Ok(());
+    };
+    let Some(mut stdin) = child.stdin.take() else {
+        return Ok(());
+    };
+    stdin
+        .write_all(data.as_bytes())
+        .map_err(|error| EngineError::StepExecutionError {
+            step_id: "shell".to_string(),
+            message: format!(
+                "Failed to write to stdin: {error} (stdout reader active: {}, stderr reader active: {})",
+                stdout_reader.is_some(),
+                stderr_reader.is_some()
+            ),
+        })
+}
+
+fn finish_child_capture(
+    child: &mut std::process::Child,
+    timeout: Option<Duration>,
+    context: &mut StepContext,
+    stdout_reader: Option<thread::JoinHandle<std::io::Result<Vec<u8>>>>,
+    stderr_reader: Option<thread::JoinHandle<std::io::Result<Vec<u8>>>>,
+) -> Result<Option<Output>, EngineError> {
+    match wait_with_optional_timeout(child, timeout) {
+        Ok(WaitResult::Completed(status)) => Ok(Some(Output {
+            status,
+            stdout: join_pipe_reader(stdout_reader),
+            stderr: join_pipe_reader(stderr_reader),
+        })),
         Ok(WaitResult::TimedOut { timeout }) => {
+            let _ = join_pipe_reader(stdout_reader);
+            let _ = join_pipe_reader(stderr_reader);
             context.set("exit_code", "124");
             context.set(
                 "diagnostic",
@@ -213,13 +256,16 @@ fn spawn_and_capture(
             );
             Ok(None)
         }
-        Err(e) => Err(EngineError::StepExecutionError {
-            step_id: "shell".to_string(),
-            message: format!("Failed to wait for command output: {e}"),
-        }),
+        Err(error) => {
+            let _ = join_pipe_reader(stdout_reader);
+            let _ = join_pipe_reader(stderr_reader);
+            Err(EngineError::StepExecutionError {
+                step_id: "shell".to_string(),
+                message: format!("Failed to wait for command output: {error}"),
+            })
+        }
     }
 }
-
 /// Resolve the step outcome from a completed (non-timed-out) shell run,
 /// following the spec's critical evaluation order:
 /// 1. Non-zero exit: consult `exit_code_map`, else default `Fixable`.
@@ -321,25 +367,30 @@ fn extract_json_context(
     Some(StepOutcome::Success)
 }
 
+/// Result of waiting for the shell child: either it completed (with the exit
+/// status; the drained output is joined by the caller) or it timed out.
 enum WaitResult {
-    Completed(Output),
+    Completed(std::process::ExitStatus),
     TimedOut { timeout: Duration },
 }
 
+/// Poll the child until it exits or `timeout` elapses. Output pipes must be
+/// drained concurrently (by the caller's reader threads) so this function only
+/// waits for the process status; it never calls `wait_with_output`, which would
+/// re-read already-taken pipes and deadlock.
 fn wait_with_optional_timeout(
     child: &mut std::process::Child,
     timeout: Option<Duration>,
 ) -> std::io::Result<WaitResult> {
     let Some(timeout) = timeout else {
-        let owned_child = take_child(child)?;
-        return owned_child.wait_with_output().map(WaitResult::Completed);
+        let status = child.wait()?;
+        return Ok(WaitResult::Completed(status));
     };
 
     let start = Instant::now();
     loop {
-        if child.try_wait()?.is_some() {
-            let owned_child = take_child(child)?;
-            return owned_child.wait_with_output().map(WaitResult::Completed);
+        if let Some(status) = child.try_wait()? {
+            return Ok(WaitResult::Completed(status));
         }
 
         if start.elapsed() >= timeout {
@@ -351,15 +402,31 @@ fn wait_with_optional_timeout(
     }
 }
 
-fn take_child(child: &mut std::process::Child) -> std::io::Result<std::process::Child> {
-    let replacement_child = Command::new("sh")
-        .arg("-c")
-        .arg("exit 0")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()?;
-    Ok(std::mem::replace(child, replacement_child))
+/// Spawn a thread that reads a child pipe to completion. The pipe is taken
+/// from the child before spawning so the reader observes end-of-file as soon
+/// as the last write end is closed by the child (and its descendants).
+fn spawn_pipe_reader(
+    mut pipe: impl Read + Send + 'static,
+) -> thread::JoinHandle<std::io::Result<Vec<u8>>> {
+    thread::spawn(move || {
+        let mut buffer = Vec::new();
+        pipe.read_to_end(&mut buffer)?;
+        Ok(buffer)
+    })
+}
+
+/// Join a pipe-reader thread and return the drained bytes. A `None` handle
+/// means the pipe was not piped; an empty buffer is returned in that case.
+fn join_pipe_reader(reader: Option<thread::JoinHandle<std::io::Result<Vec<u8>>>>) -> Vec<u8> {
+    match reader {
+        Some(handle) => match handle.join() {
+            Ok(Ok(bytes)) => bytes,
+            // A reader failure or panic is not fatal to the step outcome; the
+            // caller still receives whatever (possibly empty) bytes we have.
+            Ok(Err(_)) | Err(_) => Vec::new(),
+        },
+        None => Vec::new(),
+    }
 }
 
 fn terminate_process_tree(child: &mut std::process::Child) {
@@ -545,4 +612,79 @@ fn resolve_shell_stdin(params: &serde_json::Value, context: &mut StepContext) ->
         };
     }
     StdinResolution::Data(None)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::executor::{StepContext, StepExecutor};
+    use crate::engine::transition::StepOutcome;
+    use std::time::Instant;
+    use tempfile::tempdir;
+
+    /// Regression: piping a large stdin payload while the child writes a large
+    /// stdout/stderr payload must not deadlock. Before the concurrent-drain
+    /// fix, the reader threads were spawned only after stdin was written, so a
+    /// child that filled its stdout pipe while still reading stdin blocked our
+    /// `write_all`, and the child blocked on a full stdout pipe it could not
+    /// drain because it had not finished consuming stdin. This test exercises
+    /// that path with payloads exceeding typical pipe capacities (64 KiB) and
+    /// enforces a generous-but-finite timeout so a regression deadlocks the
+    /// test instead of silently passing.
+    #[test]
+    fn large_stdin_and_stdout_do_not_deadlock() {
+        let work_dir = tempdir().expect("create temp work dir");
+        let mut context = StepContext::new(
+            work_dir.path().to_path_buf(),
+            "deadlock-regression".to_string(),
+        );
+        // Write enough bytes to both directions to exceed a typical pipe
+        // buffer (64 KiB) on each stream independently.
+        let stdin_bytes = "x".repeat(256 * 1024);
+        let params = serde_json::json!({
+            "command": "cat; dd if=/dev/zero bs=262144 count=1 2>/dev/null | tr '\\000' A 1>&2; dd if=/dev/zero bs=262144 count=1 2>/dev/null | tr '\\000' B",
+            "stdin": stdin_bytes,
+            "timeout_seconds": 60u64,
+        });
+
+        let started = Instant::now();
+        let outcome = ShellExecutor.execute(&mut context, &params);
+        let elapsed = started.elapsed();
+
+        let outcome = outcome.expect("shell execution should not error");
+        assert!(
+            matches!(outcome, StepOutcome::Success),
+            "expected Success, got {outcome:?}"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(60),
+            "execution should not deadlock; elapsed {elapsed:?}"
+        );
+
+        let stdout = context
+            .get("stdout")
+            .map(String::as_str)
+            .unwrap_or_default();
+        let stderr = context
+            .get("stderr")
+            .map(String::as_str)
+            .unwrap_or_default();
+        // `cat` writes the 256 KiB stdin to stdout, then `printf 'B...'` adds
+        // another 256 KiB of 'B' bytes, for a total of 512 KiB.
+        assert_eq!(stdout.len(), 512 * 1024, "stdout should be fully drained");
+        let (cat_part, b_part) = stdout.split_at(256 * 1024);
+        assert!(
+            cat_part.chars().all(|c| c == 'x'),
+            "first half of stdout should be the echoed stdin"
+        );
+        assert!(
+            b_part.chars().all(|c| c == 'B'),
+            "second half of stdout should be 'B' bytes"
+        );
+        assert_eq!(stderr.len(), 256 * 1024, "stderr should be fully drained");
+        assert!(
+            stderr.chars().all(|c| c == 'A'),
+            "stderr should contain only 'A' bytes"
+        );
+    }
 }

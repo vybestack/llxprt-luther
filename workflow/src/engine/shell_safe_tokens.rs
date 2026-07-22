@@ -1,17 +1,23 @@
-//! Typed validation of identity-bearing tokens interpolated into shell
-//! commands.
+//! Defensive validation of identity-bearing tokens that may be interpolated
+//! into shell command templates.
 //!
-//! Certain tokens (`issue_number`, `base_branch`, `artifact_dir`, `work_dir`)
-//! carry externally-sourced or attacker-influencable values that are
-//! interpolated directly into shell command templates via
-//! [`crate::engine::executor::interpolate_string`]. Without validation, a
-//! hostile GitHub issue number or branch name carrying shell metacharacters
-//! (`;`, `` ` ``, `$()`, `|`) could inject arbitrary commands.
+//! ## Actual boundary: positional binding
 //!
-//! [`validate_shell_safe_tokens`] provides a typed safety gate: the shell
-//! executor calls it **before** interpolation, rejecting any identity token
-//! whose value contains a disallowed character. Tokens absent from the context
-//! are skipped (validated only when present).
+//! The shell executor's primary injection defense is positional parameter
+//! binding ([`bind_shell_template`](crate::engine::executors::shell)): dynamic
+//! values are never interpolated into the shell command string. Instead they
+//! are passed as `$1`, `$2`, ... positional parameters, so shell parsing only
+//! sees the static template. Metacharacters in GitHub or config values are
+//! treated as literal data and are never reparsed as shell syntax.
+//!
+//! ## Supplementary validation
+//!
+//! [`validate_shell_safe_tokens`] is a **supplementary, defense-in-depth**
+//! check. It is not wired into the shell executor's hot path because
+//! positional binding is the authoritative boundary. It remains available for
+//! callers that want an early rejection of suspicious identity values before
+//! they reach any execution path, and it is covered by unit tests so the
+//! character policies do not silently regress.
 //!
 //! # Character policies
 //!
@@ -34,8 +40,13 @@ const SHELL_SAFE_REFNAME_TOKENS: &[&str] = &["base_branch"];
 /// Filesystem-path tokens: must not contain shell metacharacters or whitespace.
 const SHELL_SAFE_PATH_TOKENS: &[&str] = &["artifact_dir", "work_dir"];
 
-/// Validate that identity-bearing tokens interpolated into shell commands
-/// carry only safe characters.
+/// Validate that identity-bearing tokens carry only safe characters.
+///
+/// **Not wired into the shell executor:** the authoritative injection defense
+/// is positional parameter binding, which passes dynamic values as `$1`, `$2`,
+/// ... so they are never reparsed as shell syntax. This function is a
+/// supplementary, defense-in-depth check for callers that want to reject
+/// suspicious identity values early.
 ///
 /// Returns `Ok(())` when all identity tokens in the context are safe, or
 /// `Err(String)` with a diagnostic naming the offending token and character.
