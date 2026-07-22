@@ -930,6 +930,7 @@ mod tests {
         assert_eq!(decoded, root);
     }
 
+    #[cfg(unix)]
     #[test]
     fn decode_config_root_rejects_empty_encoding() {
         let error = decode_config_root("").expect_err("empty encoding must be rejected");
@@ -939,6 +940,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn decode_config_root_rejects_odd_length_hex() {
         let error = decode_config_root("abc").expect_err("odd-length encoding must be rejected");
@@ -948,6 +950,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn decode_config_root_rejects_non_hex_character() {
         let error = decode_config_root("2g").expect_err("non-hex character must be rejected");
@@ -957,6 +960,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn decode_config_root_accepts_uppercase_hex() {
         let root = Path::new("/A");

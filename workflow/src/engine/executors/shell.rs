@@ -184,6 +184,11 @@ fn spawn_and_capture(
             });
         }
     };
+    let timeout = params
+        .get("timeout_seconds")
+        .and_then(serde_json::Value::as_u64)
+        .map(Duration::from_secs);
+    let deadline = timeout.map(|duration| Instant::now() + duration);
 
     // Drain stdout/stderr on dedicated reader threads BEFORE writing stdin
     // and waiting for the child. Reading only after the process exits can
@@ -197,53 +202,104 @@ fn spawn_and_capture(
     let stdout_reader = child.stdout.take().map(spawn_pipe_reader);
     let stderr_reader = child.stderr.take().map(spawn_pipe_reader);
 
-    write_child_stdin(&mut child, stdin_data, &stdout_reader, &stderr_reader)?;
+    // Write stdin on a worker thread so the main thread can wait against the
+    // timeout deadline without blocking on a full pipe buffer. If the child
+    // never reads stdin, `write_all` would block indefinitely; the worker
+    // thread isolates that block so the deadline (captured immediately after
+    // spawn in `finish_child_capture`) can bound it.
+    let stdin_writer = spawn_stdin_writer(&mut child, stdin_data);
 
-    let timeout = params
-        .get("timeout_seconds")
-        .and_then(serde_json::Value::as_u64)
-        .map(Duration::from_secs);
-    finish_child_capture(&mut child, timeout, context, stdout_reader, stderr_reader)
+    finish_child_capture(
+        &mut child,
+        timeout,
+        deadline,
+        stdin_writer,
+        context,
+        stdout_reader,
+        stderr_reader,
+    )
 }
 
-fn write_child_stdin(
+/// Spawn a worker thread that writes `stdin_data` to the child's stdin handle
+/// and closes it. The write runs off-thread so the caller can concurrently
+/// wait for the child against a deadline without blocking on a full pipe
+/// buffer (which happens when the child never reads stdin). The returned
+/// handle yields the write result; a `None` handle means no stdin was
+/// configured and the caller should not report a write error.
+fn spawn_stdin_writer(
     child: &mut std::process::Child,
     stdin_data: Option<String>,
-    stdout_reader: &Option<thread::JoinHandle<std::io::Result<Vec<u8>>>>,
-    stderr_reader: &Option<thread::JoinHandle<std::io::Result<Vec<u8>>>>,
+) -> Option<thread::JoinHandle<std::io::Result<()>>> {
+    let data = stdin_data?;
+    let mut stdin = child.stdin.take()?;
+    Some(thread::spawn(move || {
+        stdin.write_all(data.as_bytes())?;
+        stdin.flush()
+    }))
+}
+
+/// Join the stdin writer thread after the child has been reaped (by
+/// `terminate_process_tree`). When the child exited normally (`!timed_out`),
+/// the real write result is surfaced so the caller preserves original error
+/// semantics. When the timeout won, the result is intentionally discarded: a
+/// write error (e.g. EPIPE because the killed child closed the pipe) must
+/// never override the timeout outcome. The caller must terminate/reap the
+/// child before calling this so the writer thread (possibly blocked in
+/// `write_all`) is unblocked by the closed pipe and the join completes.
+fn join_stdin_writer(
+    stdin_writer: Option<thread::JoinHandle<std::io::Result<()>>>,
+    timed_out: bool,
 ) -> Result<(), EngineError> {
-    let Some(data) = stdin_data else {
+    let Some(handle) = stdin_writer else {
         return Ok(());
     };
-    let Some(mut stdin) = child.stdin.take() else {
+    let result = handle.join();
+    if timed_out {
+        // Timeout already won; discard any writer error (e.g. EPIPE from the
+        // killed child) so it cannot override the timeout outcome.
         return Ok(());
-    };
-    stdin
-        .write_all(data.as_bytes())
-        .map_err(|error| EngineError::StepExecutionError {
+    }
+    match result {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(error)) => Err(EngineError::StepExecutionError {
             step_id: "shell".to_string(),
-            message: format!(
-                "Failed to write to stdin: {error} (stdout reader active: {}, stderr reader active: {})",
-                stdout_reader.is_some(),
-                stderr_reader.is_some()
-            ),
-        })
+            message: format!("Failed to write to stdin: {error}"),
+        }),
+        Err(panic) => std::panic::resume_unwind(panic),
+    }
 }
 
 fn finish_child_capture(
     child: &mut std::process::Child,
     timeout: Option<Duration>,
+    deadline: Option<Instant>,
+    stdin_writer: Option<thread::JoinHandle<std::io::Result<()>>>,
     context: &mut StepContext,
     stdout_reader: Option<thread::JoinHandle<std::io::Result<Vec<u8>>>>,
     stderr_reader: Option<thread::JoinHandle<std::io::Result<Vec<u8>>>>,
 ) -> Result<Option<Output>, EngineError> {
-    match wait_with_optional_timeout(child, timeout) {
-        Ok(WaitResult::Completed(status)) => Ok(Some(Output {
-            status,
-            stdout: join_pipe_reader(stdout_reader),
-            stderr: join_pipe_reader(stderr_reader),
-        })),
+    let configured_timeout = timeout.unwrap_or_default();
+
+    match wait_with_optional_timeout(child, deadline, configured_timeout) {
+        Ok(WaitResult::Completed(status)) => {
+            // Child exited normally: surface the real stdin write result so
+            // error semantics are preserved (only if no timeout won).
+            join_stdin_writer(stdin_writer, false)?;
+            Ok(Some(Output {
+                status,
+                stdout: join_pipe_reader(stdout_reader),
+                stderr: join_pipe_reader(stderr_reader),
+            }))
+        }
         Ok(WaitResult::TimedOut { timeout }) => {
+            // Timeout won: terminate and reap the child before joining the
+            // pipe/stdin workers. Killing the child closes the stdin pipe,
+            // unblocking the writer thread (which may be stuck in write_all)
+            // so the pipe/stdin worker threads can complete. The stdin write
+            // result is intentionally discarded so a writer error (e.g. EPIPE
+            // from the killed child) cannot override the timeout outcome.
+            terminate_process_tree(child);
+            let _ = join_stdin_writer(stdin_writer, true);
             let _ = join_pipe_reader(stdout_reader);
             let _ = join_pipe_reader(stderr_reader);
             context.set("exit_code", "124");
@@ -257,6 +313,10 @@ fn finish_child_capture(
             Ok(None)
         }
         Err(error) => {
+            // On an unexpected wait error, reap the child and discard the
+            // stdin writer result so it cannot mask the wait error.
+            terminate_process_tree(child);
+            let _ = join_stdin_writer(stdin_writer, true);
             let _ = join_pipe_reader(stdout_reader);
             let _ = join_pipe_reader(stderr_reader);
             Err(EngineError::StepExecutionError {
@@ -368,34 +428,39 @@ fn extract_json_context(
 }
 
 /// Result of waiting for the shell child: either it completed (with the exit
-/// status; the drained output is joined by the caller) or it timed out.
+/// status; the drained output is joined by the caller) or it timed out,
+/// carrying the originally configured timeout duration for diagnostic
+/// reporting.
 enum WaitResult {
     Completed(std::process::ExitStatus),
     TimedOut { timeout: Duration },
 }
 
-/// Poll the child until it exits or `timeout` elapses. Output pipes must be
+/// Poll the child until it exits or `deadline` elapses. Output pipes must be
 /// drained concurrently (by the caller's reader threads) so this function only
 /// waits for the process status; it never calls `wait_with_output`, which would
-/// re-read already-taken pipes and deadlock.
+/// re-read already-taken pipes and deadlock. A `None` deadline means wait
+/// indefinitely. The caller records `configured_timeout` on timeout for
+/// diagnostic messages.
 fn wait_with_optional_timeout(
     child: &mut std::process::Child,
-    timeout: Option<Duration>,
+    deadline: Option<Instant>,
+    configured_timeout: Duration,
 ) -> std::io::Result<WaitResult> {
-    let Some(timeout) = timeout else {
+    let Some(deadline) = deadline else {
         let status = child.wait()?;
         return Ok(WaitResult::Completed(status));
     };
 
-    let start = Instant::now();
     loop {
         if let Some(status) = child.try_wait()? {
             return Ok(WaitResult::Completed(status));
         }
 
-        if start.elapsed() >= timeout {
-            terminate_process_tree(child);
-            return Ok(WaitResult::TimedOut { timeout });
+        if Instant::now() >= deadline {
+            return Ok(WaitResult::TimedOut {
+                timeout: configured_timeout,
+            });
         }
 
         thread::sleep(Duration::from_millis(100));
@@ -661,6 +726,10 @@ mod tests {
             "execution should not deadlock; elapsed {elapsed:?}"
         );
 
+        assert_large_bidirectional_output(&context);
+    }
+
+    fn assert_large_bidirectional_output(context: &StepContext) {
         let stdout = context
             .get("stdout")
             .map(String::as_str)
@@ -669,22 +738,64 @@ mod tests {
             .get("stderr")
             .map(String::as_str)
             .unwrap_or_default();
-        // `cat` writes the 256 KiB stdin to stdout, then `printf 'B...'` adds
-        // another 256 KiB of 'B' bytes, for a total of 512 KiB.
         assert_eq!(stdout.len(), 512 * 1024, "stdout should be fully drained");
         let (cat_part, b_part) = stdout.split_at(256 * 1024);
-        assert!(
-            cat_part.chars().all(|c| c == 'x'),
-            "first half of stdout should be the echoed stdin"
-        );
-        assert!(
-            b_part.chars().all(|c| c == 'B'),
-            "second half of stdout should be 'B' bytes"
-        );
+        assert!(cat_part.chars().all(|c| c == 'x'));
+        assert!(b_part.chars().all(|c| c == 'B'));
         assert_eq!(stderr.len(), 256 * 1024, "stderr should be fully drained");
+        assert!(stderr.chars().all(|c| c == 'A'));
+    }
+
+    /// Regression: a child that never reads stdin with a large (>64 KiB) stdin
+    /// payload and a short timeout must produce Fatal/124 without hanging.
+    /// Before the worker-thread fix, the blocking `write_all` on the full pipe
+    /// buffer ran on the main thread before the timeout poll, so a
+    /// non-reading child hung the executor indefinitely regardless of
+    /// `timeout_seconds`. Writing stdin on a worker thread and starting the
+    /// deadline immediately after spawn lets the timeout poll win, terminate
+    /// the child, and unblock the writer.
+    #[test]
+    fn stdin_timeout_does_not_hang_on_non_reading_child() {
+        let work_dir = tempdir().expect("create temp work dir");
+        let mut context = StepContext::new(
+            work_dir.path().to_path_buf(),
+            "stdin-timeout-regression".to_string(),
+        );
+        // The child sleeps without reading stdin, so the pipe buffer fills and
+        // `write_all` blocks once it exceeds the OS pipe capacity (~64 KiB).
+        let stdin_bytes = "x".repeat(128 * 1024);
+        let params = serde_json::json!({
+            "command": "sleep 30",
+            "stdin": stdin_bytes,
+            "timeout_seconds": 1u64,
+        });
+
+        let started = Instant::now();
+        let outcome = ShellExecutor
+            .execute(&mut context, &params)
+            .expect("no engine error");
+        let elapsed = started.elapsed();
+
         assert!(
-            stderr.chars().all(|c| c == 'A'),
-            "stderr should contain only 'A' bytes"
+            matches!(outcome, StepOutcome::Fatal),
+            "expected Fatal on timeout, got {outcome:?}"
+        );
+        let exit_code = context
+            .get("exit_code")
+            .map(String::as_str)
+            .unwrap_or_default();
+        assert_eq!(exit_code, "124", "timeout must set exit_code 124");
+        let diagnostic = context
+            .get("diagnostic")
+            .map(String::as_str)
+            .unwrap_or_default();
+        assert!(
+            diagnostic.contains("timed out"),
+            "diagnostic should mention timeout: {diagnostic}"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(15),
+            "timeout must not hang; elapsed {elapsed:?}"
         );
     }
 }
