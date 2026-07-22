@@ -24,8 +24,9 @@ pub fn claim_for_launch(
     conn: &Connection,
     config_id: &str,
     bases: &DaemonPathBases,
+    config_root: &std::path::Path,
 ) -> Result<Result<ClaimedLaunch, SkipReason>, rusqlite::Error> {
-    claim_for_launch_with_state(issue, cfg, conn, config_id, bases, true)
+    claim_for_launch_with_state(issue, cfg, conn, config_id, bases, true, config_root)
 }
 
 pub(crate) fn claim_for_launch_pending(
@@ -34,8 +35,9 @@ pub(crate) fn claim_for_launch_pending(
     conn: &Connection,
     config_id: &str,
     bases: &DaemonPathBases,
+    config_root: &std::path::Path,
 ) -> Result<Result<ClaimedLaunch, SkipReason>, rusqlite::Error> {
-    claim_for_launch_with_state(issue, cfg, conn, config_id, bases, false)
+    claim_for_launch_with_state(issue, cfg, conn, config_id, bases, false, config_root)
 }
 
 fn claim_for_launch_with_state(
@@ -45,6 +47,7 @@ fn claim_for_launch_with_state(
     config_id: &str,
     bases: &DaemonPathBases,
     mark_running: bool,
+    config_root: &std::path::Path,
 ) -> Result<Result<ClaimedLaunch, SkipReason>, rusqlite::Error> {
     let repo = cfg.repo.clone().unwrap_or_default();
     let lease = match acquire_lease_with_receipt(conn, &repo, issue.number, config_id, cfg)? {
@@ -83,6 +86,10 @@ fn claim_for_launch_with_state(
             claim_label_added: false,
             work_dir: paths.work_dir,
             artifact_dir: paths.artifact_dir,
+            // Issue 158 finding 5: flow the target's config root (which
+            // originated from the supervisor's --config-dir) rather than
+            // hardcoding "config".
+            config_root: config_root.to_path_buf(),
         },
     }))
 }

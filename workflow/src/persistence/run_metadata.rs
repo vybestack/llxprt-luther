@@ -141,6 +141,21 @@ pub struct FailureCleanupState {
     pub cleanup_completed_at: Option<DateTime<Utc>>,
     #[serde(default)]
     pub recovery_consumed_at: Option<DateTime<Utc>>,
+    /// Explicit typed marker that this terminal failure was caused by a
+    /// workspace ownership authentication failure (the run could not verify
+    /// workspace ownership before entering a `failure_cleanup` step). An
+    /// ownership-denied terminal is **non-resumable**: it must never be routed
+    /// to the cleanup step, because cleanup executes workspace-mutating shell
+    /// commands that must only run in a trusted workspace. This field defaults
+    /// to `false` for backward compatibility with pre-existing persisted
+    /// states, but the terminal ownership failure path sets it to `true`
+    /// alongside `cleanup_succeeded = false`.
+    ///
+    /// The raw ownership rejection reason is never persisted here; only the
+    /// categorical boolean is durable. The raw reason remains in event logs
+    /// and ephemeral runtime output only.
+    #[serde(default)]
+    pub ownership_denied: bool,
 }
 
 impl FailureCleanupState {
@@ -214,6 +229,13 @@ pub struct RunMetadata {
     pub continuation_rearm_checkpoint_id: Option<String>,
     /// Original failed-work provenance when a failure-cleanup terminal ran.
     pub failure_cleanup: Option<FailureCleanupState>,
+    /// Exact launch provenance: the canonical serialization + SHA-256 digest
+    /// of the resolved workflow type/config at launch time, plus the config
+    /// root. `None` only for legacy rows created before provenance recording;
+    /// new records always carry `Some`. Resume surfaces recompute the digest
+    /// and refuse on mismatch before any lease/marker/DB mutation.
+    /// @plan:PLAN-20260722-ISSUE158-LAUNCH-PROVENANCE
+    pub launch_provenance: Option<crate::persistence::launch_provenance::LaunchProvenance>,
 }
 
 impl RunMetadata {
@@ -248,6 +270,7 @@ impl RunMetadata {
             child_pids: Vec::new(),
             continuation_rearm_checkpoint_id: None,
             failure_cleanup: None,
+            launch_provenance: None,
         }
     }
 
@@ -259,6 +282,49 @@ impl RunMetadata {
                 .failure_cleanup
                 .as_ref()
                 .is_some_and(FailureCleanupState::is_complete)
+    }
+
+    /// True only for an explicitly evidenced ownership-denied terminal: a
+    /// workspace ownership authentication failure recorded with
+    /// `ownership_denied = true` and `cleanup_succeeded = false`. Such a
+    /// terminal is **non-resumable** and must never be routed to the cleanup
+    /// step, because cleanup executes workspace-mutating shell commands that
+    /// must only run in a trusted workspace. This is the distinct
+    /// non-resumable terminal state for ownership authentication failures,
+    /// separate from the resumable `Failed` state and from the recoverable
+    /// cleanup-failure-abandonment state.
+    #[must_use]
+    pub fn is_ownership_denied_terminal(&self) -> bool {
+        self.failure_cleanup
+            .as_ref()
+            .is_some_and(|failure| failure.ownership_denied && !failure.cleanup_succeeded)
+    }
+
+    /// The issue number that authorizes issue-lease mutations, derived from
+    /// `issue_number` only.
+    ///
+    /// Issue leases are keyed by the GitHub issue number. A PR number is **not**
+    /// a valid lease authority: a run that recorded only a `pr_number` (a
+    /// PR-only run) has no issue lease and must never mutate one. Returning
+    /// `None` for a PR-only run makes every lease-authority call site
+    /// (`heartbeat_owned_lease`, `protect_failure_cleanup_lease`,
+    /// `acquire_continuation_lease`, ownership-denial lease failure, etc.)
+    /// uniformly skip lease mutation, closing the fallback path where
+    /// `issue_number.or(pr_number)` would silently treat a PR number as an
+    /// issue lease anchor.
+    ///
+    /// Identity recoverability (whether a continuation can reconstruct the
+    /// run's repo/issue/PR at all) intentionally still accepts either an issue
+    /// *or* a PR anchor — see [`check_identity_recoverable`]. That path does
+    /// not mutate a lease; it only verifies the run's identity is
+    /// reconstructable. This accessor is the strict, issue-only authority used
+    /// wherever a lease is read or written.
+    ///
+    /// [`check_identity_recoverable`]: crate::engine::continuation::check_identity_recoverable
+    #[must_use]
+    pub fn issue_lease_number(&self) -> Option<u64> {
+        self.issue_number
+            .and_then(|number| u64::try_from(number).ok())
     }
 
     /// Mark the run as started (Running status).
@@ -458,7 +524,8 @@ pub fn init_runs_table(conn: &rusqlite::Connection) -> Result<(), rusqlite::Erro
             process_pid INTEGER,
             child_pids TEXT,
             continuation_rearm_checkpoint_id TEXT,
-            failure_cleanup TEXT
+            failure_cleanup TEXT,
+            launch_provenance TEXT
         )",
         [],
     )?;
@@ -493,6 +560,7 @@ pub fn migrate_runs_table(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
         "child_pids TEXT",
         "continuation_rearm_checkpoint_id TEXT",
         "failure_cleanup TEXT",
+        "launch_provenance TEXT",
     ];
     for column in columns {
         let name = column.split_whitespace().next().unwrap_or_default();
@@ -641,6 +709,7 @@ mod tests {
             captured_at: now,
             cleanup_completed_at: Some(now),
             recovery_consumed_at: None,
+            ownership_denied: false,
         }
     }
 

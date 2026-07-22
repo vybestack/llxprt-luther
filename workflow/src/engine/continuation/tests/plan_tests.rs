@@ -45,9 +45,16 @@ fn continuation_overrides_omits_unrecorded_fields() {
 
 #[test]
 fn continuation_overrides_falls_back_to_pr_anchor() {
-    // A PR-only continuation (no issue_number, only pr_number) is accepted by
-    // check_identity_recoverable, so the rebuilt overrides must preserve the
-    // PR anchor instead of silently dropping to the default issue.
+    // Issue 158 slice 5: a PR-only run (no issue_number, only pr_number) has
+    // no issue lease authority. The continuation overrides must NOT reuse the
+    // pr_number as the issue anchor, because the `issue` override seeds
+    // `primary_issue_number` → `RunMetadata.issue_number` →
+    // `issue_lease_number()`, which is the issue-lease authority anchor.
+    // Granting lease authority to a PR-only run would let it mutate an issue
+    // lease it does not own. The PR number identity remains recoverable
+    // through the persisted `pr_number` metadata field and through
+    // `check_identity_recoverable` (which accepts either anchor for identity
+    // recoverability without granting lease authority).
     // @plan:PLAN-20260623-LUTHER-CONTINUATION
     let mut md = RunMetadata::new("r", "wf", "cfg");
     md.repository = Some("vybestack/llxprt-luther".to_string());
@@ -58,9 +65,8 @@ fn continuation_overrides_falls_back_to_pr_anchor() {
 
     assert_eq!(overrides.repo.as_deref(), Some("vybestack/llxprt-luther"));
     assert_eq!(
-        overrides.issue.as_deref(),
-        Some("66"),
-        "a PR-only run must reuse pr_number as the issue anchor"
+        overrides.issue, None,
+        "a PR-only run must not reuse pr_number as the issue lease authority anchor"
     );
 }
 

@@ -124,6 +124,7 @@ pub fn scheduler_target(
             discovery,
             path_bases,
             parent_path_bases,
+            config_root.to_path_buf(),
         )
     })
 }
@@ -143,6 +144,7 @@ pub fn discovery_scheduler_target(
         discovery.clone(),
         daemon_path_bases_from_config(cfg),
         parent_path_bases_from_config(cfg, config_root),
+        config_root.to_path_buf(),
     )
 }
 

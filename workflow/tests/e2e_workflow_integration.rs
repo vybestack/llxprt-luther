@@ -10,7 +10,10 @@ use std::sync::{Arc, Mutex};
 use luther_workflow::engine::executor::{
     interpolate_string, ExecutorRegistry, StepContext, StepExecutor,
 };
-use luther_workflow::engine::executors::ShellExecutor;
+use luther_workflow::engine::executors::{
+    GitConfigPublishExecutor, ShellExecutor, WorkspaceOwnershipExecutor,
+    WorkspaceOwnershipVerifyExecutor,
+};
 use luther_workflow::engine::instance::WorkflowInstance;
 use luther_workflow::engine::runner::{EngineError, EngineRunner, RunOutcome};
 use luther_workflow::engine::transition::StepOutcome;
@@ -113,6 +116,9 @@ fn setup_registry(outcomes: HashMap<String, Vec<StepOutcome>>) -> ExecutorRegist
     registry.register("llxprt", Box::new(executor.clone()));
     registry.register("workflow_auth_preflight", Box::new(executor.clone()));
     registry.register("command_manifest_group", Box::new(executor.clone()));
+    registry.register("workspace_ownership_verify", Box::new(executor.clone()));
+    registry.register("git_config_publish", Box::new(executor.clone()));
+    registry.register("workspace_ownership", Box::new(executor.clone()));
     for step_type in [
         "failure_cleanup",
         "task_charter",
@@ -154,8 +160,8 @@ fn test_happy_path_all_steps_succeed() {
     // Count the steps
     assert_eq!(
         workflow_type.steps.len(),
-        33,
-        "Expected scope-control gates plus workflow auth and PR follow-through steps"
+        37,
+        "Expected typed Git setup, ownership, scope-control, workflow auth, and PR follow-through steps"
     );
 
     // All steps succeed by default (empty outcomes map)
@@ -656,7 +662,7 @@ fn test_workflow_type_loads_from_toml() {
         .expect("Failed to load workflow type");
 
     // Assert base workflow, scope-control gates, and PR follow-through tail steps.
-    assert_eq!(workflow_type.steps.len(), 33, "Expected 33 steps");
+    assert_eq!(workflow_type.steps.len(), 37, "Expected 37 steps");
 
     // Assert transitions include per-edge limits
     let has_per_edge_limit = workflow_type
@@ -2973,17 +2979,32 @@ fn setup_workspace_exports_existing_pr_context_for_repeat_runs() {
         "setup_workspace should expose existing PR context for repeatable smoke runs: {command}"
     );
     assert!(
-        command.contains("git fetch --prune origin")
+        command.contains("fetch --prune origin")
             && command.contains("jq -r '.state'")
             && command.contains("OPEN")
             && command.contains("jq -r '.isDraft'")
             && command.contains("false"),
         "setup_workspace should prune stale deleted branches and only reuse an open non-draft PR: {command}"
     );
+    let setup_init = workflow_type
+        .steps
+        .iter()
+        .find(|step| step.step_id == "setup_workspace_init")
+        .expect("setup_workspace_init step exists");
+    let init_command = setup_init
+        .parameters
+        .as_ref()
+        .and_then(|params| params.get("command"))
+        .and_then(serde_json::Value::as_str)
+        .expect("setup_workspace_init command exists");
     assert!(
-        command.contains("git fsck --connectivity-only")
-            && command.contains("git clone https://github.com/{target_repo}.git \"{work_dir}\""),
-        "setup_workspace should replace corrupt target clones before fetching: {command}"
+        command.contains("fsck --connectivity-only")
+            && init_command.contains("git -c core.hooksPath=/dev/null init")
+            && !command.contains("rm -rf \"{work_dir}\"")
+            && !command.contains("git clone")
+            && !init_command.contains("rm -rf \"{work_dir}\"")
+            && !init_command.contains("git clone"),
+        "split setup should initialize safely in place without deleting ownership evidence"
     );
 }
 
@@ -3431,6 +3452,13 @@ fn dogfood_scope_control_dominates_mutation_and_push() {
         );
     }
     for (from, to, condition) in [
+        (
+            "setup_workspace_init",
+            "git_config_publish",
+            Some("success"),
+        ),
+        ("git_config_publish", "workspace_ownership", Some("success")),
+        ("workspace_ownership", "setup_workspace", Some("success")),
         ("setup_workspace", "task_charter", Some("success")),
         ("task_charter", "route_pr_path", Some("success")),
         ("workflow_auth_preflight_plan", "implement", Some("success")),
@@ -3557,6 +3585,81 @@ fn install_setup_test_commands(fake_bin: &std::path::Path, global_config: &std::
     std::fs::set_permissions(&fake_git, permissions).unwrap();
 }
 
+fn execute_shipped_setup_chain(
+    workflow: &WorkflowType,
+    context: &mut StepContext,
+    fake_bin: &std::path::Path,
+) {
+    let params_for = |step_id: &str| {
+        workflow
+            .steps
+            .iter()
+            .find(|step| step.step_id == step_id)
+            .unwrap_or_else(|| panic!("{step_id} step"))
+            .parameters
+            .clone()
+            .unwrap_or(serde_json::Value::Null)
+    };
+    let mut init_params = params_for("setup_workspace_init");
+    let git_config_params = params_for("git_config_publish");
+    let mut setup_params = params_for("setup_workspace");
+    for params in [&mut init_params, &mut setup_params] {
+        let command = params
+            .get("command")
+            .and_then(serde_json::Value::as_str)
+            .expect("setup shell command");
+        params["command"] = serde_json::Value::String(format!(
+            "export PATH=\"{}:$PATH\"\n{command}",
+            fake_bin.display()
+        ));
+    }
+
+    context.set_current_step_id("workspace_ownership_verify");
+    assert_eq!(
+        WorkspaceOwnershipVerifyExecutor
+            .execute(context, &serde_json::Value::Null)
+            .unwrap(),
+        StepOutcome::Success
+    );
+    context.set_current_step_id("setup_workspace_init");
+    assert_eq!(
+        ShellExecutor.execute(context, &init_params).unwrap(),
+        StepOutcome::Success
+    );
+    context.set_current_step_id("git_config_publish");
+    assert_eq!(
+        GitConfigPublishExecutor
+            .execute(context, &git_config_params)
+            .unwrap(),
+        StepOutcome::Success
+    );
+    context.set_current_step_id("workspace_ownership");
+    assert_eq!(
+        WorkspaceOwnershipExecutor
+            .execute(context, &serde_json::Value::Null)
+            .unwrap(),
+        StepOutcome::Success
+    );
+    context.set_current_step_id("setup_workspace");
+    assert_eq!(
+        ShellExecutor.execute(context, &setup_params).unwrap(),
+        StepOutcome::Success
+    );
+
+    context.set_current_step_id("git_config_publish");
+    assert_eq!(
+        GitConfigPublishExecutor
+            .execute(context, &git_config_params)
+            .unwrap(),
+        StepOutcome::Success
+    );
+    context.set_current_step_id("setup_workspace");
+    assert_eq!(
+        ShellExecutor.execute(context, &setup_params).unwrap(),
+        StepOutcome::Success
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn dogfood_setup_initializes_marker_owned_workspace_in_place() {
@@ -3603,54 +3706,27 @@ fn dogfood_setup_initializes_marker_owned_workspace_in_place() {
     install_setup_test_commands(&fake_bin, &global_config);
 
     let workflow = load_workflow_toml("config/workflows/llxprt-luther-dogfood-v1.toml");
-    let setup = workflow
-        .steps
-        .iter()
-        .find(|step| step.step_id == "setup_workspace")
-        .expect("setup_workspace step");
-    let mut params = setup.parameters.clone().expect("setup parameters");
-    let command = params
-        .get("command")
-        .and_then(serde_json::Value::as_str)
-        .expect("setup command");
-    let command = format!("export PATH=\"{}:$PATH\"\n{command}", fake_bin.display());
-    params["command"] = serde_json::Value::String(command);
-
     let mut context = StepContext::new(workspace.clone(), "run-setup-contract".to_string());
     context.set("work_dir", &workspace.to_string_lossy());
     context.set("artifact_dir", &artifacts.to_string_lossy());
     context.set("target_repo", "owner/repo");
     context.set("issue_number", "150");
     context.set("base_branch", "main");
-    context.set("daemon_managed_claim", "true");
 
-    let outcome = ShellExecutor
-        .execute(&mut context, &params)
-        .expect("execute shipped setup command");
-    assert_eq!(
-        outcome,
-        StepOutcome::Success,
-        "diagnostic={:?} json_parse_error={:?} stdout={:?} stderr={:?} exit={:?}",
-        context.get("diagnostic"),
-        context.get("json_parse_error"),
-        context.get("stdout"),
-        context.get("stderr"),
-        context.get("exit_code")
-    );
+    execute_shipped_setup_chain(&workflow, &mut context, &fake_bin);
     assert!(workspace.join(".git").is_dir());
     assert_eq!(
         std::fs::read_to_string(workspace.join(".luther/workspace-owner")).unwrap(),
         "run-setup-contract"
     );
     assert_eq!(
+        std::fs::read_to_string(workspace.join(".git/luther/workspace-owner")).unwrap(),
+        "run-setup-contract"
+    );
+    assert_eq!(
         std::fs::read_to_string(workspace.join("README.md")).unwrap(),
         "fixture\n"
     );
-
-    let outcome = ShellExecutor
-        .execute(&mut context, &params)
-        .expect("repeat shipped setup command");
-    assert_eq!(outcome, StepOutcome::Success);
 }
 
 #[test]

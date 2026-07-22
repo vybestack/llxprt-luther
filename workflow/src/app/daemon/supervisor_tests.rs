@@ -309,6 +309,7 @@ fn supervisor_scheduler_pass_reports_orphaned_wait_without_failing() {
         },
         DaemonPathBases::default(),
         std::collections::BTreeMap::new(),
+        std::path::PathBuf::from("config"),
     );
 
     let result: Result<RunSummary, SchedulerError> =

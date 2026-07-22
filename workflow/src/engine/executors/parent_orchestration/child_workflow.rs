@@ -15,23 +15,8 @@ pub(super) fn verify_existing_workspace_owner_marker(
     workspace: &Path,
     run_id: &str,
 ) -> Result<(), String> {
-    crate::engine::continuation::verify_workspace_ownership_marker(workspace, run_id)
+    crate::engine::workspace_ownership::verify_workspace_ownership(workspace, run_id)
         .map_or(Ok(()), Err)
-}
-
-/// Provision a child workspace's durable ownership marker.
-///
-/// Only the launch path may write the marker: it is the provisioning moment
-/// that establishes durable ownership for the new run id. This writes the
-/// `.luther/workspace-owner` marker atomically (create-new on first provision,
-/// idempotent on a same-owner match) and rejects a workspace already owned by a
-/// different run.
-pub(super) fn write_child_workspace_owner_marker(
-    workspace: &Path,
-    run_id: &str,
-) -> Result<(), String> {
-    crate::engine::continuation::provision_workspace_owner_marker(workspace, run_id)
-        .map_err(|err| format!("provision child workspace owner marker: {err}"))
 }
 
 pub fn child_launch_request(state: &OrchestrationState, child: u64) -> ChildWorkflowLaunchRequest {
@@ -113,40 +98,6 @@ pub enum ChildRunMode {
     Resume,
 }
 
-/// Reject a run id that is not a safe single path component.
-///
-/// A run id is interpolated directly into child artifact and work directories
-/// (`base/issue-{child}/{run_id}` and `base/children/issue-{child}/{run_id}`),
-/// so it must be a safe single path component: non-empty, no path separators
-/// (`/`, ``), no parent-directory traversal (`..`), no NUL byte, and only
-/// otherwise-permissible identifier characters. This prevents a hostile or
-/// malformed run id from escaping the per-child directory subtree into an
-/// arbitrary filesystem location.
-pub fn validate_run_id_path_component(run_id: &str) -> Result<(), String> {
-    if run_id.is_empty() {
-        return Err("child workflow run id must not be empty".to_string());
-    }
-    if run_id.contains('/') || run_id.contains('\\') {
-        return Err(format!(
-            "child workflow run id '{run_id}' must not contain path separators"
-        ));
-    }
-    if run_id == "." || run_id == ".." || run_id.contains('\0') {
-        return Err(format!(
-            "child workflow run id '{run_id}' must be a safe single path component"
-        ));
-    }
-    if !run_id
-        .chars()
-        .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
-    {
-        return Err(format!(
-            "child workflow run id '{run_id}' must contain only alphanumeric, '-', or '_' characters"
-        ));
-    }
-    Ok(())
-}
-
 pub fn run_child_workflow(
     request: &ChildWorkflowLaunchRequest,
     mode: ChildRunMode,
@@ -161,34 +112,152 @@ pub fn run_child_workflow(
         .map_err(|err| format!("resolve child workflow type: {err}"))?;
     apply_child_overrides(&mut config, request)?;
     let db_path = crate::runtime_paths::get_data_dir().join("checkpoints.db");
-    if let Some(work_dir) = request.work_dir.as_deref() {
-        match mode {
-            // Launch provisions the durable workspace ownership marker; it is
-            // the only path that may write it.
-            ChildRunMode::Launch => {
-                write_child_workspace_owner_marker(work_dir, &request.run_id)?;
-            }
-            // Resume must verify the marker already exists and belongs to the
-            // resuming run id, never (re)writing it. A missing or foreign-owned
-            // marker means the resume cannot safely proceed.
-            ChildRunMode::Resume => {
-                verify_existing_workspace_owner_marker(work_dir, &request.run_id)?;
-            }
+    match mode {
+        ChildRunMode::Launch => {
+            launch_child_workflow(request, &workflow_type, &config, config_root, &db_path)
+        }
+        ChildRunMode::Resume => {
+            resume_child_workflow(request, &workflow_type, &config, config_root, &db_path)
         }
     }
-    let run_context = child_run_context(&config, request)?;
-    let instance =
-        WorkflowInstance::create_with_run_id(workflow_type, config.clone(), &request.run_id);
-    let mut runner = EngineRunner::with_db_path_and_context(
+}
+
+/// Launch a fresh child workflow: provision workspace ownership, insert the
+/// starting run row with provenance, construct the runner, and run.
+fn launch_child_workflow(
+    request: &ChildWorkflowLaunchRequest,
+    workflow_type: &crate::workflow::schema::WorkflowType,
+    config: &WorkflowConfig,
+    config_root: &Path,
+    db_path: &Path,
+) -> Result<ChildWorkflowRunResult, String> {
+    // Launch provisions the durable workspace ownership marker; it is the
+    // only path that may write it.
+    if let Some(work_dir) = request.work_dir.as_deref() {
+        crate::engine::workspace_ownership::provision_workspace_ownership(
+            work_dir,
+            &request.run_id,
+        )
+        .map_err(|err| format!("provision child workspace ownership: {err}"))?;
+    }
+    let launch_provenance =
+        crate::persistence::LaunchProvenance::from_resolved(workflow_type, config, config_root)
+            .map_err(|err| format!("record child launch provenance: {err}"))?;
+    let mut run_context = child_run_context(config, request)?;
+    run_context.launch_provenance = Some(launch_provenance);
+    let instance = WorkflowInstance::create_with_run_id(
+        workflow_type.clone(),
+        config.clone(),
+        &request.run_id,
+    );
+    // A fresh launch must fail closed if the initial Starting RunMetadata with
+    // Some provenance cannot be atomically inserted (run_id collision or DB
+    // error).
+    let mut runner = EngineRunner::with_db_path_for_launch(
         instance,
         crate::engine::executor::ExecutorRegistry::with_defaults(),
-        &db_path,
+        db_path,
         run_context,
     )
     .map_err(|err| err.to_string())?;
-    if matches!(mode, ChildRunMode::Resume) {
-        prepare_child_resume(&db_path, request)?;
+    let outcome = runner.run().map_err(|err| err.to_string())?;
+    child_result_from_run_outcome(outcome, request, config, db_path)
+}
+
+/// Resume an existing child workflow: perform complete read-only validation
+/// (identity, provenance, workspace marker, current-step, checkpoint,
+/// authorization) BEFORE any durable mutation, then promote ownership, commit
+/// the checkpoint, construct the runner, and run.
+fn resume_child_workflow(
+    request: &ChildWorkflowLaunchRequest,
+    workflow_type: &crate::workflow::schema::WorkflowType,
+    config: &WorkflowConfig,
+    config_root: &Path,
+    db_path: &Path,
+) -> Result<ChildWorkflowRunResult, String> {
+    // Issue 158 gap 1: perform the COMPLETE read-only validation BEFORE any
+    // durable mutation. This returns the ephemeral WorkspaceAuthorization and
+    // the selected checkpoint identity. On any failure (foreign owner, missing
+    // evidence, malformed marker, provenance mismatch, missing current_step)
+    // the child run aborts without touching markers, lease, or checkpoint.
+    let prepared = child_resume_preparation::prepare_child_resume_readonly(
+        db_path,
+        request,
+        workflow_type,
+        config,
+        config_root,
+    )?;
+    // Promote verified existing evidence only AFTER the read-only
+    // authorization succeeded. Resume never creates a first claim.
+    if let Some(work_dir) = request.work_dir.as_deref() {
+        crate::engine::workspace_ownership::ensure_durable_workspace_ownership(
+            work_dir,
+            &request.run_id,
+        )
+        .map_err(|err| format!("verify child workspace ownership: {err}"))?;
+    }
+    // Commit the resume checkpoint using the identity selected during
+    // read-only preparation. The commit re-validates the identity inside its
+    // IMMEDIATE transaction.
+    child_resume_preparation::commit_prepared_resume_checkpoint(
+        db_path,
+        request,
+        prepared.checkpoint_identity(),
+    )?;
+    let run_context = child_run_context(config, request)?;
+    let instance = WorkflowInstance::create_with_run_id(
+        workflow_type.clone(),
+        config.clone(),
+        &request.run_id,
+    );
+    // Resume reuses the existing persisted row via the best-effort constructor.
+    let mut runner = EngineRunner::with_db_path_and_context(
+        instance,
+        crate::engine::executor::ExecutorRegistry::with_defaults(),
+        db_path,
+        run_context,
+    )
+    .map_err(|err| err.to_string())?;
+    // Inject the ephemeral WorkspaceAuthorization reconstructed from the
+    // verified workspace descriptor BEFORE any resumed step executes.
+    if let Some(authorization) = prepared.authorization() {
+        runner.attach_workspace_authorization(authorization);
     }
     let outcome = runner.run().map_err(|err| err.to_string())?;
-    child_result_from_run_outcome(outcome, request, &config, &db_path)
+    child_result_from_run_outcome(outcome, request, config, db_path)
+}
+
+/// Verify the persisted launch provenance for a child resume against the
+/// recomputed digests, refusing before any mutation on mismatch.
+///
+/// @plan:PLAN-20260722-ISSUE158-LAUNCH-PROVENANCE
+pub(super) fn verify_child_resume_provenance(
+    db_path: &Path,
+    request: &ChildWorkflowLaunchRequest,
+    workflow_type: &crate::workflow::schema::WorkflowType,
+    config: &WorkflowConfig,
+    config_root: &Path,
+) -> Result<(), String> {
+    let conn = rusqlite::Connection::open(db_path).map_err(|e| e.to_string())?;
+    let metadata = crate::persistence::get_run_with_conn(&conn, &request.run_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("missing run metadata for child {}", request.run_id))?;
+    let verification = crate::persistence::verify_provenance(
+        &metadata.launch_provenance,
+        workflow_type,
+        config,
+        config_root,
+        crate::persistence::LegacyAllowed::Allowed,
+    );
+    match verification {
+        crate::persistence::ProvenanceVerification::Match => Ok(()),
+        crate::persistence::ProvenanceVerification::Legacy(warning) => {
+            tracing::warn!("child run '{}': {warning}", request.run_id);
+            Ok(())
+        }
+        crate::persistence::ProvenanceVerification::Mismatch(reason) => Err(format!(
+            "child launch provenance mismatch for run '{}': {reason}",
+            request.run_id
+        )),
+    }
 }

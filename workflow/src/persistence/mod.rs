@@ -3,7 +3,14 @@
 pub mod artifacts;
 pub mod checkpoint;
 pub(crate) mod claim_metadata;
+/// Exact launch provenance: durable canonical serialization + SHA-256 digest
+/// of the resolved workflow type/config at launch time.
+/// @plan:PLAN-20260722-ISSUE158-LAUNCH-PROVENANCE
+pub mod launch_provenance;
 pub mod leases;
+/// Durable state machine table for recoverable legacy ownership migration.
+/// @plan:PLAN-20260722-ISSUE158-LEGACY-OWNERSHIP-MIGRATION
+pub mod legacy_migration_state;
 pub mod run_metadata;
 pub mod sqlite;
 pub mod trace;
@@ -22,6 +29,11 @@ pub use checkpoint::{
     set_resume_point, Checkpoint, EventRecord, EventType, PersistenceError, StateSnapshot,
     CHECKPOINT_STATUS_INTERRUPTED, CHECKPOINT_STATUS_READY_TO_RESUME, CHECKPOINT_STATUS_WAITING,
 };
+pub use launch_provenance::{
+    compute_config_digest, compute_workflow_digest, decode_config_root, encode_config_root,
+    verify_provenance, LaunchProvenance, LaunchProvenanceError, LegacyAllowed, MigrationSource,
+    ProvenanceVerification, LAUNCH_PROVENANCE_SCHEMA_VERSION,
+};
 pub use leases::{
     count_active_leases, count_active_leases_for_config, count_active_leases_for_repository,
     create_lease, get_lease_for_issue, init_leases_table, list_all_leases, list_leases_by_config,
@@ -30,13 +42,16 @@ pub use leases::{
     update_lease_status, update_lease_status_conditional,
     update_lease_status_conditional_exact_owner, IssueLease, LeaseStatus,
 };
+pub use legacy_migration_state::{
+    migration_is_durable_completed, migration_is_pending, MigrationStateRow, MigrationStatus,
+};
 pub use run_metadata::{
     is_pid_stale, run_metadata_from_ref, FailureCleanupState, RunMetadata, RunStatus,
 };
 pub use sqlite::{
-    get_run_with_conn, list_runs_by_ids_with_conn, list_runs_with_conn,
-    persist_run_status_conditional_outcome_with_conn, persist_run_with_conn,
-    ConditionalStatusOutcome, SqliteStore, SqliteStoreRef,
+    get_run_with_conn, insert_initial_run_with_conn, list_runs_by_ids_with_conn,
+    list_runs_with_conn, persist_run_status_conditional_outcome_with_conn, persist_run_with_conn,
+    ConditionalStatusOutcome, InitialRunInsert, SqliteStore, SqliteStoreRef,
 };
 pub use trace::{
     export_trace, load_trace, save_trace, SmokeTrace, TraceEvent, TraceOutcome, SCHEMA_VERSION,
@@ -105,6 +120,14 @@ pub fn init_database(db_path: &Path) -> Result<(), checkpoint::PersistenceError>
     wait_state::init_wait_states_table(&tx).map_err(|e| {
         checkpoint::PersistenceError::Database(format!(
             "Failed to initialize wait-state schema: {e}"
+        ))
+    })?;
+
+    // Initialize durable legacy-ownership-migration state table (issue 158).
+    // @plan:PLAN-20260722-ISSUE158-LEGACY-OWNERSHIP-MIGRATION
+    legacy_migration_state::init_legacy_migration_table(&tx).map_err(|e| {
+        checkpoint::PersistenceError::Database(format!(
+            "Failed to initialize legacy migration state schema: {e}"
         ))
     })?;
 

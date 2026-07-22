@@ -128,12 +128,45 @@ pub(super) fn seed_cleanup_abandonment(
         captured_at: Utc::now(),
         cleanup_completed_at: Some(Utc::now()),
         recovery_consumed_at: None,
+        ownership_denied: false,
     });
     persist_run_with_conn(conn, &metadata).expect("persist cleanup provenance");
     // Write the durable `.luther/workspace-owner` marker so the workspace is
     // trusted for cleanup-failure-abandonment recovery.
     write_workspace_owner_marker(workspace, run_id).expect("write owner marker");
     checkpoint_identity(&checkpoint)
+}
+
+/// Seed a run whose failure-cleanup state marks it as an ownership-denied
+/// terminal: `ownership_denied = true` and `cleanup_succeeded = false`. This
+/// is the distinct non-resumable state that must never be selected for
+/// cleanup continuation, because cleanup executes shell commands that must
+/// only run in a trusted workspace.
+pub(super) fn seed_ownership_denied_terminal(conn: &Connection, run_id: &str) {
+    seed_run(conn, run_id, RunStatus::Failed, "abandon_and_log");
+    seed_checkpoint(conn, run_id, "remediate", "completed");
+    let checkpoint = get_checkpoint_for_step(conn, run_id, "remediate")
+        .expect("checkpoint query")
+        .expect("failed checkpoint");
+    seed_checkpoint(conn, run_id, "abandon_and_log", "completed");
+    let mut metadata = get_run_with_conn(conn, run_id)
+        .expect("run query")
+        .expect("run");
+    metadata.failure_cleanup = Some(crate::persistence::FailureCleanupState {
+        schema_version: crate::persistence::FailureCleanupState::SCHEMA_VERSION,
+        failed_step: "remediate".to_string(),
+        failure_outcome: "fatal".to_string(),
+        failure_reason: "workspace ownership denied".to_string(),
+        failed_checkpoint_id: checkpoint_identity(&checkpoint),
+        failed_state_snapshot: checkpoint.state_snapshot.clone(),
+        cleanup_step: "abandon_and_log".to_string(),
+        cleanup_succeeded: false,
+        captured_at: Utc::now(),
+        cleanup_completed_at: None,
+        recovery_consumed_at: None,
+        ownership_denied: true,
+    });
+    persist_run_with_conn(conn, &metadata).expect("persist ownership-denied terminal");
 }
 
 /// Continuation kinds that should be rejected uniformly when a run is in a

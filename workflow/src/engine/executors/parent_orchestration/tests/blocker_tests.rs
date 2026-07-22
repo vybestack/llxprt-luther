@@ -520,8 +520,8 @@ fn child_cas_rejected_outcome_propagates_artifact_write_error() {
 fn validate_run_id_rejects_empty() {
     let err = validate_run_id_path_component("").unwrap_err();
     assert!(
-        err.contains("empty"),
-        "expected empty-rejection message, got: {err}"
+        err.contains("alphanumeric"),
+        "expected categorical identifier rejection, got: {err}"
     );
 }
 
@@ -529,13 +529,13 @@ fn validate_run_id_rejects_empty() {
 fn validate_run_id_rejects_path_separators() {
     let err = validate_run_id_path_component("run/with/slash").unwrap_err();
     assert!(
-        err.contains("path separators"),
-        "expected path-separator rejection, got: {err}"
+        err.contains("alphanumeric"),
+        "expected categorical identifier rejection, got: {err}"
     );
     let err = validate_run_id_path_component("run\\with\\backslash").unwrap_err();
     assert!(
-        err.contains("path separators"),
-        "expected path-separator rejection, got: {err}"
+        err.contains("alphanumeric"),
+        "expected categorical identifier rejection, got: {err}"
     );
 }
 
@@ -543,13 +543,13 @@ fn validate_run_id_rejects_path_separators() {
 fn validate_run_id_rejects_parent_traversal() {
     let err = validate_run_id_path_component("..").unwrap_err();
     assert!(
-        err.contains("safe single path component"),
-        "expected traversal rejection, got: {err}"
+        err.contains("alphanumeric"),
+        "expected categorical identifier rejection, got: {err}"
     );
     let err = validate_run_id_path_component(".").unwrap_err();
     assert!(
-        err.contains("safe single path component"),
-        "expected traversal rejection, got: {err}"
+        err.contains("alphanumeric"),
+        "expected categorical identifier rejection, got: {err}"
     );
 }
 
@@ -557,8 +557,8 @@ fn validate_run_id_rejects_parent_traversal() {
 fn validate_run_id_rejects_nul_byte() {
     let err = validate_run_id_path_component("run\u{0}evil").unwrap_err();
     assert!(
-        err.contains("safe single path component"),
-        "expected NUL rejection, got: {err}"
+        err.contains("alphanumeric"),
+        "expected categorical identifier rejection, got: {err}"
     );
 }
 
@@ -596,9 +596,10 @@ fn launch_child_process_writes_workspace_owner_marker() {
     assert!(!marker.exists());
 
     // Invoke the launch marker provisioning path. This is exercised via the
-    // public `write_child_workspace_owner_marker` helper used by
+    // public `crate::engine::workspace_ownership::provision_workspace_owner_marker` helper used by
     // `run_child_workflow` in Launch mode.
-    write_child_workspace_owner_marker(&work_dir, run_id).unwrap();
+    crate::engine::workspace_ownership::provision_workspace_owner_marker(&work_dir, run_id)
+        .unwrap();
 
     assert!(
         marker.exists(),
@@ -622,10 +623,13 @@ fn launch_child_process_marker_writing_rejects_foreign_owner() {
     let first_run = "first-run";
     let second_run = "second-run";
 
-    write_child_workspace_owner_marker(&work_dir, first_run).unwrap();
-    let err = write_child_workspace_owner_marker(&work_dir, second_run).unwrap_err();
+    crate::engine::workspace_ownership::provision_workspace_owner_marker(&work_dir, first_run)
+        .unwrap();
+    let err =
+        crate::engine::workspace_ownership::provision_workspace_owner_marker(&work_dir, second_run)
+            .unwrap_err();
     assert!(
-        err.contains("provision child workspace owner marker"),
+        err.to_string().contains(first_run),
         "expected a foreign-owner rejection, got: {err}"
     );
 
@@ -647,7 +651,8 @@ fn resume_child_process_marker_verification_passes_for_matching_owner() {
     let run_id = "child-resume-run-1";
 
     // Simulate a prior launch provisioning the marker.
-    write_child_workspace_owner_marker(&work_dir, run_id).unwrap();
+    crate::engine::workspace_ownership::provision_workspace_owner_marker(&work_dir, run_id)
+        .unwrap();
     let marker = work_dir.join(".luther").join("workspace-owner");
     let mtime_before = std::fs::metadata(&marker).unwrap().modified().unwrap();
 
@@ -685,7 +690,8 @@ fn resume_child_process_marker_verification_rejects_foreign_owner() {
     let owning_run = "owning-run";
     let resuming_run = "resuming-run";
 
-    write_child_workspace_owner_marker(&work_dir, owning_run).unwrap();
+    crate::engine::workspace_ownership::provision_workspace_owner_marker(&work_dir, owning_run)
+        .unwrap();
 
     let err = verify_existing_workspace_owner_marker(&work_dir, resuming_run).unwrap_err();
     assert!(

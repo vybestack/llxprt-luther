@@ -8,6 +8,18 @@ workflow_type_id = "llxprt-luther-dogfood-v1"
 # STEPS (14 total - write_issue_files eliminated, fetch_issue writes directly)
 # =============================================================================
 
+# Issue 158: workspace_ownership_verify runs BEFORE select_issue so no GitHub
+# state mutation (assignment/label) occurs until workspace ownership is
+# confirmed. A daemon-managed workspace provisions bootstrap ownership
+# evidence in the daemon launch path (provision_workspace_ownership) before
+# the engine runs, so this step has evidence to verify on the first graph
+# execution.
+
+[[steps]]
+step_id = "workspace_ownership_verify"
+step_type = "workspace_ownership_verify"
+description = "Read-only pre-setup workspace ownership verification (issue 158)"
+
 [[steps]]
 step_id = "select_issue"
 step_type = "shell"
@@ -88,9 +100,40 @@ issue_number = ".number"
 issue_title = ".title"
 
 [[steps]]
+step_id = "setup_workspace_init"
+step_type = "shell"
+description = "Initialize Git metadata in the authorized workspace"
+
+[steps.parameters]
+command = """
+set -eu
+
+unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_INDEX_FILE GIT_CONFIG_COUNT GIT_CONFIG_PARAMETERS GIT_PROXY_COMMAND GIT_SSH GIT_SSH_COMMAND
+export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_NOSYSTEM=1
+git -c core.hooksPath=/dev/null init 1>&2
+"""
+
+[steps.parameters.exit_code_map]
+1 = "fatal"
+128 = "fatal"
+
+[[steps]]
+step_id = "git_config_publish"
+step_type = "git_config_publish"
+description = "Publish repository-local Git configuration through authorized descriptors"
+
+[steps.parameters]
+origin_url = "https://github.com/{target_repo}.git"
+
+[[steps]]
+step_id = "workspace_ownership"
+step_type = "workspace_ownership"
+description = "Promote bootstrap workspace ownership evidence to durable .git/luther evidence"
+
+[[steps]]
 step_id = "setup_workspace"
 step_type = "shell"
-description = "Ensure repo is checked out, create issue branch, create artifact dir"
+description = "Verify and fetch repo, create issue branch, create artifact dir"
 
 [steps.parameters]
 output_format = "json"
@@ -100,69 +143,6 @@ set -eu
 
 unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_INDEX_FILE GIT_CONFIG_COUNT GIT_CONFIG_PARAMETERS GIT_PROXY_COMMAND GIT_SSH GIT_SSH_COMMAND
 export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_NOSYSTEM=1
-cd "{work_dir}"
-EXPECTED_ORIGIN='https://github.com/{target_repo}.git'
-if [ -e .luther ] && { [ -L .luther ] || [ ! -d .luther ]; }; then
-  echo "Workspace ownership directory must be a real directory" >&2
-  exit 1
-fi
-if [ -e .luther/workspace-owner ] || [ -L .luther/workspace-owner ]; then
-  if [ -L .luther/workspace-owner ] || [ ! -f .luther/workspace-owner ]; then
-    echo "Workspace ownership marker must be a regular file" >&2
-    exit 1
-  fi
-  if ! printf %s '{run_id}' | cmp -s - .luther/workspace-owner; then
-    echo "Workspace ownership marker does not exactly match this run" >&2
-    exit 1
-  fi
-elif [ "{daemon_managed_claim}" = "true" ]; then
-  echo "Daemon-managed workspace has no regular ownership marker" >&2
-  exit 1
-fi
-if [ -e .git ] && { [ -L .git ] || [ ! -d .git ]; }; then
-  echo "Workspace Git metadata must be a real directory" >&2
-  exit 1
-fi
-if [ -d .git ]; then
-  GIT_SYMLINK=$(find .git -type l -print -quit) || {
-    echo "Unable to inspect workspace Git metadata" >&2
-    exit 1
-  }
-  if [ -n "$GIT_SYMLINK" ]; then
-    echo "Workspace Git metadata may not contain symlinks" >&2
-    exit 1
-  fi
-fi
-if [ ! -d .git ]; then
-  UNEXPECTED_ENTRY=$(find . -mindepth 1 -maxdepth 1 ! -name .luther -print -quit) || {
-    echo "Unable to inspect owned workspace" >&2
-    exit 1
-  }
-  if [ -n "$UNEXPECTED_ENTRY" ]; then
-    echo "Owned workspace contains unexpected pre-repository state" >&2
-    exit 1
-  fi
-fi
-if [ ! -d .git ]; then
-  git -c core.hooksPath=/dev/null init 1>&2
-fi
-ORIGIN_URL=$(git config --get remote.origin.url || true)
-if [ -n "$ORIGIN_URL" ] && [ "$ORIGIN_URL" != "$EXPECTED_ORIGIN" ]; then
-  echo "Workspace origin does not match target repository" >&2
-  exit 1
-fi
-rm -f .git/config .git/objects/info/alternates
-cat > .git/config <<EOF
-[core]
-	repositoryformatversion = 0
-	filemode = true
-	bare = false
-	logallrefupdates = true
-	hooksPath = /dev/null
-[remote "origin"]
-	url = $EXPECTED_ORIGIN
-	fetch = +refs/heads/*:refs/remotes/origin/*
-EOF
 if ! git -c core.hooksPath=/dev/null fsck --connectivity-only >/dev/null 2>&1; then
   echo "Workspace repository failed connectivity verification" >&2
   exit 1
@@ -955,14 +935,45 @@ echo "Luther dogfood PR created successfully for issue #{issue_number}: {pr_url}
 # TRANSITIONS - dogfood includes deterministic post-PR follow-up
 # =============================================================================
 
+# Issue 158: workspace_ownership_verify runs first so no GitHub state mutation
+# occurs until workspace ownership is confirmed.
+[[transitions]]
+from = "workspace_ownership_verify"
+to = "select_issue"
+
+[[transitions]]
+from = "workspace_ownership_verify"
+to = "abandon_and_log"
+condition = "fatal"
+
 [[transitions]]
 from = "select_issue"
+to = "setup_workspace_init"
+
+[[transitions]]
+from = "setup_workspace_init"
+to = "git_config_publish"
+condition = "success"
+
+[[transitions]]
+from = "git_config_publish"
+to = "workspace_ownership"
+condition = "success"
+
+[[transitions]]
+from = "workspace_ownership"
 to = "setup_workspace"
+condition = "success"
 
 [[transitions]]
 from = "setup_workspace"
 to = "task_charter"
 condition = "success"
+
+[[transitions]]
+from = "workspace_ownership"
+to = "abandon_and_log"
+condition = "fatal"
 
 [[transitions]]
 from = "task_charter"
@@ -1281,6 +1292,16 @@ condition = "fatal"
 
 [[transitions]]
 from = "select_issue"
+to = "abandon_and_log"
+condition = "fatal"
+
+[[transitions]]
+from = "setup_workspace_init"
+to = "abandon_and_log"
+condition = "fatal"
+
+[[transitions]]
+from = "git_config_publish"
 to = "abandon_and_log"
 condition = "fatal"
 

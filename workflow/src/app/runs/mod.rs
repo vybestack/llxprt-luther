@@ -4,6 +4,7 @@ use super::status::{
 };
 use luther_workflow::engine::executor::ExecutorRegistry;
 use luther_workflow::engine::instance::WorkflowInstance;
+use luther_workflow::engine::prepare_resume_authorization;
 use luther_workflow::engine::runner::{EngineRunner, RunOutcome};
 use luther_workflow::monitor::heartbeat::{read_all_heartbeats, MonitorState};
 use luther_workflow::persistence::{
@@ -46,6 +47,9 @@ pub async fn handle_runs_command(args: &luther_workflow::cli::RunsArgs) {
         RunsCommand::Resume(resume_args) => handle_runs_resume(resume_args),
         RunsCommand::Retry(retry_args) => handle_runs_retry(retry_args),
         RunsCommand::Rewind(rewind_args) => handle_runs_rewind(rewind_args),
+        RunsCommand::MigrateLegacyOwnership(migrate_args) => {
+            handle_runs_migrate_legacy_ownership(migrate_args)
+        }
     }
 }
 
@@ -68,6 +72,11 @@ pub fn run_context_from_metadata(
         issue_number: md.issue_number,
         pr_number: md.pr_number,
         head_sha: md.head_sha.clone(),
+        workspace_authorization: None,
+        // Resume paths do not set launch_provenance; the engine preserves the
+        // existing persisted value because persist_initial_run is a no-op for
+        // existing rows. @plan:PLAN-20260722-ISSUE158-LAUNCH-PROVENANCE
+        launch_provenance: None,
     }
 }
 
@@ -80,8 +89,16 @@ pub fn reconstruct_runner(
     db_path: &std::path::Path,
     config_dir: &Option<std::path::PathBuf>,
 ) -> Result<EngineRunner, String> {
-    let config_root = config_dir
+    let persisted_root = match md.launch_provenance.as_ref() {
+        Some(provenance) => Some(
+            luther_workflow::persistence::decode_config_root(&provenance.canonical_config_root)
+                .map_err(|error| format!("decode persisted config root: {error}"))?,
+        ),
+        None => None,
+    };
+    let config_root = persisted_root
         .as_deref()
+        .or(config_dir.as_deref())
         .unwrap_or(std::path::Path::new("config"));
     let config = resolve_workflow_config(&md.config_id, config_root)
         .map_err(|e| format!("resolve config '{}': {e}", md.config_id))?;
@@ -136,6 +153,29 @@ fn reconstruct_runner_with_config_and_provenance(
         .map_err(|e| format!("apply continuation overrides: {e}"))?;
     let workflow_type = resolve_workflow_type(&md.workflow_type_id, config_root)
         .map_err(|e| format!("resolve workflow type '{}': {e}", md.workflow_type_id))?;
+    // @plan:PLAN-20260722-ISSUE158-LAUNCH-PROVENANCE
+    // Re-resolve from the persisted canonical config root, recompute the exact
+    // digest, and refuse BEFORE any lease/marker/DB mutation on mismatch.
+    // Legacy None rows are admitted only via the explicit typed LegacyAllowed
+    // policy with a warning; new records always carry Some provenance.
+    let verification = luther_workflow::persistence::verify_provenance(
+        &md.launch_provenance,
+        &workflow_type,
+        &config,
+        config_root,
+        luther_workflow::persistence::LegacyAllowed::Allowed,
+    );
+    match verification {
+        luther_workflow::persistence::ProvenanceVerification::Match => {}
+        luther_workflow::persistence::ProvenanceVerification::Legacy(warning) => {
+            eprintln!("Warning: {warning}");
+        }
+        luther_workflow::persistence::ProvenanceVerification::Mismatch(reason) => {
+            return Err(format!(
+                "launch provenance mismatch for run '{run_id}': {reason}"
+            ));
+        }
+    }
     // Fail fast with diagnostics rather than resuming against an invalid profile,
     // but only when the workflow actually uses a target profile (mirrors the
     // initial-run gate). @plan:PLAN-20260623-LUTHER-CONTINUATION
@@ -201,11 +241,9 @@ fn continuation_lease(
     let Some(repository) = metadata.repository.as_deref() else {
         return Ok(None);
     };
-    let Some(issue_number) = metadata
-        .issue_number
-        .or(metadata.pr_number)
-        .and_then(|number| u64::try_from(number).ok())
-    else {
+    // Issue 158 slice 5: lease authority requires the immutable issue number,
+    // never a PR number. A PR-only run has no issue lease to resolve.
+    let Some(issue_number) = metadata.issue_lease_number() else {
         return Ok(None);
     };
     luther_workflow::persistence::get_lease_for_issue(store.conn(), repository, issue_number)
@@ -264,10 +302,14 @@ fn resolve_continuation_lease(
     Ok(Some(lease))
 }
 
-/// Whether `metadata` carries enough identity (repository + issue/PR number) to
+/// Whether `metadata` carries enough identity (repository + issue number) to
 /// be expected to hold an issue lease.
+///
+/// Issue 158 slice 5: a PR number is **not** a lease anchor. A run that
+/// recorded only a `pr_number` has no issue lease, so it is not expected to
+/// hold one and a missing lease for it is not a hard error.
 fn metadata_has_issue_identity(metadata: &RunMetadata) -> bool {
-    metadata.repository.is_some() && metadata.issue_number.or(metadata.pr_number).is_some()
+    metadata.repository.is_some() && metadata.issue_lease_number().is_some()
 }
 
 /// Fail closed unless the lease is owned by `run_id`.
@@ -438,6 +480,135 @@ fn lease_already_finalized(
         && current.status == status
 }
 
+/// Lease + daemon-management state resolved for a continuation run before
+/// any durable mutation. Captured up front so the execution phases can stay
+/// linear and free of inline exit-on-error logic.
+struct ContinuationLeaseState {
+    had_lease: bool,
+    daemon_managed: bool,
+}
+
+/// Resolve the continuation lease (exiting on inspection failure) and derive
+/// whether this run is daemon-managed and previously held the lease.
+fn resolve_continuation_lease_state(
+    store: &SqliteStore,
+    md: &RunMetadata,
+    request: &luther_workflow::engine::ContinuationRequest,
+) -> ContinuationLeaseState {
+    let continuation_lease = continuation_lease(store, md).unwrap_or_else(|error| {
+        eprintln!("Error: failed to inspect continuation lease: {error}");
+        process::exit(1);
+    });
+    let had_lease = continuation_lease.is_some();
+    let daemon_managed = md.issue_number.is_some()
+        && continuation_lease
+            .as_ref()
+            .is_some_and(|lease| lease.run_id.as_deref() == Some(request.run_id.as_str()));
+    ContinuationLeaseState {
+        had_lease,
+        daemon_managed,
+    }
+}
+
+/// Reject the continuation when a legacy ownership migration is durably
+/// pending. A pending migration row signals an incomplete migration that may
+/// have published the marker without recording the completion audit; the
+/// resume trust contract requires a durable `completed` migration before the
+/// migrated marker is trusted.
+fn reject_pending_legacy_migration(store: &SqliteStore, run_id: &str) {
+    if luther_workflow::persistence::migration_is_pending(store.conn(), run_id) {
+        eprintln!(
+            "Error: resume refused for run '{}': a legacy ownership migration is pending \
+             (intent recorded but not completed). Run 'migrate-legacy-ownership' to complete it first.",
+            run_id
+        );
+        process::exit(1);
+    }
+}
+
+/// Perform all read-only authorization (runner reconstruction, pending-migration
+/// rejection, resume authorization) BEFORE any durable mutation so a failure
+/// leaves lease, checkpoint, and markers untouched.
+fn authorize_continuation(
+    runner: &mut EngineRunner,
+    store: &SqliteStore,
+    md: &RunMetadata,
+    request: &luther_workflow::engine::ContinuationRequest,
+) {
+    // Issue 158: reject resume while a legacy ownership migration is durably
+    // pending. A pending migration row signals an incomplete migration that may
+    // have published the marker without recording the completion audit; the
+    // resume trust contract requires a durable `completed` migration before the
+    // migrated marker is trusted.
+    reject_pending_legacy_migration(store, &request.run_id);
+    // Issue 158 slice 6: perform complete read-only persisted identity +
+    // ownership + authorization BEFORE any durable mutation (commit/lease
+    // CAS). The PreparedResume reconstructs the ephemeral
+    // WorkspaceAuthorization from the same verified workspace descriptor so a
+    // resumed shell step retains descriptor-anchored authorization. On any
+    // failure (foreign owner, missing evidence, malformed marker) the process
+    // exits without touching the lease, checkpoint, or markers.
+    attach_resume_authorization_or_exit(runner, md, &request.run_id);
+}
+
+/// Borrowed bundle of the continuation identity and plan used across the
+/// execution + maintenance phases. Grouping these keeps the phase helpers
+/// under the argument-count limit without leaking internals.
+struct ContinuationRun<'a> {
+    md: &'a RunMetadata,
+    request: &'a luther_workflow::engine::ContinuationRequest,
+    plan: &'a luther_workflow::engine::continuation::ContinuationPlan,
+    step: &'a str,
+}
+
+/// Run the reconstructed continuation runner and aggregate all post-run
+/// maintenance (failed-state persistence, result artifact, lease
+/// finalization). Maintenance is performed independently so a failure in one
+/// action cannot skip or suppress the others. Returns the run outcome and
+/// whether any maintenance action failed (including `prior_errors`).
+fn execute_and_maintain(
+    store: &SqliteStore,
+    run: ContinuationRun<'_>,
+    mut runner: EngineRunner,
+    lease_state: &ContinuationLeaseState,
+    prior_errors: Vec<String>,
+) -> (
+    Result<RunOutcome, luther_workflow::engine::runner::EngineError>,
+    bool,
+) {
+    install_interrupt_handlers(runner.interrupt_handle());
+    let outcome = runner.run();
+    let mut maintenance_errors = prior_errors;
+    // Post-run maintenance is performed independently so a failure in one
+    // action cannot skip or suppress the others. Concretely, a persistence
+    // failure while recording the failed-state must not leave the continuation
+    // lease stuck in `Running` nor suppress the result artifact. Maintenance
+    // errors are aggregated and reported after all actions are attempted.
+    // @plan:PLAN-20260623-LUTHER-CONTINUATION
+    if let Err(ref error) = outcome {
+        if let Err(maintenance_error) =
+            persist_continuation_failure(store, &run.request.run_id, error)
+        {
+            maintenance_errors.push(maintenance_error);
+        }
+    }
+    write_continuation_result(
+        &run.plan.artifact_dir,
+        &run.request.kind,
+        run.step,
+        &outcome,
+    );
+    if lease_state.had_lease {
+        if let Err(error) =
+            finalize_continuation_lease(store, run.md, &run.request.run_id, &outcome)
+        {
+            maintenance_errors.push(format!("failed to finalize continuation lease: {error}"));
+        }
+    }
+    report_aggregated_maintenance_errors(&run.request.run_id, &maintenance_errors);
+    (outcome, !maintenance_errors.is_empty())
+}
+
 /// Commit a planned continuation (re-stamp resume point + reopen run) and
 /// execute the reconstructed runner, writing the result artifact.
 /// @plan:PLAN-20260623-LUTHER-CONTINUATION
@@ -448,69 +619,53 @@ pub fn commit_and_execute(
     plan: &luther_workflow::engine::continuation::ContinuationPlan,
     config_dir: &Option<std::path::PathBuf>,
 ) {
-    let continuation_lease = continuation_lease(store, md).unwrap_or_else(|error| {
-        eprintln!("Error: failed to inspect continuation lease: {error}");
-        process::exit(1);
-    });
-    let continuation_had_lease = continuation_lease.is_some();
-    let daemon_managed = md.issue_number.is_some()
-        && continuation_lease
-            .as_ref()
-            .is_some_and(|lease| lease.run_id.as_deref() == Some(request.run_id.as_str()));
+    let lease_state = resolve_continuation_lease_state(store, md, request);
     let step = plan
         .selected
         .as_ref()
         .map(|c| c.step_id.clone())
         .unwrap_or_default();
+    let db_path = store
+        .db_path()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| luther_workflow::runtime_paths::get_data_dir().join("checkpoints.db"));
     // Reconstruct the runner first: it applies and validates the continuation /
     // target-profile overrides (continuation_overrides, apply_target_profile_overrides,
     // resolve_workflow_type, and validate_target_profile when required). Running
     // this before commit_continuation ensures a profile/continuation failure
     // cannot mutate run state and leave a refused continuation reopened and stuck
     // in 'Running'. @plan:PLAN-20260623-LUTHER-CONTINUATION
-    let db_path = store
-        .db_path()
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| luther_workflow::runtime_paths::get_data_dir().join("checkpoints.db"));
-    let mut runner =
-        reconstruct_runner_or_exit(md, &request.run_id, &db_path, config_dir, daemon_managed);
+    let mut runner = reconstruct_runner_or_exit(
+        md,
+        &request.run_id,
+        &db_path,
+        config_dir,
+        lease_state.daemon_managed,
+    );
+    authorize_continuation(&mut runner, store, md, request);
     commit_continuation_or_exit(store, request, &plan.checkpoint_identity);
-    let mut maintenance_errors: Vec<String> = Vec::new();
+    let mut prior_errors: Vec<String> = Vec::new();
     if let Err(error) = write_committed_checkpoint_artifacts(store, request, plan, &step) {
-        maintenance_errors.push(error);
+        prior_errors.push(error);
     }
     println!(
         "Reopened run '{}' at step '{step}' (continuation: {})",
         request.run_id,
         request.kind.verb()
     );
-    install_interrupt_handlers(runner.interrupt_handle());
-    let outcome = runner.run();
-    // Post-run maintenance is performed independently so a failure in one
-    // action cannot skip or suppress the others. Concretely, a persistence
-    // failure while recording the failed-state must not leave the continuation
-    // lease stuck in `Running` nor suppress the result artifact. Maintenance
-    // errors are aggregated and reported after all actions are attempted.
-    // @plan:PLAN-20260623-LUTHER-CONTINUATION
-    if let Err(ref error) = outcome {
-        if let Err(maintenance_error) = persist_continuation_failure(store, &request.run_id, error)
-        {
-            maintenance_errors.push(maintenance_error);
-        }
-    }
-    write_continuation_result(&plan.artifact_dir, &request.kind, &step, &outcome);
-    if continuation_had_lease {
-        if let Err(error) = finalize_continuation_lease(store, md, &request.run_id, &outcome) {
-            maintenance_errors.push(format!("failed to finalize continuation lease: {error}"));
-        }
-    }
-    report_aggregated_maintenance_errors(&request.run_id, &maintenance_errors);
-    report_continuation_outcome(
-        &request.run_id,
-        &step,
-        outcome,
-        !maintenance_errors.is_empty(),
+    let (outcome, maintenance_failed) = execute_and_maintain(
+        store,
+        ContinuationRun {
+            md,
+            request,
+            plan,
+            step: &step,
+        },
+        runner,
+        &lease_state,
+        prior_errors,
     );
+    report_continuation_outcome(&request.run_id, &step, outcome, maintenance_failed);
 }
 
 fn reconstruct_runner_or_exit(
@@ -520,18 +675,38 @@ fn reconstruct_runner_or_exit(
     config_dir: &Option<std::path::PathBuf>,
     daemon_managed: bool,
 ) -> EngineRunner {
-    let config_root = config_dir.as_deref().unwrap_or(Path::new("config"));
-    let reconstruction = resolve_workflow_config(&md.config_id, config_root)
-        .map_err(|error| format!("resolve config '{}': {error}", md.config_id))
-        .and_then(|config| {
-            if daemon_managed {
-                reconstruct_runner_with_daemon_provenance(
-                    md, run_id, db_path, config_dir, config, true,
-                )
-            } else {
-                reconstruct_runner_with_config(md, run_id, db_path, config_dir, config)
-            }
-        });
+    let persisted_encoded = md
+        .launch_provenance
+        .as_ref()
+        .map(|provenance| provenance.canonical_config_root.clone());
+    let reconstruction = (|| -> Result<EngineRunner, String> {
+        let persisted_root = persisted_encoded
+            .as_deref()
+            .map(|encoded| {
+                luther_workflow::persistence::decode_config_root(encoded)
+                    .map_err(|error| format!("decode persisted config root: {error}"))
+            })
+            .transpose()?;
+        let config_root = persisted_root
+            .as_deref()
+            .or(config_dir.as_deref())
+            .unwrap_or(Path::new("config"));
+        let config = resolve_workflow_config(&md.config_id, config_root)
+            .map_err(|error| format!("resolve config '{}': {error}", md.config_id))?;
+        let effective_config_dir = Some(config_root.to_path_buf());
+        if daemon_managed {
+            reconstruct_runner_with_daemon_provenance(
+                md,
+                run_id,
+                db_path,
+                &effective_config_dir,
+                config,
+                true,
+            )
+        } else {
+            reconstruct_runner_with_config(md, run_id, db_path, &effective_config_dir, config)
+        }
+    })();
     match reconstruction {
         Ok(runner) => runner,
         Err(e) => {
@@ -551,6 +726,24 @@ fn commit_continuation_or_exit(
     {
         eprintln!("Error: failed to reopen run '{}': {e}", request.run_id);
         process::exit(1);
+    }
+}
+
+/// Issue 158 slice 6: reconstruct the ephemeral `WorkspaceAuthorization`
+/// from the persisted workspace path and attach it to the resumed runner
+/// BEFORE any durable mutation (commit_continuation / lease CAS).
+///
+/// This is the read-only persisted identity + ownership authorization that
+/// must complete before `commit_continuation_or_exit`. On any failure
+/// (missing workspace path, foreign owner, missing evidence, malformed
+/// marker) the process exits without touching lease, checkpoint, or markers.
+fn attach_resume_authorization_or_exit(runner: &mut EngineRunner, md: &RunMetadata, run_id: &str) {
+    match prepare_resume_authorization(md.workspace_path.as_deref(), run_id) {
+        Ok(prepared) => runner.attach_workspace_authorization(prepared.authorization()),
+        Err(error) => {
+            eprintln!("Error: resume authorization failed for run '{run_id}': {error}");
+            process::exit(1);
+        }
     }
 }
 fn write_committed_checkpoint_artifacts(
@@ -852,6 +1045,21 @@ pub fn handle_runs_rewind(args: &luther_workflow::cli::RunsRewindArgs) {
         trusted_internal: false,
     };
     let plan = plan_continuation_or_exit(&store, &md, &request);
+    let db_path = store
+        .db_path()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| luther_workflow::runtime_paths::get_data_dir().join("checkpoints.db"));
+    let mut authorization_runner =
+        reconstruct_runner_or_exit(&md, &args.run_id, &db_path, &None, false);
+    // Issue 158: reject rewind while a legacy ownership migration is pending.
+    if luther_workflow::persistence::migration_is_pending(store.conn(), &args.run_id) {
+        eprintln!(
+            "Error: rewind refused for run '{}': a legacy ownership migration is pending.",
+            args.run_id
+        );
+        process::exit(1);
+    }
+    attach_resume_authorization_or_exit(&mut authorization_runner, &md, &args.run_id);
     let step = plan
         .selected
         .as_ref()
@@ -877,6 +1085,9 @@ pub fn handle_runs_rewind(args: &luther_workflow::cli::RunsRewindArgs) {
 
 mod inspect;
 pub use inspect::*;
+
+mod legacy_migration;
+pub use legacy_migration::*;
 
 #[cfg(test)]
 #[path = "runs_tests.rs"]

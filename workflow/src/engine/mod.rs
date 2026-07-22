@@ -11,7 +11,13 @@ pub mod executor;
 pub mod executors;
 pub mod instance;
 pub mod runner;
+/// Typed validation of identity-bearing tokens interpolated into shell
+/// commands. @plan:PLAN-20260722-ISSUE158-SHELL-SAFE-TOKENS
+pub mod shell_safe_tokens;
 pub mod transition;
+/// Cohesive workspace ownership abstraction (two-phase evidence).
+/// @plan:PLAN-20260623-LUTHER-CONTINUATION
+pub mod workspace_ownership;
 
 // Re-export transition types for convenience
 pub use runner::{EngineRunner, RunContext, RunOutcome};
@@ -19,8 +25,9 @@ pub use transition::{resolve_transition, resolve_transition_schema, StepOutcome}
 // Re-export continuation operator API.
 // @plan:PLAN-20260623-LUTHER-CONTINUATION
 pub use continuation::{
-    commit_continuation, continuation_overrides, prepare_continuation, ContinuationKind,
-    ContinuationRequest, ContinuationValidation, RewindTarget,
+    commit_continuation, continuation_overrides, prepare_continuation,
+    prepare_resume_authorization, ContinuationKind, ContinuationRequest, ContinuationValidation,
+    PreparedResume, ResumeAuthorizationError, RewindTarget,
 };
 // Re-export TransitionDef from workflow schema for test compatibility
 pub use crate::workflow::schema::TransitionDef;

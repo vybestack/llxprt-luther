@@ -780,4 +780,65 @@ mod tests {
             "daemon stop without --config or --all should fail"
         );
     }
+
+    #[test]
+    fn runs_migrate_legacy_ownership_parses_with_confirm() {
+        // @plan:PLAN-20260722-ISSUE158-LEGACY-OWNERSHIP-MIGRATION
+        let cli = Cli::try_parse_from([
+            "luther-workflow",
+            "runs",
+            "migrate-legacy-ownership",
+            "run-123",
+            "--workspace",
+            "/tmp/ws",
+            "--config-root",
+            "/etc/luther/config",
+            "--confirm",
+            "--json",
+        ])
+        .expect("runs migrate-legacy-ownership should parse");
+        match cli.command {
+            Commands::Runs(RunsArgs {
+                command: RunsCommand::MigrateLegacyOwnership(args),
+            }) => {
+                assert_eq!(args.run_id, "run-123");
+                assert_eq!(args.workspace, PathBuf::from("/tmp/ws"));
+                assert_eq!(args.config_root, PathBuf::from("/etc/luther/config"));
+                assert!(args.confirm);
+                assert!(args.json);
+            }
+            other => panic!("expected migrate-legacy-ownership, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn runs_migrate_legacy_ownership_requires_workspace_and_config_root() {
+        // @plan:PLAN-20260722-ISSUE158-LEGACY-OWNERSHIP-MIGRATION
+        let missing_workspace = Cli::try_parse_from([
+            "luther-workflow",
+            "runs",
+            "migrate-legacy-ownership",
+            "run-123",
+            "--config-root",
+            "/etc/luther/config",
+            "--confirm",
+        ]);
+        assert!(
+            missing_workspace.is_err(),
+            "migrate-legacy-ownership without --workspace should fail"
+        );
+        let missing_config_root = Cli::try_parse_from([
+            "luther-workflow",
+            "runs",
+            "migrate-legacy-ownership",
+            "run-123",
+            "--workspace",
+            "/tmp/ws",
+            "--confirm",
+        ]);
+        assert!(
+            missing_config_root.is_err(),
+            "migrate-legacy-ownership without --config-root should fail"
+        );
+    }
 }

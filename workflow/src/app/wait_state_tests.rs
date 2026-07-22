@@ -74,6 +74,7 @@ fn wait_poll_identity_reads_captured_pr_artifact_when_metadata_is_empty() {
         claim_label_added: false,
         work_dir: None,
         artifact_dir: None,
+        config_root: std::path::PathBuf::from("config"),
     };
     let identity = wait_poll_identity(
         &request,
@@ -101,6 +102,7 @@ fn wait_poll_identity_rejects_missing_pr_check_identity() {
         claim_label_added: false,
         work_dir: None,
         artifact_dir: None,
+        config_root: std::path::PathBuf::from("config"),
     };
 
     let err = wait_poll_identity(
@@ -138,6 +140,7 @@ fn wait_poll_identity_requires_child_run_id_for_child_workflow_wait() {
         claim_label_added: false,
         work_dir: None,
         artifact_dir: None,
+        config_root: std::path::PathBuf::from("config"),
     };
 
     let err = wait_poll_identity(
@@ -176,6 +179,7 @@ fn wait_poll_identity_reads_child_workflow_wait_run_id() {
         claim_label_added: false,
         work_dir: None,
         artifact_dir: None,
+        config_root: std::path::PathBuf::from("config"),
     };
 
     let identity = wait_poll_identity(
@@ -261,6 +265,7 @@ fn child_workflow_wait_request() -> luther_workflow::daemon::launcher::LaunchReq
         claim_label_added: false,
         work_dir: None,
         artifact_dir: None,
+        config_root: std::path::PathBuf::from("config"),
     }
 }
 
@@ -372,6 +377,7 @@ fn wait_poll_identity_prefers_captured_pr_artifact_over_stale_metadata() {
         claim_label_added: false,
         work_dir: None,
         artifact_dir: None,
+        config_root: std::path::PathBuf::from("config"),
     };
     let mut metadata = RunMetadata::new("run-stale", "wf", "cfg");
     metadata.pr_number = Some(1);
@@ -653,6 +659,7 @@ fn wait_condition_payload_pr_checks_requires_params() {
         workflow_type_id: None,
         work_dir: None,
         artifact_dir: None,
+        config_root: std::path::PathBuf::from("config"),
     };
     let params = serde_json::json!({
         "artifact_root": "/root",
@@ -686,6 +693,7 @@ fn wait_condition_payload_optional_kind_allows_missing_params() {
         workflow_type_id: None,
         work_dir: None,
         artifact_dir: None,
+        config_root: std::path::PathBuf::from("config"),
     };
     let params = serde_json::json!({});
     let payload = wait_condition_payload(

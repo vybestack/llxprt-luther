@@ -384,6 +384,11 @@ pub enum RunsCommand {
     /// @plan:PLAN-20260623-LUTHER-CONTINUATION
     #[command(name = "rewind")]
     Rewind(RunsRewindArgs),
+    /// Migrate a legacy provenance-less, marker-less run to publish the
+    /// workspace ownership marker (issue 158 recoverable migration).
+    /// @plan:PLAN-20260722-ISSUE158-LEGACY-OWNERSHIP-MIGRATION
+    #[command(name = "migrate-legacy-ownership")]
+    MigrateLegacyOwnership(RunsMigrateLegacyOwnershipArgs),
 }
 
 /// Arguments for `runs list`.
@@ -511,6 +516,36 @@ pub struct RunsRewindArgs {
     /// Permit rewinding to a non-whitelisted (e.g. implementation) step
     #[arg(long)]
     pub force: bool,
+    /// Output in JSON format
+    #[arg(long)]
+    pub json: bool,
+}
+
+/// Arguments for `runs migrate-legacy-ownership`.
+///
+/// This is a narrowly scoped, explicitly confirmed operator action that
+/// publishes the bootstrap workspace ownership marker for a provenance-less,
+/// marker-less legacy row. It requires the exact persisted workspace path, the
+/// canonical config root to record in provenance, and an explicit `--confirm`
+/// flag to guard against accidental invocation.
+///
+/// @plan:PLAN-20260722-ISSUE158-LEGACY-OWNERSHIP-MIGRATION
+#[derive(Args, Debug)]
+pub struct RunsMigrateLegacyOwnershipArgs {
+    /// The run id to migrate
+    #[arg(value_name = "RUN_ID")]
+    pub run_id: String,
+    /// The workspace path (must match the persisted workspace_path exactly)
+    #[arg(long, value_name = "PATH")]
+    pub workspace: PathBuf,
+    /// The exact canonical config root to record in launch provenance (must
+    /// match the persisted config root). The workspace path is never placed
+    /// in provenance; only this canonical config root is encoded.
+    #[arg(long, value_name = "DIR")]
+    pub config_root: PathBuf,
+    /// Explicit confirmation required to perform the migration
+    #[arg(long)]
+    pub confirm: bool,
     /// Output in JSON format
     #[arg(long)]
     pub json: bool,

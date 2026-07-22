@@ -10,9 +10,12 @@ use std::process::Command;
 use tempfile::TempDir;
 
 use luther_workflow::engine::executor::{ExecutorRegistry, StepContext, StepExecutor};
-use luther_workflow::engine::executors::ShellExecutor;
+use luther_workflow::engine::executors::{
+    GitConfigPublishExecutor, ShellExecutor, WorkspaceOwnershipExecutor,
+    WorkspaceOwnershipVerifyExecutor,
+};
 use luther_workflow::engine::instance::WorkflowInstance;
-use luther_workflow::engine::runner::{EngineError, EngineRunner, RunOutcome};
+use luther_workflow::engine::runner::{EngineError, EngineRunner, RunContext, RunOutcome};
 use luther_workflow::engine::transition::StepOutcome;
 use luther_workflow::persistence::trace::{save_trace, SmokeTrace};
 use luther_workflow::workflow::config_loader::{resolve_workflow_config, resolve_workflow_type};
@@ -92,10 +95,42 @@ impl StepExecutor for SmokeTestExecutor {
 // ============================================================================
 // Tests
 // ============================================================================
+fn smoke_registry(real_steps: Vec<String>) -> ExecutorRegistry {
+    let mut registry = ExecutorRegistry::new();
+    registry.register("shell", Box::new(SmokeTestExecutor::new(real_steps)));
+    registry.register(
+        "failure_cleanup",
+        Box::new(SmokeTestExecutor::new(vec!["abandon_and_log".to_string()])),
+    );
+    registry.register(
+        "workspace_ownership_verify",
+        Box::new(WorkspaceOwnershipVerifyExecutor),
+    );
+    registry.register("git_config_publish", Box::new(GitConfigPublishExecutor));
+    registry.register("workspace_ownership", Box::new(WorkspaceOwnershipExecutor));
+    registry.register(
+        "command_manifest_group",
+        Box::new(luther_workflow::engine::executors::NoOpExecutor),
+    );
+    registry.register("llxprt", Box::new(SmokeTestExecutor::new(Vec::new())));
+    registry.register(
+        "write_file",
+        Box::new(luther_workflow::engine::executors::WriteFileExecutor),
+    );
+    registry.register(
+        "verify",
+        Box::new(luther_workflow::engine::executors::VerifyExecutor),
+    );
+    registry.register(
+        "noop",
+        Box::new(luther_workflow::engine::executors::NoOpExecutor),
+    );
+    registry
+}
 
-/// Smoke test that runs first 3 real steps against GitHub.
-/// Delegates `select_issue`, `setup_workspace`, `fetch_issue` to `ShellExecutor`,
-/// returns Fatal for `create_plan` to trigger cleanup via `abandon_and_log`.
+/// Smoke test that runs the real selection and split setup path against GitHub.
+/// Typed ownership/config executors cover the descriptor-sensitive steps; shell
+/// setup and fetch run normally before `create_plan` triggers cleanup.
 /// @plan:PLAN-20260408-LLXPRT-FIRST.P21
 #[test]
 #[ignore = "Requires gh auth, network access, modifies real GitHub state"]
@@ -116,39 +151,37 @@ fn test_smoke_select_and_fetch() {
     let temp_path = temp_dir.path().to_string_lossy().to_string();
     config.variables.insert("work_dir".to_string(), temp_path);
 
-    // Create workflow instance
-    let instance = WorkflowInstance::create(workflow_type, config);
+    // Create a known run identity so the ignored live smoke can provision the
+    // same ownership evidence required by the typed setup executors.
+    let run_id = uuid::Uuid::new_v4().to_string();
+    luther_workflow::engine::workspace_ownership::provision_workspace_owner_marker(
+        temp_dir.path(),
+        &run_id,
+    )
+    .expect("provision smoke workspace owner marker");
+    let instance = WorkflowInstance::create_with_run_id(workflow_type, config, run_id);
 
-    // Create executor registry with SmokeTestExecutor
-    // Only these 3 steps run real commands; all others return Fatal
-    let real_steps = vec![
+    let registry = smoke_registry(vec![
         "select_issue".to_string(),
+        "setup_workspace_init".to_string(),
         "setup_workspace".to_string(),
         "fetch_issue".to_string(),
-        // abandon_and_log also needs to run real cleanup commands
         "abandon_and_log".to_string(),
-    ];
+    ]);
 
-    let mut registry = ExecutorRegistry::new();
-    registry.register("shell", Box::new(SmokeTestExecutor::new(real_steps)));
-    registry.register(
-        "write_file",
-        Box::new(luther_workflow::engine::executors::WriteFileExecutor),
-    );
-    registry.register(
-        "verify",
-        Box::new(luther_workflow::engine::executors::VerifyExecutor),
-    );
-    registry.register(
-        "noop",
-        Box::new(luther_workflow::engine::executors::NoOpExecutor),
-    );
-
-    // Create engine runner
-    let mut runner = EngineRunner::new(instance, registry).expect("Failed to create EngineRunner");
-
-    // Override work_dir in runner context to temp directory
-    runner.set_work_dir(temp_dir.path().to_path_buf());
+    // Create engine runner with an immutable workspace path resolved before
+    // StepContext construction (issue 158 slice 4), replacing the removed
+    // post-construction `set_work_dir` mutation.
+    let temp_path = temp_dir.path().to_path_buf();
+    let mut runner = EngineRunner::with_context(
+        instance,
+        registry,
+        RunContext {
+            workspace_path: Some(temp_path.to_string_lossy().to_string()),
+            ..Default::default()
+        },
+    )
+    .expect("Failed to create EngineRunner");
 
     // Run the engine
     let outcome = runner.run();
@@ -237,7 +270,7 @@ fn test_smoke_select_and_fetch() {
     // TempDir cleanup happens automatically when dropped
 }
 
-/// Smoke test that verifies dry-run mode prints all 14 `step_ids`.
+/// Smoke test that verifies dry-run mode prints the key workflow `step_ids`.
 /// This exercises the CLI -> config resolution -> workflow loading path.
 /// @plan:PLAN-20260408-LLXPRT-FIRST.P21
 #[test]
@@ -274,9 +307,13 @@ fn test_smoke_dry_run_prints_all_steps() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     let combined = format!("{stdout} {stderr}");
 
-    // All 14 step_ids should be present in output
+    // Key step_ids, including the complete split setup chain, should be present.
     let expected_steps = [
+        "workspace_ownership_verify",
         "select_issue",
+        "setup_workspace_init",
+        "git_config_publish",
+        "workspace_ownership",
         "setup_workspace",
         "fetch_issue",
         "create_plan",

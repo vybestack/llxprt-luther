@@ -249,6 +249,7 @@ fn complete_failure_cleanup() -> FailureCleanupState {
         captured_at: now,
         cleanup_completed_at: Some(now),
         recovery_consumed_at: None,
+        ownership_denied: false,
     }
 }
 
@@ -512,6 +513,7 @@ fn incomplete_failure_cleanup() -> FailureCleanupState {
         captured_at: now,
         cleanup_completed_at: None,
         recovery_consumed_at: None,
+        ownership_denied: false,
     }
 }
 

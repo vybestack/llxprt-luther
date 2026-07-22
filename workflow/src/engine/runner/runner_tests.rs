@@ -476,3 +476,225 @@ fn export_trace_matches_executed_sequence_and_outcome() {
     assert!(trace.events.iter().all(|e| e.outcome == "success"));
     assert!(trace.final_outcome.matches_run_outcome(&outcome));
 }
+
+// ---------------------------------------------------------------------------
+// Issue 158 finding 1/2: failure_cleanup lease operations must require the
+// immutable daemon_managed_claim authority, and verify_failure_cleanup_workspace
+// must use the immutable StepContext.work_dir() accessor, never the mutable
+// context.get("work_dir") that a shell step can overwrite.
+// ---------------------------------------------------------------------------
+
+use crate::engine::transition::StepOutcome;
+use crate::persistence::leases::{
+    get_lease_for_issue, init_leases_table, try_claim, update_lease_status, LeaseStatus,
+};
+use crate::persistence::{RunMetadata, RunStatus};
+
+/// Build a minimal workflow instance with a single `failure_cleanup` terminal
+/// step and a transition into it from a non-terminal step.
+fn failure_cleanup_test_instance() -> WorkflowInstance {
+    use crate::workflow::schema::*;
+    let workflow_type = WorkflowType {
+        workflow_type_id: "fc-test".to_string(),
+        steps: vec![
+            StepDef {
+                step_id: "work_step".to_string(),
+                step_type: "noop".to_string(),
+                description: None,
+                parameters: None,
+                produces: None,
+                consumes: None,
+                terminal: None,
+            },
+            StepDef {
+                step_id: "abandon_and_log".to_string(),
+                step_type: "failure_cleanup".to_string(),
+                description: None,
+                parameters: None,
+                produces: None,
+                consumes: None,
+                terminal: Some(true),
+            },
+        ],
+        transitions: vec![TransitionDef {
+            from: "work_step".to_string(),
+            to: "abandon_and_log".to_string(),
+            condition: Some("fixable".to_string()),
+            max_iterations: None,
+        }],
+        guards: Default::default(),
+    };
+    let config = test_workflow_config("fc-test");
+    WorkflowInstance::create(workflow_type, config)
+}
+
+/// Initialize leases + runs schema on a file-based connection.
+fn init_failure_cleanup_schema(conn: &Connection) {
+    init_leases_table(conn).unwrap();
+    crate::persistence::sqlite::init_runs_schema_serialized(conn).unwrap();
+}
+
+#[test]
+fn protect_failure_cleanup_lease_is_noop_for_non_daemon_run() {
+    // Issue 158 finding 1: a non-daemon (one-shot CLI) run has no
+    // daemon_managed_claim authority and must never touch a lease. Even if a
+    // matching lease exists for the issue, the non-daemon run must not
+    // advance it. The daemon_managed flag is read from the immutable runtime
+    // provenance accessor.
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("test.db");
+    // Seed schema + a Running lease in the SAME db the runner will use.
+    let conn = Connection::open(&db_path).unwrap();
+    init_failure_cleanup_schema(&conn);
+    let lease = try_claim(&conn, "o/r", 42, "cfg").unwrap().unwrap();
+    update_lease_status(
+        &conn,
+        &lease.lease_id,
+        LeaseStatus::Running,
+        Some("run-non-daemon"),
+    )
+    .unwrap();
+    drop(conn);
+
+    let instance = failure_cleanup_test_instance();
+    let registry = crate::engine::executor::ExecutorRegistry::with_defaults();
+    // Non-daemon RunContext (daemon_managed = false).
+    let run_context = RunContext {
+        daemon_managed: false,
+        repository: Some("o/r".to_string()),
+        issue_number: Some(42),
+        ..Default::default()
+    };
+    let runner = EngineRunner::with_db_path_and_context(instance, registry, &db_path, run_context)
+        .expect("runner");
+
+    // Build metadata with a matching repository/issue so the lease WOULD be
+    // found if the guard were absent.
+    let mut metadata = RunMetadata::new(&runner.instance.run_id, "fc-test", "fc-test-config");
+    metadata.repository = Some("o/r".to_string());
+    metadata.issue_number = Some(42);
+    metadata.status = RunStatus::Failed;
+
+    // Call protect_failure_cleanup_lease on the same DB.
+    let conn2 = Connection::open(&db_path).unwrap();
+    let result = runner.protect_failure_cleanup_lease(&conn2, &metadata);
+    assert!(
+        result.is_ok(),
+        "non-daemon run must not error on protect_failure_cleanup_lease"
+    );
+    // The lease must remain Running (untouched by the non-daemon run).
+    let lease_after = get_lease_for_issue(&conn2, "o/r", 42).unwrap().unwrap();
+    assert_eq!(
+        lease_after.status,
+        LeaseStatus::Running,
+        "non-daemon run must not advance the lease"
+    );
+}
+
+#[test]
+fn protect_failure_cleanup_lease_advances_for_daemon_run() {
+    // Issue 158 finding 1: a daemon-managed run DOES have lease authority.
+    // protect_failure_cleanup_lease must advance the matching lease to
+    // CleanupAbandoned.
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("test.db");
+    let conn = Connection::open(&db_path).unwrap();
+    init_failure_cleanup_schema(&conn);
+    let lease = try_claim(&conn, "o/r", 43, "cfg").unwrap().unwrap();
+    drop(conn);
+
+    let instance = failure_cleanup_test_instance();
+    let registry = crate::engine::executor::ExecutorRegistry::with_defaults();
+    let run_id = instance.run_id.clone();
+    let run_context = RunContext {
+        daemon_managed: true,
+        repository: Some("o/r".to_string()),
+        issue_number: Some(43),
+        ..Default::default()
+    };
+    let runner = EngineRunner::with_db_path_and_context(instance, registry, &db_path, run_context)
+        .expect("runner");
+
+    // Set the lease to Running for this run_id.
+    let conn2 = Connection::open(&db_path).unwrap();
+    update_lease_status(&conn2, &lease.lease_id, LeaseStatus::Running, Some(&run_id)).unwrap();
+
+    let mut metadata = RunMetadata::new(&run_id, "fc-test", "fc-test-config");
+    metadata.repository = Some("o/r".to_string());
+    metadata.issue_number = Some(43);
+    metadata.status = RunStatus::Failed;
+
+    let result = runner.protect_failure_cleanup_lease(&conn2, &metadata);
+    assert!(result.is_ok(), "daemon run must protect lease: {result:?}");
+    let lease_after = get_lease_for_issue(&conn2, "o/r", 43).unwrap().unwrap();
+    assert_eq!(
+        lease_after.status,
+        LeaseStatus::CleanupAbandoned,
+        "daemon run must advance lease to CleanupAbandoned"
+    );
+}
+
+#[test]
+fn verify_failure_cleanup_workspace_uses_immutable_work_dir_not_context_variable() {
+    // Issue 158 finding 1: verify_failure_cleanup_workspace must read the
+    // workspace from the immutable StepContext.work_dir() accessor, NOT from
+    // context.get("work_dir"). A shell step can overwrite the mutable
+    // "work_dir" context variable to redirect cleanup verification to a
+    // different workspace. The immutable accessor prevents this shadowing.
+    //
+    // We simulate a shell step overwriting "work_dir" in the context
+    // variables, then verify that verify_failure_cleanup_workspace consults
+    // the immutable work_dir (the real workspace), not the shadowed variable.
+    let real_workspace = tempfile::tempdir().unwrap();
+    let shadowed_workspace = tempfile::tempdir().unwrap();
+    let db_path = real_workspace.path().join("test.db");
+
+    let instance = failure_cleanup_test_instance();
+    let registry = crate::engine::executor::ExecutorRegistry::with_defaults();
+    let run_context = RunContext {
+        daemon_managed: true,
+        workspace_path: Some(real_workspace.path().to_string_lossy().to_string()),
+        ..Default::default()
+    };
+    let mut runner =
+        EngineRunner::with_db_path_and_context(instance, registry, &db_path, run_context)
+            .expect("runner");
+
+    // Simulate a shell step overwriting the mutable "work_dir" variable to
+    // point at a different (shadowed) workspace.
+    runner
+        .context
+        .set("work_dir", shadowed_workspace.path().to_str().unwrap());
+
+    // The immutable work_dir() must still point at the real workspace.
+    assert_eq!(
+        runner.context.work_dir(),
+        real_workspace.path(),
+        "immutable work_dir() must not be affected by context variable shadowing"
+    );
+    // The mutable variable IS shadowed (this is the vulnerability that the
+    // immutable accessor closes).
+    assert_eq!(
+        runner.context.get("work_dir").map(String::as_str),
+        Some(shadowed_workspace.path().to_str().unwrap()),
+        "the mutable variable is shadowed; verify uses the immutable accessor"
+    );
+
+    // verify_failure_cleanup_workspace with a Fixable outcome routing into
+    // the failure_cleanup step should consult the immutable work_dir (the
+    // real workspace, which has no ownership evidence). For a daemon-managed
+    // run, this must NOT return NotApplicable just because the shadowed
+    // variable points elsewhere — it must use the real workspace.
+    let outcome = StepOutcome::Fixable;
+    let result = runner.verify_failure_cleanup_workspace(&outcome, Some("abandon_and_log"));
+    // The real workspace has no ownership evidence. For a daemon-managed run,
+    // ownership IS required, so this should fail (OwnershipFailure), proving
+    // the immutable accessor was used. If the shadowed variable were used
+    // instead, the result would differ based on the shadowed path.
+    assert!(
+        matches!(result, Err(EngineError::OwnershipFailure(_))),
+        "verify_failure_cleanup_workspace must use the immutable work_dir; \
+         a daemon-managed run with no ownership evidence at the real workspace \
+         must fail, got: {result:?}"
+    );
+}

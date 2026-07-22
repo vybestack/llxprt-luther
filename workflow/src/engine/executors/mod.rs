@@ -20,6 +20,7 @@ pub mod command_manifest;
 pub mod feedback_eval;
 pub mod feedback_eval_policy;
 pub mod feedback_eval_timeout;
+pub mod git_config_publish;
 pub mod github_feedback;
 pub mod github_pr;
 pub mod llxprt;
@@ -35,6 +36,7 @@ pub mod scope_control;
 pub mod shell;
 pub mod verify;
 pub mod workflow_auth_preflight;
+pub mod workspace_ownership;
 pub mod write_file;
 
 // Re-export executor implementations for tests
@@ -49,6 +51,7 @@ pub use change_detection::{ChangeDetectionMode, ChangedPathDetector, GitChangedP
 pub use command_manifest::{
     request_from_entry, run_manifest_command, ManifestCommandRequest, ManifestCommandResult,
 };
+pub use git_config_publish::GitConfigPublishExecutor;
 pub use github_feedback::{
     FeedbackMarkerParser, GithubCodeRabbitFeedbackExecutor,
     GithubCodeRabbitFeedbackExecutorWithRunner, GithubFeedbackMarkerExecutor,
@@ -102,6 +105,7 @@ pub use scope_control::{
 pub use shell::ShellExecutor;
 pub use verify::VerifyExecutor;
 pub use workflow_auth_preflight::WorkflowAuthPreflightExecutor;
+pub use workspace_ownership::{WorkspaceOwnershipExecutor, WorkspaceOwnershipVerifyExecutor};
 pub use write_file::WriteFileExecutor;
 
 /// Enforce the scope-decision barrier at a mutation entry point.

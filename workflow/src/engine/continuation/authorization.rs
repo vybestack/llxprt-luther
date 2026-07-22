@@ -160,6 +160,11 @@ pub(super) fn authorizes_cleanup_resume(
     request: &ContinuationRequest,
     checkpoint: &Checkpoint,
 ) -> bool {
+    // An ownership-denied terminal never authorizes cleanup resume: cleanup
+    // cannot execute in an unowned workspace.
+    if metadata.is_ownership_denied_terminal() {
+        return false;
+    }
     metadata.failure_cleanup.as_ref().is_some_and(|failure| {
         if !matches!(request.kind, ContinuationKind::Resume) {
             return false;
@@ -185,6 +190,11 @@ pub(super) fn checkpoint_is_authorized(
     request: &ContinuationRequest,
     checkpoint: &Checkpoint,
 ) -> bool {
+    // An ownership-denied terminal never authorizes any rerun: it is a
+    // distinct non-resumable state.
+    if metadata.is_ownership_denied_terminal() {
+        return false;
+    }
     let authorized_failed_checkpoint = metadata
         .failure_cleanup
         .as_ref()

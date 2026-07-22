@@ -12,31 +12,51 @@
   "events": [
     {
       "seq": 0,
-      "step_id": "select_issue",
+      "step_id": "workspace_ownership_verify",
       "outcome": "success"
     },
     {
       "seq": 1,
-      "step_id": "setup_workspace",
+      "step_id": "select_issue",
       "outcome": "success"
     },
     {
-      "seq": 2,
+      "step_id": "setup_workspace_init",
+      "outcome": "success",
+      "seq": 2
+    },
+    {
+      "step_id": "git_config_publish",
+      "outcome": "success",
+      "seq": 3
+    },
+    {
+      "step_id": "workspace_ownership",
+      "outcome": "success",
+      "seq": 4
+    },
+    {
+      "step_id": "setup_workspace",
+      "outcome": "success",
+      "seq": 5
+    },
+    {
+      "seq": 6,
       "step_id": "bootstrap_workspace",
       "outcome": "success"
     },
     {
-      "seq": 3,
+      "seq": 7,
       "step_id": "fetch_issue",
       "outcome": "success"
     },
     {
-      "seq": 4,
+      "seq": 8,
       "step_id": "create_plan",
       "outcome": "fatal"
     },
     {
-      "seq": 5,
+      "seq": 9,
       "step_id": "abandon_and_log",
       "outcome": "fatal"
     }

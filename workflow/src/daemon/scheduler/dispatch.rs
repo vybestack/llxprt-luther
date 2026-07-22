@@ -262,6 +262,7 @@ mod tests {
                 claim_label_added: true,
                 work_dir: None,
                 artifact_dir: None,
+                config_root: std::path::PathBuf::from("config"),
             },
             resume: false,
             query_index: Some(0),

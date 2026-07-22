@@ -22,8 +22,11 @@ fn workflow_paths() -> Vec<PathBuf> {
     let root = project_root();
     let mut paths = vec![
         root.join("config/workflows/llxprt-issue-fix-v1.toml"),
+        root.join("config/workflows/llxprt-luther-dogfood-v1.toml"),
         root.join("tests/fixtures/workflows/valid/llxprt-issue-fix-v1.toml"),
         root.join("tests/fixtures/workflows/valid/llxprt-issue-fix-v1.json"),
+        root.join("tests/fixtures/workflows/valid/llxprt-luther-dogfood-v1.toml"),
+        root.join("tests/fixtures/workflows/valid/llxprt-luther-dogfood-v1.json"),
     ];
 
     let invalid_dir = root.join("tests/fixtures/workflows/invalid");
@@ -181,6 +184,37 @@ fn shared_shell_commands_do_not_embed_target_bootstrap_or_guidance() {
 }
 
 #[test]
+fn setup_shell_never_publishes_git_config_or_removes_alternates() {
+    let setup_commands: Vec<_> = shell_commands()
+        .into_iter()
+        .filter(|command| {
+            command.step_id == "setup_workspace_init" || command.step_id == "setup_workspace"
+        })
+        .collect();
+    assert!(
+        setup_commands.len() >= 8,
+        "both production workflows and TOML/JSON fixtures must contribute setup commands"
+    );
+    for command in setup_commands {
+        for forbidden in [
+            ".git/config",
+            "objects/info/alternates",
+            "git config --get remote.origin.url",
+            "cat > .git",
+            "find .git",
+        ] {
+            assert!(
+                !command.command.contains(forbidden),
+                "workflow {} step {} must leave Git config publication to git_config_publish; found {forbidden:?}:\n{}",
+                command.path.display(),
+                command.step_id,
+                command.command
+            );
+        }
+    }
+}
+
+#[test]
 fn shared_workflow_prompts_keep_forbidden_actions_in_target_guidance() {
     let root = project_root();
     let workflow_text =
@@ -241,16 +275,11 @@ fn coderabbit_text_metacharacters_cannot_execute() {
     }
 }
 
-#[test]
-fn static_command_allowlist_is_machine_checked() {
-    let commands = shell_commands();
-    assert!(
-        !commands.is_empty(),
-        "static command allowlist must inspect workflow shell commands"
-    );
-
-    let allowed_prefixes = [
+fn static_command_allowed_prefixes() -> &'static [&'static str] {
+    &[
         "set ",
+        "unset ",
+        "export ",
         "#",
         "ISSUE_NUM=",
         "case ",
@@ -271,6 +300,7 @@ fn static_command_allowlist_is_machine_checked() {
         "jq ",
         "git clone ",
         "git fetch ",
+        "git -c ",
         "git checkout ",
         "git reset ",
         "git restore ",
@@ -280,15 +310,36 @@ fn static_command_allowlist_is_machine_checked() {
         "git push ",
         "mkdir ",
         "rm ",
+        "cp ",
         "cd ",
         "cat ",
+        "[core]",
+        "repositoryformatversion = ",
+        "filemode = ",
+        "bare = ",
+        "logallrefupdates = ",
+        "hooksPath = ",
+        "[remote ",
+        "url = ",
+        "fetch = ",
+        "EOF",
         "echo ",
         "exit ",
         "if ",
         "then",
         "fi",
         "else",
-    ];
+    ]
+}
+
+#[test]
+fn static_command_allowlist_is_machine_checked() {
+    let commands = shell_commands();
+    assert!(
+        !commands.is_empty(),
+        "static command allowlist must inspect workflow shell commands"
+    );
+    let allowed_prefixes = static_command_allowed_prefixes();
 
     for command in &commands {
         for raw_line in command.command.lines() {
@@ -306,6 +357,7 @@ fn static_command_allowlist_is_machine_checked() {
                 || line == "else"
                 || line == "continue"
                 || line == ";;"
+                || line == "}"
                 || line.ends_with("|\"\")")
                 || line.starts_with("' ")
                 || line.starts_with("break ")
