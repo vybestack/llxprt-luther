@@ -188,11 +188,24 @@ impl FileIdentity {
     /// platform-specific dev/inode widths to `u64`.
     fn from_stat(stat: &rustix::fs::Stat) -> Self {
         Self {
-            dev: stat.st_dev as u64,
-            ino: stat.st_ino,
+            dev: Self::normalize_device_id(stat.st_dev),
+            ino: Self::normalize_inode_id(stat.st_ino),
         }
     }
 
+    #[cfg(target_os = "macos")]
+    fn normalize_device_id(value: i32) -> u64 {
+        u64::try_from(value).expect("device id is non-negative")
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn normalize_device_id(value: u64) -> u64 {
+        value
+    }
+
+    fn normalize_inode_id(value: u64) -> u64 {
+        value
+    }
     /// Capture the dev/inode identity of a path via `symlink_metadata`.
     ///
     /// Only Unix is supported: the descriptor-anchored ownership kernel relies
