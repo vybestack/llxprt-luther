@@ -7,6 +7,8 @@ use std::collections::{BTreeSet, HashMap};
 /// @requirement:REQ-PRFU-011,REQ-PRFU-012
 /// @pseudocode lines 1-23
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use crate::engine::runner::EngineError;
 use crate::engine::transition::StepOutcome;
@@ -42,6 +44,8 @@ pub struct StepContext {
     /// Namespaced variables: step_id -> {variable_name -> value}
     /// @plan:PLAN-20260408-LLXPRT-FIRST.P09
     pub namespaced_vars: HashMap<String, HashMap<String, String>>,
+    /// Control-only interruption signal; never interpolated or checkpointed.
+    interrupted: Arc<AtomicBool>,
 }
 
 fn is_checkpointable_context_key(key: &str) -> bool {
@@ -100,7 +104,16 @@ impl StepContext {
             current_step_id: None,
             step_order: Vec::new(),
             namespaced_vars: HashMap::new(),
+            interrupted: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    pub(crate) fn bind_interrupt(&mut self, interrupted: Arc<AtomicBool>) {
+        self.interrupted = interrupted;
+    }
+
+    pub(crate) fn is_interrupted(&self) -> bool {
+        self.interrupted.load(Ordering::SeqCst)
     }
 
     /// Capture non-secret execution context needed to safely reconstruct a failed step.

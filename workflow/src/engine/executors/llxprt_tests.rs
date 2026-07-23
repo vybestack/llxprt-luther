@@ -81,8 +81,13 @@ fn match_static_stdout_outcome_none_without_match() {
 #[test]
 fn match_stdout_outcome_reads_shared_buffer() {
     let params = json!({"outcome_on_stdout": {"READY": "retryable"}});
-    let buffer = Arc::new(Mutex::new("prelude\nREADY\n".to_string()));
-    let outcome = match_stdout_outcome(&params, &buffer);
+    let temp = tempfile::tempdir().unwrap();
+    let mut context = StepContext::new(temp.path().to_path_buf(), "run-1".to_string());
+    context.set_current_step_id("test");
+    context.set("artifact_dir", &temp.path().to_string_lossy());
+    let captures = artifacts::DiagnosticArtifacts::initialize(&mut context, &json!({})).unwrap();
+    artifacts::append(&captures.stdout, b"prelude\nREADY\n").unwrap();
+    let outcome = match_stdout_outcome(&params, &captures.stdout);
     assert!(matches!(outcome, Some(StepOutcome::Retryable)));
 }
 
@@ -91,6 +96,7 @@ fn string_array_param_interpolates_and_defaults() {
     let mut context = StepContext::new(PathBuf::from("/tmp/work"), "run-1".to_string());
     context.set("name", "world");
     let params = json!({"args": ["hello-{name}", "static"]});
+
     let out = string_array_param(&params, "args", &context);
     assert_eq!(out, vec!["hello-world".to_string(), "static".to_string()]);
     // Missing key yields empty vec.
@@ -216,4 +222,74 @@ fn llxprt_test_head(workspace: &std::path::Path) -> String {
         .expect("git head must be UTF-8")
         .trim()
         .to_string()
+}
+
+#[derive(Clone, Copy)]
+struct NoChanges;
+
+impl ChangedPathDetector for NoChanges {
+    fn detect_changed_paths(
+        &self,
+        _work_dir: &std::path::Path,
+        _mode: ChangeDetectionMode,
+    ) -> Result<Vec<String>, EngineError> {
+        Ok(Vec::new())
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn failing_step_without_explicit_paths_persists_diagnostics() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = tempfile::tempdir().unwrap();
+    let script = temp.path().join("fake-llxprt");
+    std::fs::write(
+        &script,
+        "#!/bin/sh\nprintf 'stdout-head\\nstdout-tail\\n'\nprintf 'stderr-head\\nstderr-tail\\n' >&2\nexit 7\n",
+    )
+    .unwrap();
+    let mut permissions = std::fs::metadata(&script).unwrap().permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&script, permissions).unwrap();
+
+    let artifacts_dir = temp.path().join("artifacts");
+    let mut context = StepContext::new(temp.path().to_path_buf(), "run-1".to_string());
+    context.set_current_step_id("create_plan");
+    context.set("artifact_dir", &artifacts_dir.to_string_lossy());
+    let params = json!({"binary_path": script, "timeout_seconds": 5});
+    let outcome = LlxprtExecutorWithDetector::new(NoChanges)
+        .execute(&mut context, &params)
+        .unwrap();
+
+    assert_eq!(outcome, StepOutcome::Fatal);
+    let stdout = PathBuf::from(context.get("stdout_artifact_path").unwrap());
+    let stderr = PathBuf::from(context.get("stderr_artifact_path").unwrap());
+    let manifest = PathBuf::from(context.get("llxprt_diagnostic_manifest_path").unwrap());
+    assert!(std::fs::read_to_string(stdout)
+        .unwrap()
+        .contains("stdout-tail"));
+    assert!(std::fs::read_to_string(stderr)
+        .unwrap()
+        .contains("stderr-tail"));
+    assert!(manifest.exists());
+}
+
+#[test]
+fn spawn_failure_precreates_diagnostic_files() {
+    let temp = tempfile::tempdir().unwrap();
+    let artifacts_dir = temp.path().join("artifacts");
+    let mut context = StepContext::new(temp.path().to_path_buf(), "run-2".to_string());
+    context.set_current_step_id("evaluate_plan");
+    context.set("artifact_dir", &artifacts_dir.to_string_lossy());
+    let params = json!({"binary_path": temp.path().join("missing-llxprt")});
+    let result = LlxprtExecutorWithDetector::new(NoChanges).execute(&mut context, &params);
+
+    assert!(matches!(
+        result,
+        Err(EngineError::LlxprtBinaryNotFound { .. })
+    ));
+    assert!(PathBuf::from(context.get("stdout_artifact_path").unwrap()).exists());
+    assert!(PathBuf::from(context.get("stderr_artifact_path").unwrap()).exists());
+    assert!(PathBuf::from(context.get("llxprt_diagnostic_manifest_path").unwrap()).exists());
 }

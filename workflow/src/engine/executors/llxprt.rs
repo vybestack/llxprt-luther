@@ -22,9 +22,8 @@
 //! via [`LlxprtExecutorWithDetector`].
 
 use std::io::Read;
-use std::path::Path;
 use std::process::{Command, Stdio};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -37,6 +36,11 @@ use crate::engine::executors::llxprt_diff::{
 };
 use crate::engine::runner::EngineError;
 use crate::engine::transition::StepOutcome;
+
+mod artifact_paths;
+mod artifacts;
+mod outcome_scan;
+mod process_control;
 
 #[path = "llxprt_timeout.rs"]
 mod llxprt_timeout;
@@ -106,6 +110,7 @@ fn execute_llxprt(
         step_id: "llxprt".to_string(),
         message: format!("Failed to create work_dir: {e}"),
     })?;
+    let artifacts = artifacts::DiagnosticArtifacts::initialize(context, params)?;
 
     if llxprt_step_requires_scope_barrier(context) {
         if let Some(outcome) = crate::engine::executors::scope_control_barrier(context) {
@@ -119,11 +124,11 @@ fn execute_llxprt(
         return Ok(outcome);
     }
 
-    if let Some(outcome) = handle_static_stdout(context, params, &config)? {
+    if let Some(outcome) = handle_static_stdout(context, params, &config, &artifacts)? {
         return Ok(outcome);
     }
 
-    let result = run_llxprt_process(context, params, &config)?;
+    let result = run_llxprt_process(context, params, &config, &artifacts)?;
 
     classify_llxprt_outcome(context, params, &config, &result)
 }
@@ -140,8 +145,6 @@ struct LlxprtStepConfig<'a> {
     required_changed_path_patterns: Vec<String>,
     initial_changed_paths: Vec<String>,
     initial_success_condition_met: bool,
-    stdout_file: Option<String>,
-    stderr_file: Option<String>,
 }
 
 /// Boolean diff-gating parameters grouped to avoid an excessive-bool struct.
@@ -196,8 +199,6 @@ impl<'a> LlxprtStepConfig<'a> {
                 continue_on_empty_diff: bool_param(params, "continue_on_empty_diff", false),
                 success_on_diff,
             },
-            stdout_file: interpolated_optional_str(params, "stdout_file", context),
-            stderr_file: interpolated_optional_str(params, "stderr_file", context),
             detection,
             success_file,
             required_changed_paths,
@@ -233,7 +234,7 @@ fn handle_static_content(
             message: "static_content requires success_file".to_string(),
         });
     };
-    write_success_file(context, path_template, &content)?;
+    artifact_paths::write_file(context, path_template, &content)?;
     Ok(Some(StepOutcome::Success))
 }
 
@@ -243,14 +244,14 @@ fn handle_static_stdout(
     context: &mut StepContext,
     params: &serde_json::Value,
     config: &LlxprtStepConfig<'_>,
+    artifacts: &artifacts::DiagnosticArtifacts,
 ) -> Result<Option<StepOutcome>, EngineError> {
     let Some(static_stdout) = str_param(params, "static_stdout") else {
         return Ok(None);
     };
     let stdout = interpolate_string(static_stdout, context);
-    if let Some(path_template) = config.stdout_file.as_deref() {
-        write_artifact_file(context, path_template, &stdout)?;
-    }
+    artifacts::append(&artifacts.stdout, stdout.as_bytes())?;
+    artifacts.publish_manifest()?;
     context.set("stdout", &stdout);
 
     if let Some(outcome) = match_static_stdout_outcome(params, &stdout) {
@@ -308,74 +309,130 @@ struct ProcessResult {
     idle_timeout: Option<Duration>,
 }
 
+type StreamReader = thread::JoinHandle<Result<(), EngineError>>;
+
+struct ProcessStreams {
+    stdout: artifacts::SharedCapture,
+    stderr: artifacts::SharedCapture,
+    outcome_scanner: outcome_scan::SharedScanner,
+    stdout_reader: Option<StreamReader>,
+    stderr_reader: Option<StreamReader>,
+}
+
+impl ProcessStreams {
+    fn start(
+        child: &mut std::process::Child,
+        params: &serde_json::Value,
+        artifacts: &artifacts::DiagnosticArtifacts,
+    ) -> Self {
+        let stdout = Arc::clone(&artifacts.stdout);
+        let stderr = Arc::clone(&artifacts.stderr);
+        let outcome_scanner = Arc::new(std::sync::Mutex::new(
+            outcome_scan::OutcomeScanner::from_params(params),
+        ));
+        let stdout_reader = child.stdout.take().map(|mut pipe| {
+            let capture = Arc::clone(&stdout);
+            let scanner = Arc::clone(&outcome_scanner);
+            thread::spawn(move || read_stream_into_buffer(&mut pipe, &capture, Some(&scanner)))
+        });
+        let stderr_reader = child.stderr.take().map(|mut pipe| {
+            let capture = Arc::clone(&stderr);
+            thread::spawn(move || read_stream_into_buffer(&mut pipe, &capture, None))
+        });
+        Self {
+            stdout,
+            stderr,
+            outcome_scanner,
+            stdout_reader,
+            stderr_reader,
+        }
+    }
+
+    fn join(&mut self) -> Result<(), EngineError> {
+        join_stream_reader(self.stdout_reader.take(), "stdout")?;
+        join_stream_reader(self.stderr_reader.take(), "stderr")
+    }
+}
+
 /// Run the llxprt child process to completion, polling for success conditions
 /// and timeouts.
 fn run_llxprt_process(
     context: &mut StepContext,
     params: &serde_json::Value,
     config: &LlxprtStepConfig<'_>,
+    artifacts: &artifacts::DiagnosticArtifacts,
 ) -> Result<ProcessResult, EngineError> {
-    let timing = ProcessTiming::from_params(params);
     let mut child = spawn_llxprt(context, params)?;
-
-    let stdout_buffer = Arc::new(Mutex::new(String::new()));
-    let stderr_buffer = Arc::new(Mutex::new(String::new()));
-    let stdout_reader = child.stdout.take().map(|mut stdout| {
-        let buffer = Arc::clone(&stdout_buffer);
-        thread::spawn(move || {
-            read_stream_into_buffer(&mut stdout, &buffer);
-        })
-    });
-    let stderr_reader = child.stderr.take().map(|mut stderr| {
-        let buffer = Arc::clone(&stderr_buffer);
-        thread::spawn(move || {
-            read_stream_into_buffer(&mut stderr, &buffer);
-        })
-    });
-
-    let mut poll = ProcessPoll::new(timing);
+    let mut streams = ProcessStreams::start(&mut child, params, artifacts);
+    let mut poll = ProcessPoll::new(ProcessTiming::from_params(params));
     let outcome_seen = poll.run(
         context,
-        params,
         config,
-        &stdout_buffer,
-        &stderr_buffer,
+        &streams.stdout,
+        &streams.stderr,
+        &streams.outcome_scanner,
         &mut child,
-    )?;
+    );
+    let outcome_seen = match outcome_seen {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            terminate_and_drain(&mut child, &mut streams, artifacts)?;
+            return Err(error);
+        }
+    };
+    if should_terminate(context, &poll, outcome_seen) {
+        process_control::terminate_process_tree(&mut child);
+    }
+    finish_llxprt_process(context, child, streams, poll, outcome_seen, artifacts)
+}
 
-    if poll.success_seen
+fn should_terminate(
+    context: &StepContext,
+    poll: &ProcessPoll,
+    outcome_seen: Option<StepOutcome>,
+) -> bool {
+    context.is_interrupted()
+        || poll.success_seen
         || poll.timed_out(outcome_seen)
         || poll.idle_timed_out(outcome_seen)
         || outcome_seen.is_some()
-    {
-        terminate_process_tree(&mut child);
-    }
+}
 
-    let exit_status = child.wait().map_err(|e| EngineError::StepExecutionError {
-        step_id: "llxprt".to_string(),
-        message: format!("Failed to wait for llxprt: {e}"),
-    })?;
-    if let Some(reader) = stdout_reader {
-        let _ = reader.join();
-    }
-    if let Some(reader) = stderr_reader {
-        let _ = reader.join();
-    }
+fn terminate_and_drain(
+    child: &mut std::process::Child,
+    streams: &mut ProcessStreams,
+    artifacts: &artifacts::DiagnosticArtifacts,
+) -> Result<(), EngineError> {
+    process_control::terminate_process_tree(child);
+    let _ = child.wait();
+    let _ = streams.join();
+    artifacts.publish_manifest()
+}
 
-    let stdout = lock_clone(&stdout_buffer);
-    let stderr = lock_clone(&stderr_buffer);
-    if let Some(path_template) = config.stdout_file.as_deref() {
-        write_artifact_file(context, path_template, &stdout)?;
-    }
-    if let Some(path_template) = config.stderr_file.as_deref() {
-        write_artifact_file(context, path_template, &stderr)?;
-    }
+fn finish_llxprt_process(
+    context: &mut StepContext,
+    mut child: std::process::Child,
+    mut streams: ProcessStreams,
+    poll: ProcessPoll,
+    outcome_seen: Option<StepOutcome>,
+    artifacts: &artifacts::DiagnosticArtifacts,
+) -> Result<ProcessResult, EngineError> {
+    let exit_status = child
+        .wait()
+        .map_err(|error| EngineError::StepExecutionError {
+            step_id: "llxprt".to_string(),
+            message: format!("Failed to wait for llxprt: {error}"),
+        })?;
+    streams.join()?;
+    let outcome_seen = outcome_seen.or_else(|| outcome_scan::finish(&streams.outcome_scanner));
+    artifacts.publish_manifest()?;
+    let stdout = artifacts::capture_text(&streams.stdout);
+    let stderr = artifacts::capture_text(&streams.stderr);
     if let Some(code) = exit_status.code() {
         context.set("exit_code", &code.to_string());
     }
     context.set("stdout", &stdout);
     context.set("stderr", &stderr);
-
     Ok(ProcessResult {
         stdout,
         stderr,
@@ -426,6 +483,7 @@ fn spawn_llxprt(
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
     cmd.stdin(Stdio::null());
+    process_control::configure_process_group(&mut cmd);
 
     cmd.spawn().map_err(|e| spawn_error(context, &binary, e))
 }
@@ -517,16 +575,19 @@ impl ProcessPoll {
     fn run(
         &mut self,
         context: &mut StepContext,
-        params: &serde_json::Value,
         config: &LlxprtStepConfig<'_>,
-        stdout_buffer: &Arc<Mutex<String>>,
-        stderr_buffer: &Arc<Mutex<String>>,
+        stdout_buffer: &artifacts::SharedCapture,
+        stderr_buffer: &artifacts::SharedCapture,
+        outcome_scanner: &outcome_scan::SharedScanner,
         child: &mut std::process::Child,
     ) -> Result<Option<StepOutcome>, EngineError> {
         let mut stdout_snapshot_len = 0usize;
         let mut stderr_snapshot_len = 0usize;
         let mut outcome_seen = None;
         while self.start.elapsed() < self.timing.timeout {
+            if context.is_interrupted() {
+                break;
+            }
             if self.check_idle_timeout(
                 stdout_buffer,
                 stderr_buffer,
@@ -536,8 +597,10 @@ impl ProcessPoll {
                 break;
             }
 
-            if let Some(outcome) = match_stdout_outcome(params, stdout_buffer) {
-                outcome_seen = Some(outcome);
+            if outcome_seen.is_none() {
+                outcome_seen = outcome_scan::detected(outcome_scanner);
+            }
+            if outcome_seen.is_some() {
                 break;
             }
 
@@ -560,11 +623,9 @@ impl ProcessPoll {
             self.log_progress(
                 stdout_buffer,
                 stderr_buffer,
-                context,
-                config,
                 &mut stdout_snapshot_len,
                 &mut stderr_snapshot_len,
-            )?;
+            );
 
             thread::sleep(Duration::from_secs(2));
         }
@@ -575,16 +636,16 @@ impl ProcessPoll {
     /// elapsed since the last output change.
     fn check_idle_timeout(
         &mut self,
-        stdout_buffer: &Arc<Mutex<String>>,
-        stderr_buffer: &Arc<Mutex<String>>,
+        stdout_buffer: &artifacts::SharedCapture,
+        stderr_buffer: &artifacts::SharedCapture,
         stdout_snapshot_len: &mut usize,
         stderr_snapshot_len: &mut usize,
     ) -> bool {
         let Some(idle_timeout) = self.timing.idle_timeout else {
             return false;
         };
-        let stdout_len = stdout_buffer.lock().map_or(0, |output| output.len());
-        let stderr_len = stderr_buffer.lock().map_or(0, |output| output.len());
+        let stdout_len = artifacts::total_bytes(stdout_buffer);
+        let stderr_len = artifacts::total_bytes(stderr_buffer);
         if stdout_len != *stdout_snapshot_len || stderr_len != *stderr_snapshot_len {
             self.last_output_change = Instant::now();
         }
@@ -638,41 +699,27 @@ impl ProcessPoll {
         }
     }
 
-    /// Periodically log progress and flush stdout/stderr artifacts when output
-    /// has grown.
+    /// Periodically log progress. Reader threads publish stream snapshots as
+    /// bytes arrive, so this path only reports monotonic byte counters.
     fn log_progress(
         &mut self,
-        stdout_buffer: &Arc<Mutex<String>>,
-        stderr_buffer: &Arc<Mutex<String>>,
-        context: &mut StepContext,
-        config: &LlxprtStepConfig<'_>,
+        stdout_buffer: &artifacts::SharedCapture,
+        stderr_buffer: &artifacts::SharedCapture,
         stdout_snapshot_len: &mut usize,
         stderr_snapshot_len: &mut usize,
-    ) -> Result<(), EngineError> {
+    ) {
         if self.last_progress.elapsed() < Duration::from_secs(30) {
-            return Ok(());
+            return;
         }
         let elapsed = self.start.elapsed().as_secs();
-        let stdout_len = stdout_buffer.lock().map_or(0, |output| output.len());
-        let stderr_len = stderr_buffer.lock().map_or(0, |output| output.len());
+        let stdout_len = artifacts::total_bytes(stdout_buffer);
+        let stderr_len = artifacts::total_bytes(stderr_buffer);
         println!(
             "[llxprt] running for {elapsed}s (stdout {stdout_len} bytes, stderr {stderr_len} bytes)"
         );
-
-        if stdout_len != *stdout_snapshot_len || stderr_len != *stderr_snapshot_len {
-            if let Some(path_template) = config.stdout_file.as_deref() {
-                let stdout = lock_clone(stdout_buffer);
-                write_artifact_file(context, path_template, &stdout)?;
-            }
-            if let Some(path_template) = config.stderr_file.as_deref() {
-                let stderr = lock_clone(stderr_buffer);
-                write_artifact_file(context, path_template, &stderr)?;
-            }
-            *stdout_snapshot_len = stdout_len;
-            *stderr_snapshot_len = stderr_len;
-        }
+        *stdout_snapshot_len = stdout_len;
+        *stderr_snapshot_len = stderr_len;
         self.last_progress = Instant::now();
-        Ok(())
     }
 }
 
@@ -835,57 +882,44 @@ fn duration_param(params: &serde_json::Value, name: &str, default_secs: u64) -> 
         .unwrap_or_else(|| Duration::from_secs(default_secs))
 }
 
-/// Clone the contents of a shared string buffer, defaulting to empty on poison.
-fn lock_clone(buffer: &Arc<Mutex<String>>) -> String {
-    buffer
-        .lock()
-        .map_or_else(|_| String::new(), |output| output.clone())
-}
-
-fn write_success_file(
-    context: &StepContext,
-    path_template: &str,
-    content: &str,
+fn join_stream_reader(
+    reader: Option<thread::JoinHandle<Result<(), EngineError>>>,
+    stream: &str,
 ) -> Result<(), EngineError> {
-    write_artifact_file(context, path_template, content)
-}
-
-fn write_artifact_file(
-    context: &StepContext,
-    path_template: &str,
-    content: &str,
-) -> Result<(), EngineError> {
-    let path = Path::new(path_template);
-    let path = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        context.work_dir().join(path)
+    let Some(reader) = reader else {
+        return Ok(());
     };
-
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| EngineError::StepExecutionError {
-            step_id: "llxprt".to_string(),
-            message: format!("Failed to create artifact file parent: {e}"),
-        })?;
-    }
-
-    std::fs::write(&path, content).map_err(|e| EngineError::StepExecutionError {
+    reader.join().map_err(|_| EngineError::StepExecutionError {
         step_id: "llxprt".to_string(),
-        message: format!("Failed to write artifact file: {e}"),
-    })
+        message: format!("llxprt {stream} reader panicked"),
+    })?
 }
 
-fn read_stream_into_buffer<R: Read>(reader: &mut R, buffer: &Arc<Mutex<String>>) {
+fn read_stream_into_buffer<R: Read>(
+    reader: &mut R,
+    buffer: &artifacts::SharedCapture,
+    scanner: Option<&outcome_scan::SharedScanner>,
+) -> Result<(), EngineError> {
     let mut bytes = [0_u8; 4096];
     loop {
         match reader.read(&mut bytes) {
-            Ok(0) => break,
+            Ok(0) => return Ok(()),
             Ok(n) => {
-                if let Ok(mut output) = buffer.lock() {
-                    output.push_str(&String::from_utf8_lossy(&bytes[..n]));
+                artifacts::append(buffer, &bytes[..n])?;
+                if let Some(shared) = scanner {
+                    if let Ok(mut guard) = shared.lock() {
+                        if let Some(scan) = guard.as_mut() {
+                            scan.append(&bytes[..n]);
+                        }
+                    }
                 }
             }
-            Err(_) => break,
+            Err(error) => {
+                return Err(EngineError::StepExecutionError {
+                    step_id: "llxprt".to_string(),
+                    message: format!("Failed to read llxprt stream: {error}"),
+                });
+            }
         }
     }
 }
@@ -913,11 +947,12 @@ fn match_static_stdout_outcome(params: &serde_json::Value, stdout: &str) -> Opti
     None
 }
 
+#[cfg(test)]
 fn match_stdout_outcome(
     params: &serde_json::Value,
-    stdout_buffer: &Arc<Mutex<String>>,
+    stdout_buffer: &artifacts::SharedCapture,
 ) -> Option<StepOutcome> {
-    let stdout = stdout_buffer.lock().ok()?;
+    let stdout = artifacts::capture_text(stdout_buffer);
     let pattern_map = params.get("outcome_on_stdout")?.as_object()?;
     for (pattern, outcome_value) in pattern_map {
         if contains_outcome_marker_line(&stdout, pattern) {
@@ -929,13 +964,6 @@ fn match_stdout_outcome(
 
 fn contains_outcome_marker_line(stdout: &str, marker: &str) -> bool {
     stdout.lines().any(|line| line.trim() == marker)
-}
-
-fn terminate_process_tree(child: &mut std::process::Child) {
-    let _ = child.kill();
-    thread::sleep(Duration::from_millis(250));
-
-    let _ = child.kill();
 }
 
 fn parse_outcome_name(name: &str) -> StepOutcome {

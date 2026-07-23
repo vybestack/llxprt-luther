@@ -55,7 +55,9 @@ impl EngineRunner {
     ) -> Result<Self, EngineError> {
         let max_retries = instance.config.runtime.max_retries;
         let max_loops = instance.config.guard_limits.max_iterations.unwrap_or(10);
-        let context = build_step_context(&instance, Some(&run_context))?;
+        let interrupted = Arc::new(AtomicBool::new(false));
+        let mut context = build_step_context(&instance, Some(&run_context))?;
+        context.bind_interrupt(interrupted.clone());
 
         // Create an in-memory SQLite connection for persistence
         let conn = Connection::open_in_memory().map_err(|e| {
@@ -74,7 +76,7 @@ impl EngineRunner {
             max_retries,
             max_loops,
             conn: RefCell::new(conn),
-            interrupted: Arc::new(AtomicBool::new(false)),
+            interrupted,
             registry,
             context,
             run_context,
@@ -115,7 +117,9 @@ impl EngineRunner {
         let max_loops = instance.config.guard_limits.max_iterations.unwrap_or(10);
         let conn = open_initialized_connection(db_path.as_ref())?;
         let (retry_count, edge_loop_counts) = load_checkpoint_state(&conn, &instance.run_id);
-        let context = build_step_context(&instance, Some(&run_context))?;
+        let interrupted = Arc::new(AtomicBool::new(false));
+        let mut context = build_step_context(&instance, Some(&run_context))?;
+        context.bind_interrupt(interrupted.clone());
 
         let mut runner = Self {
             instance,
@@ -124,7 +128,7 @@ impl EngineRunner {
             max_retries,
             max_loops,
             conn: RefCell::new(conn),
-            interrupted: Arc::new(AtomicBool::new(false)),
+            interrupted,
             registry,
             context,
             run_context,
@@ -167,7 +171,9 @@ impl EngineRunner {
         let max_loops = instance.config.guard_limits.max_iterations.unwrap_or(10);
         let conn = open_initialized_connection(db_path.as_ref())?;
         let (retry_count, edge_loop_counts) = load_checkpoint_state(&conn, &instance.run_id);
-        let context = build_step_context(&instance, Some(&run_context))?;
+        let interrupted = Arc::new(AtomicBool::new(false));
+        let mut context = build_step_context(&instance, Some(&run_context))?;
+        context.bind_interrupt(interrupted.clone());
 
         let mut runner = Self {
             instance,
@@ -176,7 +182,7 @@ impl EngineRunner {
             max_retries,
             max_loops,
             conn: RefCell::new(conn),
-            interrupted: Arc::new(AtomicBool::new(false)),
+            interrupted,
             registry,
             context,
             run_context,

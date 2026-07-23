@@ -200,6 +200,13 @@ pub fn print_runs_show_json(
             .collect::<Vec<_>>()),
     );
     obj.insert(
+        "llxprt_diagnostics".to_string(),
+        serde_json::json!(super::diagnostics::project(
+            events,
+            md.artifact_root.as_deref()
+        )),
+    );
+    obj.insert(
         "artifacts".to_string(),
         serde_json::json!(artifacts
             .iter()
@@ -360,6 +367,7 @@ pub fn print_runs_show_human(
     print_runs_show_info(md);
     print_runs_show_paths_and_procs(md, log_path, log_exists);
     print_runs_show_scope_control(md);
+    super::diagnostics::print_human(events, md.artifact_root.as_deref());
     print_runs_show_events(events, artifacts);
 }
 

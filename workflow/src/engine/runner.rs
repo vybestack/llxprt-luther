@@ -17,6 +17,7 @@ use crate::workflow::schema::{StepDef, TransitionDef};
 
 mod target_path_context;
 
+mod diagnostic_events;
 mod support;
 use support::preview_for_log;
 
@@ -274,6 +275,9 @@ impl EngineRunner {
                 }
                 Err(error) => return Err(error),
             };
+            if self.interrupted.load(std::sync::atomic::Ordering::SeqCst) {
+                return self.interrupt_at_step(&current_step_id);
+            }
             let next_step = if outcome == StepOutcome::Abandon {
                 None
             } else {
@@ -373,6 +377,13 @@ impl EngineRunner {
         let conn = self.conn.borrow();
         save_checkpoint_with_conn(&conn, &checkpoint)?;
         drop(conn);
+        let details = diagnostic_events::details(&self.context, current_step_id);
+        self.record_event(
+            EventType::StepOutcome,
+            current_step_id,
+            "interrupted",
+            details.as_deref(),
+        );
 
         let run_outcome = RunOutcome::Interrupted {
             step_id: current_step_id.to_string(),
