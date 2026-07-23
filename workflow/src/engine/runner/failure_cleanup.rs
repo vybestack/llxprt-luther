@@ -330,13 +330,14 @@ impl super::EngineRunner {
             rusqlite::Transaction::new_unchecked(&conn, rusqlite::TransactionBehavior::Immediate)
                 .map_err(|error| EngineError::PersistenceError(error.to_string()))?;
         save_checkpoint_with_conn(&tx, &checkpoint)?;
+        let diagnostic_details = super::diagnostic_events::details(&self.context, current_step_id);
         append_typed_event_with_conn(
             &tx,
             &self.instance.run_id,
             current_step_id,
             &outcome.to_string(),
             EventType::StepOutcome,
-            None,
+            diagnostic_details.as_deref(),
             chrono::Utc::now(),
         )?;
         if self.persist_registry {

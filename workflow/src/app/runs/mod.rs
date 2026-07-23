@@ -223,6 +223,7 @@ pub fn handle_runs_rewind(args: &luther_workflow::cli::RunsRewindArgs) {
 mod continuation_execution;
 pub use continuation_execution::*;
 
+mod diagnostics;
 mod inspect;
 pub use inspect::*;
 
