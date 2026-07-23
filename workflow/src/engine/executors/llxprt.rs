@@ -22,7 +22,6 @@
 //! via [`LlxprtExecutorWithDetector`].
 
 use std::io::Read;
-use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::thread;
@@ -41,6 +40,7 @@ use crate::engine::transition::StepOutcome;
 mod artifact_paths;
 mod artifacts;
 mod outcome_scan;
+mod process_control;
 
 #[path = "llxprt_timeout.rs"]
 mod llxprt_timeout;
@@ -234,7 +234,7 @@ fn handle_static_content(
             message: "static_content requires success_file".to_string(),
         });
     };
-    write_success_file(context, path_template, &content)?;
+    artifact_paths::write_file(context, path_template, &content)?;
     Ok(Some(StepOutcome::Success))
 }
 
@@ -309,6 +309,51 @@ struct ProcessResult {
     idle_timeout: Option<Duration>,
 }
 
+type StreamReader = thread::JoinHandle<Result<(), EngineError>>;
+
+struct ProcessStreams {
+    stdout: artifacts::SharedCapture,
+    stderr: artifacts::SharedCapture,
+    outcome_scanner: outcome_scan::SharedScanner,
+    stdout_reader: Option<StreamReader>,
+    stderr_reader: Option<StreamReader>,
+}
+
+impl ProcessStreams {
+    fn start(
+        child: &mut std::process::Child,
+        params: &serde_json::Value,
+        artifacts: &artifacts::DiagnosticArtifacts,
+    ) -> Self {
+        let stdout = Arc::clone(&artifacts.stdout);
+        let stderr = Arc::clone(&artifacts.stderr);
+        let outcome_scanner = Arc::new(std::sync::Mutex::new(
+            outcome_scan::OutcomeScanner::from_params(params),
+        ));
+        let stdout_reader = child.stdout.take().map(|mut pipe| {
+            let capture = Arc::clone(&stdout);
+            let scanner = Arc::clone(&outcome_scanner);
+            thread::spawn(move || read_stream_into_buffer(&mut pipe, &capture, Some(&scanner)))
+        });
+        let stderr_reader = child.stderr.take().map(|mut pipe| {
+            let capture = Arc::clone(&stderr);
+            thread::spawn(move || read_stream_into_buffer(&mut pipe, &capture, None))
+        });
+        Self {
+            stdout,
+            stderr,
+            outcome_scanner,
+            stdout_reader,
+            stderr_reader,
+        }
+    }
+
+    fn join(&mut self) -> Result<(), EngineError> {
+        join_stream_reader(self.stdout_reader.take(), "stdout")?;
+        join_stream_reader(self.stderr_reader.take(), "stderr")
+    }
+}
+
 /// Run the llxprt child process to completion, polling for success conditions
 /// and timeouts.
 fn run_llxprt_process(
@@ -317,72 +362,77 @@ fn run_llxprt_process(
     config: &LlxprtStepConfig<'_>,
     artifacts: &artifacts::DiagnosticArtifacts,
 ) -> Result<ProcessResult, EngineError> {
-    let timing = ProcessTiming::from_params(params);
     let mut child = spawn_llxprt(context, params)?;
-
-    let stdout_buffer = Arc::clone(&artifacts.stdout);
-    let stderr_buffer = Arc::clone(&artifacts.stderr);
-    let outcome_scanner = Arc::new(std::sync::Mutex::new(
-        outcome_scan::OutcomeScanner::from_params(params),
-    ));
-    let stdout_reader = child.stdout.take().map(|mut stdout| {
-        let buffer = Arc::clone(&stdout_buffer);
-        let scanner = Arc::clone(&outcome_scanner);
-        thread::spawn(move || read_stream_into_buffer(&mut stdout, &buffer, Some(&scanner)))
-    });
-    let stderr_reader = child.stderr.take().map(|mut stderr| {
-        let buffer = Arc::clone(&stderr_buffer);
-        thread::spawn(move || read_stream_into_buffer(&mut stderr, &buffer, None))
-    });
-
-    let mut poll = ProcessPoll::new(timing);
-    let outcome_seen = match poll.run(
+    let mut streams = ProcessStreams::start(&mut child, params, artifacts);
+    let mut poll = ProcessPoll::new(ProcessTiming::from_params(params));
+    let outcome_seen = poll.run(
         context,
         config,
-        &stdout_buffer,
-        &stderr_buffer,
-        &outcome_scanner,
+        &streams.stdout,
+        &streams.stderr,
+        &streams.outcome_scanner,
         &mut child,
-    ) {
+    );
+    let outcome_seen = match outcome_seen {
         Ok(outcome) => outcome,
         Err(error) => {
-            terminate_process_tree(&mut child);
-            let _ = child.wait();
-            let _ = join_stream_reader(stdout_reader, "stdout");
-            let _ = join_stream_reader(stderr_reader, "stderr");
-            artifacts.publish_manifest()?;
+            terminate_and_drain(&mut child, &mut streams, artifacts)?;
             return Err(error);
         }
     };
+    if should_terminate(context, &poll, outcome_seen) {
+        process_control::terminate_process_tree(&mut child);
+    }
+    finish_llxprt_process(context, child, streams, poll, outcome_seen, artifacts)
+}
 
-    if context.is_interrupted()
+fn should_terminate(
+    context: &StepContext,
+    poll: &ProcessPoll,
+    outcome_seen: Option<StepOutcome>,
+) -> bool {
+    context.is_interrupted()
         || poll.success_seen
         || poll.timed_out(outcome_seen)
         || poll.idle_timed_out(outcome_seen)
         || outcome_seen.is_some()
-    {
-        terminate_process_tree(&mut child);
-    }
+}
 
-    let exit_status = child.wait().map_err(|e| EngineError::StepExecutionError {
-        step_id: "llxprt".to_string(),
-        message: format!("Failed to wait for llxprt: {e}"),
-    })?;
-    join_stream_reader(stdout_reader, "stdout")?;
-    join_stream_reader(stderr_reader, "stderr")?;
+fn terminate_and_drain(
+    child: &mut std::process::Child,
+    streams: &mut ProcessStreams,
+    artifacts: &artifacts::DiagnosticArtifacts,
+) -> Result<(), EngineError> {
+    process_control::terminate_process_tree(child);
+    let _ = child.wait();
+    let _ = streams.join();
+    artifacts.publish_manifest()
+}
 
-    let final_outcome = outcome_scan::finish(&outcome_scanner);
-    let outcome_seen = outcome_seen.or(final_outcome);
-
+fn finish_llxprt_process(
+    context: &mut StepContext,
+    mut child: std::process::Child,
+    mut streams: ProcessStreams,
+    poll: ProcessPoll,
+    outcome_seen: Option<StepOutcome>,
+    artifacts: &artifacts::DiagnosticArtifacts,
+) -> Result<ProcessResult, EngineError> {
+    let exit_status = child
+        .wait()
+        .map_err(|error| EngineError::StepExecutionError {
+            step_id: "llxprt".to_string(),
+            message: format!("Failed to wait for llxprt: {error}"),
+        })?;
+    streams.join()?;
+    let outcome_seen = outcome_seen.or_else(|| outcome_scan::finish(&streams.outcome_scanner));
     artifacts.publish_manifest()?;
-    let stdout = artifacts::capture_text(&stdout_buffer);
-    let stderr = artifacts::capture_text(&stderr_buffer);
+    let stdout = artifacts::capture_text(&streams.stdout);
+    let stderr = artifacts::capture_text(&streams.stderr);
     if let Some(code) = exit_status.code() {
         context.set("exit_code", &code.to_string());
     }
     context.set("stdout", &stdout);
     context.set("stderr", &stderr);
-
     Ok(ProcessResult {
         stdout,
         stderr,
@@ -433,7 +483,7 @@ fn spawn_llxprt(
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
     cmd.stdin(Stdio::null());
-    configure_process_group(&mut cmd);
+    process_control::configure_process_group(&mut cmd);
 
     cmd.spawn().map_err(|e| spawn_error(context, &binary, e))
 }
@@ -845,39 +895,6 @@ fn join_stream_reader(
     })?
 }
 
-fn write_success_file(
-    context: &StepContext,
-    path_template: &str,
-    content: &str,
-) -> Result<(), EngineError> {
-    write_artifact_file(context, path_template, content)
-}
-
-fn write_artifact_file(
-    context: &StepContext,
-    path_template: &str,
-    content: &str,
-) -> Result<(), EngineError> {
-    let path = Path::new(path_template);
-    let path = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        context.work_dir().join(path)
-    };
-
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| EngineError::StepExecutionError {
-            step_id: "llxprt".to_string(),
-            message: format!("Failed to create artifact file parent: {e}"),
-        })?;
-    }
-
-    std::fs::write(&path, content).map_err(|e| EngineError::StepExecutionError {
-        step_id: "llxprt".to_string(),
-        message: format!("Failed to write artifact file: {e}"),
-    })
-}
-
 fn read_stream_into_buffer<R: Read>(
     reader: &mut R,
     buffer: &artifacts::SharedCapture,
@@ -947,55 +964,6 @@ fn match_stdout_outcome(
 
 fn contains_outcome_marker_line(stdout: &str, marker: &str) -> bool {
     stdout.lines().any(|line| line.trim() == marker)
-}
-
-#[cfg(unix)]
-fn configure_process_group(command: &mut Command) {
-    use std::os::unix::process::CommandExt;
-
-    command.process_group(0);
-}
-
-#[cfg(not(unix))]
-fn configure_process_group(_command: &mut Command) {}
-
-fn terminate_process_tree(child: &mut std::process::Child) {
-    #[cfg(unix)]
-    {
-        signal_process_group(child.id(), "-TERM");
-        thread::sleep(Duration::from_millis(250));
-        signal_process_group(child.id(), "-KILL");
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = child.kill();
-        thread::sleep(Duration::from_millis(250));
-        let _ = child.kill();
-    }
-}
-
-#[cfg(unix)]
-fn signal_process_group(process_group: u32, signal: &str) {
-    use rustix::process::{getpgid, kill_process, kill_process_group, Pid, Signal};
-
-    let Some(signal) = (match signal {
-        "-TERM" => Some(Signal::TERM),
-        "-KILL" => Some(Signal::KILL),
-        _ => None,
-    }) else {
-        return;
-    };
-    let Ok(raw_pid) = i32::try_from(process_group) else {
-        return;
-    };
-    let Some(pid) = Pid::from_raw(raw_pid) else {
-        return;
-    };
-    if getpgid(Some(pid)).is_ok_and(|pgid| pgid == pid) {
-        let _ = kill_process_group(pid, signal);
-    } else {
-        let _ = kill_process(pid, signal);
-    }
 }
 
 fn parse_outcome_name(name: &str) -> StepOutcome {

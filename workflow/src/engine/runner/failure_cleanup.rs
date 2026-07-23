@@ -302,29 +302,8 @@ impl super::EngineRunner {
             Err(other) => return Err(other),
         }
         let checkpoint = self.create_checkpoint(current_step_id, "completed");
-        let failure = next_step
-            .filter(|next| *outcome != StepOutcome::Success && self.is_failure_cleanup_step(next))
-            .map(|next| {
-                self.build_failure_cleanup_state(current_step_id, next, outcome, &checkpoint)
-            });
-        let terminal_failure = if self.is_failure_cleanup_step(current_step_id) {
-            let mut state = self
-                .load_metadata()
-                .and_then(|metadata| metadata.failure_cleanup)
-                .or_else(|| self.pending_failure_cleanup.clone())
-                .ok_or_else(|| {
-                    EngineError::PersistenceError(
-                        "failure cleanup completed without failed-work provenance".to_string(),
-                    )
-                })?;
-            if *outcome == StepOutcome::Success {
-                state.cleanup_succeeded = true;
-                state.cleanup_completed_at = Some(chrono::Utc::now());
-            }
-            Some(state)
-        } else {
-            None
-        };
+        let (failure, terminal_failure) =
+            self.failure_states_for_step(current_step_id, outcome, next_step, &checkpoint)?;
         let conn = self.conn.borrow();
         let tx =
             rusqlite::Transaction::new_unchecked(&conn, rusqlite::TransactionBehavior::Immediate)
@@ -396,6 +375,37 @@ impl super::EngineRunner {
     /// The returned `Err(EngineError::OwnershipFailure)` signals the runner
     /// loop that the run must terminate immediately without advancing to the
     /// cleanup step. The `run` method maps this to a terminal `RunOutcome`.
+    fn failure_states_for_step(
+        &self,
+        current_step_id: &str,
+        outcome: &StepOutcome,
+        next_step: Option<&str>,
+        checkpoint: &crate::persistence::Checkpoint,
+    ) -> Result<(Option<FailureCleanupState>, Option<FailureCleanupState>), EngineError> {
+        let failure = next_step
+            .filter(|next| *outcome != StepOutcome::Success && self.is_failure_cleanup_step(next))
+            .map(|next| {
+                self.build_failure_cleanup_state(current_step_id, next, outcome, checkpoint)
+            });
+        if !self.is_failure_cleanup_step(current_step_id) {
+            return Ok((failure, None));
+        }
+        let mut terminal = self
+            .load_metadata()
+            .and_then(|metadata| metadata.failure_cleanup)
+            .or_else(|| self.pending_failure_cleanup.clone())
+            .ok_or_else(|| {
+                EngineError::PersistenceError(
+                    "failure cleanup completed without failed-work provenance".to_string(),
+                )
+            })?;
+        if *outcome == StepOutcome::Success {
+            terminal.cleanup_succeeded = true;
+            terminal.cleanup_completed_at = Some(chrono::Utc::now());
+        }
+        Ok((failure, Some(terminal)))
+    }
+
     fn persist_terminal_ownership_failure(
         &mut self,
         current_step_id: &str,

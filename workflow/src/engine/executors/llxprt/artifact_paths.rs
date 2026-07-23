@@ -38,6 +38,26 @@ pub(super) fn resolve_stream_path(
     }))
 }
 
+pub(super) fn write_file(
+    context: &StepContext,
+    path_template: &str,
+    content: &str,
+) -> Result<(), EngineError> {
+    let path = Path::new(path_template);
+    let path = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        context.work_dir().join(path)
+    };
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| {
+            path_error(format!("failed to create artifact file parent: {error}"))
+        })?;
+    }
+    std::fs::write(&path, content)
+        .map_err(|error| path_error(format!("failed to write artifact file: {error}")))
+}
+
 fn reject_unresolved_path(path: &Path) -> Result<(), EngineError> {
     let value = path.to_string_lossy();
     if value.contains('{') || value.contains('}') {
