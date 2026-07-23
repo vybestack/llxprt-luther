@@ -39,6 +39,7 @@ fn due_wait_states_are_polled_and_resumed_before_new_discovery() {
         cfg(1),
         DaemonPathBases::default(),
         BTreeMap::new(),
+        std::path::PathBuf::from("config"),
     );
     let summary = run_multi_target_once_with_poller(
         &[target],
@@ -177,6 +178,7 @@ fn resumed_waits_participate_in_capacity_accounting() {
         cfg(1),
         DaemonPathBases::default(),
         BTreeMap::new(),
+        std::path::PathBuf::from("config"),
     );
     let summary = run_multi_target_once_with_poller(
         &[target],
@@ -214,6 +216,7 @@ fn multi_target_respects_global_and_repository_limits() {
             },
             DaemonPathBases::default(),
             BTreeMap::new(),
+            std::path::PathBuf::from("config"),
         ),
         SchedulerTarget::new(
             "cfg-b".to_string(),
@@ -226,6 +229,7 @@ fn multi_target_respects_global_and_repository_limits() {
             },
             DaemonPathBases::default(),
             BTreeMap::new(),
+            std::path::PathBuf::from("config"),
         ),
     ];
     let q1 = MockQuery {
@@ -268,6 +272,7 @@ fn mismatched_targets_and_queries_returns_structured_error() {
         cfg(1),
         DaemonPathBases::default(),
         BTreeMap::new(),
+        std::path::PathBuf::from("config"),
     );
     let q = MockQuery { issues: vec![] };
     let l = MockLauncher {
@@ -311,6 +316,7 @@ fn run_loop_recovers_stale_then_stops() {
         cfg(1),
         DaemonPathBases::default(),
         BTreeMap::new(),
+        std::path::PathBuf::from("config"),
     );
     run_loop(target, &q, &c, &l, shutdown, 300).unwrap();
     let recovered = get_lease_for_issue(&c, "o/r", 9).unwrap().unwrap();
@@ -330,6 +336,7 @@ fn parent_routed_launch_without_parent_bases_uses_empty_fallback() {
             artifact_dir_base: Some(std::path::PathBuf::from("/tmp/child-artifacts")),
         },
         BTreeMap::new(),
+        std::path::PathBuf::from("config"),
     );
 
     let bases = path_bases_for(&target, "parent-cfg");

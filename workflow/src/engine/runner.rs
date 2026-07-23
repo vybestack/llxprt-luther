@@ -2,7 +2,6 @@
 /// Workflow execution engine - runs workflow instances step by step.
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::path::Path;
 
 use rusqlite::Connection;
 use thiserror::Error;
@@ -11,24 +10,24 @@ use crate::engine::executor::{ExecutorRegistry, StepContext};
 use crate::engine::instance::WorkflowInstance;
 use crate::engine::transition::{resolve_transition_schema, StepOutcome};
 use crate::persistence::{
-    append_typed_event_with_conn, load_checkpoint_with_conn, persist_run_with_conn,
-    save_checkpoint_with_conn, Checkpoint, EventType, FailureCleanupState, PersistenceError,
-    RunMetadata, RunStatus, StateSnapshot,
+    load_checkpoint_with_conn, save_checkpoint_with_conn, Checkpoint, EventType,
+    FailureCleanupState, PersistenceError, StateSnapshot,
 };
 use crate::workflow::schema::{StepDef, TransitionDef};
 
 mod target_path_context;
 
 mod support;
-use support::{
-    build_step_context, load_checkpoint_state, open_initialized_connection, preview_for_log,
-};
+use support::preview_for_log;
 
+mod completion;
+mod construction;
 mod failure_cleanup;
+mod lease_coordination;
 
-/// Contextual metadata for a run: paths and GitHub references.
-/// Used to populate the persistent run registry beyond the core identifiers.
-/// @plan:PLAN-20260404-INITIAL-RUNTIME.P05
+/// Contextual paths, GitHub references, and ephemeral authorities for a run.
+/// Workspace authorization is reconstructed from verified ownership on every
+/// process entry and is never persisted in run metadata.
 #[derive(Debug, Clone, Default)]
 pub struct RunContext {
     pub daemon_managed: bool,
@@ -39,6 +38,22 @@ pub struct RunContext {
     pub issue_number: Option<i64>,
     pub pr_number: Option<i64>,
     pub head_sha: Option<String>,
+    /// Ephemeral workspace dev/inode authorization, reconstructed by resume
+    /// surfaces from a freshly-verified workspace descriptor. Not persisted.
+    /// `None` on fresh launches until the `workspace_ownership_verify` step
+    /// captures it; reconstructed by resume paths so resumed shell steps
+    /// retain descriptor-anchored authorization without re-running the
+    /// verify graph step.
+    pub workspace_authorization: Option<crate::engine::workspace_ownership::WorkspaceAuthorization>,
+    /// Exact launch provenance recorded for new runs at launch time. The launch
+    /// surfaces (CLI `run`, daemon launch, child launch) compute this from the
+    /// resolved workflow type/config + config root and inject it here so the
+    /// engine persists it in the initial `RunMetadata` row. Resume surfaces do
+    /// NOT set this; they recompute and verify against the persisted value.
+    /// `None` on resume paths means `build_metadata` preserves the existing
+    /// persisted provenance rather than overwriting it.
+    /// @plan:PLAN-20260722-ISSUE158-LAUNCH-PROVENANCE
+    pub launch_provenance: Option<crate::persistence::launch_provenance::LaunchProvenance>,
 }
 
 /// Errors that can occur during workflow execution.
@@ -78,6 +93,39 @@ pub enum EngineError {
 
     #[error("llxprt profile `{profile}` could not be resolved: {message}")]
     LlxprtProfileError { profile: String, message: String },
+
+    /// Workspace ownership verification failed while routing into a
+    /// `failure_cleanup` step. This is a terminal ownership failure: the run
+    /// must not execute the workspace-mutating cleanup shell script (e.g.
+    /// `abandon_and_log`) because the workspace is not owned by this run.
+    /// Instead, the runner protects the issue lease and records a terminal
+    /// failure outcome without workspace mutation. This prevents a misleading
+    /// "ownership-fatal → abandon_and_log" path where an ownership auth
+    /// failure pretends cleanup will run.
+    #[error("{0}")]
+    OwnershipFailure(OwnershipFailureDetails),
+}
+
+/// Details of a terminal workspace ownership failure encountered while routing
+/// into a `failure_cleanup` step. Carries the targeted cleanup step and the
+/// ownership verification rejection reason so the runner can record a terminal
+/// failure outcome without executing the workspace-mutating cleanup.
+#[derive(Debug, Clone)]
+pub struct OwnershipFailureDetails {
+    /// The `failure_cleanup` step that would have been entered.
+    pub failed_step: String,
+    /// The ownership verification rejection reason.
+    pub reason: String,
+}
+
+impl std::fmt::Display for OwnershipFailureDetails {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "workspace ownership failure before cleanup step {}: {}",
+            self.failed_step, self.reason
+        )
+    }
 }
 
 impl From<PersistenceError> for EngineError {
@@ -160,207 +208,15 @@ pub struct EngineRunner {
     persist_registry: bool,
     /// In-memory causal failure for non-registry runners and immediate cleanup.
     pending_failure_cleanup: Option<FailureCleanupState>,
+    /// Set when `persist_step_result` recorded a terminal ownership failure
+    /// (workspace ownership verification failed while routing into a
+    /// `failure_cleanup` step). The runner loop checks this after
+    /// `persist_step_result` to terminate the run with a terminal failure
+    /// without advancing to the workspace-mutating cleanup step.
+    terminal_ownership_failure: bool,
 }
 
 impl EngineRunner {
-    /// Create a new engine runner for the given workflow instance.
-    /// @plan:PLAN-20260404-INITIAL-RUNTIME.P08
-    /// @plan:PLAN-20260408-STEP-EXEC.P06
-    /// @requirement:REQ-EARS-ENG-001
-    pub fn new(
-        instance: WorkflowInstance,
-        registry: ExecutorRegistry,
-    ) -> Result<Self, EngineError> {
-        let max_retries = instance.config.runtime.max_retries;
-        let max_loops = instance.config.guard_limits.max_iterations.unwrap_or(10);
-        let context = build_step_context(&instance, None)?;
-
-        // Create an in-memory SQLite connection for persistence
-        let conn = Connection::open_in_memory().map_err(|e| {
-            EngineError::PersistenceError(format!("Failed to create in-memory database: {e}"))
-        })?;
-
-        // Initialize checkpoint schema
-        crate::persistence::checkpoint::init_checkpoint_table(&conn).map_err(|e| {
-            EngineError::PersistenceError(format!("Failed to initialize checkpoint schema: {e}"))
-        })?;
-
-        Ok(Self {
-            instance,
-            retry_count: 0,
-            edge_loop_counts: HashMap::new(),
-            max_retries,
-            max_loops,
-            conn: RefCell::new(conn),
-            interrupted: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            registry,
-            context,
-            run_context: RunContext::default(),
-            persist_registry: false,
-            pending_failure_cleanup: None,
-        })
-    }
-
-    /// Create a new engine runner for the given workflow instance with a custom database path.
-    /// @plan:PLAN-20260404-INITIAL-RUNTIME.P08
-    /// @plan:PLAN-20260408-STEP-EXEC.P06
-    /// @requirement:REQ-EARS-ENG-001
-    pub fn with_db_path(
-        instance: WorkflowInstance,
-        registry: ExecutorRegistry,
-        db_path: impl AsRef<Path>,
-    ) -> Result<Self, EngineError> {
-        Self::with_db_path_and_context(instance, registry, db_path, RunContext::default())
-    }
-
-    /// Create a new engine runner with a custom database path and run context.
-    ///
-    /// The provided [`RunContext`] is attached *before* the initial run record
-    /// is persisted, so the first durable `Starting` row already includes path
-    /// and GitHub metadata. Use this instead of chaining
-    /// [`with_run_context`](Self::with_run_context) after `with_db_path` when the
-    /// context is known up front.
-    /// @plan:PLAN-20260404-INITIAL-RUNTIME.P05
-    /// @requirement:REQ-EARS-ENG-001
-    pub fn with_db_path_and_context(
-        instance: WorkflowInstance,
-        registry: ExecutorRegistry,
-        db_path: impl AsRef<Path>,
-        run_context: RunContext,
-    ) -> Result<Self, EngineError> {
-        let max_retries = instance.config.runtime.max_retries;
-        let max_loops = instance.config.guard_limits.max_iterations.unwrap_or(10);
-        let conn = open_initialized_connection(db_path.as_ref())?;
-        let (retry_count, edge_loop_counts) = load_checkpoint_state(&conn, &instance.run_id);
-        let context = build_step_context(&instance, Some(&run_context))?;
-
-        let mut runner = Self {
-            instance,
-            retry_count,
-            edge_loop_counts,
-            max_retries,
-            max_loops,
-            conn: RefCell::new(conn),
-            interrupted: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            registry,
-            context,
-            run_context,
-            persist_registry: true,
-            pending_failure_cleanup: None,
-        };
-
-        // Persist an initial run record so in-flight runs are visible before
-        // they complete. The run context is already attached above, so the
-        // first durable `Starting` row includes path and GitHub metadata.
-        // Best-effort: a persistence failure must not block execution.
-        // @plan:PLAN-20260404-INITIAL-RUNTIME.P05
-        runner.persist_initial_run();
-
-        Ok(runner)
-    }
-
-    /// Attach contextual run metadata (paths, GitHub refs) and persist it.
-    /// @plan:PLAN-20260404-INITIAL-RUNTIME.P05
-    pub fn with_run_context(mut self, ctx: RunContext) -> Self {
-        self.run_context = ctx;
-        if self.persist_registry {
-            let mut metadata = self.build_metadata(RunStatus::Starting);
-            metadata.current_step = self.first_step_id();
-            self.persist_metadata(&metadata);
-        }
-        self
-    }
-
-    /// Determine the first step id of the workflow, if any.
-    /// @plan:PLAN-20260404-INITIAL-RUNTIME.P05
-    fn first_step_id(&self) -> Option<String> {
-        self.instance
-            .workflow_type
-            .steps
-            .first()
-            .map(|s| s.step_id.clone())
-    }
-
-    /// Build a `RunMetadata` from the current instance + run context.
-    /// @plan:PLAN-20260404-INITIAL-RUNTIME.P05
-    fn build_metadata(&self, status: RunStatus) -> RunMetadata {
-        let mut metadata = RunMetadata::new(
-            &self.instance.run_id,
-            &self.instance.workflow_type.workflow_type_id,
-            &self.instance.config.config_id,
-        );
-        metadata.status = status;
-        metadata.process_pid = Some(std::process::id());
-        metadata.log_path = self.run_context.log_path.clone();
-        metadata.artifact_root = self.run_context.artifact_root.clone();
-        metadata.workspace_path = self.run_context.workspace_path.clone();
-        metadata.repository = self.run_context.repository.clone();
-        metadata.issue_number = self.run_context.issue_number;
-        metadata.pr_number = self.run_context.pr_number;
-        metadata.head_sha = self.run_context.head_sha.clone();
-        metadata
-    }
-
-    /// Persist the initial run record (status Starting) at construction time.
-    ///
-    /// Non-destructive when a row already exists: a reopened/in-flight run (e.g.
-    /// reconstructed for operator continuation) already represents this run with
-    /// its own status, `created_at`, current step, and history. Overwriting it
-    /// with a fresh `Starting` record would reset `created_at`, clear history,
-    /// and reset `current_step` to the first step, so we skip persistence when a
-    /// row is present and only write the fresh `Starting` row on first
-    /// construction.
-    /// @plan:PLAN-20260404-INITIAL-RUNTIME.P05
-    /// @plan:PLAN-20260623-LUTHER-CONTINUATION
-    fn persist_initial_run(&mut self) {
-        if !self.persist_registry {
-            return;
-        }
-        if self.load_metadata().is_some() {
-            return;
-        }
-        let mut metadata = self.build_metadata(RunStatus::Starting);
-        metadata.current_step = self.first_step_id();
-        self.persist_metadata(&metadata);
-    }
-
-    /// Best-effort persist of a run metadata record to the registry.
-    /// @plan:PLAN-20260404-INITIAL-RUNTIME.P05
-    fn persist_metadata(&self, metadata: &RunMetadata) {
-        let conn = self.conn.borrow();
-        let _ = persist_run_with_conn(&conn, metadata);
-    }
-
-    /// Load the current run metadata from the registry, if present.
-    /// @plan:PLAN-20260404-INITIAL-RUNTIME.P05
-    fn load_metadata(&self) -> Option<RunMetadata> {
-        let conn = self.conn.borrow();
-        crate::persistence::get_run_with_conn(&conn, &self.instance.run_id)
-            .ok()
-            .flatten()
-    }
-
-    /// Record a typed lifecycle event (best-effort).
-    /// @plan:PLAN-20260404-INITIAL-RUNTIME.P05
-    fn record_event(
-        &self,
-        event_type: EventType,
-        step_id: &str,
-        outcome: &str,
-        details: Option<&str>,
-    ) {
-        let conn = self.conn.borrow();
-        let _ = append_typed_event_with_conn(
-            &conn,
-            &self.instance.run_id,
-            step_id,
-            outcome,
-            event_type,
-            details,
-            chrono::Utc::now(),
-        );
-    }
-
     /// Compute candidate next steps for the given step across all outcomes.
     /// @plan:PLAN-20260404-INITIAL-RUNTIME.P05
     fn compute_next_step_candidates(&self, step_id: &str) -> Vec<String> {
@@ -425,6 +281,24 @@ impl EngineRunner {
             };
             self.persist_step_result(&current_step_id, &outcome, next_step.as_deref())?;
 
+            // A terminal ownership failure was recorded by persist_step_result:
+            // workspace ownership verification failed while routing into a
+            // failure_cleanup step. The run must terminate immediately with a
+            // terminal failure WITHOUT advancing to the workspace-mutating
+            // cleanup step (e.g. abandon_and_log). The lease is already
+            // protected and the failure provenance is persisted.
+            if self.terminal_ownership_failure {
+                let failure = self.pending_failure_cleanup.clone().ok_or_else(|| {
+                    EngineError::InvalidState(
+                        "terminal ownership failure recorded without provenance".to_string(),
+                    )
+                })?;
+                return Ok(RunOutcome::Failure {
+                    step_id: failure.failed_step,
+                    reason: failure.failure_reason,
+                });
+            }
+
             if outcome == StepOutcome::Abandon {
                 if self.is_failure_cleanup_step(&current_step_id) {
                     return self.finish_without_transition(&current_step_id, &outcome);
@@ -451,6 +325,19 @@ impl EngineRunner {
             .and_then(|metadata| metadata.failure_cleanup)
             .filter(|failure| !failure.cleanup_succeeded)
         {
+            // An ownership-denied terminal must NEVER be routed to the
+            // workspace-mutating cleanup step. The ownership-denied terminal is
+            // a distinct non-resumable state, but as a defense-in-depth guard
+            // we refuse to transition into the cleanup step even if the run is
+            // somehow reconstructed: cleanup executes shell commands that must
+            // only run in a trusted workspace.
+            if failure.ownership_denied {
+                return Err(EngineError::InvalidState(format!(
+                    "run {} terminated with a workspace ownership denial and cannot resume into \
+                     cleanup step {}; cleanup cannot execute in an unowned workspace",
+                    self.instance.run_id, failure.cleanup_step
+                )));
+            }
             self.context
                 .restore_checkpoint_values(failure.failed_state_snapshot.context.clone())
                 .map_err(|error| EngineError::PersistenceError(error.to_string()))?;
@@ -520,33 +407,6 @@ impl EngineRunner {
             self.record_event(EventType::StepStart, current_step_id, "started", None);
         }
         Ok(())
-    }
-    fn heartbeat_owned_lease(&self) {
-        let Some(metadata) = self.load_metadata() else {
-            return;
-        };
-        let Some(repository) = metadata.repository.as_deref() else {
-            return;
-        };
-        let Some(issue_number) = metadata
-            .issue_number
-            .or(metadata.pr_number)
-            .and_then(|number| u64::try_from(number).ok())
-        else {
-            return;
-        };
-        let conn = self.conn.borrow();
-        if let Ok(Some(lease)) =
-            crate::persistence::get_lease_for_issue(&conn, repository, issue_number)
-        {
-            if lease.run_id.as_deref() == Some(self.instance.run_id.as_str()) {
-                let _ = crate::persistence::touch_owned_running_lease_heartbeat(
-                    &conn,
-                    &lease.lease_id,
-                    &self.instance.run_id,
-                );
-            }
-        }
     }
 
     fn is_registered_step_type(&self, step_id: &str) -> bool {
@@ -809,14 +669,6 @@ impl EngineRunner {
         self.edge_loop_counts.values().sum()
     }
 
-    /// Set the working directory for step execution context.
-    /// @plan:PLAN-20260408-STEP-EXEC.P07
-    /// @plan:PLAN-20260408-LLXPRT-FIRST.P15
-    /// @requirement:REQ-LF-PROF-003
-    pub fn set_work_dir(&mut self, work_dir: std::path::PathBuf) {
-        self.context.set_work_dir(work_dir);
-    }
-
     /// Try to resume from a checkpoint in the shared default database.
     /// Returns true if a checkpoint was found and loaded, false otherwise.
     /// @plan:PLAN-20260404-INITIAL-RUNTIME.P08
@@ -890,58 +742,6 @@ impl EngineRunner {
             (Some(curr), Some(next)) => next <= curr,
             _ => false,
         }
-    }
-
-    /// Record run completion metadata to the persistence store.
-    /// @plan:PLAN-20260408-LLXPRT-FIRST.P15
-    /// @requirement:REQ-LF-FAIL-005
-    fn record_run_completion(
-        &self,
-        outcome: &RunOutcome,
-        final_step_id: &str,
-    ) -> Result<(), EngineError> {
-        if !self.persist_registry {
-            return Ok(());
-        }
-        // Determine RunStatus based on outcome
-        let status = match outcome {
-            RunOutcome::Success => RunStatus::Completed,
-            RunOutcome::Failure { .. } => RunStatus::Failed,
-            RunOutcome::Abandoned { .. } => RunStatus::Abandoned,
-            RunOutcome::Interrupted { .. } => RunStatus::Paused,
-            // A recoverable external wait maps to a non-terminal status so the
-            // run stays visible/active and can be resumed.
-            // @plan:PLAN-20260623-LUTHER-CONTINUATION
-            RunOutcome::WaitingExternal { .. } => RunStatus::WaitingExternal,
-        };
-
-        // Update the existing run record (created at start) rather than
-        // creating a fresh one. Fall back to a new record if none exists
-        // (e.g. the in-memory ::new() path that does not persist at start).
-        // @plan:PLAN-20260404-INITIAL-RUNTIME.P05
-        let mut metadata = self
-            .load_metadata()
-            .unwrap_or_else(|| self.build_metadata(status.clone()));
-        metadata.status = status.clone();
-        metadata.set_current_step(final_step_id);
-
-        {
-            let conn = self.conn.borrow();
-            persist_run_with_conn(&conn, &metadata).map_err(|e| {
-                EngineError::PersistenceError(format!("Failed to record run completion: {}", e))
-            })?;
-        }
-
-        // Emit a terminal-state event describing the final status.
-        // @plan:PLAN-20260404-INITIAL-RUNTIME.P05
-        self.record_event(
-            EventType::TerminalState,
-            final_step_id,
-            &status.to_string(),
-            None,
-        );
-
-        Ok(())
     }
 }
 

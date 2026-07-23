@@ -1314,10 +1314,12 @@ fn test_run_abandonment_records_metadata() {
 // Test 14: Set work dir preserves seeded variables
 // ============================================================================
 
-/// Test 14: Set work dir preserves seeded variables
-/// GIVEN: `EngineRunner` with config variables {"`my_var"`: "preserved"}
-/// WHEN: Call `runner.set_work_dir(new_path)`, then run shell step echoing {`my_var`}
-/// THEN: stdout contains "preserved" - the config variable survived the change
+/// Test 14: Immutable work_dir preserves seeded variables (issue 158 slice 4)
+/// GIVEN: `EngineRunner` constructed with a `RunContext.workspace_path` and
+///        config variables {"`my_var"`: "preserved"}
+/// WHEN: run a shell step echoing {`my_var`}
+/// THEN: stdout contains "preserved" - the config variable is available, and
+///       the immutable work_dir resolved from the RunContext is used.
 /// @plan:PLAN-20260408-LLXPRT-FIRST.P16
 /// @requirement:REQ-LF-PROF-003
 #[test]
@@ -1340,14 +1342,20 @@ fn test_set_work_dir_preserves_seeded_variables() {
     variables.insert("my_var".to_string(), "preserved".to_string());
     let config = make_config_with_vars(Some(10), variables);
 
-    let instance = WorkflowInstance::create(workflow_type, config);
-    let registry = ExecutorRegistry::with_defaults();
-    let mut runner = EngineRunner::new(instance, registry).expect("Failed to create EngineRunner");
-
-    // Change work directory
+    // Issue 158 slice 4: the work_dir is now an immutable RunContext field
+    // resolved before StepContext construction, replacing the removed
+    // post-construction `set_work_dir` mutation.
     let new_work_dir = std::env::temp_dir().join(format!("test_work_dir_{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&new_work_dir).expect("Failed to create work dir");
-    runner.set_work_dir(new_work_dir.clone());
+    let run_context = luther_workflow::engine::runner::RunContext {
+        workspace_path: Some(new_work_dir.to_string_lossy().to_string()),
+        ..Default::default()
+    };
+
+    let instance = WorkflowInstance::create(workflow_type, config);
+    let registry = ExecutorRegistry::with_defaults();
+    let mut runner = EngineRunner::with_context(instance, registry, run_context)
+        .expect("Failed to create EngineRunner");
 
     let result = runner.run();
 

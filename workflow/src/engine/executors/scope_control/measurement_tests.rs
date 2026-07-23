@@ -1,7 +1,7 @@
 //! Tests for [`super::measurement`].
 
 use super::*;
-use crate::engine::continuation::WORKSPACE_OWNER_MARKER;
+use crate::engine::workspace_ownership::WORKSPACE_OWNER_MARKER;
 
 #[test]
 fn split_z_handles_empty() {
@@ -331,7 +331,10 @@ fn malformed_or_foreign_workspace_marker_fails_closed() {
 
     let error = patch_untracked_files(&data, workspace.path(), "run-owned", true)
         .expect_err("foreign marker must fail closed");
-    assert!(error.to_string().contains("belongs to run 'different-run'"));
+    assert!(
+        error.to_string().contains("different-run"),
+        "foreign marker should identify the conflicting claim, got: {error}"
+    );
 }
 
 #[test]
@@ -346,7 +349,10 @@ fn listed_but_missing_workspace_marker_fails_closed() {
 
     let error = patch_untracked_files(&data, workspace.path(), "run-owned", true)
         .expect_err("missing marker must fail closed");
-    assert!(error.to_string().contains("marker is missing"));
+    assert!(
+        error.to_string().contains("missing"),
+        "missing marker should fail closed with a missing reason, got: {error}"
+    );
 }
 
 #[test]
@@ -361,7 +367,10 @@ fn daemon_measurement_requires_marker_even_when_git_does_not_list_it() {
 
     let error = patch_untracked_files(&data, workspace.path(), "run-owned", true)
         .expect_err("daemon marker must be verified independently of git output");
-    assert!(error.to_string().contains("marker is missing"));
+    assert!(
+        error.to_string().contains("missing"),
+        "daemon marker must be verified independently of git output, got: {error}"
+    );
 }
 
 #[test]
@@ -380,6 +389,56 @@ fn non_daemon_measurement_does_not_require_workspace_marker() {
         files,
         vec![WORKSPACE_OWNER_MARKER.to_string(), "README.md".to_string()]
     );
+}
+
+#[test]
+fn durable_only_workspace_is_trusted_for_scope_exclusion() {
+    // A workspace whose bootstrap marker was deleted by agent cleanup but
+    // whose durable marker remains must still be trusted for scope exclusion.
+    // The durable evidence lives under .git and is naturally invisible to
+    // scope measurement, so only the bootstrap marker (if present) appears in
+    // the untracked list and would be excluded.
+    let workspace = tempfile::tempdir().expect("workspace");
+    std::fs::create_dir_all(workspace.path().join(".git/luther")).expect("durable dir");
+    std::fs::write(
+        workspace.path().join(".git/luther/workspace-owner"),
+        "run-owned",
+    )
+    .expect("durable marker");
+    let data = GitPatchData {
+        head_sha: "abc".into(),
+        divergence: 0,
+        tracked_changes: vec![],
+        // Bootstrap marker absent from the untracked list because it was
+        // deleted by agent cleanup; durable marker is invisible to git.
+        untracked_files: vec!["README.md".into()],
+    };
+    let files = patch_untracked_files(&data, workspace.path(), "run-owned", true)
+        .expect("durable-only workspace must be trusted");
+    assert_eq!(files, vec!["README.md".to_string()]);
+}
+
+#[test]
+fn durable_only_workspace_excludes_bootstrap_when_listed() {
+    // Even with durable-only evidence, if the bootstrap marker somehow appears
+    // in the untracked list, it is excluded because ownership is verified via
+    // the durable record.
+    let workspace = tempfile::tempdir().expect("workspace");
+    std::fs::create_dir_all(workspace.path().join(".git/luther")).expect("durable dir");
+    std::fs::write(
+        workspace.path().join(".git/luther/workspace-owner"),
+        "run-owned",
+    )
+    .expect("durable marker");
+    let data = GitPatchData {
+        head_sha: "abc".into(),
+        divergence: 0,
+        tracked_changes: vec![],
+        untracked_files: vec![WORKSPACE_OWNER_MARKER.into(), "src/main.rs".into()],
+    };
+    let files = patch_untracked_files(&data, workspace.path(), "run-owned", true)
+        .expect("durable-only workspace must be trusted");
+    assert_eq!(files, vec!["src/main.rs".to_string()]);
 }
 fn run_git(workspace: &Path, args: &[&str]) {
     let status = std::process::Command::new("git")

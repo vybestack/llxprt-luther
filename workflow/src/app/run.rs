@@ -20,6 +20,14 @@ use luther_workflow::workflow::target_profile::{
 };
 use std::process;
 
+#[path = "daemon_run.rs"]
+mod daemon_run;
+
+// Re-export the daemon launcher so `daemon::mod` can reach it via
+// `super::run::DaemonWorkflowLauncher`, preserving the public API surface
+// after the source-size decomposition.
+pub use daemon_run::DaemonWorkflowLauncher;
+
 /// Report dry-run semantic validation: unresolved interpolation tokens and
 /// missing artifact producers. Returns `true` if any error was reported.
 ///
@@ -125,8 +133,7 @@ pub fn fail_llxprt_preflight(err: &LlxprtError) -> ! {
 }
 
 /// Handle the run command.
-/// @plan:PLAN-20260404-INITIAL-RUNTIME.P12
-/// @plan:PLAN-20260408-LLXPRT-FIRST.P20
+/// @plan:PLAN-20260404-INITIAL-RUNTIME.P12, PLAN-20260408-LLXPRT-FIRST.P20
 pub async fn handle_run_command(args: &luther_workflow::cli::RunArgs) {
     let config_root = run_config_root(args);
     let (workflow_type, mut config, run_ref) = resolve_run_inputs(args, &config_root);
@@ -139,15 +146,50 @@ pub async fn handle_run_command(args: &luther_workflow::cli::RunArgs) {
     println!("  Config: {}", config.config_id);
 
     run_start_preflights(args, &workflow_type, &config);
+    // Issue 158 slice 4: a dry run must exit BEFORE any state mutation. The
+    // checkpoint database and workspace directory are side effects of a real
+    // run; a dry run only reports the planned step sequence and validation
+    // results, so it must not create the DB or the workspace. Exiting here
+    // (after preflights, before `init_database` and workspace creation) keeps
+    // the dry run side-effect-free: no DB file, no workspace directory.
+    if args.dry_run {
+        finish_dry_run(&workflow_type, &config);
+    }
     let db_path = luther_workflow::runtime_paths::get_data_dir().join("checkpoints.db");
     if let Err(e) = init_database(&db_path) {
         eprintln!("Warning: Failed to initialize checkpoint database: {e}");
     }
-    if args.dry_run {
-        finish_dry_run(&workflow_type, &config);
-    }
 
-    let mut runner = create_durable_runner(workflow_type, config, &run_id, &db_path, false);
+    let launch_provenance = match luther_workflow::persistence::LaunchProvenance::from_resolved(
+        &workflow_type,
+        &config,
+        &config_root,
+    ) {
+        Ok(provenance) => provenance,
+        Err(error) => {
+            eprintln!("Error: failed to record launch provenance: {error}");
+            process::exit(1);
+        }
+    };
+    let workspace_config = config.clone();
+    // Reserve the fresh run id and persist provenance before publishing any
+    // workspace ownership evidence. A collision or DB failure leaves no marker.
+    let mut runner = create_durable_runner_with_provenance(
+        workflow_type,
+        config,
+        &run_id,
+        &db_path,
+        false,
+        launch_provenance,
+    )
+    .unwrap_or_else(|error| {
+        eprintln!("Error: Failed to create durable engine runner: {error}");
+        process::exit(1);
+    });
+    if let Err(error) = daemon_run::ensure_non_daemon_workspace(&workspace_config, &run_id) {
+        eprintln!("Workspace initialization error: {error}");
+        process::exit(1);
+    }
     install_interrupt_handlers(runner.interrupt_handle());
     println!("Executing workflow...");
     match runner.run() {
@@ -160,14 +202,23 @@ pub async fn handle_run_command(args: &luther_workflow::cli::RunArgs) {
 }
 
 fn validate_cli_run_id(run_id: &str) {
-    if run_id.is_empty()
-        || !run_id
-            .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
-    {
+    if !is_valid_run_id(run_id) {
         eprintln!("Error: run id must contain only ASCII letters, digits, '-' or '_'");
         process::exit(1);
     }
+}
+
+/// Whether a run id is a safe identifier.
+fn is_valid_run_id(run_id: &str) -> bool {
+    if run_id.is_empty() {
+        return false;
+    }
+    for ch in run_id.chars() {
+        if !ch.is_ascii_alphanumeric() && ch != '-' && ch != '_' {
+            return false;
+        }
+    }
+    true
 }
 
 pub fn run_config_root(args: &luther_workflow::cli::RunArgs) -> std::path::PathBuf {
@@ -370,27 +421,41 @@ pub fn exit_run_outcome(outcome: RunOutcome, run_id: &str) -> ! {
     }
 }
 
-pub fn create_durable_runner(
+/// Create a durable runner for a **fresh launch**, atomically inserting the
+/// initial `Starting` `RunMetadata` row with the recorded launch provenance.
+///
+/// Uses [`EngineRunner::with_db_path_for_launch`] so a `run_id` collision or DB
+/// error fails closed (propagates an error) rather than silently overwriting an
+/// existing run record. Pass `None` for `launch_provenance` only when the
+/// caller does not need to record provenance (e.g. test helpers).
+///
+/// **Issue 158 finding 1:** this function returns `Result` and never calls
+/// `process::exit`. The CLI top-level maps the error to a non-zero exit; the
+/// daemon and child paths propagate the error so it can be surfaced through the
+/// launcher seam / parent orchestration result.
+///
+/// @plan:PLAN-20260722-ISSUE158-LAUNCH-PROVENANCE
+/// @plan:PLAN-20260722-ISSUE158-LAUNCH-PERSISTENCE
+pub fn create_durable_runner_with_provenance(
     workflow_type: luther_workflow::workflow::schema::WorkflowType,
     config: luther_workflow::workflow::schema::WorkflowConfig,
     run_id: &str,
     db_path: &std::path::Path,
     daemon_managed: bool,
-) -> EngineRunner {
+    launch_provenance: luther_workflow::persistence::LaunchProvenance,
+) -> Result<EngineRunner, String> {
     let mut run_context = build_run_context(&config, run_id);
     run_context.daemon_managed = daemon_managed;
+    run_context.launch_provenance = Some(launch_provenance);
     let instance = WorkflowInstance::create_with_run_id(workflow_type, config, run_id);
     let registry = ExecutorRegistry::with_defaults();
     // Attach the run context up front so the initial persisted `Starting` row
     // includes path and GitHub metadata, instead of chaining
     // `with_run_context` after the initial record has already been written.
-    match EngineRunner::with_db_path_and_context(instance, registry, db_path, run_context) {
-        Ok(runner) => runner,
-        Err(e) => {
-            eprintln!("Error: Failed to create durable engine runner: {e}");
-            process::exit(1);
-        }
-    }
+    // Fail closed on collision/persistence error rather than best-effort
+    // overwriting.
+    EngineRunner::with_db_path_for_launch(instance, registry, db_path, run_context)
+        .map_err(|error| error.to_string())
 }
 
 /// Build a [`RunContext`] from a workflow config and run id, populating run
@@ -431,234 +496,10 @@ pub fn build_run_context(
         issue_number,
         pr_number: None,
         head_sha: None,
-    }
-}
-/// Production [`WorkflowLauncher`] that builds and executes the durable engine
-/// runner for a claimed issue, applying `repo`/`issue` overrides to the config.
-/// @plan:PLAN-20260415-DAEMON-DISCOVERY.P06
-pub struct DaemonWorkflowLauncher;
-
-impl DaemonWorkflowLauncher {
-    pub fn new(_config_id: String) -> Self {
-        Self
-    }
-}
-
-impl luther_workflow::daemon::launcher::WorkflowLauncher for DaemonWorkflowLauncher {
-    fn launch(
-        &self,
-        request: &luther_workflow::daemon::launcher::LaunchRequest,
-    ) -> Result<luther_workflow::daemon::launcher::WorkflowLaunchResult, String> {
-        launch_daemon_workflow(&request.config_id, request)
-    }
-
-    fn resume(
-        &self,
-        request: &luther_workflow::daemon::launcher::LaunchRequest,
-    ) -> Result<luther_workflow::daemon::launcher::WorkflowLaunchResult, String> {
-        resume_daemon_workflow(request)
-    }
-}
-
-pub fn launch_daemon_workflow(
-    config_id: &str,
-    request: &luther_workflow::daemon::launcher::LaunchRequest,
-) -> Result<luther_workflow::daemon::launcher::WorkflowLaunchResult, String> {
-    let config_root = std::path::PathBuf::from("config");
-    let mut config = resolve_workflow_config(config_id, &config_root)
-        .map_err(|e| format!("resolve config '{config_id}': {e}"))?;
-    let workflow_type_id = request
-        .workflow_type_id
-        .as_deref()
-        .unwrap_or(&config.workflow_type_id);
-    let workflow_type = resolve_workflow_type(workflow_type_id, &config_root)
-        .map_err(|e| format!("resolve workflow type: {e}"))?;
-    let overrides = TargetProfileOverrides {
-        repo: Some(request.repo.clone()),
-        issue: Some(request.issue_number.to_string()),
-        work_dir: request.work_dir.clone(),
-        artifact_dir: request.artifact_dir.clone(),
-    };
-    apply_target_profile_overrides(&mut config, &overrides)
-        .map_err(|e| format!("apply overrides: {e}"))?;
-    apply_daemon_claim_overrides(&mut config, request);
-    ensure_daemon_run_dirs(request)?;
-    let db_path = luther_workflow::runtime_paths::get_data_dir().join("checkpoints.db");
-    let wait_config = config.clone();
-    let mut runner = create_durable_runner(
-        workflow_type,
-        config,
-        &request.run_id,
-        &db_path,
-        request.daemon_managed_claim,
-    );
-    run_daemon_runner(request, &wait_config, &db_path, &mut runner)
-}
-fn apply_daemon_claim_overrides(
-    config: &mut luther_workflow::workflow::schema::WorkflowConfig,
-    request: &luther_workflow::daemon::launcher::LaunchRequest,
-) {
-    for (key, value) in [
-        ("daemon_managed_claim", request.daemon_managed_claim),
-        ("claim_assignment_added", request.claim_assignment_added),
-        ("claim_label_added", request.claim_label_added),
-    ] {
-        config.variables.insert(key.to_owned(), value.to_string());
-    }
-}
-
-pub fn ensure_daemon_run_dirs(
-    request: &luther_workflow::daemon::launcher::LaunchRequest,
-) -> Result<(), String> {
-    ensure_daemon_run_dir("artifact", request.artifact_dir.as_deref())?;
-    ensure_daemon_workspace(request.work_dir.as_deref(), &request.run_id)
-}
-
-fn ensure_daemon_workspace(work_dir: Option<&std::path::Path>, run_id: &str) -> Result<(), String> {
-    let Some(work_dir) = work_dir else {
-        return Ok(());
-    };
-    luther_workflow::engine::continuation::provision_workspace_owner_marker(work_dir, run_id)
-        .map_err(|e| format!("provision workspace owner marker: {e}"))
-}
-
-pub fn ensure_daemon_run_dir(kind: &str, path: Option<&std::path::Path>) -> Result<(), String> {
-    let Some(path) = path else {
-        return Ok(());
-    };
-    std::fs::create_dir_all(path)
-        .map_err(|e| format!("failed to create {kind} dir {}: {e}", path.display()))
-}
-
-pub fn resume_daemon_workflow(
-    request: &luther_workflow::daemon::launcher::LaunchRequest,
-) -> Result<luther_workflow::daemon::launcher::WorkflowLaunchResult, String> {
-    let db_path = luther_workflow::runtime_paths::get_data_dir().join("checkpoints.db");
-    let conn = rusqlite::Connection::open(&db_path).map_err(|e| e.to_string())?;
-    let metadata = get_run_with_conn(&conn, &request.run_id)
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("missing run metadata for {}", request.run_id))?;
-    // Daemon-launched resumes use the same hardcoded "config" root as launch_daemon_workflow;
-    // CLI `runs resume --config-dir` covers temporary per-run config roots.
-    let config_root = std::path::PathBuf::from("config");
-    let mut wait_config = resolve_workflow_config(&metadata.config_id, &config_root)
-        .map_err(|e| format!("resolve config '{}': {e}", metadata.config_id))?;
-    apply_daemon_claim_overrides(&mut wait_config, request);
-    let workspace = metadata.workspace_path.as_deref().ok_or_else(|| {
-        format!(
-            "missing workspace_path for resume of run {}",
-            request.run_id
-        )
-    })?;
-    luther_workflow::engine::continuation::verify_workspace_ownership_marker(
-        std::path::Path::new(workspace),
-        &request.run_id,
-    )
-    .map_or(Ok(()), Err)?;
-    let config_dir = Some(config_root);
-    if metadata
-        .current_step
-        .as_deref()
-        .unwrap_or_default()
-        .is_empty()
-    {
-        return Err(format!(
-            "missing current_step for resume of run {}",
-            request.run_id
-        ));
-    }
-    let overrides = TargetProfileOverrides {
-        repo: Some(request.repo.clone()),
-        issue: Some(request.issue_number.to_string()),
-        work_dir: request.work_dir.clone(),
-        artifact_dir: request.artifact_dir.clone(),
-    };
-    apply_target_profile_overrides(&mut wait_config, &overrides)
-        .map_err(|e| format!("apply resume overrides: {e}"))?;
-    // Provision workspace dirs and ownership marker on resume too, so the
-    // durable ownership anchor stays current for the resumed run id even when
-    // the original launch did not write it (or the workspace moved).
-    ensure_daemon_run_dirs(request)?;
-    let mut runner = reconstruct_runner_with_daemon_provenance(
-        &metadata,
-        &request.run_id,
-        &db_path,
-        &config_dir,
-        wait_config.clone(),
-        request.daemon_managed_claim,
-    )?;
-    // Construct the resume request once and derive the checkpoint identity via
-    // request-bound `select_checkpoint` rather than a first-by-step lookup. The
-    // same request is then passed to `commit_continuation`, whose internal
-    // transaction re-selects and verifies this identity, so the bound identity
-    // and the in-transaction selection cannot diverge. `select_checkpoint`
-    // honors failure-cleanup provenance and terminal-step handling rather than
-    // blindly matching the first checkpoint for `current_step`.
-    let resume_request = luther_workflow::engine::ContinuationRequest {
-        run_id: request.run_id.clone(),
-        kind: luther_workflow::engine::ContinuationKind::Resume,
-        force: true,
-        trusted_internal: true,
-    };
-    let checkpoint =
-        luther_workflow::engine::continuation::select_checkpoint(&conn, &resume_request, &metadata)
-            .map_err(|e| format!("select resume checkpoint: {e}"))?;
-    let checkpoint_identity =
-        luther_workflow::engine::continuation::checkpoint_identity(&checkpoint);
-    luther_workflow::engine::commit_continuation(&conn, &resume_request, &checkpoint_identity)
-        .map_err(|e| format!("commit resume: {e}"))?;
-    run_daemon_runner(request, &wait_config, &db_path, &mut runner)
-}
-
-pub fn run_daemon_runner(
-    request: &luther_workflow::daemon::launcher::LaunchRequest,
-    wait_config: &WorkflowConfig,
-    db_path: &std::path::Path,
-    runner: &mut EngineRunner,
-) -> Result<luther_workflow::daemon::launcher::WorkflowLaunchResult, String> {
-    match runner.run() {
-        Ok(RunOutcome::Success) => {
-            Ok(luther_workflow::daemon::launcher::WorkflowLaunchResult::CompletedSuccess)
-        }
-        Ok(RunOutcome::WaitingExternal { step_id, reason }) => {
-            persist_external_wait_state(request, wait_config, db_path, &step_id, &reason)
-                .map_err(|e| format!("persist wait state: {e}"))?;
-            Ok(luther_workflow::daemon::launcher::WorkflowLaunchResult::SuspendedExternalWait)
-        }
-        Ok(RunOutcome::Abandoned { .. }) => {
-            let conn = rusqlite::Connection::open(db_path)
-                .map_err(|error| format!("open run registry after abandonment: {error}"))?;
-            let metadata = get_run_with_conn(&conn, &request.run_id)
-                .map_err(|error| format!("load run after abandonment: {error}"))?
-                .ok_or_else(|| {
-                    format!("missing run metadata after abandonment: {}", request.run_id)
-                })?;
-            if metadata.is_cleanup_failure_abandonment() {
-                Ok(luther_workflow::daemon::launcher::WorkflowLaunchResult::CleanupAbandoned)
-            } else {
-                Ok(luther_workflow::daemon::launcher::WorkflowLaunchResult::CompletedFailure)
-            }
-        }
-        Ok(RunOutcome::Failure { .. }) => {
-            let conn = rusqlite::Connection::open(db_path)
-                .map_err(|error| format!("open run registry after failure: {error}"))?;
-            let metadata = get_run_with_conn(&conn, &request.run_id)
-                .map_err(|error| format!("load run after failure: {error}"))?
-                .ok_or_else(|| format!("missing run metadata after failure: {}", request.run_id))?;
-            if metadata
-                .failure_cleanup
-                .as_ref()
-                .is_some_and(|failure| !failure.cleanup_succeeded)
-            {
-                Ok(luther_workflow::daemon::launcher::WorkflowLaunchResult::CleanupAbandoned)
-            } else {
-                Ok(luther_workflow::daemon::launcher::WorkflowLaunchResult::CompletedFailure)
-            }
-        }
-        Ok(RunOutcome::Interrupted { .. }) => {
-            Ok(luther_workflow::daemon::launcher::WorkflowLaunchResult::CompletedFailure)
-        }
-        Err(e) => Err(format!("run error: {e}")),
+        workspace_authorization: None,
+        // build_run_context is used by create_durable_runner*; the launch
+        // provenance is injected by the caller via the run_context field.
+        launch_provenance: None,
     }
 }
 

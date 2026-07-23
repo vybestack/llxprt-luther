@@ -635,8 +635,9 @@ fn conversion_error(
 /// By delegating to the shared typed-outcome function, the terminal-status
 /// placeholder SQL and its bound parameters are constructed compile-time-safely
 /// via [`RunStatus::TERMINAL_SQL`] in exactly one place
-/// ([`persist_run_status_conditional_with_conn`]), keeping the SQL shape and
-/// parameter count synchronized without a parallel hardcoded construction.
+/// (`persist_run_status_conditional_with_conn` in the persistence sqlite
+/// module), keeping the SQL shape and parameter count synchronized without a
+/// parallel hardcoded construction.
 fn mark_run_waiting_external(
     conn: &rusqlite::Transaction<'_>,
     run_id: &str,

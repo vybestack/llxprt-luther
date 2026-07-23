@@ -247,16 +247,25 @@ fn ready_lease_resumes_via_ready_lease_collection_without_poller_input() {
         "parent-orchestrator-luther",
     );
     metadata.status = luther_workflow::persistence::RunStatus::ReadyToResume;
-    metadata.set_current_step("wait_for_child_merge");
+    metadata.set_current_step("watch_pr_checks");
     metadata.repository = Some("owner/repo".to_string());
     metadata.issue_number = Some(61);
+    let workspace_parent = tempfile::tempdir().expect("workspace parent");
+    let workspace = workspace_parent.path().join("workspace");
+    luther_workflow::engine::workspace_ownership::provision_workspace_owner_marker(
+        &workspace,
+        "run-parent-61",
+    )
+    .expect("provision workspace ownership");
+    metadata.workspace_path = Some(workspace.to_string_lossy().into_owned());
+    std::mem::forget(workspace_parent);
     luther_workflow::persistence::persist_run_with_conn(&conn, &metadata)
         .expect("persist parent metadata");
     luther_workflow::persistence::checkpoint::save_checkpoint_with_conn(
         &conn,
         &luther_workflow::persistence::checkpoint::Checkpoint::new(
             "run-parent-61",
-            "wait_for_child_merge",
+            "watch_pr_checks",
         ),
     )
     .expect("persist parent checkpoint");
@@ -373,6 +382,7 @@ fn two_issues_same_config_get_distinct_run_paths() {
             )),
         },
         parent_path_bases: BTreeMap::new(),
+        config_root: std::path::PathBuf::from("config"),
     };
     let summary = run_multi_target_once(
         &[target],
@@ -465,6 +475,7 @@ fn parent_routed_issue_uses_parent_path_bases() {
             )),
         },
         parent_path_bases,
+        config_root: std::path::PathBuf::from("config"),
     };
     let summary = run_multi_target_once(
         &[target],

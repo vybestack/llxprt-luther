@@ -19,7 +19,7 @@ fn workspace_owner_marker_path(workspace: &Path) -> PathBuf {
 /// Reject symlinks in every existing workspace path component before marker
 /// operations can follow a redirected ancestor. macOS's `/tmp` and `/var` are
 /// fixed system aliases, so those two roots are the only accepted symlinks.
-fn reject_symlinked_workspace_root(workspace: &Path) -> Option<String> {
+pub(crate) fn reject_symlinked_workspace_root(workspace: &Path) -> Option<String> {
     for component in workspace.ancestors() {
         match std::fs::symlink_metadata(component) {
             Ok(meta) if meta.file_type().is_symlink() => {
@@ -50,17 +50,26 @@ fn reject_symlinked_workspace_root(workspace: &Path) -> Option<String> {
 /// check uses `symlink_metadata` so the link itself is inspected rather than
 /// its target, matching the symlink rejection already applied to the workspace
 /// root and the marker file.
-fn reject_symlinked_luther_parent(workspace: &Path) -> Option<String> {
+///
+/// **Reject parent metadata errors:** a `NotFound` `.luther` is acceptable
+/// (the directory has not been created yet), but any other inspection error
+/// (e.g. `PermissionDenied`) must fail closed rather than be silently ignored.
+/// Treating an unreadable `.luther` as "not a symlink" would allow a
+/// fail-open bypass.
+pub(crate) fn reject_symlinked_luther_parent(workspace: &Path) -> Option<String> {
     let luther = workspace.join(".luther");
-    if let Ok(meta) = std::fs::symlink_metadata(&luther) {
-        if meta.file_type().is_symlink() {
-            return Some(format!(
-                "workspace `.luther` parent is a symlink and must be a real directory: {luther_display}",
-                luther_display = luther.display()
-            ));
-        }
+    match std::fs::symlink_metadata(&luther) {
+        Ok(meta) if meta.file_type().is_symlink() => Some(format!(
+            "workspace `.luther` parent is a symlink and must be a real directory: {luther_display}",
+            luther_display = luther.display()
+        )),
+        Ok(_) => None,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => Some(format!(
+            "workspace `.luther` parent cannot be inspected: {error}: {luther_display}",
+            luther_display = luther.display()
+        )),
     }
-    None
 }
 
 /// Collision-safe temp path inside `.luther`, mirroring the established
@@ -93,6 +102,95 @@ fn fsync_dir(dir: &Path) -> std::io::Result<()> {
         // reliable directory fsync support.
         let _ = std::fs::File::open(dir).and_then(|file| file.sync_all());
         Ok(())
+    }
+}
+
+/// Maximum marker size (matches the small run-id strings published). Path-based
+/// marker reads are bounded to this size so a hostile or oversized marker
+/// cannot exhaust memory or be streamed indefinitely.
+const MAX_MARKER_BYTES: u64 = 4096;
+
+/// Read a marker file as a UTF-8 string with a bounded size. Requires the path
+/// to be a regular file (verified via `symlink_metadata`) of bounded size
+/// *before* the read so a special file that `metadata.is_file()` misclassifies
+/// (or an oversized marker) cannot be streamed unbounded. Returns the trimmed
+/// string content.
+///
+/// On Unix the file is opened with `O_NONBLOCK` so a special file that slipped
+/// past the regular-file check cannot block the read.
+fn read_marker_bounded(marker: &Path) -> std::io::Result<String> {
+    let meta = std::fs::symlink_metadata(marker)?;
+    if meta.file_type().is_symlink() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "workspace ownership marker is a symlink: {marker_display}",
+                marker_display = marker.display()
+            ),
+        ));
+    }
+    if !meta.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "workspace ownership marker is not a regular file: {marker_display}",
+                marker_display = marker.display()
+            ),
+        ));
+    }
+    if meta.len() > MAX_MARKER_BYTES {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "workspace ownership marker exceeds maximum size",
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::io::Read;
+        use std::os::unix::fs::OpenOptionsExt;
+        // Open with NONBLOCK so a special file misclassified as regular by
+        // metadata cannot block the read. `read` on a regular file is
+        // unaffected by NONBLOCK.
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(marker)?;
+        let mut bytes = Vec::with_capacity(usize::try_from(meta.len()).unwrap_or(0));
+        let reader = std::io::BufReader::new(file);
+        reader.take(MAX_MARKER_BYTES + 1).read_to_end(&mut bytes)?;
+        if u64::try_from(bytes.len()).map_or(true, |len| len > MAX_MARKER_BYTES) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "workspace ownership marker exceeds maximum size",
+            ));
+        }
+        String::from_utf8(bytes).map_err(|err| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("workspace ownership marker is not valid UTF-8: {err}"),
+            )
+        })
+    }
+    #[cfg(not(unix))]
+    {
+        // Best-effort bounded read on non-Unix: rely on the pre-read size
+        // bound from metadata and a capped read_to_end.
+        use std::io::Read;
+        let mut file = std::fs::File::open(marker)?;
+        let mut bytes = Vec::with_capacity(usize::try_from(meta.len()).unwrap_or(0));
+        file.take(MAX_MARKER_BYTES + 1).read_to_end(&mut bytes)?;
+        if u64::try_from(bytes.len()).map_or(true, |len| len > MAX_MARKER_BYTES) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "workspace ownership marker exceeds maximum size",
+            ));
+        }
+        String::from_utf8(bytes).map_err(|err| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("workspace ownership marker is not valid UTF-8: {err}"),
+            )
+        })
     }
 }
 
@@ -189,7 +287,14 @@ fn provision_workspace_owner_marker_once(workspace: &Path, run_id: &str) -> std:
             reason,
         ));
     }
-    std::fs::create_dir_all(workspace)?;
+    // Issue 158 finding 3: no auto-adopt of a pre-existing empty workspace.
+    // Only an atomically created-by-this-launch directory, or a directory
+    // carrying exact interrupted-publication evidence (a `.luther` subdir
+    // containing only `.workspace-owner.tmp.*` temp files for this run), may
+    // be first-claimed. A pre-existing empty directory created by some other
+    // actor must NOT be silently adopted, because it carries no provenance
+    // tying it to this launch.
+    let created_by_this_launch = bootstrap_workspace_creation(workspace)?;
     if let Some(reason) = reject_symlinked_workspace_root(workspace) {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
@@ -197,44 +302,141 @@ fn provision_workspace_owner_marker_once(workspace: &Path, run_id: &str) -> std:
         ));
     }
     let marker = workspace_owner_marker_path(workspace);
-    match std::fs::symlink_metadata(&marker) {
-        Ok(_) => return inspect_existing_marker(&marker, run_id),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error),
+    match resolve_existing_marker(&marker, run_id)? {
+        ExistingMarker::Valid => return Ok(()),
+        ExistingMarker::Absent => {}
     }
-    if !workspace_is_claimable(workspace, run_id)? {
-        if marker_exists(&marker) {
-            return inspect_existing_marker(&marker, run_id);
+    // A directory created by this launch may always be first-claimed. A
+    // pre-existing directory may only be claimed when it carries exact
+    // interrupted-publication evidence; otherwise it is rejected outright.
+    let claimable = created_by_this_launch
+        || workspace_has_interrupted_publication_evidence(workspace, run_id)?;
+    if !claimable {
+        return resolve_unclaimable_workspace(workspace, &marker, run_id);
+    }
+    let canonical = workspace.canonicalize()?;
+    let anchor = crate::engine::workspace_ownership::WorkspaceAnchor::open(&canonical)?;
+    crate::engine::workspace_ownership::publish_bootstrap_via_anchor(&anchor, run_id)?;
+    // Issue 158 descriptor retention: adjudicate the published bootstrap
+    // marker through the SAME retained anchor descriptor rather than
+    // re-opening the workspace path via `adjudicate_workspace_ownership`.
+    // The anchor was opened before publication and is the exact descriptor
+    // the publication wrote through; using a path-based re-open here would
+    // re-introduce a TOCTOU window in which a concurrent attacker could swap
+    // the workspace path between publication and adjudication.
+    match crate::engine::workspace_ownership::snapshot_bootstrap_marker_via_anchor(&anchor, run_id)
+    {
+        crate::engine::workspace_ownership::AnchoredMarkerVerdict::Trusted => Ok(()),
+        crate::engine::workspace_ownership::AnchoredMarkerVerdict::Absent => {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "bootstrap owner publication produced no ownership evidence",
+            ))
         }
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::AlreadyExists,
-            format!(
-                "refusing to claim pre-existing non-empty workspace without ownership marker: {}",
-                workspace.display()
-            ),
-        ));
+        crate::engine::workspace_ownership::AnchoredMarkerVerdict::Rejected(reason) => {
+            Err(std::io::Error::new(std::io::ErrorKind::InvalidData, reason))
+        }
     }
-    write_workspace_owner_marker(workspace, run_id)?;
-    if !workspace_is_owned_after_claim(workspace, run_id)? {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            format!(
-                "workspace changed while ownership was being established: {}",
-                workspace.display()
-            ),
-        ));
-    }
-    Ok(())
 }
 
-fn workspace_is_claimable(workspace: &Path, run_id: &str) -> std::io::Result<bool> {
+/// Outcome of inspecting a marker path that may already exist.
+enum ExistingMarker {
+    /// The marker is present and records the exact same owner (idempotent).
+    Valid,
+    /// The marker path has no entry yet.
+    Absent,
+}
+
+/// Atomically determine whether `workspace` was created by this launch.
+///
+/// `create_dir` (single-component) creates the final path component atomically;
+/// `AlreadyExists` means the directory pre-existed and requires evidence.
+/// `create_dir_all` would silently succeed on a pre-existing directory and lose
+/// the creation signal, so the parent chain is created separately first when the
+/// final component's parent does not yet exist.
+fn bootstrap_workspace_creation(workspace: &Path) -> std::io::Result<bool> {
+    match std::fs::create_dir(workspace) {
+        Ok(()) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            // The parent chain does not exist yet; create it, then attempt the
+            // atomic single-component create again so the final component's
+            // creation is still observed.
+            if let Some(parent) = workspace.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            match std::fs::create_dir(workspace) {
+                Ok(()) => Ok(true),
+                Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
+                Err(err) => Err(err),
+            }
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// Inspect a marker that may already exist. `Valid` means it records the exact
+/// same owner (idempotent success); `Absent` means no entry exists yet. Any
+/// other condition (foreign owner, symlink, malformed) is an error.
+fn resolve_existing_marker(marker: &Path, run_id: &str) -> std::io::Result<ExistingMarker> {
+    match std::fs::symlink_metadata(marker) {
+        Ok(_) => {
+            inspect_existing_marker(marker, run_id)?;
+            Ok(ExistingMarker::Valid)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(ExistingMarker::Absent),
+        Err(error) => Err(error),
+    }
+}
+
+/// Resolve a workspace that is not first-claimable: if a marker appeared between
+/// the claimability check and now, validate it; otherwise reject the adoption.
+fn resolve_unclaimable_workspace(
+    workspace: &Path,
+    marker: &Path,
+    run_id: &str,
+) -> std::io::Result<()> {
+    if marker_exists(marker) {
+        return inspect_existing_marker(marker, run_id);
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        format!(
+            "refusing to adopt pre-existing workspace without ownership marker or \
+             interrupted-publication evidence: {}",
+            workspace.display()
+        ),
+    ))
+}
+
+/// Whether a pre-existing workspace directory carries exact evidence that a
+/// prior publication attempt by `run_id` was interrupted. The only accepted
+/// evidence is a real `.luther` directory containing exclusively
+/// `.workspace-owner.tmp.*` temp files whose content matches `run_id` (and no
+/// final `workspace-owner` marker). An empty directory, a directory with any
+/// other content, or a directory whose `.luther` has a foreign-owner temp file
+/// is NOT claimable.
+fn workspace_has_interrupted_publication_evidence(
+    workspace: &Path,
+    run_id: &str,
+) -> std::io::Result<bool> {
+    let mut found_evidence = false;
     for entry in std::fs::read_dir(workspace)? {
         let entry = entry?;
-        if entry.file_name() != ".luther" || !luther_dir_is_claimable(&entry.path(), run_id)? {
+        if entry.file_name() == ".luther" {
+            if !luther_dir_is_claimable(&entry.path(), run_id)? {
+                return Ok(false);
+            }
+            // `.luther` exists and contains only same-run temp files: that is
+            // the interrupted-publication signal.
+            found_evidence = true;
+        } else {
+            // Any other entry means the workspace is not a bare interrupted
+            // publication.
             return Ok(false);
         }
     }
-    Ok(true)
+    Ok(found_evidence)
 }
 
 fn luther_dir_is_claimable(path: &Path, run_id: &str) -> std::io::Result<bool> {
@@ -242,6 +444,7 @@ fn luther_dir_is_claimable(path: &Path, run_id: &str) -> std::io::Result<bool> {
     if metadata.file_type().is_symlink() || !metadata.is_dir() {
         return Ok(false);
     }
+    let mut found_temp = false;
     for entry in std::fs::read_dir(path)? {
         let entry = entry?;
         let name_is_temp = entry
@@ -252,47 +455,12 @@ fn luther_dir_is_claimable(path: &Path, run_id: &str) -> std::io::Result<bool> {
         if !name_is_temp || metadata.file_type().is_symlink() || !metadata.is_file() {
             return Ok(false);
         }
-        if std::fs::read_to_string(entry.path())? != run_id {
+        if read_marker_bounded(&entry.path())? != run_id {
             return Ok(false);
         }
+        found_temp = true;
     }
-    Ok(true)
-}
-
-fn workspace_is_owned_after_claim(workspace: &Path, run_id: &str) -> std::io::Result<bool> {
-    inspect_existing_marker(&workspace_owner_marker_path(workspace), run_id)?;
-    for entry in std::fs::read_dir(workspace)? {
-        let entry = entry?;
-        if entry.file_name() != ".luther" {
-            return Ok(false);
-        }
-        let metadata = std::fs::symlink_metadata(entry.path())?;
-        if metadata.file_type().is_symlink() || !metadata.is_dir() {
-            return Ok(false);
-        }
-        for luther_entry in std::fs::read_dir(entry.path())? {
-            let luther_entry = luther_entry?;
-            if luther_entry.file_name() == "workspace-owner" {
-                if inspect_existing_marker(&luther_entry.path(), run_id).is_err() {
-                    return Ok(false);
-                }
-                continue;
-            }
-            let is_temp = luther_entry
-                .file_name()
-                .to_str()
-                .is_some_and(|value| value.starts_with(".workspace-owner.tmp."));
-            let metadata = std::fs::symlink_metadata(luther_entry.path())?;
-            if !is_temp
-                || metadata.file_type().is_symlink()
-                || !metadata.is_file()
-                || std::fs::read_to_string(luther_entry.path())? != run_id
-            {
-                return Ok(false);
-            }
-        }
-    }
-    Ok(true)
+    Ok(found_temp)
 }
 
 pub fn write_workspace_owner_marker(workspace: &Path, run_id: &str) -> std::io::Result<()> {
@@ -411,7 +579,7 @@ fn inspect_existing_marker(marker: &Path, run_id: &str) -> std::io::Result<()> {
             ),
         ));
     }
-    let existing = std::fs::read_to_string(marker)?;
+    let existing = read_marker_bounded(marker)?;
     if existing.trim().is_empty() {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
@@ -477,12 +645,31 @@ pub fn verify_workspace_ownership_marker(workspace: &Path, run_id: &str) -> Opti
 /// Verify the marker file at `marker`: existence, regular-file type, containment
 /// beneath `workspace_root`, content, and tamper-resistant metadata around the
 /// read. Returns `None` when trusted or `Some(reason)` explaining a rejection.
-fn verify_marker_file(marker: &Path, run_id: &str, workspace_root: &Path) -> Option<String> {
+///
+/// **Typed marker inspection:** only `NotFound` means the marker is absent.
+/// `PermissionDenied` or any other inspection error is a rejection, never a
+/// silent "absent", because treating an unreadable marker as missing would
+/// allow a fail-open bypass of ownership verification (e.g. an attacker that
+/// strips read permission on the marker could make verification report it as
+/// missing).
+pub(crate) fn verify_marker_file(
+    marker: &Path,
+    run_id: &str,
+    workspace_root: &Path,
+) -> Option<String> {
     let meta_before = match std::fs::symlink_metadata(marker) {
         Ok(meta) => meta,
-        Err(_) => {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             return Some(format!(
                 "workspace ownership marker is missing: {marker_display}",
+                marker_display = marker.display()
+            ));
+        }
+        Err(error) => {
+            // Any non-NotFound inspection error (PermissionDenied, Io, etc.)
+            // must reject rather than be silently treated as "absent".
+            return Some(format!(
+                "workspace ownership marker cannot be inspected: {error}: {marker_display}",
                 marker_display = marker.display()
             ));
         }
@@ -499,15 +686,40 @@ fn verify_marker_file(marker: &Path, run_id: &str, workspace_root: &Path) -> Opt
             marker_display = marker.display()
         ));
     }
+    if !meta_before.is_file() {
+        return Some(format!(
+            "workspace ownership marker is not a regular file: {marker_display}",
+            marker_display = marker.display()
+        ));
+    }
     // Containment: the canonicalized marker must stay beneath the canonical
     // workspace root, ruling out any redirection that escaped the earlier
     // component checks.
     if let Some(reason) = verify_marker_containment(marker, workspace_root) {
         return Some(reason);
     }
-    let contents = match std::fs::read_to_string(marker) {
+    let contents = match read_marker_bounded(marker) {
         Ok(contents) => contents,
-        Err(err) => return Some(format!("workspace ownership marker is not readable: {err}")),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Some(format!(
+                "workspace ownership marker vanished during verification: {marker_display}",
+                marker_display = marker.display()
+            ));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::InvalidData => {
+            // A size/UTF-8 failure is a categorical rejection (never raw
+            // diagnostics) so a bounded-oversized or non-UTF-8 marker fails
+            // closed.
+            return Some(format!("workspace ownership marker is invalid: {error}"));
+        }
+        Err(error) => {
+            // A read error other than NotFound (e.g. PermissionDenied) is a
+            // rejection, never silently "absent".
+            return Some(format!(
+                "workspace ownership marker is not readable: {error}: {marker_display}",
+                marker_display = marker.display()
+            ));
+        }
     };
     // Recheck metadata around the read to detect a path swap (e.g. replaced
     // with a symlink) that occurred between the type check and the content
@@ -553,6 +765,11 @@ fn recheck_marker_metadata(marker: &Path, meta_before: &std::fs::Metadata) -> Op
             "workspace ownership marker became a directory during verification".to_string(),
         );
     }
+    if !meta_after.is_file() {
+        return Some(
+            "workspace ownership marker became a non-regular file during verification".to_string(),
+        );
+    }
     if marker_identity_changed(meta_before, &meta_after) {
         return Some("workspace ownership marker identity changed during verification".to_string());
     }
@@ -589,7 +806,7 @@ fn marker_identity_changed(before: &std::fs::Metadata, after: &std::fs::Metadata
 /// to the canonical root's inode — silently passing. Using `symlink_metadata`
 /// observes the link itself, so the symlink is rejected before the identity
 /// comparison.
-pub(super) fn revalidate_workspace_root_identity(
+pub(crate) fn revalidate_workspace_root_identity(
     observed_workspace: &Path,
     canonical_workspace: &Path,
 ) -> Option<String> {

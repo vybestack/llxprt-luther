@@ -220,6 +220,11 @@ pub struct SchedulerTarget {
     /// Parent-routed base roots keyed by config id, used when a routed parent
     /// issue launches under a parent config id. @plan:issue-117
     pub parent_path_bases: BTreeMap<String, DaemonPathBases>,
+    /// The config root this target resolves workflows from. Flows through to
+    /// `LaunchRequest` so fresh launches and resumes re-resolve from the same
+    /// root the supervisor selected (e.g. a custom `--config-dir`).
+    /// @plan:PLAN-20260722-ISSUE158-LAUNCH-PROVENANCE
+    pub config_root: std::path::PathBuf,
 }
 
 impl SchedulerTarget {
@@ -229,12 +234,14 @@ impl SchedulerTarget {
         discovery: DiscoveryConfig,
         path_bases: DaemonPathBases,
         parent_path_bases: BTreeMap<String, DaemonPathBases>,
+        config_root: std::path::PathBuf,
     ) -> Self {
         Self {
             config_id,
             discovery,
             path_bases,
             parent_path_bases,
+            config_root,
         }
     }
 }
@@ -268,6 +275,7 @@ pub fn run_once_with_bases(
         cfg.clone(),
         path_bases,
         parent_path_bases,
+        std::path::PathBuf::from("config"),
     );
     run_multi_target_once_with_poller(&[target], &[q], conn, launcher, &poller)
 }
@@ -470,9 +478,10 @@ fn prepare_resume_unit(
     lease: &IssueLease,
     conn: &Connection,
 ) -> Result<Option<DispatchUnit>, SchedulerError> {
-    let Ok(claimed) = prepare_resume_lease(lease, conn)? else {
+    let Ok(prepared) = prepare_resume_lease(lease, conn)? else {
         return Ok(None);
     };
+    let claimed = prepared.into_claimed_launch(lease);
     Ok(Some(DispatchUnit {
         lease_id: claimed.lease_id,
         request: claimed.request,
@@ -573,6 +582,7 @@ fn acquire_claimed_launch(
         conn,
         config_id,
         path_bases.as_ref(),
+        &target.config_root,
     ) {
         Ok(Ok(claimed)) => Ok(Ok(claimed)),
         Ok(Err(_)) => Ok(Err(PrepareLaunchOutcome::Skipped)),

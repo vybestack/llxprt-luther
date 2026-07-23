@@ -250,6 +250,7 @@ fn complete_failure_cleanup_fixture() -> FailureCleanupState {
         captured_at: now,
         cleanup_completed_at: Some(now),
         recovery_consumed_at: None,
+        ownership_denied: false,
     }
 }
 

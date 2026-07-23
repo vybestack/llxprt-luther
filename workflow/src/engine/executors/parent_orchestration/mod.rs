@@ -273,6 +273,7 @@ impl OrchestrationState {
     }
 }
 
+mod child_resume_preparation;
 mod child_run;
 mod child_wait;
 mod child_workflow;

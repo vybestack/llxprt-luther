@@ -16,14 +16,14 @@ use rusqlite::Connection;
 
 use crate::adapters::github_issues::GithubIssue;
 use crate::daemon::discovery::SkipReason;
-use crate::persistence::leases::{
-    update_lease_status, update_lease_status_conditional_outcome, ConditionalLeaseStatusOutcome,
-    IssueLease, LeaseStatus,
-};
+use crate::persistence::leases::{IssueLease, LeaseStatus};
+#[cfg(test)]
+use crate::persistence::update_lease_status;
 use crate::workflow::schema::DiscoveryConfig;
 
 mod lease_finalization;
 mod paths;
+mod resume_preparation;
 
 #[cfg(test)]
 mod tests;
@@ -32,6 +32,7 @@ mod transaction_tests;
 
 pub use lease_finalization::finish_lease_after_result;
 pub use paths::{DaemonPathBases, PerRunPaths};
+pub use resume_preparation::{prepare_resume_lease, PreparedResume};
 
 /// Terminal result of a launch attempt.
 /// @plan:PLAN-20260415-DAEMON-DISCOVERY.P06
@@ -59,6 +60,13 @@ pub enum WorkflowLaunchResult {
     CompletedFailure,
     CleanupAbandoned,
     SuspendedExternalWait,
+    /// The run terminated because workspace ownership verification failed
+    /// (ownership-denied terminal). This is a distinct terminal state from
+    /// [`Self::CleanupAbandoned`]: it must never be selected for cleanup
+    /// continuation, because cleanup executes shell commands that must only
+    /// run in a trusted workspace. An ownership-denied workspace is unowned
+    /// (or owned by a foreign run), so cleanup cannot run there.
+    OwnershipDenied,
 }
 
 /// Request passed to a [`WorkflowLauncher`] to start a single workflow run.
@@ -79,6 +87,13 @@ pub struct LaunchRequest {
     /// Resolved per-run artifact directory (`base/issue-N/run-id`), or `None`
     /// when no daemon path base is available.
     pub artifact_dir: Option<PathBuf>,
+    /// The config root the workflow was resolved from at launch. For fresh
+    /// daemon launches this is always `"config"`. For resumes prepared via
+    /// [`prepare_resume_lease`] this carries the **persisted** canonical config
+    /// root (decoded from the launch provenance), so the resume re-resolves
+    /// from exactly the same root the run was launched from.
+    /// @plan:PLAN-20260722-ISSUE158-LAUNCH-PROVENANCE
+    pub config_root: PathBuf,
 }
 
 /// Seam for executing a workflow run for a claimed issue.
@@ -117,8 +132,9 @@ pub fn claim_and_launch(
     launcher: &dyn WorkflowLauncher,
     config_id: &str,
     bases: &DaemonPathBases,
+    config_root: &std::path::Path,
 ) -> Result<LaunchOutcome, rusqlite::Error> {
-    let claimed = match claim_for_launch(issue, cfg, conn, config_id, bases)? {
+    let claimed = match claim_for_launch(issue, cfg, conn, config_id, bases, config_root)? {
         Ok(claimed) => claimed,
         Err(reason) => return Ok(LaunchOutcome::Skipped(reason)),
     };
@@ -130,96 +146,22 @@ pub fn claim_and_launch(
     )
 }
 
-/// Prepare a ready-to-resume lease for dispatch by validating durable state
-/// before acquiring ownership.
-///
-/// All fallible reads (claim receipt, run metadata/workflow type) are performed
-/// and validated **before** the conditional lease acquisition. Once the CAS
-/// transitions the lease to `Running`, no fallible operation remains — the
-/// `ClaimedLaunch` is constructed from values already loaded. This eliminates
-/// the transaction-blocker window where a post-acquisition read failure would
-/// strand the lease in `Running` without compensation.
-///
-/// The CAS acquires only when the lease is exactly `ReadyToResume` **and**
-/// owned by the expected `run_id`, so a concurrent writer that reassigned the
-/// lease cannot be overwritten by this stale preparation.
-pub fn prepare_resume_lease(
-    lease: &IssueLease,
-    conn: &Connection,
-) -> Result<Result<ClaimedLaunch, SkipReason>, rusqlite::Error> {
-    let Some(run_id) = lease.run_id.clone() else {
-        update_lease_status(conn, &lease.lease_id, LeaseStatus::Failed, None)?;
-        return Ok(Err(SkipReason::InvalidLeaseState));
-    };
-
-    // Load and validate the claim receipt before any state mutation.
-    let Some(receipt) =
-        crate::persistence::claim_metadata::get_claim_metadata(conn, &lease.lease_id)?
-    else {
-        return Ok(Err(SkipReason::InvalidLeaseState));
-    };
-
-    // Load and validate run metadata/workflow type before the CAS acquisition
-    // so no fallible read remains after the lease is acquired. A missing or
-    // corrupt run row skips the resume without touching the lease; a DB error
-    // propagates before any write occurs.
-    let Some(workflow_type_id) = workflow_type_id_for_resume(conn, &run_id)? else {
-        return Ok(Err(SkipReason::InvalidLeaseState));
-    };
-
-    // Acquire exact ReadyToResume ownership via conditional update. The
-    // expected_run_id guard rejects a stale writer whose run_id was superseded
-    // by a concurrent reclaim, preserving the durable ReadyToResume state.
-    let acquired = update_lease_status_conditional_outcome(
-        conn,
-        &lease.lease_id,
-        LeaseStatus::Running,
-        &[LeaseStatus::ReadyToResume],
-        Some(&run_id),
-        Some(&run_id),
-    )?;
-    if !matches!(acquired, ConditionalLeaseStatusOutcome::Applied) {
-        return Ok(Err(SkipReason::InvalidLeaseState));
-    }
-
-    Ok(Ok(ClaimedLaunch {
-        lease_id: lease.lease_id.clone(),
-        request: LaunchRequest {
-            config_id: lease.config_id.clone(),
-            workflow_type_id: Some(workflow_type_id),
-            run_id,
-            repo: lease.issue_repo.clone(),
-            issue_number: lease.issue_number,
-            daemon_managed_claim: true,
-            claim_assignment_added: receipt.assignment_added,
-            claim_label_added: receipt.label_added,
-            // Resumes reuse persisted RunMetadata paths; do not synthesize new
-            // per-run paths for a resumed run. @plan:issue-117
-            work_dir: None,
-            artifact_dir: None,
-        },
-    }))
-}
-
-fn workflow_type_id_for_resume(
-    conn: &Connection,
-    run_id: &str,
-) -> Result<Option<String>, rusqlite::Error> {
-    Ok(crate::persistence::get_run_with_conn(conn, run_id)?
-        .map(|metadata| metadata.workflow_type_id)
-        .filter(|workflow_type_id| !workflow_type_id.is_empty()))
-}
-
 /// Resume a ready lease using its existing run id/checkpoint.
+///
+/// Delegates to [`prepare_resume_lease`] (which performs all read-only
+/// validation before the CAS) and then finalizes the lease based on the
+/// launcher's resume result. On any validation skip, the lease is left in
+/// `ReadyToResume` without mutation.
 pub fn resume_lease(
     lease: &IssueLease,
     conn: &Connection,
     launcher: &dyn WorkflowLauncher,
 ) -> Result<LaunchOutcome, rusqlite::Error> {
-    let claimed = match prepare_resume_lease(lease, conn)? {
-        Ok(claimed) => claimed,
+    let prepared = match prepare_resume_lease(lease, conn)? {
+        Ok(prepared) => prepared,
         Err(reason) => return Ok(LaunchOutcome::Skipped(reason)),
     };
+    let claimed = prepared.into_claimed_launch(lease);
     finish_lease_after_result(
         conn,
         &claimed.lease_id,

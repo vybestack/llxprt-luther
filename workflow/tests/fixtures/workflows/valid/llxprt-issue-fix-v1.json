@@ -2,6 +2,11 @@
   "workflow_type_id": "llxprt-issue-fix-v1",
   "steps": [
     {
+      "step_id": "workspace_ownership_verify",
+      "step_type": "workspace_ownership_verify",
+      "description": "Read-only pre-setup workspace ownership verification (issue 158)"
+    },
+    {
       "step_id": "select_issue",
       "step_type": "shell",
       "description": "Select lowest-numbered unassigned issue in lowest-versioned milestone",
@@ -18,16 +23,41 @@
       }
     },
     {
+      "step_id": "setup_workspace_init",
+      "step_type": "shell",
+      "description": "Initialize Git metadata in the authorized workspace",
+      "parameters": {
+        "command": "set -eu\n\nunset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_INDEX_FILE GIT_CONFIG_COUNT GIT_CONFIG_PARAMETERS GIT_PROXY_COMMAND GIT_SSH GIT_SSH_COMMAND\nexport GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_NOSYSTEM=1\ngit -c core.hooksPath=/dev/null init 1>&2\n",
+        "exit_code_map": {
+          "1": "fatal",
+          "128": "fatal"
+        }
+      }
+    },
+    {
+      "step_id": "git_config_publish",
+      "step_type": "git_config_publish",
+      "description": "Publish repository-local Git configuration through authorized descriptors",
+      "parameters": {
+        "origin_url": "https://github.com/{target_repo}.git"
+      }
+    },
+    {
+      "step_id": "workspace_ownership",
+      "step_type": "workspace_ownership",
+      "description": "Promote bootstrap workspace ownership evidence to durable .git/luther evidence"
+    },
+    {
       "step_id": "setup_workspace",
       "step_type": "shell",
-      "description": "Ensure repo is checked out, create issue branch, create artifact dir",
+      "description": "Verify and fetch repo, create issue branch, create artifact dir",
       "parameters": {
         "output_format": "json",
         "context_map": {
           "existing_pr_number": "existing_pr_number",
           "existing_pr_url": "existing_pr_url"
         },
-        "command": "set -euo pipefail\n\nif [ ! -d \"{work_dir}/.git\" ]; then\n  git clone https://github.com/{target_repo}.git {work_dir}\nfi\n\ncd {work_dir}\nif ! git fsck --connectivity-only >/dev/null 2>&1; then\n  cd \"$(dirname \"{work_dir}\")\"\n  rm -rf \"{work_dir}\"\n  git clone https://github.com/{target_repo}.git \"{work_dir}\"\n  cd \"{work_dir}\"\nfi\n\ngit fetch --prune origin\nEXISTING_PR_JSON=$(gh pr view issue{issue_number} --repo {target_repo} --json number,url,state,isDraft 2>/dev/null || true)\nif [ -n \"$EXISTING_PR_JSON\" ] && [ \"$(echo \"$EXISTING_PR_JSON\" | jq -r '.state')\" = \"OPEN\" ] && [ \"$(echo \"$EXISTING_PR_JSON\" | jq -r '.isDraft')\" = \"false\" ]; then\n  EXISTING_PR_NUMBER=$(echo \"$EXISTING_PR_JSON\" | jq -r '.number')\n  EXISTING_PR_URL=$(echo \"$EXISTING_PR_JSON\" | jq -r '.url')\nelse\n  EXISTING_PR_NUMBER=\"0\"\n  EXISTING_PR_URL=\"\"\nfi\ngit reset --hard 1>&2\nif [ \"$EXISTING_PR_NUMBER\" != \"0\" ] && git rev-parse --verify origin/issue{issue_number} >/dev/null 2>&1; then\n  git checkout -B issue{issue_number} origin/issue{issue_number} 1>&2\nelse\n  git checkout {base_branch} 1>&2\n  git reset --hard origin/{base_branch} 1>&2\n  git checkout -B issue{issue_number} 1>&2\nfi\n\nmkdir -p {artifact_dir}\nrm -f {artifact_dir}/plan.md {artifact_dir}/plan-evaluation.md {artifact_dir}/implement-stdout.txt {artifact_dir}/implement-stderr.txt {artifact_dir}/implementation-evaluation.md {artifact_dir}/implementation-evaluation-stdout.txt {artifact_dir}/implementation-evaluation-stderr.txt {artifact_dir}/remediate-output.txt {artifact_dir}/remediate-stdout.txt {artifact_dir}/remediate-stderr.txt {artifact_dir}/verify-report.json {artifact_dir}/pr-description.md\nrm -f implementation-evaluation.tmp.md .tmp-implementation-evaluation.md\njq -n --argjson existing_pr_number \"$EXISTING_PR_NUMBER\" --arg existing_pr_url \"$EXISTING_PR_URL\" '{existing_pr_number: $existing_pr_number, existing_pr_url: $existing_pr_url}'\n",
+        "command": "set -eu\n\nunset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_INDEX_FILE GIT_CONFIG_COUNT GIT_CONFIG_PARAMETERS GIT_PROXY_COMMAND GIT_SSH GIT_SSH_COMMAND\nexport GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_NOSYSTEM=1\nif ! git -c core.hooksPath=/dev/null fsck --connectivity-only >/dev/null 2>&1; then\n  echo \"Workspace repository failed connectivity verification\" >&2\n  exit 1\nfi\ngit -c core.hooksPath=/dev/null fetch --prune origin\nREPLACE_DELETIONS=$(git -c core.hooksPath=/dev/null for-each-ref --format='delete %(refname)' refs/replace)\nif [ -n \"$REPLACE_DELETIONS\" ]; then\n  printf '%s\n' \"$REPLACE_DELETIONS\" | git -c core.hooksPath=/dev/null update-ref --stdin\nfi\nEXISTING_PR_JSON=$(gh pr view issue{issue_number} --repo {target_repo} --json number,url,state,isDraft 2>/dev/null || true)\nif [ -n \"$EXISTING_PR_JSON\" ] && [ \"$(echo \"$EXISTING_PR_JSON\" | jq -r '.state')\" = \"OPEN\" ] && [ \"$(echo \"$EXISTING_PR_JSON\" | jq -r '.isDraft')\" = \"false\" ]; then\n  EXISTING_PR_NUMBER=$(echo \"$EXISTING_PR_JSON\" | jq -r '.number')\n  EXISTING_PR_URL=$(echo \"$EXISTING_PR_JSON\" | jq -r '.url')\nelse\n  EXISTING_PR_NUMBER=\"0\"\n  EXISTING_PR_URL=\"\"\nfi\nif git rev-parse --verify -q HEAD >/dev/null; then\n  git -c core.hooksPath=/dev/null reset --hard 1>&2\nfi\nif [ \"$EXISTING_PR_NUMBER\" != \"0\" ] && git rev-parse --verify origin/issue{issue_number} >/dev/null 2>&1; then\n  git -c core.hooksPath=/dev/null checkout -B issue{issue_number} origin/issue{issue_number} 1>&2\nelse\n  git -c core.hooksPath=/dev/null checkout {base_branch} 1>&2\n  git -c core.hooksPath=/dev/null reset --hard origin/{base_branch} 1>&2\n  git -c core.hooksPath=/dev/null checkout -B issue{issue_number} 1>&2\nfi\n\nmkdir -p {artifact_dir}\nrm -f {artifact_dir}/plan.md {artifact_dir}/plan-evaluation.md {artifact_dir}/implement-stdout.txt {artifact_dir}/implement-stderr.txt {artifact_dir}/implementation-evaluation.md {artifact_dir}/implementation-evaluation-stdout.txt {artifact_dir}/implementation-evaluation-stderr.txt {artifact_dir}/remediate-output.txt {artifact_dir}/remediate-stdout.txt {artifact_dir}/remediate-stderr.txt {artifact_dir}/verify-report.json {artifact_dir}/pr-description.md\nrm -f implementation-evaluation.tmp.md .tmp-implementation-evaluation.md\njq -n --argjson existing_pr_number \"$EXISTING_PR_NUMBER\" --arg existing_pr_url \"$EXISTING_PR_URL\" '{existing_pr_number: $existing_pr_number, existing_pr_url: $existing_pr_url}'\n",
         "exit_code_map": {
           "1": "fatal",
           "128": "fatal"
@@ -546,12 +576,41 @@
   ],
   "transitions": [
     {
+      "from": "workspace_ownership_verify",
+      "to": "select_issue"
+    },
+    {
+      "from": "workspace_ownership_verify",
+      "to": "abandon_and_log",
+      "condition": "fatal"
+    },
+    {
       "from": "select_issue",
-      "to": "setup_workspace"
+      "to": "setup_workspace_init"
+    },
+    {
+      "from": "setup_workspace_init",
+      "to": "git_config_publish",
+      "condition": "success"
+    },
+    {
+      "from": "git_config_publish",
+      "to": "workspace_ownership",
+      "condition": "success"
+    },
+    {
+      "from": "workspace_ownership",
+      "to": "setup_workspace",
+      "condition": "success"
     },
     {
       "from": "setup_workspace",
       "to": "bootstrap_workspace"
+    },
+    {
+      "from": "workspace_ownership",
+      "to": "abandon_and_log",
+      "condition": "fatal"
     },
     {
       "from": "bootstrap_workspace",
@@ -861,6 +920,16 @@
     },
     {
       "from": "select_issue",
+      "to": "abandon_and_log",
+      "condition": "fatal"
+    },
+    {
+      "from": "setup_workspace_init",
+      "to": "abandon_and_log",
+      "condition": "fatal"
+    },
+    {
+      "from": "git_config_publish",
       "to": "abandon_and_log",
       "condition": "fatal"
     },

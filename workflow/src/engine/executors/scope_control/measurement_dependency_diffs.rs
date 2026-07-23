@@ -1,4 +1,5 @@
-//! Dependency-manifest diff collection extracted from [`super::measurement`].
+//! Dependency-manifest diff collection extracted from the scope-control
+//! measurement module.
 //!
 //! These functions compute dependency additions by comparing manifest files
 //! (TOML) between the charter's frozen merge base and the current worktree.

@@ -1,7 +1,7 @@
 use std::path::Path;
 use std::process::Command;
 
-use crate::engine::continuation::{verify_workspace_ownership_marker, WORKSPACE_OWNER_MARKER};
+use crate::engine::workspace_ownership::{verify_workspace_ownership, WORKSPACE_OWNER_MARKER};
 
 use super::{GitPatchData, MeasurementError};
 
@@ -63,9 +63,15 @@ pub(super) fn patch_untracked_files(
         return Ok(data.untracked_files.clone());
     }
 
-    if let Some(reason) = verify_workspace_ownership_marker(work_dir, run_id) {
+    // Scope measurement may exclude only the verified bootstrap
+    // `.luther/workspace-owner` marker. The durable evidence lives beneath
+    // `.git`, which is naturally invisible to scope measurement (Git never
+    // reports `.git` contents as untracked files). When workspace ownership
+    // is not trusted, fail closed rather than silently excluding or including
+    // the control-plane marker.
+    if let Some(reason) = verify_workspace_ownership(work_dir, run_id) {
         return Err(MeasurementError::ControlMetadata(format!(
-            "cannot exclude untrusted workspace ownership marker: {reason}"
+            "cannot exclude untrusted workspace ownership marker for run '{run_id}': {reason}"
         )));
     }
     Ok(data

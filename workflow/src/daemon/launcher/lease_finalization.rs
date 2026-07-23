@@ -38,6 +38,28 @@ pub fn finish_lease_after_result(
         Ok(WorkflowLaunchResult::CompletedFailure) => {
             finalize_terminal_lease(conn, lease_id, run_id, LeaseStatus::Failed, false)
         }
+        // An ownership-denied terminal maps to a terminal `Failed` lease via
+        // an exact-owner `Running` CAS. This is deliberately distinct from
+        // `CleanupAbandoned`: an ownership-denied workspace is unowned (or
+        // owned by a foreign run), so cleanup cannot run there, and the lease
+        // must never be selected for cleanup continuation. `Failed` is a
+        // terminal, non-resumable state that the cleanup-selection logic
+        // never consults.
+        //
+        // **Idempotent predecessor (issue 158):** the runner's
+        // `persist_terminal_ownership_failure` already set the matching daemon
+        // lease directly to `Failed` (exact-owner `Running` CAS) before this
+        // finalizer runs. When that predecessor applied, this CAS rejects
+        // idempotently with the lease already in `Failed` for the exact same
+        // owner. That rejection must be treated as a successful idempotent
+        // failed launch (`Launched { success: false }`) so the scheduler's
+        // claim/label cleanup runs. Any other rejection (missing lease, a
+        // foreign owner, or a non-terminal status) is an explicit error
+        // because the durable state does not represent a consistent
+        // ownership-denied terminal.
+        Ok(WorkflowLaunchResult::OwnershipDenied) => {
+            finalize_ownership_denied_lease(conn, lease_id, run_id)
+        }
         Ok(WorkflowLaunchResult::CleanupAbandoned) => finalize_exact_owner_lease(
             conn,
             lease_id,
@@ -151,6 +173,103 @@ fn finalize_terminal_lease(
             current_run_id: None,
         }),
     }
+}
+
+/// Finalize an ownership-denied terminal lease transition (issue 158
+/// finding 4).
+///
+/// The runner's `persist_terminal_ownership_failure` may have already set the
+/// matching lease to `Failed` via an exact-owner `Running` CAS before this
+/// finalizer runs. When that predecessor applied, the CAS here rejects
+/// idempotently with the lease already in `Failed` for the same owner. That
+/// rejection must be treated as a successful idempotent failed launch
+/// (`Launched { success: false }`) so the scheduler's claim/label cleanup
+/// runs for the failed run.
+///
+/// Any other rejection is an explicit error because the durable state does
+/// not represent a consistent ownership-denied terminal:
+/// - **Missing lease:** the lease row vanished; the durable state cannot be
+///   verified.
+/// - **Foreign owner:** the lease is owned by a different run; this stale
+///   launcher must not claim cleanup authority over a foreign lease.
+/// - **Resumable/non-terminal status:** the lease is in a status other than
+///   `Running` or `Failed` (e.g. `WaitingExternal`, `ReadyToResume`); this is
+///   an inconsistent state for an ownership-denied terminal.
+fn finalize_ownership_denied_lease(
+    conn: &Connection,
+    lease_id: &str,
+    run_id: &str,
+) -> Result<LaunchOutcome, rusqlite::Error> {
+    match update_lease_status_conditional_outcome(
+        conn,
+        lease_id,
+        LeaseStatus::Failed,
+        &[LeaseStatus::Running],
+        Some(run_id),
+        Some(run_id),
+    )? {
+        ConditionalLeaseStatusOutcome::Applied => Ok(launched(run_id, false)),
+        ConditionalLeaseStatusOutcome::Rejected {
+            current_status,
+            current_run_id,
+        } => classify_ownership_denied_rejection(lease_id, run_id, current_status, current_run_id),
+        ConditionalLeaseStatusOutcome::Missing => {
+            Err(missing_ownership_denied_lease_error(lease_id, run_id))
+        }
+    }
+}
+
+/// Classify a rejected ownership-denied CAS. A same-owner `Failed` lease is
+/// the idempotent predecessor outcome and is treated as a successful failed
+/// launch so scheduler claim/label cleanup runs. Any other rejection is an
+/// explicit error.
+fn classify_ownership_denied_rejection(
+    lease_id: &str,
+    run_id: &str,
+    current_status: LeaseStatus,
+    current_run_id: Option<String>,
+) -> Result<LaunchOutcome, rusqlite::Error> {
+    if current_status == LeaseStatus::Failed && current_run_id.as_deref() == Some(run_id) {
+        return Ok(launched(run_id, false));
+    }
+    Err(inconsistent_ownership_denied_lease_error(
+        lease_id,
+        run_id,
+        current_status,
+        current_run_id.as_deref(),
+    ))
+}
+
+/// Build the `rusqlite::Error` for a missing lease during ownership-denied
+/// finalization. A missing lease row means the durable state cannot be
+/// verified as a consistent ownership-denied terminal.
+fn missing_ownership_denied_lease_error(lease_id: &str, run_id: &str) -> rusqlite::Error {
+    rusqlite::Error::SqliteFailure(
+        rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CONSTRAINT),
+        Some(format!(
+            "ownership-denied finalization for run {run_id}: lease {lease_id} is missing; \
+             durable state cannot be verified"
+        )),
+    )
+}
+
+/// Build the `rusqlite::Error` for an inconsistent ownership-denied lease
+/// state. The lease exists but is not a same-owner `Failed` terminal, so it
+/// cannot be treated as an idempotent ownership-denied outcome.
+fn inconsistent_ownership_denied_lease_error(
+    lease_id: &str,
+    run_id: &str,
+    current_status: LeaseStatus,
+    current_run_id: Option<&str>,
+) -> rusqlite::Error {
+    rusqlite::Error::SqliteFailure(
+        rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CONSTRAINT),
+        Some(format!(
+            "ownership-denied finalization for run {run_id}: lease {lease_id} is in an \
+             inconsistent state (status={current_status}, owner={current_run_id:?}); expected \
+             same-owner Failed"
+        )),
+    )
 }
 
 /// Resolve the lease outcome after a launch error.

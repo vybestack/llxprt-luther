@@ -428,3 +428,81 @@ fn validation_rejects_live_running_resume_point() {
         .iter()
         .any(|r| r.contains("resumable_status")));
 }
+
+// ---------------------------------------------------------------------------
+// Ownership-denied terminal: distinct non-resumable state that must never be
+// selected for cleanup continuation (issue 158).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn ownership_denied_terminal_rejects_resume_even_with_force() {
+    let conn = test_conn();
+    seed_ownership_denied_terminal(&conn, "ownership-denied");
+    for force in [false, true] {
+        let req = request("ownership-denied", ContinuationKind::Resume, force);
+        let validation = validate_continuation(&conn, &req).expect("validate");
+        assert!(
+            !validation.ok,
+            "ownership-denied terminal must reject resume (force={force})"
+        );
+        assert!(
+            validation
+                .failure_reasons()
+                .iter()
+                .any(|r| r.contains("ownership denial")),
+            "expected ownership-denied rejection (force={force}), got {:?}",
+            validation.failure_reasons()
+        );
+    }
+}
+
+#[test]
+fn ownership_denied_terminal_rejects_retry_even_with_force() {
+    let conn = test_conn();
+    seed_ownership_denied_terminal(&conn, "ownership-denied-retry");
+    for force in [false, true] {
+        let req = request(
+            "ownership-denied-retry",
+            ContinuationKind::Retry {
+                from_failed_step: false,
+            },
+            force,
+        );
+        let validation = validate_continuation(&conn, &req).expect("validate");
+        assert!(
+            !validation.ok,
+            "ownership-denied terminal must reject retry (force={force})"
+        );
+        assert!(
+            validation
+                .failure_reasons()
+                .iter()
+                .any(|r| r.contains("ownership denial")),
+            "expected ownership-denied rejection (force={force}), got {:?}",
+            validation.failure_reasons()
+        );
+    }
+}
+
+#[test]
+fn ownership_denied_terminal_stays_distinct_from_cleanup_abandonment() {
+    // An ownership-denied terminal is a distinct state from cleanup-failure-
+    // abandonment. It must not be treated as recoverable cleanup abandonment
+    // even though it carries failure_cleanup state with cleanup_succeeded =
+    // false. The `is_cleanup_failure_abandonment` check must return false for
+    // an ownership-denied terminal (status is Failed, not Abandoned), and the
+    // `is_ownership_denied_terminal` check must return true.
+    let conn = test_conn();
+    seed_ownership_denied_terminal(&conn, "ownership-distinct");
+    let metadata = get_run_with_conn(&conn, "ownership-distinct")
+        .expect("query")
+        .expect("run");
+    assert!(
+        metadata.is_ownership_denied_terminal(),
+        "ownership-denied terminal must be detected"
+    );
+    assert!(
+        !metadata.is_cleanup_failure_abandonment(),
+        "ownership-denied terminal must not be classified as cleanup abandonment"
+    );
+}

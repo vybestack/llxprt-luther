@@ -27,9 +27,13 @@ use crate::workflow::target_profile::TargetProfileOverrides;
 mod artifacts;
 mod authorization;
 mod commit;
+/// Recoverable legacy ownership migration (issue 158 durable state machine).
+/// @plan:PLAN-20260722-ISSUE158-LEGACY-OWNERSHIP-MIGRATION
+pub mod legacy_ownership_migration;
+mod resume_authorization;
 mod selection;
 mod validation;
-mod workspace_marker;
+pub(crate) mod workspace_marker;
 
 // Re-export the public API of the submodules so existing callers
 // (`crate::engine::continuation::...` and the `engine` re-exports) are
@@ -40,6 +44,12 @@ pub use artifacts::{
 };
 pub use authorization::ResumeAuthorization;
 pub use commit::commit_continuation;
+pub use legacy_ownership_migration::{
+    migrate_legacy_ownership, LegacyMigrationError, LegacyMigrationOutcome,
+};
+pub use resume_authorization::{
+    prepare_resume_authorization, PreparedResume, ResumeAuthorizationError,
+};
 pub use selection::select_checkpoint;
 pub use validation::validate_continuation;
 
@@ -49,7 +59,6 @@ pub use validation::validate_continuation;
 #[cfg(test)]
 pub(crate) use selection::{select_rewind_checkpoint, TERMINAL_STEP};
 pub use workspace_marker::verify_workspace_ownership_marker;
-pub(crate) use workspace_marker::WORKSPACE_OWNER_MARKER;
 
 /// Steps intrinsically safe to re-run because they are external-wait or
 /// otherwise idempotent. Other steps require exact typed authorization from a
@@ -76,21 +85,25 @@ pub fn is_safe_rerun_step(step_id: &str) -> bool {
 /// Only fields the run actually recorded produce `Some(..)`, mirroring how the
 /// initial run inserts only the overrides that were provided; untouched fields
 /// keep the static config defaults.
+///
+/// Issue 158 slice 5: the `issue` override is derived from `issue_number`
+/// only, never from `pr_number`. The `issue` override seeds
+/// `primary_issue_number`, which flows into `RunMetadata.issue_number` and
+/// thus into `issue_lease_number()` — the issue-lease authority anchor. A
+/// PR-only run has no issue lease, so reconstructing its `pr_number` as the
+/// issue anchor would silently grant it lease authority it must not have.
+/// The PR number identity remains recoverable through the persisted
+/// `pr_number` metadata field (loaded directly from the DB on resume) and
+/// through [`check_identity_recoverable`], which accepts either an issue or a
+/// PR anchor for identity recoverability without granting lease authority.
+///
+/// [`check_identity_recoverable`]: crate::engine::continuation::check_identity_recoverable
 /// @plan:PLAN-20260623-LUTHER-CONTINUATION
 #[must_use]
 pub fn continuation_overrides(md: &RunMetadata) -> TargetProfileOverrides {
     TargetProfileOverrides {
         repo: md.repository.clone(),
-        // GitHub issues and PRs share a single number space, so a PR-only run
-        // can safely reuse its pr_number as the issue anchor. Preserving it via
-        // `or(pr_number)` keeps a PR-only continuation (which
-        // `check_identity_recoverable` accepts) from silently falling back to
-        // the static config/default issue during reconstruction.
-        // @plan:PLAN-20260623-LUTHER-CONTINUATION
-        issue: md
-            .issue_number
-            .or(md.pr_number)
-            .map(|anchor| anchor.to_string()),
+        issue: md.issue_lease_number().map(|anchor| anchor.to_string()),
         work_dir: md.workspace_path.as_ref().map(PathBuf::from),
         artifact_dir: md.artifact_root.as_ref().map(PathBuf::from),
     }

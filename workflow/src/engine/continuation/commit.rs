@@ -219,12 +219,14 @@ fn acquire_continuation_lease(
     metadata: &RunMetadata,
     request: &ContinuationRequest,
 ) -> Result<(), ContinuationError> {
-    let (Some(repository), Some(issue_number)) = (
-        metadata.repository.as_deref(),
-        metadata
-            .issue_number
-            .and_then(|number| u64::try_from(number).ok()),
-    ) else {
+    let Some(repository) = metadata.repository.as_deref() else {
+        return Ok(());
+    };
+    // Issue 158 slice 5: lease authority requires the immutable issue number,
+    // never a PR number. A PR-only run has no issue lease, so a continuation
+    // of it must not attempt to acquire one. `issue_lease_number` returns
+    // `None` when only a `pr_number` is recorded, skipping lease acquisition.
+    let Some(issue_number) = metadata.issue_lease_number() else {
         return Ok(());
     };
     let Some(lease) =

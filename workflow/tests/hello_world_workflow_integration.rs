@@ -2,7 +2,7 @@ use luther_workflow::engine::executor::ExecutorRegistry;
 use luther_workflow::engine::executors::shell::ShellExecutor;
 use luther_workflow::engine::executors::write_file::WriteFileExecutor;
 use luther_workflow::engine::instance::WorkflowInstance;
-use luther_workflow::engine::runner::{EngineRunner, RunOutcome};
+use luther_workflow::engine::runner::{EngineRunner, RunContext, RunOutcome};
 use luther_workflow::workflow::schema::{
     GuardConfig, GuardLimits, RepoConfig, RuntimeConfig, StepDef, TransitionDef, WorkflowConfig,
     WorkflowType,
@@ -166,10 +166,15 @@ fn test_hello_world_workflow_end_to_end() {
 
     let instance = WorkflowInstance::create(workflow_type, config);
     let registry = hello_world_registry();
-    let mut runner = EngineRunner::new(instance, registry).expect("Failed to create EngineRunner");
-
-    // Override the context work_dir to point to our temp dir
-    runner.set_work_dir(work_dir.clone());
+    let mut runner = EngineRunner::with_context(
+        instance,
+        registry,
+        RunContext {
+            workspace_path: Some(work_dir.to_string_lossy().to_string()),
+            ..Default::default()
+        },
+    )
+    .expect("Failed to create EngineRunner");
 
     let outcome = runner.run().expect("Workflow should not return an error");
 
@@ -234,8 +239,15 @@ fn test_engine_dispatches_to_shell_executor() {
     let config = hello_world_config();
     let instance = WorkflowInstance::create(workflow_type, config);
     let registry = hello_world_registry();
-    let mut runner = EngineRunner::new(instance, registry).expect("Failed to create EngineRunner");
-    runner.set_work_dir(work_dir);
+    let mut runner = EngineRunner::with_context(
+        instance,
+        registry,
+        RunContext {
+            workspace_path: Some(work_dir.to_string_lossy().to_string()),
+            ..Default::default()
+        },
+    )
+    .expect("Failed to create EngineRunner");
 
     let outcome = runner.run().expect("Should not error");
     assert_eq!(outcome, RunOutcome::Success);
@@ -272,8 +284,15 @@ fn test_engine_dispatches_to_write_file_executor() {
     let config = hello_world_config();
     let instance = WorkflowInstance::create(workflow_type, config);
     let registry = hello_world_registry();
-    let mut runner = EngineRunner::new(instance, registry).expect("Failed to create EngineRunner");
-    runner.set_work_dir(work_dir.clone());
+    let mut runner = EngineRunner::with_context(
+        instance,
+        registry,
+        RunContext {
+            workspace_path: Some(work_dir.to_string_lossy().to_string()),
+            ..Default::default()
+        },
+    )
+    .expect("Failed to create EngineRunner");
 
     let outcome = runner.run().expect("Should not error");
     assert_eq!(outcome, RunOutcome::Success);
@@ -329,8 +348,15 @@ fn test_context_passes_between_steps_through_engine() {
     let config = hello_world_config();
     let instance = WorkflowInstance::create(workflow_type, config);
     let registry = hello_world_registry();
-    let mut runner = EngineRunner::new(instance, registry).expect("Failed to create EngineRunner");
-    runner.set_work_dir(work_dir.clone());
+    let mut runner = EngineRunner::with_context(
+        instance,
+        registry,
+        RunContext {
+            workspace_path: Some(work_dir.to_string_lossy().to_string()),
+            ..Default::default()
+        },
+    )
+    .expect("Failed to create EngineRunner");
 
     let outcome = runner.run().expect("Should not error");
     assert_eq!(outcome, RunOutcome::Success);
@@ -371,8 +397,15 @@ fn test_unregistered_step_type_through_engine_produces_failure() {
     let config = hello_world_config();
     let instance = WorkflowInstance::create(workflow_type, config);
     let registry = hello_world_registry(); // has shell + write_file, NOT nonexistent_executor
-    let mut runner = EngineRunner::new(instance, registry).expect("Failed to create EngineRunner");
-    runner.set_work_dir(work_dir);
+    let mut runner = EngineRunner::with_context(
+        instance,
+        registry,
+        RunContext {
+            workspace_path: Some(work_dir.to_string_lossy().to_string()),
+            ..Default::default()
+        },
+    )
+    .expect("Failed to create EngineRunner");
 
     let result = runner.run();
     // Should be an error because the executor is not registered

@@ -68,6 +68,18 @@ pub(super) fn check_resumable_status(
     metadata: &RunMetadata,
     request: &ContinuationRequest,
 ) -> SafetyCheck {
+    // An ownership-denied terminal is a distinct non-resumable state: it must
+    // never be routed to the workspace-mutating cleanup step, because cleanup
+    // executes shell commands that must only run in a trusted workspace. This
+    // check runs before the generic resumable/cleanup-recovery branches so an
+    // ownership-denied terminal cannot be reopened even with `--force`.
+    if metadata.is_ownership_denied_terminal() {
+        return fail(
+            "resumable_status",
+            "run terminated with a workspace ownership denial and cannot be resumed; \
+             cleanup cannot execute in an unowned workspace",
+        );
+    }
     let cleanup_recovery = metadata.is_cleanup_failure_abandonment()
         && metadata
             .failure_cleanup
@@ -195,14 +207,15 @@ pub(super) fn check_cleanup_workspace_ownership(
             ),
         );
     }
-    // Verify durable workspace ownership via the `.luther/workspace-owner`
-    // regular-file marker, which records the run_id that created the
-    // workspace. This prevents a wrong-owner substitution where a different
-    // run's workspace is pointed at by the recorded workspace_path. The
-    // marker is required: a missing, empty, non-regular (directory/symlink),
-    // or mismatched marker all fail closed.
+    // Verify durable workspace ownership via the two-phase ownership evidence
+    // (bootstrap `.luther/workspace-owner` or durable `.git/luther/workspace-owner`),
+    // which records the run_id that created the workspace. This prevents a
+    // wrong-owner substitution where a different run's workspace is pointed at
+    // by the recorded workspace_path. The unified verification is mandatory: a
+    // missing, empty, non-regular (directory/symlink), or mismatched marker all
+    // fail closed.
     if let Some(reason) =
-        super::workspace_marker::verify_workspace_ownership_marker(path, &metadata.run_id)
+        crate::engine::workspace_ownership::verify_workspace_ownership(path, &metadata.run_id)
     {
         return fail("workspace", reason);
     }
@@ -255,6 +268,11 @@ pub(super) fn reopen_status_is_allowed(
     metadata: &RunMetadata,
     request: &ContinuationRequest,
 ) -> bool {
+    // An ownership-denied terminal is never reopenable: it is a distinct
+    // non-resumable terminal state that must never route to cleanup.
+    if metadata.is_ownership_denied_terminal() {
+        return false;
+    }
     metadata.status.is_resumable()
         || metadata.status == RunStatus::Running
         || (metadata.is_cleanup_failure_abandonment()

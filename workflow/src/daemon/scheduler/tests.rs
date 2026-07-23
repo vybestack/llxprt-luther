@@ -100,7 +100,15 @@ fn conn() -> Connection {
     .unwrap();
     let mut metadata = crate::persistence::RunMetadata::new("run-wait", "wf", "cfg");
     metadata.status = crate::persistence::RunStatus::WaitingExternal;
+    metadata.repository = Some("o/r".to_string());
+    metadata.issue_number = Some(99);
     metadata.set_current_step("watch_pr_checks");
+    let workspace_parent = tempfile::tempdir().unwrap();
+    let workspace = workspace_parent.path().join("ws");
+    crate::engine::workspace_ownership::provision_workspace_owner_marker(&workspace, "run-wait")
+        .unwrap();
+    metadata.workspace_path = Some(workspace.to_string_lossy().into_owned());
+    std::mem::forget(workspace_parent);
     crate::persistence::persist_run_with_conn(&c, &metadata).unwrap();
     c
 }
@@ -202,11 +210,26 @@ fn seed_external_wait(conn: &Connection, run_id: &str, issue_number: u64) {
         .unwrap();
     seed_claim_receipt(conn, &lease.lease_id);
     update_lease_status(conn, &lease.lease_id, LeaseStatus::Running, Some(run_id)).unwrap();
-    crate::persistence::persist_run_with_conn(
-        conn,
-        &crate::persistence::RunMetadata::new(run_id, "wf", "cfg"),
-    )
-    .unwrap();
+    // Issue 158 slice 6: seed a workspace path with valid bootstrap ownership
+    // evidence so the read-only ownership verification in prepare_resume_lease
+    // succeeds before the CAS.
+    let mut metadata = crate::persistence::RunMetadata::new(run_id, "wf", "cfg");
+    let dir = tempfile::tempdir().expect("create temp workspace");
+    let workspace = dir.path().join("ws");
+    crate::engine::workspace_ownership::provision_workspace_owner_marker(&workspace, run_id)
+        .expect("provision bootstrap ownership");
+    metadata.workspace_path = Some(
+        workspace
+            .to_str()
+            .expect("utf-8 workspace path")
+            .to_string(),
+    );
+    metadata.repository = Some("o/r".to_string());
+    metadata.issue_number = Some(issue_number as i64);
+    metadata.status = crate::persistence::RunStatus::WaitingExternal;
+    metadata.set_current_step("watch_pr_checks");
+    std::mem::forget(dir);
+    crate::persistence::persist_run_with_conn(conn, &metadata).unwrap();
     crate::persistence::checkpoint::save_checkpoint_with_conn(
         conn,
         &crate::persistence::checkpoint::Checkpoint::new(run_id, "watch_pr_checks"),
@@ -245,6 +268,7 @@ fn pollable_target() -> SchedulerTarget {
         cfg(1),
         DaemonPathBases::default(),
         BTreeMap::new(),
+        std::path::PathBuf::from("config"),
     )
 }
 
@@ -291,11 +315,26 @@ fn persist_engine_suspended_wait(
     lease_id: &str,
     issue_number: u64,
 ) {
-    crate::persistence::persist_run_with_conn(
-        conn,
-        &crate::persistence::RunMetadata::new(run_id, "wf", "cfg"),
-    )
-    .unwrap();
+    // Issue 158 slice 6: seed a workspace path with valid bootstrap ownership
+    // evidence so the read-only ownership verification in prepare_resume_lease
+    // succeeds before the CAS.
+    let mut metadata = crate::persistence::RunMetadata::new(run_id, "wf", "cfg");
+    let dir = tempfile::tempdir().expect("create temp workspace");
+    let workspace = dir.path().join("ws");
+    crate::engine::workspace_ownership::provision_workspace_owner_marker(&workspace, run_id)
+        .expect("provision bootstrap ownership");
+    metadata.workspace_path = Some(
+        workspace
+            .to_str()
+            .expect("utf-8 workspace path")
+            .to_string(),
+    );
+    metadata.repository = Some("o/r".to_string());
+    metadata.issue_number = Some(issue_number as i64);
+    metadata.status = crate::persistence::RunStatus::WaitingExternal;
+    metadata.set_current_step("watch_pr_checks");
+    std::mem::forget(dir);
+    crate::persistence::persist_run_with_conn(conn, &metadata).unwrap();
     crate::persistence::checkpoint::save_checkpoint_with_conn(
         conn,
         &crate::persistence::checkpoint::Checkpoint::new(run_id, "watch_pr_checks"),
@@ -563,6 +602,7 @@ fn target_with_claim(
         cfg_with_claim(max, claim_assignee, claim_label),
         DaemonPathBases::default(),
         BTreeMap::new(),
+        std::path::PathBuf::from("config"),
     )
 }
 
