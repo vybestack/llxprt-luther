@@ -111,16 +111,27 @@ fn load_checkpoint_identity(
 ///
 /// Returns `None` when the run has no issue anchor (e.g. a PR-only run or a
 /// non-daemon CLI run) — such a run has no durable lease authority to capture.
+///
+/// The primary lookup is by `run_id`; when that returns `Ok(None)` (no lease
+/// row associated with this run yet, e.g. during early recovery before the run
+/// id was linked), we fall back to looking up the lease by issue. This ensures
+/// the authority snapshot captures the lease that logically covers this run
+/// even if the `run_id` column has not yet been populated.
 fn load_issue_lease(
     conn: &Connection,
     metadata: &crate::persistence::RunMetadata,
 ) -> Option<crate::persistence::leases::IssueLease> {
     let repo = metadata.repository.as_deref()?;
     let issue_number = metadata.issue_lease_number()?;
-    crate::persistence::leases::get_lease_for_run(conn, &metadata.run_id)
-        .or_else(|_| crate::persistence::leases::get_lease_for_issue(conn, repo, issue_number))
-        .ok()
-        .flatten()
+    match crate::persistence::leases::get_lease_for_run(conn, &metadata.run_id) {
+        Ok(Some(lease)) => Some(lease),
+        Ok(None) => crate::persistence::leases::get_lease_for_issue(conn, repo, issue_number)
+            .ok()
+            .flatten(),
+        Err(_) => crate::persistence::leases::get_lease_for_issue(conn, repo, issue_number)
+            .ok()
+            .flatten(),
+    }
 }
 
 /// Computed normalized binding keys for operation idempotency. [B3]

@@ -197,16 +197,25 @@ fn load_reserve_checkpoint_identity(
 
 /// Load the matching lease inside the reserve transaction using the same
 /// resolution as prepare. [B1]
+///
+/// Mirrors [`super::prepare::load_issue_lease`]: the primary lookup is by
+/// `run_id`; when that returns `Ok(None)` we fall back to the issue lookup so
+/// the authority snapshot captures the logically-covering lease.
 fn load_reserve_lease(
     tx: &Connection,
     metadata: &crate::persistence::RunMetadata,
 ) -> Option<crate::persistence::leases::IssueLease> {
     let repo = metadata.repository.as_deref()?;
     let issue_number = metadata.issue_lease_number()?;
-    crate::persistence::leases::get_lease_for_run(tx, &metadata.run_id)
-        .or_else(|_| crate::persistence::leases::get_lease_for_issue(tx, repo, issue_number))
-        .ok()
-        .flatten()
+    match crate::persistence::leases::get_lease_for_run(tx, &metadata.run_id) {
+        Ok(Some(lease)) => Some(lease),
+        Ok(None) => crate::persistence::leases::get_lease_for_issue(tx, repo, issue_number)
+            .ok()
+            .flatten(),
+        Err(_) => crate::persistence::leases::get_lease_for_issue(tx, repo, issue_number)
+            .ok()
+            .flatten(),
+    }
 }
 
 /// Strategy refusal (fail-closed policy). [C4/C6]
@@ -316,9 +325,9 @@ fn resolve_existing_status(
     existing: &RecoveryOperation,
 ) -> Result<ExistingResolution, RecoveryError> {
     match existing.status {
-        OperationStatus::Completed => Ok(resolve_completed(prepared, existing)),
+        OperationStatus::Completed => resolve_completed(prepared, existing),
         OperationStatus::Refused | OperationStatus::Conflict => {
-            Ok(resolve_refused_or_conflict(prepared, existing))
+            resolve_refused_or_conflict(prepared, existing)
         }
         OperationStatus::Pending => resolve_pending(tx, prepared, existing),
     }
@@ -326,34 +335,89 @@ fn resolve_existing_status(
 
 /// Resolve a Completed operation: AlreadyApplied on matching binding, else
 /// conflict. [C2]
+///
+/// Fails closed with [`RecoveryError::Persistence`] when a matched Completed
+/// operation has no `execution_attempt_id` — a completed operation must always
+/// have one (allocated at reserve and finalized with the attempt in the
+/// serialized outcome). A missing attempt id signals ledger corruption.
 fn resolve_completed(
     prepared: &PreparedRecovery,
     existing: &RecoveryOperation,
-) -> ExistingResolution {
-    if existing.capsule_envelope_digest == prepared.authority.capsule.envelope_digest {
-        return ExistingResolution::ShortCircuit(RecoveryOutcome::AlreadyApplied {
-            prior_outcome: existing.serialized_outcome.clone().unwrap_or_default(),
-            attempt_id: existing.execution_attempt_id.unwrap_or(0),
-            operation_id: existing.operation_id.clone(),
-        });
+) -> Result<ExistingResolution, RecoveryError> {
+    if existing.capsule_envelope_digest != prepared.authority.capsule.envelope_digest {
+        return Ok(ExistingResolution::ShortCircuit(RecoveryOutcome::Refused {
+            reason: RefusalReason::ConflictingOperation,
+        }));
     }
-    ExistingResolution::ShortCircuit(RecoveryOutcome::Refused {
-        reason: RefusalReason::ConflictingOperation,
-    })
+    let attempt_id = existing.execution_attempt_id.ok_or_else(|| {
+        RecoveryError::Persistence(format!(
+            "completed operation '{}' has no execution_attempt_id (ledger corruption)",
+            existing.operation_id
+        ))
+    })?;
+    Ok(ExistingResolution::ShortCircuit(
+        RecoveryOutcome::AlreadyApplied {
+            prior_outcome: existing.serialized_outcome.clone().unwrap_or_default(),
+            attempt_id,
+            operation_id: existing.operation_id.clone(),
+        },
+    ))
 }
 
-/// Resolve a finalized non-completed operation: conflict on mismatched
-/// binding, else allow re-reserve. [C2/B3]
+/// Resolve a finalized Refused or Conflict operation. [C2/B3]
+///
+/// On **matching** capsule binding, the prior terminal outcome is replayed as
+/// a short-circuit — the same logical request was already refused/conflicted
+/// with the same exact bindings, so the decision stands. Re-running the
+/// recovery (fresh CAS + insert_pending) would be incorrect: it would ignore
+/// the durable terminal decision and silently re-execute.
+///
+/// On **mismatched** capsule binding, the existing operation is for a
+/// different exact operation on the same logical request — a conflicting
+/// operation refusal is returned.
 fn resolve_refused_or_conflict(
     prepared: &PreparedRecovery,
     existing: &RecoveryOperation,
-) -> ExistingResolution {
+) -> Result<ExistingResolution, RecoveryError> {
     if existing.capsule_envelope_digest != prepared.authority.capsule.envelope_digest {
-        return ExistingResolution::ShortCircuit(RecoveryOutcome::Refused {
+        return Ok(ExistingResolution::ShortCircuit(RecoveryOutcome::Refused {
             reason: RefusalReason::ConflictingOperation,
-        });
+        }));
     }
-    ExistingResolution::NotFound
+    // Matching binding: replay the persisted terminal outcome.
+    let terminal_outcome = existing.serialized_outcome.clone().unwrap_or_default();
+    Ok(ExistingResolution::ShortCircuit(match existing.status {
+        OperationStatus::Refused => RecoveryOutcome::Refused {
+            reason: persisted_refusal_reason(&terminal_outcome),
+        },
+        OperationStatus::Conflict => RecoveryOutcome::Conflict {
+            detail: terminal_outcome,
+        },
+        // Unreachable: this function is only called for Refused | Conflict.
+        _ => RecoveryOutcome::Conflict {
+            detail: "unexpected terminal status in resolve_refused_or_conflict".to_string(),
+        },
+    }))
+}
+
+/// Parse a persisted refusal detail back into a [`RefusalReason`].
+///
+/// The `serialized_outcome` of a finalized Refused operation stores the
+/// human-readable refusal detail (set by the protocol). We map the detail back
+/// to the closest matching [`RefusalReason`] so callers see a typed refusal
+/// rather than a generic conflict.
+fn persisted_refusal_reason(detail: &str) -> RefusalReason {
+    if detail.contains("not recoverable") {
+        RefusalReason::NonRecoverable
+    } else if detail.contains("not authorized") {
+        RefusalReason::NotAuthorized
+    } else if detail.contains("salvage") {
+        RefusalReason::SalvageOnly
+    } else if detail.contains("conflicting") {
+        RefusalReason::ConflictingOperation
+    } else {
+        RefusalReason::VerificationFailed(detail.to_string())
+    }
 }
 
 /// Resolve a Pending operation: adopt if lease expired, else reconcile by not
@@ -374,7 +438,7 @@ fn resolve_pending(
     let new_lease = now + chrono::Duration::minutes(RECOVERY_LEASE_MINUTES);
     let adopt = try_adopt_pending(tx, &existing.operation_id, new_pid, new_lease, now)
         .map_err(map_persist("try adopt pending"))?;
-    Ok(resolve_adopt_outcome(existing, adopt))
+    resolve_adopt_outcome(existing, adopt)
 }
 
 /// Map the adoption outcome to a reserve resolution. [B3]
@@ -385,20 +449,34 @@ fn resolve_pending(
 /// without a second CAS or duplicate insert. When the lease is still live
 /// (still owned by another recoverer), returns a short-circuit
 /// [`RecoveryOutcome::AlreadyApplied`]. [B3]
-fn resolve_adopt_outcome(existing: &RecoveryOperation, adopt: AdoptOutcome) -> ExistingResolution {
+///
+/// Fails closed with [`RecoveryError::Persistence`] when a matched Pending
+/// operation has no `execution_attempt_id` — a pending operation allocated at
+/// reserve must always have one. A missing attempt id signals ledger
+/// corruption.
+fn resolve_adopt_outcome(
+    existing: &RecoveryOperation,
+    adopt: AdoptOutcome,
+) -> Result<ExistingResolution, RecoveryError> {
+    let attempt_id = existing.execution_attempt_id.ok_or_else(|| {
+        RecoveryError::Persistence(format!(
+            "pending operation '{}' has no execution_attempt_id (ledger corruption)",
+            existing.operation_id
+        ))
+    })?;
     match adopt {
-        AdoptOutcome::Adopted => ExistingResolution::AdoptedPending(ReservedRecovery {
+        AdoptOutcome::Adopted => Ok(ExistingResolution::AdoptedPending(ReservedRecovery {
             operation_id: existing.operation_id.clone(),
-            attempt_id: existing.execution_attempt_id.unwrap_or(0),
+            attempt_id,
             epoch: existing.epoch,
-        }),
-        AdoptOutcome::StillOwned => {
-            ExistingResolution::ShortCircuit(RecoveryOutcome::AlreadyApplied {
+        })),
+        AdoptOutcome::StillOwned => Ok(ExistingResolution::ShortCircuit(
+            RecoveryOutcome::AlreadyApplied {
                 prior_outcome: existing.serialized_outcome.clone().unwrap_or_default(),
-                attempt_id: existing.execution_attempt_id.unwrap_or(0),
+                attempt_id,
                 operation_id: existing.operation_id.clone(),
-            })
-        }
+            },
+        )),
     }
 }
 

@@ -19,8 +19,8 @@ use std::path::{Path, PathBuf};
 
 use luther_workflow::engine::recovery::protocol::OperatorVerb;
 use luther_workflow::engine::recovery::{
-    classify_run, normalize_operator_verb, salvage_recover, RecoveryOutcome, RecoveryProtocolV1,
-    RecoveryRequest, RecoveryWiring, RefusalReason, RunClassification,
+    classify_run, salvage_recover, RecoveryOutcome, RecoveryProtocolV1, RecoveryRequest,
+    RecoveryWiring, RefusalReason, RunClassification,
 };
 use luther_workflow::engine::runner::{EngineError, RunOutcome};
 use luther_workflow::engine::{ContinuationKind, ContinuationRequest};
@@ -86,9 +86,15 @@ fn infer_outcome_from_metadata(
 }
 
 /// Map a [`RunStatus`] to a [`RunOutcome`] for the given step.
+///
+/// Nonterminal statuses that are not already mapped to a specific outcome
+/// (`WaitingExternal`, `Paused`, `ReadyToResume`) are treated as interrupted
+/// (resumable), never as success. [`RunStatus::ReviewReady`] is nonterminal:
+/// a merge-required run that reached `ReviewReady` is NOT `Completed` and must
+/// not report success. [B12/C11]
 fn status_to_outcome(status: &RunStatus, step: &str) -> RunOutcome {
     match status {
-        RunStatus::Completed => RunOutcome::Success,
+        RunStatus::Completed | RunStatus::Merged => RunOutcome::Success,
         RunStatus::WaitingExternal => RunOutcome::WaitingExternal {
             step_id: step.to_string(),
             reason: "external wait condition".to_string(),
@@ -104,7 +110,14 @@ fn status_to_outcome(status: &RunStatus, step: &str) -> RunOutcome {
             step_id: step.to_string(),
             reason: "step failed".to_string(),
         },
-        _ => RunOutcome::Success,
+        // ReviewReady, Initialized, Queued, Starting, Running,
+        // WaitingForChecks, Remediating, Blocked are all nonterminal. They
+        // are NOT Completed and must never report success. Treat as
+        // interrupted so the operator knows the run did not reach a
+        // terminal success.
+        _ => RunOutcome::Interrupted {
+            step_id: step.to_string(),
+        },
     }
 }
 
@@ -147,7 +160,8 @@ pub(super) fn recover_operator_run(
 
     write_continuation_result(&plan.artifact_dir, &request.kind, &step, &outcome);
 
-    let maintenance_errors = run_post_recovery_maintenance(store, md, request, &outcome, had_lease);
+    let maintenance_errors =
+        run_post_recovery_maintenance(store, md, request, &outcome, &recovery_outcome, had_lease);
 
     let exit_code = continuation_outcome_exit_code(&request.run_id, &step, &outcome);
 
@@ -244,7 +258,6 @@ fn dispatch_capsule_recovery(
         .unwrap_or_else(|| md.current_step.clone().unwrap_or_default());
 
     let operator_verb = map_operator_verb(&request.kind);
-    let _ = normalize_operator_verb(operator_verb);
 
     let expected_epoch = read_epoch(store.conn(), &request.run_id)
         .map_err(|e| format!("read epoch for '{}': {e}", request.run_id))?;
@@ -316,18 +329,33 @@ fn refusal_to_engine_error(run_id: &str, reason: &RefusalReason) -> EngineError 
 ///
 /// Each action is attempted independently so a failure in one cannot skip or
 /// suppress the other. Returns the aggregated maintenance errors.
+///
+/// `persist_continuation_failure` (which marks the run as `Failed`) is invoked
+/// ONLY for actual execution failures — i.e. when the recovery reached
+/// execution (`Recovered`/`AlreadyApplied`) and then errored. Protocol-level
+/// outcomes (`Refused`, `StaleEpoch`, `Conflict`) are NOT execution failures:
+/// the run's durable state was not advanced, so marking it `Failed` would
+/// corrupt the resumable state the operator needs for a retry.
 fn run_post_recovery_maintenance(
     store: &SqliteStore,
     md: &RunMetadata,
     request: &ContinuationRequest,
     outcome: &Result<RunOutcome, EngineError>,
+    recovery_outcome: &RecoveryOutcome,
     had_lease: bool,
 ) -> Vec<String> {
     let mut errors = Vec::new();
-    if let Err(error) = outcome {
-        if let Err(maintenance_error) = persist_continuation_failure(store, &request.run_id, error)
-        {
-            errors.push(maintenance_error);
+    let reached_execution = matches!(
+        recovery_outcome,
+        RecoveryOutcome::Recovered { .. } | RecoveryOutcome::AlreadyApplied { .. }
+    );
+    if reached_execution {
+        if let Err(error) = outcome {
+            if let Err(maintenance_error) =
+                persist_continuation_failure(store, &request.run_id, error)
+            {
+                errors.push(maintenance_error);
+            }
         }
     }
     if had_lease {
