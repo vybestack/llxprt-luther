@@ -337,13 +337,11 @@ fn seed_pending_op(conn: &Connection, op: &SeedPendingOp) {
 }
 
 /// Seed a Completed operation via raw SQL.
-#[allow(dead_code)]
 struct SeedCompletedOp {
     operation_id: String,
     run_id: String,
     epoch: u64,
     step_id: String,
-    capsule_digest: String,
     logical_key: String,
     intent_digest: String,
     attempt_id: i64,
@@ -886,7 +884,6 @@ fn f07_exact_duplicate_already_applied_no_attempt() {
             run_id: run_id.to_string(),
             epoch: 1,
             step_id: "step1".to_string(),
-            capsule_digest: capsule.envelope_digest.clone(),
             logical_key,
             intent_digest,
             attempt_id: 42,
@@ -1296,7 +1293,6 @@ fn f13_conflicting_duplicate_refused() {
             run_id: run_id.to_string(),
             epoch: 1,
             step_id: "step1".to_string(),
-            capsule_digest: "different-capsule-digest-f13".to_string(),
             logical_key,
             intent_digest,
             attempt_id: 1,

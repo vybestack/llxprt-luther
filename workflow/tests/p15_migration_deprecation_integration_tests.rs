@@ -255,16 +255,10 @@ fn salvage_records_are_append_only_and_idempotent() {
 // Backfill refusal tests [C9/B10]
 // ===========================================================================
 
-/// GIVEN: a run that already has a legacy checkpoint (no capsule)
-/// WHEN: persist_capsule_v1 is called for that run
-/// THEN: the first insert succeeds (no existing capsule) — BUT the design
-/// invariant is that a capsule may ONLY be written by the fresh-launch path
-/// BEFORE any step executes. This test verifies that classify_run after a
-/// manually-inserted capsule still classifies as CapsuleBacked, confirming
-/// that the capsule store itself is the authority. The PROHIBITION on
-/// backfill is enforced by the fresh-launch path: only
-/// `persist_launch_atomically` writes capsules, and it does so atomically
-/// with the Starting run metadata BEFORE any step executes. [C9/B10]
+/// GIVEN: a capsule already persisted for a run
+/// WHEN: `persist_capsule_v1` is called again for the same run
+/// THEN: the second insert is rejected by the PRIMARY KEY constraint (no
+///       `ON CONFLICT DO UPDATE`), preserving capsule immutability. [C8]
 #[test]
 fn capsule_store_rejects_overwrite_of_existing_capsule() {
     let conn = p15_conn();

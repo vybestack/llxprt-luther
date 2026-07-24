@@ -1152,11 +1152,9 @@ fn crash_recovery_loads_unfinalized_attempt() {
 // REQ-RP-004: Single CAS at reserve, no finalize CAS [B2]
 // ===========================================================================
 
-/// GIVEN: a recovery operation that has been reserved (epoch advanced once)
+/// GIVEN: a recovery operation driven through reserve → execute → finalize
 /// WHEN: the operation is finalized
 /// THEN: the epoch does NOT advance again (single CAS at reserve only) [B2]
-///
-/// GREEN: exercises the durable epoch CAS landed in P05 (not recover()).
 ///
 /// @plan:PLAN-20260723-SELFHOST-RELIABILITY.P10
 /// @requirement:REQ-RP-004
@@ -1164,26 +1162,26 @@ fn crash_recovery_loads_unfinalized_attempt() {
 fn finalize_does_not_advance_epoch_single_cas_at_reserve() {
     let conn = recovery_conn();
     let run_id = "run-single-cas";
+    seed_run(&conn, run_id);
+    persisted_capsule(&conn, run_id);
 
-    // Reserve: epoch advances 0 → 1 (the single CAS).
-    {
-        let tx = begin_tx(&conn);
-        let outcome = cas_advance_epoch(&tx, run_id, 0).expect("reserve CAS");
-        tx.commit().expect("commit");
-        assert_eq!(
-            outcome,
-            luther_workflow::persistence::recovery_epoch::CasOutcome::Advanced { from: 0, to: 1 }
-        );
-    }
+    let request = recovery_request(run_id, "step1", 0);
+    let protocol = RecoveryProtocolV1;
+    let executor = RecordingRecoveryExecutor::success();
 
-    let epoch_after_reserve = read_epoch(&conn, run_id).expect("read_epoch");
-    assert_eq!(epoch_after_reserve, 1);
+    let outcome = protocol
+        .recover_with_executor(&conn, Path::new("."), &request, &executor)
+        .expect("recover must succeed so finalize runs [B2]");
+    assert!(
+        matches!(outcome, RecoveryOutcome::Recovered { .. }),
+        "recovery must complete so finalize commits (epoch invariance is meaningful) [B2]"
+    );
 
-    // Finalize: the protocol finalizes WITHOUT a second CAS. The durable
-    // invariant is that the epoch does not advance at finalize.
+    // The single CAS at reserve advanced the epoch 0 → 1. Finalize must NOT
+    // open a second epoch CAS: the durable epoch stays at 1. [B2]
     let epoch_after_finalize = read_epoch(&conn, run_id).expect("read_epoch");
     assert_eq!(
-        epoch_after_reserve, epoch_after_finalize,
+        epoch_after_finalize, 1,
         "epoch must not advance at finalize (single CAS at reserve only) [B2]"
     );
 }
@@ -1520,21 +1518,17 @@ fn select_strategy_for_continue_workspace_returns_continue_workspace() {
 
 /// GIVEN: an `Idempotent` policy
 /// WHEN: `select_strategy(policy)` is called
-/// THEN: returns `RecoveryStrategy::Reenter` [C4/C6]
-///
-/// RED: the fail-closed stub returns `Refused(NonRecoverable)` instead of
-/// `Reenter`. This assertion fails because P11 hasn't implemented strategy
-/// selection yet.
+/// THEN: returns exactly `RecoveryStrategy::Reenter` [C4/C6]
 ///
 /// @plan:PLAN-20260723-SELFHOST-RELIABILITY.P10
 /// @requirement:REQ-RP-005
 #[test]
 fn select_strategy_for_idempotent_returns_reenter() {
     let strategy = select_strategy(StepRecoveryPolicy::Idempotent);
-    assert_ne!(
+    assert_eq!(
         strategy,
-        RecoveryStrategy::Refused(RefusalReason::NonRecoverable),
-        "Idempotent policy must not be fail-closed Refused [C4/C6]"
+        RecoveryStrategy::Reenter,
+        "Idempotent policy must select Reenter strategy exactly [C4/C6]"
     );
 }
 

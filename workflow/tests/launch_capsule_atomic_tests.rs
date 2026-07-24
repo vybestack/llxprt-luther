@@ -494,3 +494,108 @@ fn fresh_launch_caller_collision_leaves_no_capsule() {
         "no capsule after collision"
     );
 }
+
+// ===========================================================================
+// 7. Concurrent atomic persistence for the same run_id (writer serialization)
+// ===========================================================================
+
+/// GIVEN: two file-backed SQLite connections and a barrier synchronizing them
+/// WHEN: both call `persist_launch_atomically` for the same run_id at once
+/// THEN: exactly one returns `Persisted` and the other returns `RunCollision`;
+///       exactly one run row and one capsule row are durable.
+///
+/// The `IMMEDIATE` transaction in `persist_launch_atomically` serializes
+/// concurrent writers so a duplicate launch for the same run_id cannot create
+/// two capsules or two run rows. A `busy_timeout` lets the second writer wait
+/// for the lock rather than erroring immediately. [P08B]
+///
+/// @plan:PLAN-20260723-SELFHOST-RELIABILITY.P08B
+/// @requirement:REQ-RP-002
+#[test]
+fn concurrent_persist_launch_atomically_serializes_same_run() {
+    use std::sync::{Arc, Barrier};
+    use std::time::Duration;
+
+    let temp = tempfile::tempdir().expect("create temp dir");
+    let db_path = temp.path().join("concurrent-launch.db");
+    luther_workflow::persistence::init_database(&db_path).expect("init database");
+
+    let run_id = "run-concurrent-launch-001";
+    let metadata = build_starting_metadata(run_id);
+    let capsule = build_test_capsule(run_id);
+
+    // Two file-backed connections to the SAME database. A busy_timeout lets the
+    // second writer wait for the IMMEDIATE lock held by the first instead of
+    // erroring with SQLITE_BUSY.
+    let open_file_conn = || {
+        let conn = Connection::open(&db_path).expect("open file db");
+        conn.busy_timeout(Duration::from_secs(5))
+            .expect("set busy_timeout");
+        conn
+    };
+
+    let barrier = Arc::new(Barrier::new(2));
+    let outcomes = Arc::new(std::sync::Mutex::new(Vec::new()));
+
+    let mut handles = Vec::new();
+    for _ in 0..2 {
+        let barrier = Arc::clone(&barrier);
+        let outcomes = Arc::clone(&outcomes);
+        let metadata = metadata.clone();
+        let capsule = capsule.clone();
+        let db_path = db_path.clone();
+        handles.push(std::thread::spawn(move || {
+            let conn = Connection::open(&db_path).expect("open file db");
+            conn.busy_timeout(Duration::from_secs(5))
+                .expect("set busy_timeout");
+            // Synchronize: both threads reach persist simultaneously.
+            barrier.wait();
+            let outcome = persist_launch_atomically(&conn, &metadata, &capsule);
+            outcomes.lock().unwrap().push(outcome);
+        }));
+    }
+    for handle in handles {
+        handle.join().expect("worker thread must not panic");
+    }
+
+    let mut guarded = outcomes.lock().unwrap();
+    let raw_results: Vec<_> = guarded.drain(..).collect::<Vec<_>>();
+    drop(guarded);
+
+    // Exactly one Persisted and one RunCollision. Neither concurrent launch
+    // may hard-error (both resolve to a typed outcome).
+    let mut persisted_count = 0;
+    let mut collision_count = 0;
+    for result in &raw_results {
+        match result {
+            Ok(LaunchPersistenceOutcome::Persisted) => persisted_count += 1,
+            Err(LaunchPersistenceError::RunCollision(id)) if id == run_id => {
+                collision_count += 1;
+            }
+            other => {
+                panic!("concurrent launch resolved to an unexpected outcome: {other:?} [P08B]")
+            }
+        }
+    }
+    assert_eq!(
+        persisted_count, 1,
+        "exactly one concurrent launch must Persist [P08B]"
+    );
+    assert_eq!(
+        collision_count, 1,
+        "exactly one concurrent launch must RunCollision [P08B]"
+    );
+
+    // Durable invariants: exactly one run row and one capsule row. [C8]
+    let conn = open_file_conn();
+    assert_eq!(
+        count_run_rows(&conn, run_id),
+        1,
+        "exactly one run row after concurrent launch [P08B]"
+    );
+    assert_eq!(
+        count_capsule_rows(&conn, run_id),
+        1,
+        "exactly one capsule row after concurrent launch [C8/P08B]"
+    );
+}

@@ -1112,12 +1112,15 @@ fn runner_completion_for_merge_required_is_review_ready() {
 #[test]
 fn verifier_uses_bound_repo_and_pr() {
     // This test verifies the MergeVerifier passes the correct repo/pr to the
-    // remote probe. We use a probe that records the args.
+    // remote probe. We use a probe whose recording fields are shared via Arc
+    // so the test can assert the exact repo and pr after the boxed probe is
+    // consumed by the verifier.
     use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+    use std::sync::Arc;
 
     struct RecordingProbe {
-        observed_repo: Mutex<String>,
-        observed_pr: AtomicI64,
+        observed_repo: Arc<Mutex<String>>,
+        observed_pr: Arc<AtomicI64>,
         merged: AtomicBool,
     }
 
@@ -1137,9 +1140,12 @@ fn verifier_uses_bound_repo_and_pr() {
         }
     }
 
+    let observed_repo = Arc::new(Mutex::new(String::new()));
+    let observed_pr = Arc::new(AtomicI64::new(0));
+
     let probe = RecordingProbe {
-        observed_repo: Mutex::new(String::new()),
-        observed_pr: AtomicI64::new(0),
+        observed_repo: Arc::clone(&observed_repo),
+        observed_pr: Arc::clone(&observed_pr),
         merged: AtomicBool::new(true),
     };
 
@@ -1158,10 +1164,17 @@ fn verifier_uses_bound_repo_and_pr() {
 
     let _ = typed_merge::build_reachability_proof(&verifier).expect("proof");
 
-    // The probe received the correct repo and pr.
-    // We can't read from the boxed probe anymore, but the proof succeeding
-    // confirms the verifier passed valid args. This test verifies the binding
-    // structure is correct.
+    // The probe received the exact bound repo and pr number. [C11/B11]
+    assert_eq!(
+        *observed_repo.lock().unwrap(),
+        "owner/repo",
+        "verifier must query the bound repo [C11/B11]"
+    );
+    assert_eq!(
+        observed_pr.load(Ordering::SeqCst),
+        99,
+        "verifier must query the bound pr number 99 [C11/B11]"
+    );
 }
 
 // ===========================================================================
