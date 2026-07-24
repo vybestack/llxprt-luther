@@ -151,7 +151,7 @@ pub fn child_workflow_completed(
     };
     Ok(matches!(
         metadata.status,
-        RunStatus::Completed | RunStatus::Merged
+        RunStatus::Completed | RunStatus::ReviewReady | RunStatus::Merged
     ))
 }
 

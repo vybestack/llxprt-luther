@@ -65,6 +65,7 @@ fn llxprt_step(step_id: &str, params: Option<serde_json::Value>) -> StepDef {
         produces: None,
         consumes: None,
         terminal: None,
+        recovery_policy: None,
     }
 }
 

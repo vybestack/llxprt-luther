@@ -1,8 +1,14 @@
 /// @plan:PLAN-20260404-INITIAL-RUNTIME.P05
 /// Persistence module - durable storage for run metadata and state.
 pub mod artifacts;
+pub mod attempts;
+/// @plan:PLAN-20260723-SELFHOST-RELIABILITY.P06
+/// @plan:PLAN-20260723-SELFHOST-RELIABILITY.P08B
+pub mod capsule_store;
 pub mod checkpoint;
 pub(crate) mod claim_metadata;
+/// @plan:PLAN-20260723-SELFHOST-RELIABILITY.P03
+pub mod effect_intents;
 /// Exact launch provenance: durable canonical serialization + SHA-256 digest
 /// of the resolved workflow type/config at launch time.
 /// @plan:PLAN-20260722-ISSUE158-LAUNCH-PROVENANCE
@@ -11,6 +17,8 @@ pub mod leases;
 /// Durable state machine table for recoverable legacy ownership migration.
 /// @plan:PLAN-20260722-ISSUE158-LEGACY-OWNERSHIP-MIGRATION
 pub mod legacy_migration_state;
+pub mod recovery_epoch;
+pub mod recovery_operations;
 pub mod run_metadata;
 pub mod sqlite;
 pub mod trace;
@@ -20,6 +28,10 @@ pub use artifacts::{
     default_artifacts_root, get_artifacts_dir, list_artifacts, read_artifact, write_artifact,
     write_poll_result_artifact, write_resume_decision_artifact, write_wait_state_artifact,
     ArtifactRecord,
+};
+pub use capsule_store::{
+    init_capsules_table, load_capsule_v1, persist_capsule_v1, persist_launch_atomically,
+    LaunchPersistenceError, LaunchPersistenceOutcome, EXECUTION_CAPSULES_TABLE,
 };
 pub use checkpoint::{
     append_event, append_event_with_conn, append_typed_event_with_conn, count_events_by_type,
@@ -36,8 +48,8 @@ pub use launch_provenance::{
 };
 pub use leases::{
     count_active_leases, count_active_leases_for_config, count_active_leases_for_repository,
-    create_lease, get_lease_for_issue, init_leases_table, list_all_leases, list_leases_by_config,
-    list_leases_by_status, list_ready_to_resume_leases, mark_stale_leases,
+    create_lease, get_lease_for_issue, get_lease_for_run, init_leases_table, list_all_leases,
+    list_leases_by_config, list_leases_by_status, list_ready_to_resume_leases, mark_stale_leases,
     mark_stale_ready_to_resume_leases, touch_owned_running_lease_heartbeat, try_claim,
     update_lease_status, update_lease_status_conditional,
     update_lease_status_conditional_exact_owner, IssueLease, LeaseStatus,
@@ -69,6 +81,7 @@ use std::path::Path;
 /// Initialize the checkpoint database at the given path.
 /// Creates the database directory if needed and initializes the schema.
 /// @plan:PLAN-20260404-INITIAL-RUNTIME.P12
+/// @plan:PLAN-20260723-SELFHOST-RELIABILITY.P03
 pub fn init_database(db_path: &Path) -> Result<(), checkpoint::PersistenceError> {
     // Ensure parent directory exists
     if let Some(parent) = db_path.parent() {
@@ -128,6 +141,61 @@ pub fn init_database(db_path: &Path) -> Result<(), checkpoint::PersistenceError>
     legacy_migration_state::init_legacy_migration_table(&tx).map_err(|e| {
         checkpoint::PersistenceError::Database(format!(
             "Failed to initialize legacy migration state schema: {e}"
+        ))
+    })?;
+
+    // Initialize durable recovery epoch, operations ledger, append-only
+    // attempts, and effect-intents tables (self-hosting reliability, M1).
+    // @plan:PLAN-20260723-SELFHOST-RELIABILITY.P03
+    // @requirement:REQ-RP-003,REQ-RP-004,REQ-RP-008
+    recovery_epoch::init_epoch_table(&tx).map_err(|e| {
+        checkpoint::PersistenceError::Database(format!(
+            "Failed to initialize recovery epoch schema: {e}"
+        ))
+    })?;
+    recovery_operations::init_operations_table(&tx).map_err(|e| {
+        checkpoint::PersistenceError::Database(format!(
+            "Failed to initialize recovery operations schema: {e}"
+        ))
+    })?;
+    attempts::init_attempts_table(&tx).map_err(|e| {
+        checkpoint::PersistenceError::Database(format!(
+            "Failed to initialize recovery attempts schema: {e}"
+        ))
+    })?;
+    effect_intents::init_effect_intents_table(&tx).map_err(|e| {
+        checkpoint::PersistenceError::Database(format!(
+            "Failed to initialize effect intents schema: {e}"
+        ))
+    })?;
+
+    // Initialize the immutable execution capsule store (self-hosting
+    // reliability, M2). [C8]
+    // @plan:PLAN-20260723-SELFHOST-RELIABILITY.P06
+    // @requirement:REQ-RP-002
+    capsule_store::init_capsules_table(&tx).map_err(|e| {
+        checkpoint::PersistenceError::Database(format!(
+            "Failed to initialize execution capsules schema: {e}"
+        ))
+    })?;
+
+    // Initialize the immutable salvage lineage table (self-hosting
+    // reliability, P15). [C9/B10]
+    // @plan:PLAN-20260723-SELFHOST-RELIABILITY.P15
+    // @requirement:REQ-RP-007
+    crate::engine::recovery::salvage::init_salvage_lineage_table(&tx).map_err(|e| {
+        checkpoint::PersistenceError::Database(format!(
+            "Failed to initialize salvage lineage schema: {e}"
+        ))
+    })?;
+
+    // Initialize the immutable merge artifacts table (self-hosting
+    // reliability, P17). [B12]
+    // @plan:PLAN-20260723-SELFHOST-RELIABILITY.P17
+    // @requirement:REQ-RP-010
+    crate::engine::recovery::typed_merge::init_merge_artifacts_table(&tx).map_err(|e| {
+        checkpoint::PersistenceError::Database(format!(
+            "Failed to initialize merge artifacts schema: {e}"
         ))
     })?;
 

@@ -23,9 +23,8 @@ use crate::workflow::schema::WorkflowConfig;
 use crate::workflow::schema::WorkflowType;
 
 use super::child_run::{
-    commit_resume_checkpoint_with_identity, missing_run_metadata, missing_workspace_path,
-    require_current_step, require_matching_workspace, validate_child_resume_artifact,
-    validate_child_resume_identity,
+    missing_run_metadata, missing_workspace_path, require_current_step, require_matching_workspace,
+    validate_child_resume_artifact, validate_child_resume_identity,
 };
 use super::lease::open_parent_orchestration_connection;
 use super::{
@@ -57,12 +56,25 @@ impl PreparedChildResume {
         self.authorization
     }
 
-    /// The exact `step_id@rfc3339` identity of the selected resume checkpoint.
-    /// The caller passes this to [`commit_resume_checkpoint_with_identity`]
-    /// so the commit transaction can verify it has not been substituted.
+    /// The exact `step_id` of the selected resume checkpoint, extracted from
+    /// the `step_id@rfc3339` checkpoint identity. The caller passes this as
+    /// the `step_id` of the [`RecoveryRequest`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if the checkpoint identity is malformed (missing `@`). This
+    /// cannot happen because the identity is constructed by
+    /// [`select_resume_checkpoint_identity`] from a valid checkpoint whose
+    /// identity is always `step_id@rfc3339`.
+    ///
+    /// [`RecoveryRequest`]: crate::engine::recovery::RecoveryRequest
+    /// [`select_resume_checkpoint_identity`]: super::child_resume_preparation::select_resume_checkpoint_identity
     #[must_use]
-    pub(super) fn checkpoint_identity(&self) -> &str {
-        &self.checkpoint_identity
+    pub(super) fn resume_step_id(&self) -> &str {
+        self.checkpoint_identity
+            .split_once('@')
+            .map(|(step_id, _)| step_id)
+            .unwrap_or(&self.checkpoint_identity)
     }
 }
 
@@ -152,7 +164,6 @@ fn select_resume_checkpoint_identity(
         run_id: request.run_id.clone(),
         kind: crate::engine::ContinuationKind::Resume,
         force: true,
-        trusted_internal: true,
     };
     let checkpoint =
         crate::engine::continuation::select_checkpoint(conn, &resume_request, metadata)
@@ -178,15 +189,4 @@ fn prepare_ephemeral_authorization(
         }
         None => Ok(None),
     }
-}
-
-/// Commit the resume checkpoint using the identity selected during read-only
-/// preparation. This is the only mutation performed after preparation.
-pub(super) fn commit_prepared_resume_checkpoint(
-    db_path: &Path,
-    request: &ChildWorkflowLaunchRequest,
-    checkpoint_identity: &str,
-) -> Result<(), String> {
-    let conn = open_parent_orchestration_connection(db_path)?;
-    commit_resume_checkpoint_with_identity(&conn, request, checkpoint_identity)
 }

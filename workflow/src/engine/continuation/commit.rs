@@ -84,7 +84,7 @@ fn commit_continuation_in_transaction(
             "continuation checkpoint identity changed before commit: expected {bound_identity}, selected {current_identity}"
         )));
     }
-    if matches!(request.kind, ContinuationKind::Resume) && !request.trusted_internal {
+    if matches!(request.kind, ContinuationKind::Resume) {
         if let Some(wait) = get_wait_state(tx, &request.run_id)? {
             if wait.checkpoint_id != current_identity {
                 return Err(ContinuationError::InvalidTarget(format!(

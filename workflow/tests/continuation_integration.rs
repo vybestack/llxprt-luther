@@ -84,6 +84,7 @@ fn step(step_id: &str, step_type: &str) -> StepDef {
         produces: None,
         consumes: None,
         terminal: None,
+        recovery_policy: None,
     }
 }
 
@@ -142,6 +143,8 @@ fn followup_config() -> WorkflowConfig {
         variables: HashMap::new(),
         discovery: None,
         parent_orchestration: Default::default(),
+        merge_required: false,
+        merge_strategy: None,
         command_manifest: None,
         target_profile: None,
     }
@@ -430,7 +433,6 @@ fn resume_terminal_failed_run_rewinds_before_terminal_and_skips_terminal() {
         run_id: run_id.to_string(),
         kind: ContinuationKind::Resume,
         force: false,
-        trusted_internal: false,
     };
     let plan = prepare_continuation(&conn, &request, &md).expect("prepare");
     assert!(
@@ -477,7 +479,6 @@ fn retry_from_failed_step_targets_watch_pr_checks() {
             from_failed_step: true,
         },
         force: false,
-        trusted_internal: false,
     };
     let plan = prepare_continuation(&conn, &request, &md).expect("prepare");
     assert!(plan.validation.ok);
@@ -506,7 +507,6 @@ fn unsafe_rewind_is_rejected_and_writes_validation_artifact() {
             target: RewindTarget::ToStep("implement".to_string()),
         },
         force: false,
-        trusted_internal: false,
     };
     let plan = prepare_continuation(&conn, &request, &md).expect("prepare");
     assert!(
@@ -631,7 +631,6 @@ fn reconstruction_preserves_reopened_metadata_and_history() {
             run_id: run_id.to_string(),
             kind: ContinuationKind::Resume,
             force: false,
-            trusted_internal: false,
         };
         let plan = prepare_continuation(&conn, &request, &md).expect("prepare");
         assert!(
@@ -672,7 +671,6 @@ fn non_resumable_completed_run_is_refused_without_corrupting_state() {
         run_id: run_id.to_string(),
         kind: ContinuationKind::Resume,
         force: true,
-        trusted_internal: false,
     };
     let plan = prepare_continuation(&conn, &request, &md).expect("prepare");
     assert!(

@@ -268,9 +268,11 @@ pub fn insert_initial_run_with_conn(
 }
 
 /// Map a primary-key constraint violation to [`InitialRunInsert::Collision`],
-/// propagating all other errors. Used by [`insert_initial_run_with_conn`] to
+/// propagating all other errors. Used by [`insert_initial_run_with_conn`] and
+/// the atomic launch persistence API
+/// ([`crate::persistence::capsule_store::persist_launch_atomically`]) to
 /// distinguish a run_id collision from a generic DB error.
-fn classify_collision(error: rusqlite::Error) -> SqliteResult<InitialRunInsert> {
+pub(crate) fn classify_collision(error: rusqlite::Error) -> SqliteResult<InitialRunInsert> {
     if let Some(rusqlite::ffi::ErrorCode::ConstraintViolation) = error.sqlite_error_code() {
         Ok(InitialRunInsert::Collision)
     } else {

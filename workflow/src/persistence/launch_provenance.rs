@@ -351,6 +351,43 @@ pub fn compute_config_digest(config: &WorkflowConfig) -> String {
     hex_digest(&canonical)
 }
 
+/// Compute a canonical SHA-256 hex digest over a [`LaunchProvenance`].
+///
+/// The digest covers the schema version, canonical config root encoding,
+/// workflow digest, config digest, and migration-source tag, so two
+/// provenance records that differ in any of these fields produce different
+/// digests. This is the value stored as `launch_provenance_digest` inside an
+/// `ExecutionCapsuleV1` envelope frame. [C8/B9]
+///
+/// @plan:PLAN-20260723-SELFHOST-RELIABILITY.P08
+/// @requirement:REQ-RP-002
+#[must_use]
+pub fn compute_provenance_digest(provenance: &LaunchProvenance) -> String {
+    let mut buf = Vec::new();
+    buf.extend_from_slice(&provenance.schema_version.to_be_bytes());
+    write_provenance_field(&mut buf, provenance.canonical_config_root.as_bytes());
+    write_provenance_field(&mut buf, provenance.workflow_digest.as_bytes());
+    write_provenance_field(&mut buf, provenance.config_digest.as_bytes());
+    match provenance.migration_source {
+        Some(source) => {
+            buf.push(1);
+            let tag = match source {
+                MigrationSource::LegacyOwnershipMigration => "legacy_ownership_migration",
+            };
+            write_provenance_field(&mut buf, tag.as_bytes());
+        }
+        None => buf.push(0),
+    }
+    hex_digest(&buf)
+}
+
+/// Append a big-endian length prefix plus the bytes to `buf`.
+fn write_provenance_field(buf: &mut Vec<u8>, bytes: &[u8]) {
+    let len = u32::try_from(bytes.len()).unwrap_or(u32::MAX);
+    buf.extend_from_slice(&len.to_be_bytes());
+    buf.extend_from_slice(bytes);
+}
+
 /// Canonicalize a resolved `WorkflowType` into a stable `serde_json::Value`.
 ///
 /// The input is already deserialized from TOML/JSON; this transformation
@@ -363,7 +400,12 @@ pub fn compute_config_digest(config: &WorkflowConfig) -> String {
 /// value field-by-field from the resolved struct rather than relying on
 /// `Serialize`. This keeps the canonical representation under our control and
 /// independent of any future `Serialize` derive changes.
-fn canonicalize_workflow_type(workflow_type: &WorkflowType) -> Vec<u8> {
+///
+/// The `recovery_policy` field is included so the capsule envelope digest
+/// covers it. [B7]
+/// @plan:PLAN-20260723-SELFHOST-RELIABILITY.P06
+/// @requirement:REQ-RP-005
+pub(crate) fn canonicalize_workflow_type(workflow_type: &WorkflowType) -> Vec<u8> {
     let mut value = serde_json::json!({
         "workflow_type_id": workflow_type.workflow_type_id,
         "steps": workflow_type.steps.iter().map(|step| {
@@ -375,6 +417,7 @@ fn canonicalize_workflow_type(workflow_type: &WorkflowType) -> Vec<u8> {
                 "produces": step.produces,
                 "consumes": step.consumes,
                 "terminal": step.terminal,
+                "recovery_policy": step.recovery_policy,
             })
         }).collect::<Vec<_>>(),
         "transitions": workflow_type.transitions.iter().map(|transition| {
@@ -396,7 +439,7 @@ fn canonicalize_workflow_type(workflow_type: &WorkflowType) -> Vec<u8> {
 /// Like [`canonicalize_workflow_type`], this constructs the canonical value
 /// field-by-field from the resolved struct (the config only derives
 /// `Deserialize`), then canonicalizes object key ordering.
-fn canonicalize_workflow_config(config: &WorkflowConfig) -> Vec<u8> {
+pub(crate) fn canonicalize_workflow_config(config: &WorkflowConfig) -> Vec<u8> {
     let mut value = serde_json::json!({
         "config_id": config.config_id,
         "workflow_type_id": config.workflow_type_id,
@@ -414,7 +457,7 @@ fn canonicalize_workflow_config(config: &WorkflowConfig) -> Vec<u8> {
             "project_subdir": config.repo.project_subdir,
             "artifact_path_base": config.repo.artifact_path_base,
             "diff_path_base": config.repo.diff_path_base,
-            "diff_path_normalization": format!("{:?}", config.repo.diff_path_normalization),
+            "diff_path_normalization": serde_json::to_value(&config.repo.diff_path_normalization).unwrap_or(serde_json::Value::Null),
         },
         "guard_limits": {
             "max_iterations": config.guard_limits.max_iterations,
@@ -425,6 +468,8 @@ fn canonicalize_workflow_config(config: &WorkflowConfig) -> Vec<u8> {
         "variables": canonicalize_variables(&config.variables),
         "discovery": canonicalize_discovery(&config.discovery),
         "parent_orchestration": serde_json::to_value(&config.parent_orchestration).unwrap_or(serde_json::Value::Null),
+        "merge_required": config.merge_required,
+        "merge_strategy": config.merge_strategy.as_ref().and_then(|s| serde_json::to_value(s).ok()),
         "command_manifest": config.command_manifest.as_ref().and_then(|manifest| serde_json::to_value(manifest).ok()),
         "target_profile": config.target_profile.as_ref().and_then(|profile| serde_json::to_value(profile).ok()),
     });
@@ -494,7 +539,7 @@ fn canonicalize_json_keys_in_place(value: &mut serde_json::Value) {
 }
 
 /// Compute the lowercase hex SHA-256 digest of a byte slice.
-fn hex_digest(bytes: &[u8]) -> String {
+pub(crate) fn hex_digest(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
     format!("{:x}", hasher.finalize())
@@ -680,6 +725,7 @@ mod tests {
                 produces: Some(vec!["out1".to_string()]),
                 consumes: None,
                 terminal: Some(false),
+                recovery_policy: None,
             }],
             transitions: vec![TransitionDef {
                 from: "step1".to_string(),
@@ -727,6 +773,8 @@ mod tests {
             variables,
             discovery: None,
             parent_orchestration: ParentOrchestrationConfig::default(),
+            merge_required: false,
+            merge_strategy: None,
             command_manifest: None,
             target_profile: None,
         }

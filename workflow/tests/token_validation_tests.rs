@@ -22,6 +22,7 @@ fn shell_step(step_id: &str, command: &str) -> StepDef {
         produces: None,
         consumes: None,
         terminal: None,
+        recovery_policy: None,
     }
 }
 
@@ -227,6 +228,7 @@ fn artifact_step(step_id: &str, produces: &[&str], consumes: &[&str]) -> StepDef
         consumes: (!consumes.is_empty())
             .then(|| consumes.iter().map(|s| (*s).to_string()).collect()),
         terminal: None,
+        recovery_policy: None,
     }
 }
 

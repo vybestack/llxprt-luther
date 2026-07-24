@@ -308,6 +308,8 @@ mod tests {
             variables: std::collections::HashMap::new(),
             discovery: None,
             parent_orchestration: Default::default(),
+            merge_required: false,
+            merge_strategy: None,
             command_manifest: None,
             target_profile: Some(TargetProfileConfig {
                 scope_control,

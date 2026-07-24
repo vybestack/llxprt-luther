@@ -357,7 +357,7 @@ pub fn child_workflow_ready_for_merge(run_id: &Option<String>) -> Result<bool, E
     };
     Ok(matches!(
         metadata.status,
-        RunStatus::Completed | RunStatus::Merged
+        RunStatus::Completed | RunStatus::ReviewReady | RunStatus::Merged
     ))
 }
 
@@ -834,7 +834,8 @@ pub fn classify_child_run_result(
             | RunStatus::ReadyToResume
             | RunStatus::Remediating
             | RunStatus::Blocked
-            | RunStatus::Paused,
+            | RunStatus::Paused
+            | RunStatus::ReviewReady,
         ) => ChildWorkflowRunResult::WaitingExternal,
         Some(RunStatus::Completed | RunStatus::Merged) => ChildWorkflowRunResult::CompletedSuccess,
         Some(RunStatus::Failed | RunStatus::Abandoned | RunStatus::Cancelled) => {

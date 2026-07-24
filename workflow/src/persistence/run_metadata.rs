@@ -8,6 +8,7 @@ use crate::workflow::schema::WorkflowRunRef;
 
 /// Status of a workflow run.
 /// @plan:PLAN-20260404-INITIAL-RUNTIME.P05
+/// @plan:PLAN-20260723-SELFHOST-RELIABILITY.P17
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RunStatus {
     Initialized,
@@ -20,6 +21,16 @@ pub enum RunStatus {
     Remediating,
     Blocked,
     Paused,
+    /// Non-terminal, non-resumable status indicating a merge-required run has
+    /// finished all steps and is awaiting an observed, verified merge. The
+    /// only forward transition from `ReviewReady` is to [`RunStatus::Merged`]
+    /// via [`crate::engine::recovery::typed_merge::complete_typed_merge`],
+    /// which atomically commits both the typed merge artifact and the status
+    /// transition. A status field alone never satisfies completion.
+    /// [B12/C11]
+    /// @plan:PLAN-20260723-SELFHOST-RELIABILITY.P17
+    /// @requirement:REQ-RP-010
+    ReviewReady,
     Completed,
     Failed,
     Abandoned,
@@ -40,6 +51,7 @@ impl std::fmt::Display for RunStatus {
             RunStatus::Remediating => "remediating",
             RunStatus::Blocked => "blocked",
             RunStatus::Paused => "paused",
+            RunStatus::ReviewReady => "review_ready",
             RunStatus::Completed => "completed",
             RunStatus::Failed => "failed",
             RunStatus::Abandoned => "abandoned",
@@ -70,6 +82,7 @@ impl std::str::FromStr for RunStatus {
             "remediating" => Ok(RunStatus::Remediating),
             "blocked" => Ok(RunStatus::Blocked),
             "paused" => Ok(RunStatus::Paused),
+            "review_ready" => Ok(RunStatus::ReviewReady),
             "completed" => Ok(RunStatus::Completed),
             "failed" => Ok(RunStatus::Failed),
             "abandoned" => Ok(RunStatus::Abandoned),
@@ -589,6 +602,7 @@ mod tests {
             RunStatus::Remediating,
             RunStatus::Blocked,
             RunStatus::Paused,
+            RunStatus::ReviewReady,
             RunStatus::Completed,
             RunStatus::Failed,
             RunStatus::Abandoned,
@@ -614,6 +628,7 @@ mod tests {
         assert!(!RunStatus::WaitingForChecks.is_terminal());
         assert!(!RunStatus::WaitingExternal.is_terminal());
         assert!(!RunStatus::ReadyToResume.is_terminal());
+        assert!(!RunStatus::ReviewReady.is_terminal());
     }
 
     #[test]
@@ -626,6 +641,9 @@ mod tests {
         assert!(RunStatus::Blocked.is_resumable());
         // Terminal Failed is resumable only via explicit continuation.
         assert!(RunStatus::Failed.is_resumable());
+        // ReviewReady is non-terminal but non-resumable: it is a one-way gate
+        // to Merged via complete_typed_merge.
+        assert!(!RunStatus::ReviewReady.is_resumable());
         // Other terminal states are not resumable.
         assert!(!RunStatus::Completed.is_resumable());
         assert!(!RunStatus::Merged.is_resumable());

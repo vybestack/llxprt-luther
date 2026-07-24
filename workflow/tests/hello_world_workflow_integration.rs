@@ -28,6 +28,7 @@ fn hello_world_workflow_type(work_dir: &std::path::Path) -> WorkflowType {
                 produces: None,
                 consumes: None,
                 terminal: None,
+                recovery_policy: None,
                 parameters: Some(serde_json::json!({
                     "command": format!("cargo init --name hello_world {}", work_dir.display())
                 })),
@@ -39,6 +40,7 @@ fn hello_world_workflow_type(work_dir: &std::path::Path) -> WorkflowType {
                 produces: None,
                 consumes: None,
                 terminal: None,
+                recovery_policy: None,
                 parameters: Some(serde_json::json!({
                     "path": "tests/greeting_test.rs",
                     "content": "#[test]\nfn test_greet() {\n    assert_eq!(hello_world::greet(\"World\"), \"Hello, World!\");\n}\n"
@@ -51,6 +53,7 @@ fn hello_world_workflow_type(work_dir: &std::path::Path) -> WorkflowType {
                 produces: None,
                 consumes: None,
                 terminal: None,
+                recovery_policy: None,
                 parameters: Some(serde_json::json!({
                     "path": "src/lib.rs",
                     "content": "pub fn greet(name: &str) -> String {\n    format!(\"Hello, {}!\", name)\n}\n"
@@ -63,6 +66,7 @@ fn hello_world_workflow_type(work_dir: &std::path::Path) -> WorkflowType {
                 produces: None,
                 consumes: None,
                 terminal: None,
+                recovery_policy: None,
                 parameters: Some(serde_json::json!({
                     "command": "cargo test"
                 })),
@@ -74,6 +78,7 @@ fn hello_world_workflow_type(work_dir: &std::path::Path) -> WorkflowType {
                 produces: None,
                 consumes: None,
                 terminal: None,
+                recovery_policy: None,
                 parameters: Some(serde_json::json!({
                     "command": "echo done"
                 })),
@@ -146,6 +151,8 @@ fn hello_world_config() -> WorkflowConfig {
         variables: std::collections::HashMap::new(),
         discovery: None,
         parent_orchestration: Default::default(),
+        merge_required: false,
+        merge_strategy: None,
         command_manifest: None,
         target_profile: None,
     }
@@ -215,6 +222,7 @@ fn test_engine_dispatches_to_shell_executor() {
                 produces: None,
                 consumes: None,
                 terminal: None,
+                recovery_policy: None,
                 parameters: Some(serde_json::json!({"command": "echo hello"})),
             },
             StepDef {
@@ -224,6 +232,7 @@ fn test_engine_dispatches_to_shell_executor() {
                 produces: None,
                 consumes: None,
                 terminal: None,
+                recovery_policy: None,
                 parameters: Some(serde_json::json!({"command": "echo world"})),
             },
         ],
@@ -272,6 +281,7 @@ fn test_engine_dispatches_to_write_file_executor() {
             produces: None,
             consumes: None,
             terminal: None,
+            recovery_policy: None,
             parameters: Some(serde_json::json!({
                 "path": "output.txt",
                 "content": "hello from workflow"
@@ -321,6 +331,7 @@ fn test_context_passes_between_steps_through_engine() {
                 produces: None,
                 consumes: None,
                 terminal: None,
+                recovery_policy: None,
                 parameters: Some(serde_json::json!({"command": "echo context_value_123"})),
             },
             StepDef {
@@ -330,6 +341,7 @@ fn test_context_passes_between_steps_through_engine() {
                 produces: None,
                 consumes: None,
                 terminal: None,
+                recovery_policy: None,
                 parameters: Some(serde_json::json!({
                     "path": "captured.txt",
                     "content": "{stdout}"
@@ -388,6 +400,7 @@ fn test_unregistered_step_type_through_engine_produces_failure() {
             produces: None,
             consumes: None,
             terminal: None,
+            recovery_policy: None,
             parameters: Some(serde_json::json!({})),
         }],
         transitions: vec![],

@@ -1,4 +1,3 @@
-use super::runs::reconstruct_runner_with_daemon_provenance;
 use super::status::install_interrupt_handlers;
 use super::wait_state::persist_external_wait_state;
 use luther_workflow::adapters::github::{run_preflight, GithubError, SystemGithubCommandRunner};
@@ -181,6 +180,7 @@ pub async fn handle_run_command(args: &luther_workflow::cli::RunArgs) {
         &db_path,
         false,
         launch_provenance,
+        &config_root,
     )
     .unwrap_or_else(|error| {
         eprintln!("Error: Failed to create durable engine runner: {error}");
@@ -422,12 +422,16 @@ pub fn exit_run_outcome(outcome: RunOutcome, run_id: &str) -> ! {
 }
 
 /// Create a durable runner for a **fresh launch**, atomically inserting the
-/// initial `Starting` `RunMetadata` row with the recorded launch provenance.
+/// initial `Starting` `RunMetadata` row with the recorded launch provenance
+/// and the immutable `ExecutionCapsuleV1` in one SQLite `IMMEDIATE`
+/// transaction.
 ///
-/// Uses [`EngineRunner::with_db_path_for_launch`] so a `run_id` collision or DB
-/// error fails closed (propagates an error) rather than silently overwriting an
-/// existing run record. Pass `None` for `launch_provenance` only when the
-/// caller does not need to record provenance (e.g. test helpers).
+/// Uses [`EngineRunner::with_db_path_for_launch`] so a `run_id` collision,
+/// capsule collision, or DB error fails closed (propagates an error) rather
+/// than silently overwriting an existing run record or leaving an orphan
+/// capsule. The capsule is built from the exact resolved post-override
+/// workflow/config/config-root/provenance/base-ref before the runner is
+/// constructed.
 ///
 /// **Issue 158 finding 1:** this function returns `Result` and never calls
 /// `process::exit`. The CLI top-level maps the error to a non-zero exit; the
@@ -436,6 +440,7 @@ pub fn exit_run_outcome(outcome: RunOutcome, run_id: &str) -> ! {
 ///
 /// @plan:PLAN-20260722-ISSUE158-LAUNCH-PROVENANCE
 /// @plan:PLAN-20260722-ISSUE158-LAUNCH-PERSISTENCE
+/// @plan:PLAN-20260723-SELFHOST-RELIABILITY.P08B
 pub fn create_durable_runner_with_provenance(
     workflow_type: luther_workflow::workflow::schema::WorkflowType,
     config: luther_workflow::workflow::schema::WorkflowConfig,
@@ -443,7 +448,28 @@ pub fn create_durable_runner_with_provenance(
     db_path: &std::path::Path,
     daemon_managed: bool,
     launch_provenance: luther_workflow::persistence::LaunchProvenance,
+    config_root: &std::path::Path,
 ) -> Result<EngineRunner, String> {
+    // Build the immutable ExecutionCapsuleV1 from the exact resolved
+    // post-override workflow/config/config-root/provenance/base-ref BEFORE
+    // any are moved into the instance. The capsule is the launch authority
+    // and must exist before any workflow execution/effects.
+    // @plan:PLAN-20260723-SELFHOST-RELIABILITY.P08B
+    let base_ref = config
+        .repo
+        .base_branch
+        .clone()
+        .unwrap_or_else(|| "main".to_string());
+    let capsule = luther_workflow::engine::recovery::capsule::build_capsule_v1(
+        run_id.to_string(),
+        &workflow_type,
+        &config,
+        config_root,
+        &launch_provenance,
+        base_ref,
+    )
+    .map_err(|error| format!("build execution capsule: {error}"))?;
+
     let mut run_context = build_run_context(&config, run_id);
     run_context.daemon_managed = daemon_managed;
     run_context.launch_provenance = Some(launch_provenance);
@@ -453,8 +479,9 @@ pub fn create_durable_runner_with_provenance(
     // includes path and GitHub metadata, instead of chaining
     // `with_run_context` after the initial record has already been written.
     // Fail closed on collision/persistence error rather than best-effort
-    // overwriting.
-    EngineRunner::with_db_path_for_launch(instance, registry, db_path, run_context)
+    // overwriting. The capsule is atomically persisted in the same
+    // transaction.
+    EngineRunner::with_db_path_for_launch(instance, registry, db_path, run_context, capsule)
         .map_err(|error| error.to_string())
 }
 

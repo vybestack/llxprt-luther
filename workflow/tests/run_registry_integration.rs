@@ -28,6 +28,7 @@ fn step(id: &str) -> StepDef {
         produces: None,
         consumes: None,
         terminal: None,
+        recovery_policy: None,
         parameters: None,
     }
 }
@@ -76,6 +77,8 @@ fn test_config() -> WorkflowConfig {
         variables: HashMap::new(),
         discovery: None,
         parent_orchestration: Default::default(),
+        merge_required: false,
+        merge_strategy: None,
         command_manifest: None,
         target_profile: None,
     }

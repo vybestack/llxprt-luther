@@ -1,21 +1,11 @@
 use super::monitor::monitor_state_token;
-use super::status::{
-    install_interrupt_handlers, next_step_label, pid_liveness_label, run_metadata_to_json,
-};
-use luther_workflow::engine::executor::ExecutorRegistry;
-use luther_workflow::engine::instance::WorkflowInstance;
-use luther_workflow::engine::prepare_resume_authorization;
-use luther_workflow::engine::runner::{EngineRunner, RunOutcome};
+use super::status::{next_step_label, pid_liveness_label, run_metadata_to_json};
+#[cfg(test)]
+use luther_workflow::engine::runner::RunOutcome;
 use luther_workflow::monitor::heartbeat::{read_all_heartbeats, MonitorState};
 use luther_workflow::persistence::{
     list_artifacts, load_events, RunMetadata, RunStatus, SqliteStore,
 };
-use luther_workflow::workflow::config_loader::{resolve_workflow_config, resolve_workflow_type};
-use luther_workflow::workflow::schema::WorkflowConfig;
-use luther_workflow::workflow::target_profile::{
-    apply_target_profile_overrides, target_profile_validation_required, validate_target_profile,
-};
-use std::path::Path;
 use std::process;
 
 /// Open the persistent run registry store at the shared checkpoints.db.
@@ -129,8 +119,9 @@ pub fn print_checkpoints_human(
     }
 }
 
-/// `runs resume RUN_ID` — resume from the latest resumable checkpoint.
-/// @plan:PLAN-20260623-LUTHER-CONTINUATION
+/// `runs resume RUN_ID` — resume from the latest resumable checkpoint via
+/// `RecoveryProtocolV1`.
+/// @plan:PLAN-20260723-SELFHOST-RELIABILITY.P14
 pub fn handle_runs_resume(args: &luther_workflow::cli::RunsResumeArgs) {
     let store = require_runs_store(&args.run_id);
     let md = load_run_or_exit(&store, &args.run_id);
@@ -138,14 +129,13 @@ pub fn handle_runs_resume(args: &luther_workflow::cli::RunsResumeArgs) {
         run_id: args.run_id.clone(),
         kind: luther_workflow::engine::ContinuationKind::Resume,
         force: args.force,
-        trusted_internal: false,
     };
-    let plan = plan_continuation_or_exit(&store, &md, &request);
-    commit_and_execute(&store, &md, &request, &plan, &args.config_dir);
+    execute_operator_recovery(&store, &md, &request);
 }
 
-/// `runs retry RUN_ID [--from-failed-step]` — retry an external-wait step.
-/// @plan:PLAN-20260623-LUTHER-CONTINUATION
+/// `runs retry RUN_ID [--from-failed-step]` — retry an external-wait step via
+/// `RecoveryProtocolV1`.
+/// @plan:PLAN-20260723-SELFHOST-RELIABILITY.P14
 pub fn handle_runs_retry(args: &luther_workflow::cli::RunsRetryArgs) {
     let store = require_runs_store(&args.run_id);
     let md = load_run_or_exit(&store, &args.run_id);
@@ -155,15 +145,13 @@ pub fn handle_runs_retry(args: &luther_workflow::cli::RunsRetryArgs) {
             from_failed_step: args.from_failed_step,
         },
         force: args.force,
-        trusted_internal: false,
     };
-    let plan = plan_continuation_or_exit(&store, &md, &request);
-    commit_and_execute(&store, &md, &request, &plan, &args.config_dir);
+    execute_operator_recovery(&store, &md, &request);
 }
 
-/// `runs rewind RUN_ID (--to-step S | --to-checkpoint ID)` — set the resume
-/// point to an earlier checkpoint without immediately re-executing.
-/// @plan:PLAN-20260623-LUTHER-CONTINUATION
+/// `runs rewind RUN_ID (--to-step S | --to-checkpoint ID)` — rewind the resume
+/// point to an earlier checkpoint via `RecoveryProtocolV1`.
+/// @plan:PLAN-20260723-SELFHOST-RELIABILITY.P14
 pub fn handle_runs_rewind(args: &luther_workflow::cli::RunsRewindArgs) {
     let store = require_runs_store(&args.run_id);
     let md = load_run_or_exit(&store, &args.run_id);
@@ -179,45 +167,45 @@ pub fn handle_runs_rewind(args: &luther_workflow::cli::RunsRewindArgs) {
         run_id: args.run_id.clone(),
         kind: luther_workflow::engine::ContinuationKind::Rewind { target },
         force: args.force,
-        trusted_internal: false,
     };
-    let plan = plan_continuation_or_exit(&store, &md, &request);
-    let db_path = store
-        .db_path()
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| luther_workflow::runtime_paths::get_data_dir().join("checkpoints.db"));
-    let mut authorization_runner =
-        reconstruct_runner_or_exit(&md, &args.run_id, &db_path, &None, false);
-    // Issue 158: reject rewind while a legacy ownership migration is pending.
-    if luther_workflow::persistence::migration_is_pending(store.conn(), &args.run_id) {
-        eprintln!(
-            "Error: rewind refused for run '{}': a legacy ownership migration is pending.",
-            args.run_id
-        );
-        process::exit(1);
+    execute_operator_recovery(&store, &md, &request);
+}
+
+/// Bounded entrypoint for operator recovery: dispatch through the
+/// `RecoveryProtocolV1` wiring and exit with the outcome code.
+fn execute_operator_recovery(
+    store: &SqliteStore,
+    md: &RunMetadata,
+    request: &luther_workflow::engine::ContinuationRequest,
+) {
+    let step = request_kind_step_hint(&request.kind, md);
+    match recovery_wiring::recover_operator_run(store, md, request) {
+        Ok(result) => {
+            let code = recovery_wiring::report_recovery_outcome(&request.run_id, &step, &result);
+            process::exit(if result.maintenance_failed && code == 0 {
+                1
+            } else {
+                code
+            });
+        }
+        Err(e) => {
+            eprintln!("Error: {e}");
+            process::exit(1);
+        }
     }
-    attach_resume_authorization_or_exit(&mut authorization_runner, &md, &args.run_id);
-    let step = plan
-        .selected
-        .as_ref()
-        .map(|c| c.step_id.clone())
-        .unwrap_or_default();
-    if let Err(e) = luther_workflow::engine::commit_continuation(
-        store.conn(),
-        &request,
-        &plan.checkpoint_identity,
-    ) {
-        eprintln!("Error: failed to set resume point: {e}");
-        process::exit(1);
+}
+
+/// Derive a step hint for reporting from the continuation kind and metadata.
+fn request_kind_step_hint(
+    kind: &luther_workflow::engine::ContinuationKind,
+    md: &RunMetadata,
+) -> String {
+    match kind {
+        luther_workflow::engine::ContinuationKind::Rewind {
+            target: luther_workflow::engine::RewindTarget::ToStep(step),
+        } => step.clone(),
+        _ => md.current_step.clone().unwrap_or_default(),
     }
-    if let Err(error) = write_committed_checkpoint_artifacts(&store, &request, &plan, &step) {
-        eprintln!("Error: {error}");
-        process::exit(1);
-    }
-    println!(
-        "Rewound run '{}' to step '{step}'. Resume with: luther-workflow runs resume {}",
-        args.run_id, args.run_id
-    );
 }
 
 mod continuation_execution;
@@ -229,6 +217,8 @@ pub use inspect::*;
 
 mod legacy_migration;
 pub use legacy_migration::*;
+
+mod recovery_wiring;
 
 #[cfg(test)]
 #[path = "runs_tests.rs"]

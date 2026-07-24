@@ -43,6 +43,14 @@ pub(super) fn open_initialized_connection(db_path: &Path) -> Result<Connection, 
     crate::persistence::leases::init_leases_table(&conn).map_err(|e| {
         EngineError::PersistenceError(format!("Failed to initialize lease schema: {e}"))
     })?;
+    // Initialize the immutable execution capsule store so the runner's own
+    // connection can atomically persist the capsule at fresh launch.
+    // @plan:PLAN-20260723-SELFHOST-RELIABILITY.P08B
+    crate::persistence::capsule_store::init_capsules_table(&conn).map_err(|e| {
+        EngineError::PersistenceError(format!(
+            "Failed to initialize execution capsules schema: {e}"
+        ))
+    })?;
 
     Ok(conn)
 }

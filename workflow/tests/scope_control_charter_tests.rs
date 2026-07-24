@@ -106,6 +106,8 @@ fn workflow_config(scope_control: ScopeControlConfig) -> WorkflowConfig {
             .collect::<std::collections::HashMap<_, _>>(),
         discovery: None,
         parent_orchestration: Default::default(),
+        merge_required: false,
+        merge_strategy: None,
         command_manifest: None,
         target_profile: Some(TargetProfileConfig {
             scope_control,

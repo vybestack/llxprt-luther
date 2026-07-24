@@ -97,7 +97,6 @@ pub(super) fn request(run_id: &str, kind: ContinuationKind, force: bool) -> Cont
         run_id: run_id.to_string(),
         kind,
         force,
-        trusted_internal: false,
     }
 }
 

@@ -25,6 +25,7 @@ pub mod github_feedback;
 pub mod github_pr;
 pub mod llxprt;
 mod llxprt_diff;
+pub mod merge_wait;
 pub mod noop;
 pub mod parent_orchestration;
 pub mod pr_check_wait;
@@ -63,6 +64,7 @@ pub use github_pr::{
     GithubPrIdentityExecutorWithRunner, SystemGithubPrCommandRunner,
 };
 pub use llxprt::{LlxprtExecutor, LlxprtExecutorWithDetector};
+pub use merge_wait::{MergeWaitExecutor, MergeWaitProbe, RemoteProbeMergeWaitAdapter};
 pub use noop::NoOpExecutor;
 pub use parent_orchestration::model::{
     classify_child, next_actionable_child, order_subissues, ChildIssueState, ChildIssueStatus,
