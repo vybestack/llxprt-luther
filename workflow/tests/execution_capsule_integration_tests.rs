@@ -233,7 +233,7 @@ fn build_capsule_v1_envelope_digest_verifies() {
         capsule
             .envelope_digest
             .chars()
-            .all(|c| c.is_ascii_hexdigit()),
+            .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c)),
         "envelope digest must be lowercase hex"
     );
 

@@ -1159,9 +1159,12 @@ fn three_consecutive_mixed_canaries_full_viability_gate() {
     }
 
     // Verify the three canaries are genuinely mixed (different types + strategies).
-    let types: Vec<_> = specs.iter().map(|s| s.type_id).collect();
+    let types: std::collections::HashSet<_> = specs.iter().map(|s| s.type_id).collect();
     assert_eq!(types.len(), 3, "three distinct type_ids");
-    let strategies: Vec<_> = specs.iter().map(|s| s.merge_strategy).collect();
+    let strategies: std::collections::HashSet<_> = specs
+        .iter()
+        .map(|s| format!("{:?}", s.merge_strategy))
+        .collect();
     assert_eq!(strategies.len(), 3, "three distinct merge strategies");
 }
 

@@ -60,15 +60,12 @@ impl PreparedChildResume {
     /// the `step_id@rfc3339` checkpoint identity. The caller passes this as
     /// the `step_id` of the [`RecoveryRequest`].
     ///
-    /// # Panics
-    ///
-    /// Panics if the checkpoint identity is malformed (missing `@`). This
-    /// cannot happen because the identity is constructed by
-    /// [`select_resume_checkpoint_identity`] from a valid checkpoint whose
-    /// identity is always `step_id@rfc3339`.
+    /// A well-formed identity is always `step_id@rfc3339`. If legacy or
+    /// malformed persisted data lacks the separator, the full identity is
+    /// returned so the recovery protocol can reject the unknown step rather
+    /// than panicking before durable refusal handling.
     ///
     /// [`RecoveryRequest`]: crate::engine::recovery::RecoveryRequest
-    /// [`select_resume_checkpoint_identity`]: super::child_resume_preparation::select_resume_checkpoint_identity
     #[must_use]
     pub(super) fn resume_step_id(&self) -> &str {
         self.checkpoint_identity

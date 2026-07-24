@@ -142,9 +142,10 @@ pub fn classify_run(conn: &Connection, run_id: &str) -> Result<RunClassification
                 run_id: run_id.to_string(),
             }),
         },
-        Err(_) => Ok(RunClassification::SalvageOnly {
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(RunClassification::SalvageOnly {
             run_id: run_id.to_string(),
         }),
+        Err(error) => Err(SalvageError::from(error)),
     }
 }
 

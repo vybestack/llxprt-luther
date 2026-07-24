@@ -182,11 +182,7 @@ fn execute_operator_recovery(
     match recovery_wiring::recover_operator_run(store, md, request) {
         Ok(result) => {
             let code = recovery_wiring::report_recovery_outcome(&request.run_id, &step, &result);
-            process::exit(if result.maintenance_failed && code == 0 {
-                1
-            } else {
-                code
-            });
+            process::exit(code);
         }
         Err(e) => {
             eprintln!("Error: {e}");

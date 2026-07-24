@@ -380,8 +380,8 @@ fn map_daemon_recovery_outcome(
             .map_err(|error| format!("persist wait state: {error}"))?;
             Ok(luther_workflow::daemon::launcher::WorkflowLaunchResult::SuspendedExternalWait)
         }
-        "abandoned" => classify_daemon_terminal(ctx),
-        "failure" | "interrupted" => {
+        "abandoned" | "failure" => classify_daemon_terminal(ctx),
+        "interrupted" => {
             Ok(luther_workflow::daemon::launcher::WorkflowLaunchResult::CompletedFailure)
         }
         other => Err(format!("unknown recovery runner outcome: {other}")),
