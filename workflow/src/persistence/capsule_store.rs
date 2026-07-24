@@ -214,11 +214,12 @@ fn validate_loaded_capsule(
 // Atomic fresh-launch persistence (M2 closure)
 // ===========================================================================
 
-/// Typed outcome of an atomic launch persistence operation.
+/// Typed outcome of a successful atomic launch persistence operation.
 ///
-/// [`LaunchPersistenceOutcome::Persisted`] is the success path. The variants
-/// distinguish a run/capsule collision from a generic DB error so the launch
-/// surface can fail closed with a precise diagnostic.
+/// Only the success path produces an `Ok` value — the sole variant is
+/// [`LaunchPersistenceOutcome::Persisted`]. Collision and error cases are
+/// returned as [`LaunchPersistenceError`], so there are no impossible outcome
+/// variants. [P08B]
 ///
 /// @plan:PLAN-20260723-SELFHOST-RELIABILITY.P08B
 /// @requirement:REQ-RP-002
@@ -227,12 +228,6 @@ pub enum LaunchPersistenceOutcome {
     /// Both the initial `Starting` `RunMetadata` and the immutable
     /// `ExecutionCapsuleV1` were atomically persisted in one transaction.
     Persisted,
-    /// A run row already exists for `run_id`. The transaction was rolled back;
-    /// neither row is durable.
-    RunCollision,
-    /// A capsule already exists for `run_id`. The transaction was rolled back;
-    /// neither row is durable.
-    CapsuleCollision,
 }
 
 /// Typed errors produced by the atomic launch persistence API.

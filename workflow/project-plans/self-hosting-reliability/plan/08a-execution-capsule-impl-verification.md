@@ -13,7 +13,7 @@
 ```bash
 cargo test --test execution_capsule_integration_tests || exit 1
 cargo test || exit 1
-cargo clippy -- -D warnings || exit 1
+cargo clippy --workspace --all-targets --all-features -- -D warnings || exit 1
 grep -rn -E "(todo!|unimplemented!|TODO|FIXME|HACK|placeholder|not yet|will be)" workflow/src/engine/recovery/capsule.rs workflow/src/persistence/capsule_store.rs workflow/src/engine/recovery/adapters/
 # Expected: no matches
 ```
@@ -33,7 +33,8 @@ grep -rn -E "(todo!|unimplemented!|TODO|FIXME|HACK|placeholder|not yet|will be)"
    u32`; `adapter_for` returns `Box<dyn CapsuleAdapter>`. [verified] [C8]
 5. **Does `adapter_for` fail closed on unknown versions?** Yes. [verified]
 
-#### Edge Cases Verified (via P07 tests)
+### Edge Cases Verified (via P07 tests)
+
 - [ ] Overwrite refused; original preserved.
 - [ ] Tampered envelope digest detected.
 - [ ] Unknown version rejected.

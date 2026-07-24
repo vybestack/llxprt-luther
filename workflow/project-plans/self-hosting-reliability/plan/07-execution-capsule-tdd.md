@@ -17,6 +17,7 @@ exercise the capsule through the real persistence layer (SQLite).
 ## Requirements Implemented (Expanded)
 
 ### REQ-RP-002: Immutable canonical capsule with envelope digest [C8]
+
 **Behavior**:
 - GIVEN: a freshly resolved workflow type + config + provenance + base ref
 - WHEN: `build_capsule_v1(...)` is called
@@ -28,6 +29,7 @@ exercise the capsule through the real persistence layer (SQLite).
 - THEN: returns the ORIGINAL capsule, byte-identical envelope digest
 
 ### REQ-RP-009: Versioned object-safe adapter [C8]
+
 **Behavior**:
 - GIVEN: a V1 capsule
 - WHEN: `adapter_for(capsule)` is called
@@ -57,8 +59,8 @@ exercise the capsule through the real persistence layer (SQLite).
 ## Required Code Markers
 
 ```rust
-/// @plan PLAN-20260723-SELFHOST-RELIABILITY.P07
-/// @requirement REQ-RP-002
+/// @plan:PLAN-20260723-SELFHOST-RELIABILITY.P07
+/// @requirement:REQ-RP-002
 #[test]
 fn capsule_is_immutable_after_persist() { /* ... */ }
 ```
@@ -66,8 +68,10 @@ fn capsule_is_immutable_after_persist() { /* ... */ }
 ## Verification Commands
 
 ```bash
-grep -r "@plan:PLAN-20260723-SELFHOST-RELIABILITY.P07" workflow/tests/execution_capsule_integration_tests.rs | wc -l
-grep -r "should_panic" workflow/tests/execution_capsule_integration_tests.rs && echo "FAIL"
+set -euo pipefail
+count=$(grep -r "@plan:PLAN-20260723-SELFHOST-RELIABILITY.P07" workflow/tests/execution_capsule_integration_tests.rs | wc -l)
+[ "$count" -ge 1 ] || { echo "FAIL: no P07 markers"; exit 1; }
+grep -r "should_panic" workflow/tests/execution_capsule_integration_tests.rs && { echo "FAIL"; exit 1; } || true
 cargo test --test execution_capsule_integration_tests 2>&1 | head -30
 # Expected: red phase (failures, not compile errors)
 ```

@@ -11,9 +11,10 @@
 ## Verification Commands
 
 ```bash
+set -euo pipefail
 cargo test || exit 1
-cargo clippy -- -D warnings || exit 1
-grep -rn -E "(todo!|unimplemented!|TODO|FIXME|HACK|placeholder)" workflow/src/engine/recovery/typed_merge.rs
+cargo clippy --workspace --all-targets --all-features -- -D warnings || exit 1
+grep -rn -E "(todo!|unimplemented!|TODO|FIXME|HACK|placeholder)" workflow/src/engine/recovery/typed_merge/mod.rs && { echo "FAIL: placeholder tokens found"; exit 1; } || true
 # Expected: no matches in completion path
 ```
 
@@ -30,26 +31,27 @@ grep -rn -E "(todo!|unimplemented!|TODO|FIXME|HACK|placeholder)" workflow/src/en
 5. **Is external verification separate from the transaction?** Reachability +
    observed-merge checks happen BEFORE the IMMEDIATE tx opens. The tx commits
    only DB rows. [verified] [C11]
-6. **Is the merge proof strategy-specific?** `MergeProof` is an enum with
-   `MergeCommit` (two ancestry checks), `Squash` (ancestry + content evidence),
-   `Rebase` (ancestry + patch evidence). `result_sha` is strategy-neutral.
-   [verified] [C10]
+6. **Is the merge proof strategy-specific?** `MergeReachabilityProof` is an enum
+   with `MergeCommit` (two ancestry checks), `Squash` (ancestry + content
+   evidence), `Rebase` (ancestry + patch evidence). `result_sha` is
+   strategy-neutral. [verified] [C10]
 7. **Does the normal merge-required flow avoid first writing Completed?** The
    flow writes artifact+status atomically; no intermediate Completed write.
    [verified] [C11]
 
-#### Safety Surfaces Preserved
-- [ ] `RunStatus::Merged` remains terminal and its SQL guard
+### Safety Surfaces Preserved
+
+- [x] `RunStatus::Merged` remains terminal and its SQL guard
       (`TERMINAL_SQL`) is unchanged.
-- [ ] PR-binding identity is unchanged.
-- [ ] Artifact is bound to repo/PR/head/capsule. [C11]
+- [x] PR-binding identity is unchanged.
+- [x] Artifact is bound to repo/PR/head/capsule. [C11]
 
-## Holistic Functionality Assessment (at completion)
+## Holistic Functionality Assessment
 
-- What was implemented: [typed merge artifact + strategy-specific proof + atomic artifact+status tx]
-- Does it satisfy REQ-RP-010? [yes/no]
+- What was implemented: typed merge artifact + strategy-specific proof + atomic artifact+status tx
+- Does it satisfy REQ-RP-010? PASS
 - Data flow: external verify (no tx) → short IMMEDIATE tx (artifact INSERT + conditional status UPDATE with affected-row check) → completion_satisfied
-- Verdict: [PASS/FAIL]
+- Verdict: PASS
 
 ## Failure Recovery
 

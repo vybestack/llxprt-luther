@@ -50,16 +50,31 @@ pub trait MergeProbeFactory: Send + Sync {
 
 /// Production probe factory that constructs system probes. [P17]
 ///
+/// Optionally bound to a working directory so the remote probe's local
+/// `git rev-list` parent-count query resolves commit SHAs in the correct
+/// repository (matching every other git invocation in the typed merge module).
+///
 /// @plan:PLAN-20260723-SELFHOST-RELIABILITY.P17
 /// @requirement:REQ-RP-010
 #[derive(Debug, Clone, Default)]
-pub struct SystemMergeProbeFactory;
+pub struct SystemMergeProbeFactory {
+    work_dir: Option<std::path::PathBuf>,
+}
 
 impl SystemMergeProbeFactory {
     /// Create a new system probe factory.
     #[must_use]
     pub fn new() -> Self {
-        Self
+        Self::default()
+    }
+
+    /// Bind this factory's remote probe to a working directory so local
+    /// `git rev-list` parent queries resolve the commit SHA in the correct
+    /// repository.
+    #[must_use]
+    pub fn with_work_dir(mut self, work_dir: std::path::PathBuf) -> Self {
+        self.work_dir = Some(work_dir);
+        self
     }
 }
 
@@ -69,7 +84,12 @@ impl MergeProbeFactory for SystemMergeProbeFactory {
     }
 
     fn remote_probe(&self, expected_strategy: MergeStrategy) -> Box<dyn MergeRemoteProbe> {
-        Box::new(SystemMergeRemoteProbe::new(expected_strategy))
+        let probe = SystemMergeRemoteProbe::new(expected_strategy);
+        let probe = match &self.work_dir {
+            Some(dir) => probe.with_work_dir(dir.clone()),
+            None => probe,
+        };
+        Box::new(probe)
     }
 }
 

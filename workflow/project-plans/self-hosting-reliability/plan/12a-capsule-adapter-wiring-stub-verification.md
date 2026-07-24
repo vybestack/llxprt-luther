@@ -11,18 +11,19 @@
 ## Verification Commands
 
 ```bash
+set -euo pipefail
 cargo build --all-targets || exit 1
-cargo clippy -- -D warnings || exit 1
+cargo clippy --workspace --all-targets --all-features -- -D warnings || exit 1
 grep -r "@plan:PLAN-20260723-SELFHOST-RELIABILITY.P12" workflow/src/engine/runner.rs workflow/src/main.rs
 ```
 
 ## Structural Verification Checklist
 
-- [ ] `resume_from_checkpoint()` has a marked call site for capsule load +
+- [x] `resume_from_checkpoint()` has a marked call site for capsule load +
       `verify_envelope_digest` + adapter. [C8]
-- [ ] Fresh-launch path has a marked call site for capsule build + persist.
-- [ ] No `// TODO` comments (todo!() macro OK in stub).
-- [ ] Existing tests still compile (no signature break yet — P14 may change signatures).
+- [x] Fresh-launch path has a marked call site for capsule build + persist.
+- [x] No `// TODO` comments (todo!() macro OK in stub).
+- [x] Existing tests still compile (no signature break yet — P14 may change signatures).
 
 ## Failure Recovery
 

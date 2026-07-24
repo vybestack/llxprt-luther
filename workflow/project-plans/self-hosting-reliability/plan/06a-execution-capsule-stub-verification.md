@@ -11,9 +11,11 @@
 ## Verification Commands
 
 ```bash
+set -euo pipefail
 cargo build --all-targets || exit 1
-cargo clippy -- -D warnings || exit 1
-grep -r "@plan:PLAN-20260723-SELFHOST-RELIABILITY.P06" workflow/src/engine/recovery/ workflow/src/persistence/capsule_store.rs | wc -l
+cargo clippy --workspace --all-targets --all-features -- -D warnings || exit 1
+count=$(grep -r "@plan:PLAN-20260723-SELFHOST-RELIABILITY.P06" workflow/src/engine/recovery/ workflow/src/persistence/capsule_store.rs | wc -l)
+[ "$count" -ge 1 ] || { echo "FAIL: no P06 markers found"; exit 1; }
 ```
 
 ## Structural Verification Checklist

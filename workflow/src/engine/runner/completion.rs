@@ -54,11 +54,13 @@ impl EngineRunner {
                 use crate::engine::recovery::merge_completion::{
                     complete_merge_required_run, MergeCompletionOutcome, SystemMergeProbeFactory,
                 };
+                let factory = SystemMergeProbeFactory::new()
+                    .with_work_dir(self.context.work_dir().to_path_buf());
                 match complete_merge_required_run(
                     &conn,
                     &self.instance.run_id,
                     self.context.work_dir(),
-                    &SystemMergeProbeFactory::new(),
+                    &factory,
                 ) {
                     MergeCompletionOutcome::Merged => status = RunStatus::Merged,
                     MergeCompletionOutcome::NotYetMerged => return Ok(()),

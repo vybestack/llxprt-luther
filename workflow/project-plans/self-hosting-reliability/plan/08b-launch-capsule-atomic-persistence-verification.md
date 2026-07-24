@@ -57,7 +57,7 @@ Verdict: PASS — M2 closed
 | `fresh_launch_caller_persists_run_and_capsule_atomically` | `with_db_path_for_launch` persists both rows. |
 | `fresh_launch_caller_collision_leaves_no_capsule` | `with_db_path_for_launch` collision leaves no capsule. |
 
-All7 tests pass with real SQLite.
+All 7 tests pass with real SQLite.
 
 ## Full verification gates
 

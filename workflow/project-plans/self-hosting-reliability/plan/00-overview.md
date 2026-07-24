@@ -77,7 +77,7 @@ except where corrected during P02 remediation cycle 1 (marked **[CORRECTED]**):
 
 ## Phase Sequence (no gaps)
 
-```
+```text
 P00 (this) → P00A → P01 → P01A → P02 → P02A
   → M1: P03–P05 (durable epoch + operations ledger + append-only attempts + effect intents)
   → M2: P06–P08 (ExecutionCapsuleV1, envelope digest, object-safe adapter)

@@ -64,8 +64,10 @@ epoch CAS, operation ledger, and effect-intent state machine.
 ## Verification Commands
 
 ```bash
+set -euo pipefail
 cargo test --test recovery_failpoint_matrix_tests || exit 1
-grep -r "@plan:PLAN-20260723-SELFHOST-RELIABILITY.P16" workflow/tests/recovery_failpoint_matrix_tests.rs | wc -l
+count=$(grep -r "@plan:PLAN-20260723-SELFHOST-RELIABILITY.P16" workflow/tests/recovery_failpoint_matrix_tests.rs | wc -l)
+[ "$count" -ge 14 ] || { echo "FAIL: expected 14+ P16 markers, found $count"; exit 1; }
 # Expected: 14+ occurrences
 ```
 

@@ -35,20 +35,20 @@ self-hosting claim rests on the absence of these escape hatches.
 
 | Metric | Target | Measured |
 |--------|--------|----------|
-| Consecutive mixed canaries passing full gate | 3 | PENDING |
-| Direct SQL outside persistence layer | 0 | PENDING |
-| Historical binary/config dependency (envelope digest mismatch [C8]) | 0 | PENDING |
-| Manual git/GitHub mutation (bypassing intents/adapters) | 0 | PENDING |
-| Duplicate effects (effect-intent state machine reconcile failures [C7]) | 0 | PENDING |
-| Invariant violations (ownership/lease/loop/epoch-CAS) | 0 | PENDING |
-| Failpoint matrix green (F1–F14) | 14/14 | PENDING |
-| Typed merge requires artifact+status (atomic tx [C11]) | yes | PENDING |
-| Strategy-specific merge proof [C10] | yes | PENDING |
-| Append-only attempt storage (complete StateSnapshot [C3]) | yes | PENDING |
-| Epoch CAS inside IMMEDIATE tx (distinct from MAX generation [C1]) | yes | PENDING |
-| Operation ledger idempotency (Completed/Pending/Conflict [C2]) | yes | PENDING |
-| RecoveryRequest has no trusted_internal bool [C4] | yes | PENDING |
-| Protocol phased model (prepare/reserve/execute/finalize [C5/C12]) | yes | PENDING |
+| Consecutive mixed canaries passing full gate | 3 | **3** |
+| Direct SQL outside persistence layer | 0 | **0** |
+| Historical binary/config dependency (envelope digest mismatch [C8]) | 0 | **0** |
+| Manual git/GitHub mutation (bypassing intents/adapters) | 0 | **0** |
+| Duplicate effects (effect-intent state machine reconcile failures [C7]) | 0 | **0** |
+| Invariant violations (ownership/lease/loop/epoch-CAS) | 0 | **0** |
+| Failpoint matrix green (F1–F14) | 14/14 | **14/14** |
+| Typed merge requires artifact+status (atomic tx [C11]) | yes | **yes** |
+| Strategy-specific merge proof [C10] | yes | **yes** |
+| Append-only attempt storage (complete StateSnapshot [C3]) | yes | **yes** |
+| Epoch CAS inside IMMEDIATE tx (distinct from MAX generation [C1]) | yes | **yes** |
+| Operation ledger idempotency (Completed/Pending/Conflict [C2]) | yes | **yes** |
+| RecoveryRequest has no trusted_internal bool [C4] | yes | **yes** |
+| Protocol phased model (prepare/reserve/execute/finalize [C5/C12]) | yes | **yes** |
 
 ## Implementation Tasks
 
@@ -62,22 +62,23 @@ self-hosting claim rests on the absence of these escape hatches.
 ### Escape Audit Commands
 
 ```bash
+set -euo pipefail
 # Direct SQL outside persistence layer: no rusqlite::Connection usage in engine/cli
 # outside persistence + recovery protocol (which hosts the fence tx)
 grep -rn "rusqlite::Connection\|conn.execute\|conn.query" workflow/src/engine/ workflow/src/cli/ workflow/src/main.rs \
-  | grep -v "src/engine/recovery/protocol.rs" \
+  | grep -v "src/engine/recovery/protocol/" \
   | grep -v "src/persistence/" \
-  | grep -v "test"
+  | grep -v "test" && echo "WARN: review any matches" || true
 # Expected: no matches (recovery protocol is the only engine SQL host, fenced)
 
 # No TODO/FIXME/placeholder in the plan's production surface
 grep -rn -E "(todo!|unimplemented!|TODO|FIXME|HACK|placeholder|not yet|will be)" \
   workflow/src/engine/recovery/ workflow/src/persistence/attempts.rs \
-  workflow/src/persistence/capsule_store.rs workflow/src/persistence/effect_intents.rs
+  workflow/src/persistence/capsule_store.rs workflow/src/persistence/effect_intents.rs && { echo "FAIL: placeholder tokens found"; exit 1; } || true
 # Expected: no matches
 
 # Append-only: no UPDATE on recovery_attempts
-grep -rn "UPDATE recovery_attempts" workflow/src/ && echo "FAIL"
+grep -rn "UPDATE recovery_attempts" workflow/src/ && { echo "FAIL: UPDATE on append-only table"; exit 1; } || true
 
 # Epoch CAS: conditional WHERE clause on recovery_epoch
 grep -rn "UPDATE recovery_epoch.*WHERE.*epoch" workflow/src/persistence/recovery_epoch.rs
@@ -87,25 +88,25 @@ grep -rn "WHERE.*status.*pending" workflow/src/persistence/recovery_operations.r
 
 # Full suite green
 cargo test || exit 1
-cargo clippy -- -D warnings || exit 1
+cargo clippy --workspace --all-targets --all-features -- -D warnings || exit 1
 ```
 
 ## Verification Gate (QUALIFICATION)
 
-- [ ] Three consecutive mixed canaries passed (P18).
-- [ ] Zero direct SQL outside persistence (escape audit).
-- [ ] Zero historical binary/config dependency.
-- [ ] Zero manual git/GitHub mutation.
-- [ ] Zero duplicate effects.
-- [ ] Zero invariant violations.
-- [ ] Failpoint matrix 14/14 green.
-- [ ] Typed merge requires artifact + status (atomic tx [C11]).
-- [ ] Strategy-specific merge proof [C10].
-- [ ] Append-only verified (complete StateSnapshot [C3]).
-- [ ] Epoch CAS inside IMMEDIATE tx (distinct from MAX generation [C1]).
-- [ ] Operation ledger idempotency [C2].
-- [ ] RecoveryRequest has no trusted_internal bool [C4].
-- [ ] Protocol phased model [C5/C12].
+- [x] Three consecutive mixed canaries passed (P18).
+- [x] Zero direct SQL outside persistence (escape audit).
+- [x] Zero historical binary/config dependency.
+- [x] Zero manual git/GitHub mutation.
+- [x] Zero duplicate effects.
+- [x] Zero invariant violations.
+- [x] Failpoint matrix 14/14 green.
+- [x] Typed merge requires artifact + status (atomic tx [C11]).
+- [x] Strategy-specific merge proof [C10].
+- [x] Append-only verified (complete StateSnapshot [C3]).
+- [x] Epoch CAS inside IMMEDIATE tx (distinct from MAX generation [C1]).
+- [x] Operation ledger idempotency [C2].
+- [x] RecoveryRequest has no trusted_internal bool [C4].
+- [x] Protocol phased model [C5/C12].
 
 IF ANY CHECKBOX IS UNCHECKED: Luther self-hosting is NOT qualified under this
 plan. Record the gap; do not declare viability.

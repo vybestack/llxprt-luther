@@ -886,15 +886,6 @@ fn artifact_exact_equal(a: &TypedMergeArtifact, b: &TypedMergeArtifact) -> bool 
         && a.reachability_proof == b.reachability_proof
 }
 
-/// Helper: read the current run status (outside any tx).
-#[allow(dead_code)]
-fn read_run_status(conn: &Connection, run_id: &str) -> Result<RunStatus, MergeError> {
-    let md = sqlite::get_run_with_conn(conn, run_id)
-        .map_err(|e| MergeError::Database(e.to_string()))?
-        .ok_or_else(|| MergeError::Database(format!("run not found: {run_id}")))?;
-    Ok(md.status)
-}
-
 /// Helper: read the full run metadata.
 fn read_run_metadata(conn: &Connection, run_id: &str) -> Result<RunMetadata, MergeError> {
     sqlite::get_run_with_conn(conn, run_id)

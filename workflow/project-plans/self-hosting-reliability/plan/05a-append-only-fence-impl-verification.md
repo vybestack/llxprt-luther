@@ -11,12 +11,13 @@
 ## Verification Commands
 
 ```bash
+set -euo pipefail
 cargo test || exit 1
-cargo clippy -- -D warnings || exit 1
-grep -rn -E "(todo!|unimplemented!|TODO|FIXME|HACK|placeholder|not yet|will be)" workflow/src/persistence/recovery_epoch.rs workflow/src/persistence/recovery_operations.rs workflow/src/persistence/attempts.rs workflow/src/persistence/effect_intents.rs
-# Expected: no matches
+cargo clippy --workspace --all-targets --all-features -- -D warnings || exit 1
+grep -rn -E "(todo!|unimplemented!|TODO|FIXME|HACK|placeholder|not yet|will be)" workflow/src/persistence/recovery_epoch.rs workflow/src/persistence/recovery_operations.rs workflow/src/persistence/attempts.rs workflow/src/persistence/effect_intents.rs && { echo "FAIL: placeholder tokens found"; exit 1; } || true
 # Confirm no UPDATE of existing attempt rows (epoch CAS UPDATE is on recovery_epoch, not recovery_attempts)
-grep -rn "UPDATE recovery_attempts" workflow/src/persistence/attempts.rs && echo "FAIL: UPDATE on append-only table"
+# The only allowed mutation on recovery_attempts is append_attempt_outcome's guarded finalize UPDATE.
+grep -rn "UPDATE recovery_attempts" workflow/src/persistence/attempts.rs | grep -v "finalized_at IS NULL" && { echo "FAIL: unguarded UPDATE on append-only table"; exit 1; } || true
 # Confirm epoch CAS uses conditional WHERE clause
 grep -rn "WHERE.*epoch" workflow/src/persistence/recovery_epoch.rs
 ```
@@ -36,15 +37,18 @@ grep -rn "WHERE.*epoch" workflow/src/persistence/recovery_epoch.rs
    the effect; the digest is computed in-record; guarded finalize. [verified] [C7]
 6. **No in-memory facade?** The store is durable from the start. [verified]
 
-#### Integration Points Verified
+### Integration Points Verified
+
 - [ ] `read_epoch` / `cas_advance_epoch` read/write the real `recovery_epoch` table.
 - [ ] `lookup_operation` / `insert_pending` / `finalize_*` read/write the real
       `recovery_operations` table.
-- [ ] `append_attempt` / `latest_for_step` read/write the real `recovery_attempts` table.
+- [ ] `record_attempt_start` / `append_attempt_outcome` / `latest_for_step`
+      read/write the real `recovery_attempts` table.
 - [ ] Effect intents are in a separate table (`effect_intents`) from attempts.
 - [ ] `RETURNING` clause used consistent with `src/persistence/leases.rs`.
 
-#### Edge Cases Verified (via P04 tests)
+### Edge Cases Verified (via P04 tests)
+
 - [ ] Epoch CAS stale returns persisted value.
 - [ ] Operation guard fails on double-finalize.
 - [ ] Append preserves history (original row unchanged).

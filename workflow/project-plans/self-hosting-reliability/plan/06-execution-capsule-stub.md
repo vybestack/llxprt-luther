@@ -25,6 +25,7 @@ Stubs compile; behavior driven by P07.
 ## Requirements Implemented (Expanded)
 
 ### REQ-RP-002: Immutable canonical capsule with envelope digest [C8]
+
 **Behavior**:
 - GIVEN: a freshly resolved workflow type + config + provenance + base ref
 - WHEN: `build_capsule_v1(...)` is called
@@ -35,6 +36,7 @@ Stubs compile; behavior driven by P07.
 - THEN: the store refuses (immutable)
 
 ### REQ-RP-009: Versioned capsule execution via object-safe adapters [C8]
+
 **Behavior**:
 - GIVEN: a V1 capsule
 - WHEN: `adapter_for(capsule)` is called
@@ -113,15 +115,16 @@ Stubs compile; behavior driven by P07.
 ## Verification Commands
 
 ```bash
+set -euo pipefail
 cargo build --all-targets || exit 1
-cargo clippy -- -D warnings || exit 1
+cargo clippy --workspace --all-targets --all-features -- -D warnings || exit 1
 grep -r "@plan:PLAN-20260723-SELFHOST-RELIABILITY.P06" workflow/src/engine/recovery/ workflow/src/persistence/capsule_store.rs
 grep -r "@requirement:REQ-RP-002" workflow/src/engine/recovery/capsule.rs workflow/src/persistence/capsule_store.rs
 grep -r "@requirement:REQ-RP-009" workflow/src/engine/recovery/adapters/mod.rs
 # Verify object-safe adapter: fn version(&self), not const VERSION [C8]
-grep -rn "const VERSION" workflow/src/engine/recovery/adapters/ && echo "FAIL: const VERSION is not object-safe"
+grep -rn "const VERSION" workflow/src/engine/recovery/adapters/ && { echo "FAIL: const VERSION is not object-safe"; exit 1; } || true
 grep -rn "fn version(&self)" workflow/src/engine/recovery/adapters/mod.rs
-grep -rn "// TODO\|// FIXME" workflow/src/engine/recovery/ workflow/src/persistence/capsule_store.rs && echo "FAIL"
+grep -rn "// TODO\|// FIXME" workflow/src/engine/recovery/ workflow/src/persistence/capsule_store.rs && { echo "FAIL"; exit 1; } || true
 ```
 
 ## Success Criteria
@@ -134,7 +137,7 @@ grep -rn "// TODO\|// FIXME" workflow/src/engine/recovery/ workflow/src/persiste
 
 ## Failure Recovery
 
-`git checkout -- workflow/src/engine/recovery/capsule.rs workflow/src/engine/recovery/adapters/ workflow/src/persistence/capsule_store.rs workflow/src/persistence/mod.rs`
+`git checkout -- workflow/src/engine/recovery/capsule.rs workflow/src/engine/recovery/adapters/ workflow/src/persistence/capsule_store.rs workflow/src/persistence/mod.rs workflow/src/workflow/schema.rs workflow/src/persistence/launch_provenance.rs workflow/src/engine/recovery/policy.rs`
 
 ## Phase Completion Marker
 

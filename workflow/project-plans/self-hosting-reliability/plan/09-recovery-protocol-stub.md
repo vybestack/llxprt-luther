@@ -26,12 +26,14 @@ and capsule store directly. No in-memory persistence facade is introduced.
 ## Requirements Implemented (Expanded)
 
 ### REQ-RP-001: Single typed recovery abstraction
+
 **Behavior**:
 - GIVEN: a recovery request for an interrupted run
 - WHEN: `RecoveryProtocolV1::recover(request)` is called
 - THEN: exactly one code path dispatches, returning a `RecoveryOutcome`
 
 ### REQ-RP-005: Step recovery policy from canonical StepDef [C6]
+
 **Behavior**:
 - GIVEN: a step with `step_id = "shell"` (generic, no explicit declaration)
 - WHEN: the protocol resolves the policy
@@ -48,7 +50,7 @@ and capsule store directly. No in-memory persistence facade is introduced.
   - Re-export the public types.
   - MUST include: `/// @plan:PLAN-20260723-SELFHOST-RELIABILITY.P09`
 
-- `src/engine/recovery/protocol.rs`
+- `src/engine/recovery/protocol/mod.rs`
   - `pub struct RecoveryRequest` WITHOUT `trusted_internal: bool` [C4]:
     fields: `run_id, step_id, expected_epoch: u64, operator_verb` (CLI-facing
     only). NO authorization bool; authority is derived internally. [C4/B2:
@@ -63,9 +65,9 @@ and capsule store directly. No in-memory persistence facade is introduced.
     wait_state, lease` [B1], AND a retained `verified_workspace:
     VerifiedWorkspace` anchor (OwnedFd-compatible, obtained via
     `adjudicate_workspace_ownership`) [B6].
-  - `pub enum RecoveryOutcome { Recovered { resumed_at_step, attempt_id, operation_id }, AlreadyApplied { prior_outcome, attempt_id }, Refused { reason }, StaleEpoch { persisted, expected }, Conflict { detail } }` [C1/C2/B2/B3]
+  - `pub enum RecoveryOutcome { Recovered { resumed_at_step, attempt_id, operation_id }, AlreadyApplied { prior_outcome, attempt_id, operation_id }, Refused { reason }, StaleEpoch { persisted, expected }, Conflict { detail } }` [C1/C2/B2/B3]
   - `pub enum RecoveryStrategy { ContinueWorkspace, Reenter, ReconcileThenReenter, CompensateThenRetry, Refused(RefusalReason) }`
-  - `pub enum RefusalReason { NonRecoverable, VerificationFailed(String), NotAuthorized, SalvageOnly }` [C2/C4/B6]
+  - `pub enum RefusalReason { NonRecoverable, VerificationFailed(String), NotAuthorized, SalvageOnly, ConflictingOperation }` [C2/C4/B6]
   - `pub enum OperatorVerb { Resume, Retry, Rewind }`
   - `pub struct RecoveryProtocolV1;` with `pub fn recover(conn, request) -> Result<RecoveryOutcome, RecoveryError>` returning `todo!()` for now [C5/C12]
   - `pub enum RecoveryError { Persistence(String), Capsule(String), Verification(String), OperationConflict(String), WorkspaceNotOwned, AuthorityChanged, WorkspaceAuthorizationRevoked }` [B1/B6]
@@ -97,20 +99,21 @@ and capsule store directly. No in-memory persistence facade is introduced.
 ## Verification Commands
 
 ```bash
+set -euo pipefail
 cargo build --all-targets
 
 grep -r "@plan:PLAN-20260723-SELFHOST-RELIABILITY.P09" workflow/src/engine/recovery/
-grep -r "@requirement:REQ-RP-001" workflow/src/engine/recovery/protocol.rs
+grep -r "@requirement:REQ-RP-001" workflow/src/engine/recovery/protocol/mod.rs
 grep -r "@requirement:REQ-RP-005" workflow/src/engine/recovery/policy.rs
 
 # C4: RecoveryRequest MUST NOT have trusted_internal field
-grep -rn "trusted_internal" workflow/src/engine/recovery/protocol.rs && echo "FAIL: trusted_internal in protocol" [C4]
+grep -rn "trusted_internal" workflow/src/engine/recovery/protocol/ && { echo "FAIL: trusted_internal in protocol"; exit 1; } || true
 
 # C4: RecoveryAuthority is sealed (not public-constructible)
-grep -rn "pub struct RecoveryAuthority" workflow/src/engine/recovery/protocol.rs
+grep -rn "pub struct RecoveryAuthority" workflow/src/engine/recovery/protocol/mod.rs
 
-grep -rn "// TODO\|// FIXME" workflow/src/engine/recovery/ && echo "FAIL"
-find workflow/src/engine/recovery -name "*_v2*" -o -name "*_new*" && echo "FAIL"
+grep -rn "// TODO\|// FIXME" workflow/src/engine/recovery/ && { echo "FAIL"; exit 1; } || true
+find workflow/src/engine/recovery -name "*_v2*" -o -name "*_new*" | grep . && { echo "FAIL"; exit 1; } || true
 ```
 
 ## Success Criteria

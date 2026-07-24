@@ -53,8 +53,8 @@ SQLite and temp dirs, mirroring existing `tests/*.rs` patterns).
 ## Required Code Markers
 
 ```rust
-/// @plan PLAN-20260723-SELFHOST-RELIABILITY.P13
-/// @requirement REQ-RP-009
+/// @plan:PLAN-20260723-SELFHOST-RELIABILITY.P13
+/// @requirement:REQ-RP-009
 #[test]
 fn resume_loads_capsule_and_dispatches_adapter() { /* ... */ }
 ```
@@ -62,8 +62,10 @@ fn resume_loads_capsule_and_dispatches_adapter() { /* ... */ }
 ## Verification Commands
 
 ```bash
-grep -r "@plan:PLAN-20260723-SELFHOST-RELIABILITY.P13" workflow/tests/capsule_wiring_integration_tests.rs | wc -l
-grep -r "should_panic" workflow/tests/capsule_wiring_integration_tests.rs && echo "FAIL"
+set -euo pipefail
+count=$(grep -r "@plan:PLAN-20260723-SELFHOST-RELIABILITY.P13" workflow/tests/capsule_wiring_integration_tests.rs | wc -l)
+[ "$count" -ge 8 ] || { echo "FAIL: expected 8+ P13 markers, found $count"; exit 1; }
+grep -r "should_panic" workflow/tests/capsule_wiring_integration_tests.rs && { echo "FAIL"; exit 1; } || true
 cargo test --test capsule_wiring_integration_tests 2>&1 | head -30
 # Expected: red phase
 ```

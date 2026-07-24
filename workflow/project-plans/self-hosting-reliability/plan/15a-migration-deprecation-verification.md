@@ -11,8 +11,9 @@
 ## Verification Commands
 
 ```bash
+set -euo pipefail
 cargo test || exit 1
-cargo clippy -- -D warnings || exit 1
+cargo clippy --workspace --all-targets --all-features -- -D warnings || exit 1
 
 # Confirm no row loss: a DB seeded with pre-V1 checkpoints still reads them
 # (covered by an integration test added in P15 or an existing one)
@@ -21,12 +22,12 @@ cargo clippy -- -D warnings || exit 1
 grep -rn "RecoveryProtocolV1::recover" workflow/src/engine/continuation.rs workflow/src/cli/
 
 # C4: trusted_internal removed
-grep -rn "trusted_internal" workflow/src/engine/continuation.rs workflow/src/cli/ && echo "WARN: should be removed [C4]"
+grep -rn "trusted_internal" workflow/src/engine/continuation.rs workflow/src/cli/ && echo "WARN: should be removed [C4]" || true
 
 # Confirm salvage
 grep -rn "salvage\|SalvageOnly\|NoValidV1Capsule" workflow/src/engine/recovery/salvage.rs
 
-grep -rn -E "(todo!|unimplemented!|TODO|FIXME|HACK|placeholder)" workflow/src/engine/recovery/salvage.rs workflow/src/engine/continuation.rs
+grep -rn -E "(todo!|unimplemented!|TODO|FIXME|HACK|placeholder)" workflow/src/engine/recovery/salvage.rs workflow/src/engine/continuation.rs && { echo "FAIL: placeholder tokens found"; exit 1; } || true
 # Expected: no matches in production paths (delegated)
 ```
 
@@ -44,18 +45,19 @@ grep -rn -E "(todo!|unimplemented!|TODO|FIXME|HACK|placeholder)" workflow/src/en
 5. **trusted_internal removed?** `ContinuationRequest` no longer carries
    `trusted_internal: bool`. [verified by grep] [C4]
 
-#### Safety Surfaces Preserved
-- [ ] Ownership verification unchanged in behavior.
-- [ ] Lease conditional transitions unchanged.
-- [ ] Per-edge loop limits unchanged.
-- [ ] Ownership-denied terminal guard unchanged.
+### Safety Surfaces Preserved
 
-## Holistic Functionality Assessment (at completion)
+- [x] Ownership verification unchanged in behavior.
+- [x] Lease conditional transitions unchanged.
+- [x] Per-edge loop limits unchanged.
+- [x] Ownership-denied terminal guard unchanged.
 
-- What changed: [checkpoint writes append-only; CLI verbs delegate to protocol; salvage for no-V1-capsule; trusted_internal removed]
-- Does it satisfy REQ-RP-001/003/007? [per requirement]
+## Holistic Functionality Assessment
+
+- What changed: checkpoint writes append-only; CLI verbs delegate to protocol; salvage for no-V1-capsule; trusted_internal removed
+- Does it satisfy REQ-RP-001/003/007? PASS — per requirement
 - Data flow: CLI verb → RecoveryRequest (no trusted_internal) → recover() → (valid V1 capsule? exact : salvage)
-- Verdict: [PASS/FAIL]
+- Verdict: PASS
 
 ## Failure Recovery
 

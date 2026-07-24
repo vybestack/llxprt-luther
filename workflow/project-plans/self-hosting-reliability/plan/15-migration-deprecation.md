@@ -108,17 +108,18 @@ inline here.
 ## Verification Commands
 
 ```bash
+set -euo pipefail
 cargo test || exit 1
-cargo clippy -- -D warnings || exit 1
+cargo clippy --workspace --all-targets --all-features -- -D warnings || exit 1
 
 # No ON CONFLICT DO UPDATE remains for new-run writes
-grep -rn "ON CONFLICT(run_id, step_id) DO UPDATE" workflow/src/persistence/checkpoint.rs && echo "WARN: legacy path retained for salvage read-only is OK; new writes must append"
+grep -rn "ON CONFLICT(run_id, step_id) DO UPDATE" workflow/src/persistence/checkpoint.rs && echo "WARN: legacy path retained for salvage read-only is OK; new writes must append" || true
 
 # Separate execution paths removed: resume/retry/rewind delegate to protocol
 grep -rn "RecoveryProtocolV1::recover" workflow/src/engine/continuation.rs workflow/src/cli/
 
 # C4: trusted_internal removed from continuation
-grep -rn "trusted_internal" workflow/src/engine/continuation.rs workflow/src/cli/ && echo "WARN: trusted_internal should be removed [C4]"
+grep -rn "trusted_internal" workflow/src/engine/continuation.rs workflow/src/cli/ && echo "WARN: trusted_internal should be removed [C4]" || true
 
 # Salvage refuses exact continuation for pre-V1 runs
 grep -rn "salvage\|SalvageOnly\|NoValidV1Capsule" workflow/src/engine/recovery/salvage.rs
@@ -128,13 +129,13 @@ grep -r "@plan:PLAN-20260723-SELFHOST-RELIABILITY.P15" workflow/src/persistence/
 
 ## Semantic Checks
 
-- [ ] Existing pre-V1 `checkpoints` rows are readable (salvage), never mutated.
-- [ ] New runs append to `recovery_attempts`; the loader selects latest by (run, attempt).
-- [ ] A pre-V1 run WITHOUT a valid V1 capsule (including migrated-provenance
+- [x] Existing pre-V1 `checkpoints` rows are readable (salvage), never mutated.
+- [x] New runs append to `recovery_attempts`; the loader selects latest by (run, attempt).
+- [x] A pre-V1 run WITHOUT a valid V1 capsule (including migrated-provenance
       runs with sentinel digests) cannot be exactly continued (salvage only). [C9]
-- [ ] `runs resume|retry|rewind` all route through `RecoveryProtocolV1::recover()`.
-- [ ] `trusted_internal` bool is removed from `ContinuationRequest`. [C4]
-- [ ] No row loss: migration is additive.
+- [x] `runs resume|retry|rewind` all route through `RecoveryProtocolV1::recover()`.
+- [x] `trusted_internal` bool is removed from `ContinuationRequest`. [C4]
+- [x] No row loss: migration is additive.
 
 ## Failure Recovery
 

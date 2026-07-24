@@ -71,8 +71,10 @@ mixed runs prove the recovery model holds across variation.
 ## Verification Commands
 
 ```bash
+set -euo pipefail
 cargo test --test canary_harness_tests || exit 1
-grep -r "@plan:PLAN-20260723-SELFHOST-RELIABILITY.P18" workflow/tests/canary_harness_tests.rs | wc -l
+count=$(grep -r "@plan:PLAN-20260723-SELFHOST-RELIABILITY.P18" workflow/tests/canary_harness_tests.rs | wc -l)
+[ "$count" -ge 1 ] || { echo "FAIL: no P18 markers found"; exit 1; }
 grep -r "@requirement:REQ-QUAL-001" workflow/tests/canary_harness_tests.rs
 ```
 

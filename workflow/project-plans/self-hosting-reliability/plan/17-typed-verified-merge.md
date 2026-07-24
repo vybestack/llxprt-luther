@@ -147,7 +147,7 @@ predecessor check fails cleanly (AlreadyTerminal), not as an error.
 
 ### Files to Create
 
-- `src/engine/recovery/typed_merge.rs`
+- `src/engine/recovery/typed_merge/mod.rs`
   - `pub struct TypedMergeArtifact { run_id, pr_number, result_sha, base_sha, head_sha, merge_proof, capsule_envelope_digest, recorded_at }` (bound to capsule [C11])
   - `pub enum MergeProof { MergeCommit { ... }, Squash { ... }, Rebase { ... } }` — strategy-specific [C10]
   - `pub struct AncestryCheck { tested_ancestor, tested_descendant, exit_code }`
@@ -173,22 +173,23 @@ predecessor check fails cleanly (AlreadyTerminal), not as an error.
 ## Verification Commands
 
 ```bash
+set -euo pipefail
 cargo test || exit 1
-cargo clippy -- -D warnings || exit 1
-grep -r "@plan:PLAN-20260723-SELFHOST-RELIABILITY.P17" workflow/src/engine/recovery/typed_merge.rs
-grep -r "@requirement:REQ-RP-010" workflow/src/engine/recovery/typed_merge.rs
+cargo clippy --workspace --all-targets --all-features -- -D warnings || exit 1
+grep -r "@plan:PLAN-20260723-SELFHOST-RELIABILITY.P17" workflow/src/engine/recovery/typed_merge/mod.rs
+grep -r "@requirement:REQ-RP-010" workflow/src/engine/recovery/typed_merge/mod.rs
 
 # Status-alone must not satisfy completion
-grep -rn "completion_satisfied" workflow/src/engine/recovery/typed_merge.rs
+grep -rn "completion_satisfied" workflow/src/engine/recovery/typed_merge/mod.rs
 
 # Reachability uses --is-ancestor with recorded pair
-grep -rn "is-ancestor" workflow/src/engine/recovery/typed_merge.rs
+grep -rn "is-ancestor" workflow/src/engine/recovery/typed_merge/mod.rs
 
 # C10: strategy-specific proof enum
-grep -rn "MergeProof\|MergeCommit\|Squash\|Rebase" workflow/src/engine/recovery/typed_merge.rs
+grep -rn "MergeProof\|MergeCommit\|Squash\|Rebase" workflow/src/engine/recovery/typed_merge/mod.rs
 
 # C11: atomic artifact+status transaction
-grep -rn "Transaction::new.*Immediate\|UPDATE run SET status" workflow/src/engine/recovery/typed_merge.rs
+grep -rn "Transaction::new.*Immediate\|UPDATE run SET status" workflow/src/engine/recovery/typed_merge/mod.rs
 ```
 
 ## Success Criteria

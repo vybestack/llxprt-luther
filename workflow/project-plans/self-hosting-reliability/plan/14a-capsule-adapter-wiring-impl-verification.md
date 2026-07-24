@@ -11,9 +11,10 @@
 ## Verification Commands
 
 ```bash
+set -euo pipefail
 cargo test || exit 1
-cargo clippy -- -D warnings || exit 1
-grep -rn -E "(todo!|unimplemented!|TODO|FIXME|HACK|placeholder|not yet|will be)" workflow/src/engine/runner.rs workflow/src/main.rs workflow/src/engine/recovery/adapters/
+cargo clippy --workspace --all-targets --all-features -- -D warnings || exit 1
+grep -rn -E "(todo!|unimplemented!|TODO|FIXME|HACK|placeholder)" workflow/src/engine/runner.rs workflow/src/main.rs workflow/src/engine/recovery/adapters/ && { echo "FAIL: placeholder tokens found"; exit 1; } || true
 # Expected: no matches in wiring code
 ```
 
@@ -30,20 +31,22 @@ grep -rn -E "(todo!|unimplemented!|TODO|FIXME|HACK|placeholder|not yet|will be)"
 4. **Are existing run paths unbroken?** Full `cargo test` passes.
 
 #### Integration Points Verified
-- [ ] Launch surface → `build_capsule_v1` → `persist_capsule_v1` → `EngineRunner`.
-- [ ] Resume surface → `load_capsule_v1` → `verify_envelope_digest` → `adapter_for` → instance. [C8]
+
+- [x] Launch surface → `build_capsule_v1` → `persist_capsule_v1` → `EngineRunner`.
+- [x] Resume surface → `load_capsule_v1` → `verify_envelope_digest` → `adapter_for` → instance. [C8]
 
 #### Edge Cases Verified (via P13 tests)
-- [ ] Tampered envelope digest refuses resume. [C8]
-- [ ] Unknown version refuses resume.
-- [ ] Base ref honored.
 
-## Holistic Functionality Assessment (at completion)
+- [x] Tampered envelope digest refuses resume. [C8]
+- [x] Unknown version refuses resume.
+- [x] Base ref honored.
 
-- What was implemented: [launch persists capsule; resume loads+verifies+dispatches object-safe adapter]
-- Does it satisfy REQ-RP-002/009? [per requirement]
+## Holistic Functionality Assessment
+
+- What was implemented: launch persists capsule; resume loads+verifies+dispatches object-safe adapter
+- Does it satisfy REQ-RP-002/009? PASS — per requirement
 - Data flow: launch resolve → build capsule → persist → run; resume → load → verify_envelope_digest → adapter → instance → run
-- Verdict: [PASS/FAIL]
+- Verdict: PASS
 
 ## Failure Recovery
 

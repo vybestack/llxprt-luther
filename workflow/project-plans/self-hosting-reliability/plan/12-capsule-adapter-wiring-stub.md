@@ -68,10 +68,11 @@ P13 writes the integration tests; P14 implements.
 ## Verification Commands
 
 ```bash
+set -euo pipefail
 cargo build --all-targets || exit 1
-cargo clippy -- -D warnings || exit 1
+cargo clippy --workspace --all-targets --all-features -- -D warnings || exit 1
 grep -r "@plan:PLAN-20260723-SELFHOST-RELIABILITY.P12" workflow/src/engine/runner.rs workflow/src/main.rs
-grep -rn "// TODO\|// FIXME" workflow/src/engine/runner.rs workflow/src/main.rs | grep -i capsule && echo "FAIL"
+grep -rn "// TODO\|// FIXME" workflow/src/engine/runner.rs workflow/src/main.rs | grep -i capsule && { echo "FAIL"; exit 1; } || true
 ```
 
 ## Success Criteria

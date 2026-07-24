@@ -11,8 +11,9 @@
 ## Verification Commands
 
 ```bash
+set -euo pipefail
 cargo test --test execution_capsule_integration_tests 2>&1 | tail -20
-grep -rn "should_panic" workflow/tests/execution_capsule_integration_tests.rs && echo "FAIL"
+grep -rn "should_panic" workflow/tests/execution_capsule_integration_tests.rs && { echo "FAIL"; exit 1; } || true
 ```
 
 ## Structural Verification Checklist

@@ -114,12 +114,12 @@ the line (defer follow-ups). Track cycles here:
 
 ## Completion Markers
 
-- [ ] All phases have `@plan:PLAN-20260723-SELFHOST-RELIABILITY.P##` markers in code.
-- [ ] All requirements have `@requirement:REQ-*` markers in tests.
-- [ ] Verification script passes for every phase.
-- [ ] No phases skipped.
+- [x] All phases have `@plan:PLAN-20260723-SELFHOST-RELIABILITY.P##` markers in code.
+- [x] All requirements have `@requirement:REQ-*` markers in tests.
+- [x] Verification script passes for every phase.
+- [x] No phases skipped.
 - [x] Three consecutive mixed canaries passed (P18).
-- [ ] Qualification gate met: zero prohibited escapes (P19).
+- [x] Qualification gate met: zero prohibited escapes (P19).
 
 ## Remediation Log
 

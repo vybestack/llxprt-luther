@@ -6,7 +6,7 @@
 //! @plan:PLAN-20260723-SELFHOST-RELIABILITY.P17
 //! @requirement:REQ-RP-010
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::engine::recovery::typed_merge::{
@@ -227,6 +227,12 @@ impl MergeGitProbe for SystemMergeGitProbe {
 pub struct SystemMergeRemoteProbe {
     /// The strategy declared in capsule/config — the sole authority. [P17]
     expected_strategy: MergeStrategy,
+    /// Working directory for local `git rev-list` parent-count queries. When
+    /// set, `count_commit_parents` runs `git` in this directory (matching all
+    /// other git invocations in this module). When unset, the ambient process
+    /// CWD is used — the commit SHA may not be resolvable, causing a fail-closed
+    /// single-parent default.
+    work_dir: Option<PathBuf>,
 }
 
 impl SystemMergeRemoteProbe {
@@ -236,7 +242,19 @@ impl SystemMergeRemoteProbe {
     /// [P17]
     #[must_use]
     pub fn new(expected_strategy: MergeStrategy) -> Self {
-        Self { expected_strategy }
+        Self {
+            expected_strategy,
+            work_dir: None,
+        }
+    }
+
+    /// Bind this probe to a working directory so local `git rev-list` parent
+    /// queries resolve the commit SHA in the correct repository (matching every
+    /// other git invocation in this module).
+    #[must_use]
+    pub fn with_work_dir(mut self, work_dir: PathBuf) -> Self {
+        self.work_dir = Some(work_dir);
+        self
     }
 
     /// Reject any GitHub merge observation whose structural evidence is
@@ -286,6 +304,39 @@ impl SystemMergeRemoteProbe {
             }
         }
     }
+
+    /// Count the number of parents of a commit SHA using `git rev-list
+    /// --parents -n 1`. This provides structural evidence for strategy
+    /// verification. Returns 0 on failure (fail-closed to single-parent
+    /// default).
+    ///
+    /// When `work_dir` is set, `git` runs in that directory — matching every
+    /// other git invocation in this module. When unset, the ambient process
+    /// CWD is used.
+    fn count_commit_parents(&self, sha: &str) -> Option<usize> {
+        if sha.starts_with('-') || sha.is_empty() {
+            return None;
+        }
+        let mut command = Command::new("git");
+        command
+            .arg("rev-list")
+            .arg("--parents")
+            .arg("-n")
+            .arg("1")
+            .arg(sha);
+        if let Some(dir) = &self.work_dir {
+            command.current_dir(dir);
+        }
+        let output = command.output().ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        // Output: "<sha> <parent1> <parent2> ..."
+        let line = String::from_utf8_lossy(&output.stdout);
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        // parts[0] is the commit itself; parents are parts[1..].
+        parts.len().checked_sub(1)
+    }
 }
 
 impl MergeRemoteProbe for SystemMergeRemoteProbe {
@@ -334,7 +385,7 @@ impl MergeRemoteProbe for SystemMergeRemoteProbe {
             ));
         }
         // Structural strategy proof via parent count (cat-file). [P17]
-        let parent_count = count_commit_parents(&result_sha).unwrap_or(0);
+        let parent_count = self.count_commit_parents(&result_sha).unwrap_or(0);
         let verified_strategy = self.cross_check_strategy(&result_sha, parent_count)?;
         Ok(MergeObservation {
             merged: true,
@@ -342,31 +393,6 @@ impl MergeRemoteProbe for SystemMergeRemoteProbe {
             result_sha,
         })
     }
-}
-
-/// Count the number of parents of a commit SHA using `git rev-list --count
-/// --parents -n 1`. This provides structural evidence for strategy
-/// verification. Returns 0 on failure (fail-closed to single-parent default).
-fn count_commit_parents(sha: &str) -> Option<usize> {
-    if sha.starts_with('-') || sha.is_empty() {
-        return None;
-    }
-    let output = Command::new("git")
-        .arg("rev-list")
-        .arg("--parents")
-        .arg("-n")
-        .arg("1")
-        .arg(sha)
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    // Output: "<sha> <parent1> <parent2> ..."
-    let line = String::from_utf8_lossy(&output.stdout);
-    let parts: Vec<&str> = line.split_whitespace().collect();
-    // parts[0] is the commit itself; parents are parts[1..].
-    parts.len().checked_sub(1)
 }
 
 /// SHA-256 hex digest of a byte slice (lowercase hex).

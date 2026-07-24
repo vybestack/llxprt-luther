@@ -11,15 +11,17 @@
 ## Verification Commands
 
 ```bash
+set -o pipefail
 cargo test --test epoch_operations_attempts_integration_tests 2>&1 | tail -20
-grep -rn "should_panic" workflow/tests/epoch_operations_attempts_integration_tests.rs workflow/tests/effect_intents_integration_tests.rs && echo "FAIL"
+cargo test --test effect_intents_integration_tests 2>&1 | tail -20
+grep -rn "should_panic" workflow/tests/epoch_operations_attempts_integration_tests.rs workflow/tests/effect_intents_integration_tests.rs && exit 1 || true
 ```
 
 ## Structural Verification Checklist
 
-- [ ] 15+ tests tagged `@plan:...P04`.
-- [ ] No `#[should_panic]`.
-- [ ] Tests use real SQLite connections.
+- [x] 15+ tests tagged `@plan:...P04`.
+- [x] No `#[should_panic]`.
+- [x] Tests use real SQLite connections.
 
 ## Semantic Verification Checklist
 

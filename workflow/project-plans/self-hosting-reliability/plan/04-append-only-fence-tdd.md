@@ -103,8 +103,8 @@ consume this same durable store.
 ## Required Code Markers
 
 ```rust
-/// @plan PLAN-20260723-SELFHOST-RELIABILITY.P04
-/// @requirement REQ-RP-004
+/// @plan:PLAN-20260723-SELFHOST-RELIABILITY.P04
+/// @requirement:REQ-RP-004
 #[test]
 fn epoch_cas_stale_returns_stale_with_persisted_value() { /* ... */ }
 ```
@@ -112,8 +112,10 @@ fn epoch_cas_stale_returns_stale_with_persisted_value() { /* ... */ }
 ## Verification Commands
 
 ```bash
-grep -r "@plan:PLAN-20260723-SELFHOST-RELIABILITY.P04" workflow/tests/ | wc -l
-grep -r "should_panic" workflow/tests/epoch_operations_attempts_integration_tests.rs && echo "FAIL"
+set -euo pipefail
+count=$(grep -r "@plan:PLAN-20260723-SELFHOST-RELIABILITY.P04" workflow/tests/ | wc -l)
+[ "$count" -ge 21 ] || { echo "FAIL: expected 21+ P04 markers, found $count"; exit 1; }
+grep -r "should_panic" workflow/tests/epoch_operations_attempts_integration_tests.rs && { echo "FAIL"; exit 1; } || true
 cargo test --test epoch_operations_attempts_integration_tests 2>&1 | head -30
 # Expected: red phase
 ```

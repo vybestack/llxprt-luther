@@ -106,6 +106,7 @@ attempt to make every historical run exactly recoverable.
   computed expected/observed content or patch evidence. `result_sha` is
   strategy-neutral. The transaction has an explicit allowed predecessor and an
   affected-row check; the normal merge-required flow must NOT first write
+  `Completed` (it writes the artifact and transitions to `Merged` atomically).
 
 ### Remediation Cycle 2 Refinements [B1–B13]
 
@@ -172,7 +173,6 @@ attempt to make every historical run exactly recoverable.
 ```text
 src/engine/recovery/
   mod.rs                    # RecoveryProtocolV1, RecoveryRequest, RecoveryOutcome
-  protocol.rs               # phased dispatch: prepare → reserve → execute → finalize
   policy.rs                 # StepRecoveryPolicy enum + policy_for_step(StepDef)
   capsule.rs                # ExecutionCapsuleV1 + builder + envelope digest
   adapters/
@@ -180,7 +180,17 @@ src/engine/recovery/
     v1.rs                   # ExecutionCapsuleV1 adapter
   intents.rs                # EffectIntent state machine (filesystem/remote)
   salvage.rs                # Legacy salvage lineage (no exact continuation)
-  typed_merge.rs            # TypedMergeArtifact + strategy-specific proof
+  protocol/
+    mod.rs                  # phased dispatch: prepare → reserve → execute → finalize
+    prepare.rs              # prepare phase (no tx): load capsule, resolve policy
+    reserve.rs              # reserve phase (IMMEDIATE tx): epoch CAS + ledger
+    execute.rs              # execute phase (no tx): ContinueWorkspace verify
+    finalize.rs             # finalize phase (IMMEDIATE tx): guarded finalize
+    executor.rs             # injected truthful executor
+  typed_merge/
+    mod.rs                  # TypedMergeArtifact + strategy-specific proof
+    system_probes.rs        # git/system reachability probes
+  wiring.rs                 # capsule-backed executor wiring
 src/persistence/
   attempts.rs               # append-only attempts (complete StateSnapshot)
   capsule_store.rs          # immutable canonical capsule persistence
@@ -329,6 +339,7 @@ migration/deprecation phase (Phase 15).
 ## Formal Requirements
 
 ### REQ-RP-001: Single typed recovery abstraction
+
 The system SHALL provide exactly one typed recovery entry point,
 `RecoveryProtocolV1::recover(request)`, that handles all resume/retry/rewind/
 migration execution. Separate execution paths for these verbs SHALL be removed.
@@ -340,6 +351,7 @@ authority captured during prepare and SHALL reselect/revalidate each inside the
 reserve transaction before any mutation [B1].
 
 ### REQ-RP-002: Immutable canonical capsule with envelope digest
+
 Fresh runs SHALL persist an immutable `ExecutionCapsuleV1` containing explicit
 canonicalization, schema, domain, and provenance versions, the canonical resolved
 workflow bytes, canonical resolved config bytes, the actual `LaunchProvenance`
@@ -354,6 +366,7 @@ every run without a capsule written by fresh launch before execution SHALL be
 salvage-only [B10].
 
 ### REQ-RP-003: Append-only immutable attempt IDs with complete state
+
 Attempt records and checkpoints SHALL be append-only rows identified by
 monotonic attempt IDs. Each attempt row SHALL include the complete
 `StateSnapshot`, immutable attempt/source-parent IDs, operation binding, step
@@ -366,6 +379,7 @@ SHALL be appended at finalize; the runner-result field SHALL make the outcome
 recoverable after an execute-before-finalize crash.
 
 ### REQ-RP-004: Epoch-fenced idempotent recovery with operation ledger
+
 The system SHALL maintain a distinct durable per-run recovery epoch (not derived
 from `MAX(attempt generation)`) advanced via a CAS claim inside a short
 `IMMEDIATE` transaction, with an affected-row check [C1]. **[B2]** The
@@ -385,6 +399,7 @@ conflicting duplicate SHALL refuse. No synthetic attempt rows SHALL be appended
 to bump the epoch.
 
 ### REQ-RP-005: Step recovery policy from canonical StepDef
+
 Each step SHALL resolve a `StepRecoveryPolicy` variant from the canonical
 `StepDef` / explicit declaration plus the exact current `SAFE_RERUN_STEPS`
 classifications (by step_id). Generic `shell`/`write_file` step types SHALL
@@ -399,6 +414,7 @@ is derived from the sealed `RecoveryAuthority` carrying a descriptor-bound
 `WorkspaceAuthorization`.
 
 ### REQ-RP-006: Interrupted-implement exact verification
+
 An interrupted run SHALL resume via `ContinueWorkspace` only after exact
 verification of: worktree path, ownership (bootstrap + durable marker), base
 ref, and diagnostic state. A mismatch on any dimension SHALL refuse recovery.
@@ -410,6 +426,7 @@ descriptor-relative marker re-snapshot plus exact descriptor identity comparison
 (TOCTOU guard) [C4/B6].
 
 ### REQ-RP-007: Legacy salvage, never exact continuation
+
 Every run WITHOUT a valid pre-execution V1 capsule SHALL be salvage-only,
 regardless of provenance or migration source (including runs with migrated
 `LaunchProvenance` sentinel digests but no V1 capsule) [C9/B10]. It SHALL NEVER
@@ -419,6 +436,7 @@ launch before execution SHALL remain salvage-only forever. Salvage lineage SHALL
 be immutable and append-only.
 
 ### REQ-RP-008: Complete effect-intent state machine
+
 Filesystem and remote effects SHALL use a durable `effect_intents` state
 machine with: a stable unique effect key, operation/attempt/sequence binding,
 canonical payload + digest/version, expected target/predecessor, observed
@@ -433,6 +451,7 @@ affected-row check). Call-site phases for commit/push/open_pr/merge SHALL be
 wired.
 
 ### REQ-RP-009: Versioned capsule execution via object-safe adapters
+
 The current binary SHALL load a versioned `ExecutionCapsuleV1` and execute it
 through a versioned `CapsuleAdapter`. The adapter trait SHALL be object-safe
 (`fn version(&self) -> u32` instead of `const VERSION`) [C8]. **[B9]** Adapter
@@ -440,6 +459,7 @@ dispatch SHALL be fail-closed for unsupported schema versions. Capsule schema
 evolution SHALL be isolated from the engine core.
 
 ### REQ-RP-010: Typed verified merge with strategy-specific proof
+
 Completion SHALL require a typed, verified merge artifact AND the durable
 `RunStatus::Merged` state, committed in a single short `IMMEDIATE` atomic
 artifact+status transaction with an explicit allowed predecessor and an
@@ -465,10 +485,12 @@ before the transaction; the normal merge-required flow SHALL NOT first write
 Completed.
 
 ### REQ-QUAL-001: Three consecutive mixed canaries
+
 Qualification SHALL require three consecutive mixed canaries completing the full
 viability gate with zero invariant violations.
 
 ### REQ-QUAL-002: Zero prohibited escapes
+
 Qualification SHALL require zero occurrences of: direct SQL outside the
 persistence layer, historical binary/config dependency, manual git/GitHub
 mutation, duplicate effects, or invariant violations.
@@ -480,7 +502,7 @@ A run passes the viability gate when it traverses all stages:
 1. **Fresh launch** — capsule persisted, lease claimed, ownership provisioned.
 2. **Deterministic interruption after worktree delta** — run interrupted after a
    workspace-mutating step produces a worktree delta.
-3. **Supported recover** — recovery dispatched via `RecoveryProtocolV1`.
+3. **Supported recovery** — recovery dispatched via `RecoveryProtocolV1`.
 4. **Exact working-tree verification** — `ContinueWorkspace` verifies worktree,
    ownership, base ref, diagnostics.
 5. **Allowlist staging** — `git add` only allowlisted paths.

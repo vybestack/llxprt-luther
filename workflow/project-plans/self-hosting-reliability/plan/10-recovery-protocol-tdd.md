@@ -23,6 +23,7 @@ the durable stores landed in P05 — no in-memory facade.
 ## Requirements Implemented (Expanded)
 
 ### REQ-RP-004: Epoch-fenced idempotent recovery with operation ledger [C1/C2]
+
 **Behavior**:
 - GIVEN: a run with persisted epoch E and a Completed operation for (run, step, capsule, source_attempt)
 - WHEN: `recover(request{step})` is called again with the same binding
@@ -39,6 +40,7 @@ the durable stores landed in P05 — no in-memory facade.
 - THEN: returns `RecoveryOutcome::StaleEpoch { persisted, expected }` [C1]
 
 ### REQ-RP-005: Step recovery policy from canonical StepDef [C6]
+
 **Behavior**:
 - GIVEN: a generic `shell` step_id WITHOUT an explicit `recovery_policy`
        declaration
@@ -56,6 +58,7 @@ the durable stores landed in P05 — no in-memory facade.
 - THEN: returns `NonRecoverable`
 
 ### REQ-RP-006: ContinueWorkspace exact verification with sealed authority [C4]
+
 **Behavior**:
 - GIVEN: an interrupted run with a matching worktree, ownership marker, base ref, diagnostic
 - WHEN: `recover(request{step: canonical_continue_step})` is called
@@ -81,7 +84,7 @@ the durable stores landed in P05 — no in-memory facade.
     1. Fresh recovery with valid expected_epoch → `Recovered` (REQ-RP-001) [C5/B2]
     2. Re-issue same (run, step, capsule, source) → `AlreadyApplied` with prior_outcome, no new attempt row (REQ-RP-004) [C2]
     3. Pending duplicate → reconciled via guarded owner/lease claim, not duplicated (REQ-RP-004) [C2/B3]
-    4. Conflicting duplicate (different capsule/source binding) → `Conflict` (REQ-RP-004) [C2/B3]
+    4. Conflicting duplicate (different capsule/source binding) → `Refused { reason: ConflictingOperation }` (REQ-RP-004) [C2/B3]
     5. Stale epoch → `StaleEpoch`, no durable mutation (REQ-RP-004) [C1/B2]
     6. Generic `shell` step_id without declaration → policy `NonRecoverable` → `Refused` (REQ-RP-005) [C6]
     7. Canonical step with `ContinueWorkspace` declared → policy `ContinueWorkspace` (REQ-RP-005) [C6/B7]
@@ -104,8 +107,8 @@ the durable stores landed in P05 — no in-memory facade.
 ## Required Code Markers
 
 ```rust
-/// @plan PLAN-20260723-SELFHOST-RELIABILITY.P10
-/// @requirement REQ-RP-004
+/// @plan:PLAN-20260723-SELFHOST-RELIABILITY.P10
+/// @requirement:REQ-RP-004
 #[test]
 fn conflicting_duplicate_refuses() { /* ... */ }
 ```
@@ -113,11 +116,10 @@ fn conflicting_duplicate_refuses() { /* ... */ }
 ## Verification Commands
 
 ```bash
-grep -r "@plan:PLAN-20260723-SELFHOST-RELIABILITY.P10" workflow/tests/recovery_protocol_integration_tests.rs | wc -l
-# Expected: 14+ occurrences
-
-grep -r "should_panic" workflow/tests/recovery_protocol_integration_tests.rs && echo "FAIL"
-
+set -euo pipefail
+count=$(grep -r "@plan:PLAN-20260723-SELFHOST-RELIABILITY.P10" workflow/tests/recovery_protocol_integration_tests.rs | wc -l)
+[ "$count" -ge 14 ] || { echo "FAIL: expected 14+ P10 markers, found $count"; exit 1; }
+grep -r "should_panic" workflow/tests/recovery_protocol_integration_tests.rs && { echo "FAIL"; exit 1; } || true
 cargo test --test recovery_protocol_integration_tests 2>&1 | head -30
 # Expected: failures, not "test result: ok"
 ```

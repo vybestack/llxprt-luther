@@ -26,6 +26,7 @@ Reuse the canonical serialization approach already established in
 ## Requirements Implemented
 
 ### REQ-RP-002: Immutable canonical capsule with envelope digest [C8/B9]
+
 **Implementation** (capsule pseudocode 43–103):
 - `build_envelope_frame` produces a deterministic byte frame: fixed-width
   big-endian version header (schema/canonicalization/domain/provenance) +
@@ -43,6 +44,7 @@ Reuse the canonical serialization approach already established in
   version dispatch against `SUPPORTED_*_VERSIONS`. [B9]
 
 ### REQ-RP-009: Versioned object-safe adapter [C8/B9]
+
 **Implementation** (adapters pseudocode 10–15):
 - `adapter_for` matches `schema_version` → `V1Adapter`; unknown → error
   (fail-closed). [B9]

@@ -330,7 +330,10 @@ execute-before-finalize crash.
 ## Component: Append-Only Attempts (`src/persistence/attempts.rs`) — [C3/B4]
 
 Append-only attempt rows with complete `StateSnapshot`, immutable IDs, and
-capsule binding. No row is ever updated; history is preserved.
+capsule binding. New attempt rows are inserted at reserve; the single
+finalization mutation (`append_attempt_outcome`) completes a row in place
+under a `finalized_at IS NULL` guard. No row is ever deleted and no finalized
+row is ever mutated; history is preserved.
 
 **[B4]** A durable `execution_attempt_id` is allocated at reserve (before any
 effect) and recorded via `record_attempt_start`. The outcome snapshot is
@@ -692,7 +695,7 @@ the capsule carries it.
 
 ---
 
-## Component: RecoveryProtocolV1 (`src/engine/recovery/protocol.rs`) — [C1/C2/C4/C5/C12/B1/B2/B4/B6]
+## Component: RecoveryProtocolV1 (`src/engine/recovery/protocol/mod.rs`) — [C1/C2/C4/C5/C12/B1/B2/B4/B6]
 
 Single typed recovery entry point with phased execution:
 prepare (no tx) → reserve (short IMMEDIATE tx) → execute (no tx) → finalize
@@ -758,7 +761,7 @@ re-snapshot plus exact identity comparison.
 42 // RecoveryOutcome — result of recovery dispatch.
 43 pub enum RecoveryOutcome {
 44     Recovered { resumed_at_step: String, attempt_id: i64, operation_id: String },
-45     AlreadyApplied { prior_outcome: SerializedOutcome, attempt_id: i64 },  // [C2]
+45     AlreadyApplied { prior_outcome: SerializedOutcome, attempt_id: i64, operation_id: String },  // [C2]
 46     Refused { reason: RefusalReason },
 47     StaleEpoch { persisted: u64, expected: u64 },  // [C1/B2]
 48     Conflict { detail: String },                   // [C2/B3]
@@ -771,7 +774,8 @@ re-snapshot plus exact identity comparison.
 55     VerificationFailed(String),
 56     NotAuthorized,         // [C4/B6]
 57     SalvageOnly,
-58 }
+58     ConflictingOperation,  // [C2/B3]
+59 }
 59
 60 pub enum RecoveryStrategy {
 61     ContinueWorkspace,
@@ -797,12 +801,13 @@ re-snapshot plus exact identity comparison.
 81     // The ONLY CAS in the protocol is the epoch CAS inside reserve. [B2]
 82     let reservation = reserve_recovery(conn, &prepared)?               // line 82
 83     match &reservation.status {
-84         ReserveStatus::CompletedDuplicate { prior_outcome, attempt_id } => {
+84         ReserveStatus::CompletedDuplicate { prior_outcome, attempt_id, operation_id } => {
 85             // Exact completed duplicate: return prior outcome. [C2]
 86             return Ok(RecoveryOutcome::AlreadyApplied {               // line 86
 87                 prior_outcome: prior_outcome.clone(),
 88                 attempt_id: *attempt_id,
-89             })
+89                 operation_id: operation_id.clone(),
+90             })
 90         }
 91         ReserveStatus::ConflictDuplicate { detail } => {
 92             // Conflicting duplicate: refuse. [C2/B3]
@@ -813,9 +818,15 @@ re-snapshot plus exact identity comparison.
 97                 persisted: *persisted, expected: *expected,
 98             })
 99         }
-100         ReserveStatus::PendingOwned { .. } => {
-101             return Ok(RecoveryOutcome::InProgress)
-102         }
+100         ReserveStatus::PendingOwned { op, .. } => {
+101             // Still owned by another process: return AlreadyApplied so the
+102             // caller does not execute or reconcile effects. [B3]
+103             return Ok(RecoveryOutcome::AlreadyApplied {
+104                 prior_outcome: op.serialized_outcome.clone(),
+105                 attempt_id: op.execution_attempt_id,
+106                 operation_id: op.operation_id.clone(),
+107             })
+108         }
 102A        ReserveStatus::PendingReconcile { .. }
 102B        | ReserveStatus::NewlyReserved { .. } => {}
 102C    }
@@ -1084,10 +1095,11 @@ re-snapshot plus exact identity comparison.
 359 pub enum ReserveStatus {
 360     NewlyReserved { attempt_id: i64 },
 361     PendingReconcile { operation: RecoveryOperation },
-362     CompletedDuplicate { prior_outcome: SerializedOutcome, attempt_id: i64 },
-363     ConflictDuplicate { detail: String },
-364     StaleEpoch { persisted: u64, expected: u64 },
-365 }
+362     PendingOwned { op: RecoveryOperation },  // [B3] another process owns the lease
+363     CompletedDuplicate { prior_outcome: SerializedOutcome, attempt_id: i64, operation_id: String },
+364     ConflictDuplicate { detail: String },
+365     StaleEpoch { persisted: u64, expected: u64 },
+366 }
 366
 367 pub struct Reservation {
 368     status: ReserveStatus,
@@ -1154,7 +1166,11 @@ state on mismatch; merge intent completed/conflicted in atomic merge transaction
 31 // effect_key already exists, load it and compare the exact binding
 32 // (canonical_payload, payload_digest, expected_target, expected_predecessor).
 33 // On mismatch, transition to 'conflict'. On match, return the existing intent.
-34 pub fn prepare_effect(
+34 // This function never commits a transaction it does not own; it is called
+35 // inside the caller's transaction so the PRIMARY KEY constraint on
+36 // effect_key makes concurrent inserts race-safe (the loser gets
+37 // SQLITE_CONSTRAINT and the caller's transaction rolls back). [C5/B5]
+38 pub fn prepare_effect(
 35     conn,
 36     operation_id: &str,
 37     attempt_id: i64,
@@ -1398,7 +1414,7 @@ cannot be retroactively inserted for a run that already executed without one.
 
 ---
 
-## Component: Typed Verified Merge (`src/engine/recovery/typed_merge.rs`) — [C10/C11/B11/B12]
+## Component: Typed Verified Merge (`src/engine/recovery/typed_merge/mod.rs`) — [C10/C11/B11/B12]
 
 Strategy-specific merge proof enum. Merge commit has two ancestry checks; squash
 and rebase include ancestry plus computed expected/observed content or patch
@@ -1562,8 +1578,20 @@ merge-required workflows.
 145 pub fn complete_typed_merge(conn: &Connection, artifact: &TypedMergeArtifact, verifier: &MergeVerifier) -> Result<(), MergeError> {
 146     // Step 1: build the reachability proof via injected probes (no tx). [B11]
 147     let proof = build_reachability_proof(verifier)?                  // line 147
+147A    // Step 2: validate artifact identity against the verifier BEFORE any tx. [C11/B12]
+147B    // Reject if the supplied artifact does not describe the verified merge.
+147C    if proof.result_sha() != artifact.result_sha
+147D        || proof != artifact.reachability_proof
+147E        || verifier.repo != artifact.repo
+147F        || verifier.pr_number != artifact.pr_number
+147G        || verifier.head_sha != artifact.head_sha
+147H        || verifier.base_sha != artifact.base_sha {
+147I        return Err(MergeError::ArtifactConflict)
+147J    }
+147K    // Verify the capsule binding matches the persisted capsule.
+147L    verify_capsule_binding(conn, artifact)?
 148
-149     // Step 2: short IMMEDIATE atomic artifact+status transaction. [C11/B12]
+149     // Step 3: short IMMEDIATE atomic artifact+status transaction. [C11/B12]
 150     // Artifact INSERT and status UPDATE happen in ONE transaction.
 151     // Normal merge-required flow must NOT first write Completed.
 152     let tx = Transaction::new(conn, Immediate)?                      // line 152
@@ -1659,7 +1687,7 @@ merge-required workflows.
 ## Verification Gate
 
 - [x] Every component has numbered lines.
-- [ ] Implementation phases (P05, P08, P11, P14, P15, P17) cite specific lines.
+- [x] Implementation phases (P05, P08, P11, P14, P15, P17) cite specific lines.
 - [x] Recovery epoch is a distinct durable state with CAS claim (epoch lines
       09–41). [C1]
 - [x] `recovery_operations` ledger has stable operation_id, logical_request_key,

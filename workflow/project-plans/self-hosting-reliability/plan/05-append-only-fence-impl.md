@@ -27,6 +27,7 @@ functions.
 ## Requirements Implemented
 
 ### REQ-RP-003: Append-only immutable attempt IDs with complete state [C3/B4]
+
 **Implementation** (attempts pseudocode 23–93):
 - `record_attempt_start`: INSERT with complete `StateSnapshot` JSON, capsule binding,
   snapshot digest, `operation_id`, `started_at`, `finalized_at = NULL`. Returns the
@@ -41,6 +42,7 @@ functions.
   serialization, compare.
 
 ### REQ-RP-004: Epoch CAS + operation ledger (durable half) [C1/C2/B3]
+
 **Implementation** (epoch pseudocode 17–36, operations pseudocode 22–149):
 - `cas_advance_epoch`: conditional UPDATE with `WHERE epoch = ?expected`,
   affected-row check, returns `Advanced` or `Stale`. [C1/B2: this is the ONLY CAS]
@@ -57,6 +59,7 @@ functions.
   affected != 1. [C2]
 
 ### REQ-RP-008: Effect-intent state machine [C7/B5]
+
 **Implementation** (intents pseudocode 34–151):
 - `compute_effect_key`: SHA-256 over operation_id + attempt_id + sequence + kind. [C7]
 - `prepare_effect`: canonicalize payload, compute digest, INSERT-or-LOAD with
@@ -106,13 +109,14 @@ functions.
 ## Verification Commands
 
 ```bash
+set -euo pipefail
 cargo test --test epoch_operations_attempts_integration_tests || exit 1
 cargo test --test effect_intents_integration_tests || exit 1
-git diff workflow/tests/ | grep -E "^[+-]" | grep -v "^[+-]{3}" && echo "FAIL: tests modified"
-grep -rn "println!\|dbg!\|todo!\|unimplemented!" workflow/src/persistence/recovery_epoch.rs workflow/src/persistence/recovery_operations.rs workflow/src/persistence/attempts.rs workflow/src/persistence/effect_intents.rs && echo "FAIL"
-grep -rn -E "(placeholder|not yet|will be)" workflow/src/persistence/recovery_epoch.rs workflow/src/persistence/recovery_operations.rs workflow/src/persistence/attempts.rs workflow/src/persistence/effect_intents.rs && echo "FAIL"
+git diff workflow/tests/ | grep -E "^[+-]" | grep -v "^[+-]{3}" && { echo "FAIL: tests modified"; exit 1; } || true
+grep -rn "println!\|dbg!\|todo!\|unimplemented!" workflow/src/persistence/recovery_epoch.rs workflow/src/persistence/recovery_operations.rs workflow/src/persistence/attempts.rs workflow/src/persistence/effect_intents.rs && { echo "FAIL"; exit 1; } || true
+grep -rn -E "(placeholder|not yet|will be)" workflow/src/persistence/recovery_epoch.rs workflow/src/persistence/recovery_operations.rs workflow/src/persistence/attempts.rs workflow/src/persistence/effect_intents.rs && { echo "FAIL"; exit 1; } || true
 cargo test || exit 1
-cargo clippy -- -D warnings || exit 1
+cargo clippy --workspace --all-targets --all-features -- -D warnings || exit 1
 ```
 
 ## Success Criteria

@@ -88,13 +88,14 @@ run is intentionally published. [B10]
 ## Verification Commands
 
 ```bash
+set -euo pipefail
 cargo test --test capsule_wiring_integration_tests || exit 1
-git diff workflow/tests/capsule_wiring_integration_tests.rs | grep -E "^[+-]" | grep -v "^[+-]{3}" && echo "FAIL: tests modified"
-grep -rn "println!\|dbg!\|todo!\|unimplemented!" workflow/src/engine/runner.rs workflow/src/app/run.rs workflow/src/app/daemon_run.rs workflow/src/engine/executors/parent_orchestration/child_workflow.rs workflow/src/app/runs/continuation_execution.rs workflow/src/engine/recovery/adapters/v1.rs | grep -i capsule && echo "FAIL"
+git diff workflow/tests/capsule_wiring_integration_tests.rs | grep -E "^[+-]" | grep -v "^[+-]{3}" && { echo "FAIL: tests modified"; exit 1; } || true
+grep -rn "println!\|dbg!\|todo!\|unimplemented!" workflow/src/engine/runner.rs workflow/src/app/run.rs workflow/src/app/daemon_run.rs workflow/src/engine/executors/parent_orchestration/child_workflow.rs workflow/src/app/runs/continuation_execution.rs workflow/src/engine/recovery/adapters/v1.rs | grep -i capsule && { echo "FAIL"; exit 1; } || true
 # B8: capsule wiring in actual surfaces
 grep -rn "build_capsule_v1\|persist_capsule_v1\|load_capsule_v1\|adapter_for" workflow/src/app/run.rs workflow/src/app/daemon_run.rs workflow/src/engine/executors/parent_orchestration/child_workflow.rs workflow/src/app/runs/continuation_execution.rs workflow/src/engine/runner.rs
 cargo test || exit 1
-cargo clippy -- -D warnings || exit 1
+cargo clippy --workspace --all-targets --all-features -- -D warnings || exit 1
 ```
 
 ## Success Criteria

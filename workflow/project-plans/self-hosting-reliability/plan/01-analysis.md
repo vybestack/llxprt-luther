@@ -75,7 +75,7 @@ phases modify the right call sites.
 
 ### Key data flows
 
-```
+```text
 FRESH LAUNCH:
   CLI/daemon → resolve workflow type+config+provenance → build ExecutionCapsuleV1
   → persist capsule (immutable, envelope digest) → claim lease → provision ownership → EngineRunner::run()
@@ -105,14 +105,19 @@ COMPLETE:
 | File | Surface |
 |------|---------|
 | `src/engine/recovery/mod.rs` | `RecoveryProtocolV1`, `RecoveryRequest` (no trusted_internal), `RecoveryOutcome`, re-exports |
-| `src/engine/recovery/protocol.rs` | `recover()` dispatch, phased model (prepare/reserve/execute/finalize), epoch CAS, operation ledger reconciliation |
+| `src/engine/recovery/protocol/mod.rs` | `recover()` dispatch, phased model (prepare/reserve/execute/finalize), epoch CAS, operation ledger reconciliation |
+| `src/engine/recovery/protocol/prepare.rs` | prepare phase (no tx): load capsule, resolve policy |
+| `src/engine/recovery/protocol/reserve.rs` | reserve phase (IMMEDIATE tx): epoch CAS + operation ledger |
+| `src/engine/recovery/protocol/execute.rs` | execute phase (no tx): ContinueWorkspace exact verify |
+| `src/engine/recovery/protocol/finalize.rs` | finalize phase (IMMEDIATE tx): guarded finalize |
+| `src/engine/recovery/protocol/executor.rs` | injected truthful executor |
 | `src/engine/recovery/policy.rs` | `StepRecoveryPolicy` enum + `policy_for_step` consuming StepDef + SAFE_RERUN_STEPS |
 | `src/engine/recovery/capsule.rs` | `ExecutionCapsuleV1`, builder, ONE envelope digest over all replay authority fields |
 | `src/engine/recovery/adapters/mod.rs` | object-safe `CapsuleAdapter` trait (`fn version(&self)`), version registry |
 | `src/engine/recovery/adapters/v1.rs` | V1 adapter |
 | `src/engine/recovery/intents.rs` | `EffectIntent` durable state machine + reconcile |
 | `src/engine/recovery/salvage.rs` | Legacy salvage lineage (no V1 capsule = salvage-only) |
-| `src/engine/recovery/typed_merge.rs` | typed verified merge + strategy-specific proof + atomic artifact+status tx |
+| `src/engine/recovery/typed_merge/mod.rs` | typed verified merge + strategy-specific proof + atomic artifact+status tx |
 | `src/persistence/recovery_epoch.rs` | distinct durable epoch + CAS claim |
 | `src/persistence/recovery_operations.rs` | idempotent operation ledger |
 | `src/persistence/attempts.rs` | append-only attempt IDs with complete StateSnapshot |

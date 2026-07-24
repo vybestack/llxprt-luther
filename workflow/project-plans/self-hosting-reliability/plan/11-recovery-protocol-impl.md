@@ -67,7 +67,9 @@ marker re-snapshot [B6]), base ref, diagnostic.
 
 ### Files to Modify
 
-- `src/engine/recovery/protocol.rs`
+- `src/engine/recovery/protocol/mod.rs` (and split phase modules
+  `protocol/prepare.rs`, `protocol/reserve.rs`, `protocol/execute.rs`,
+  `protocol/finalize.rs`, `protocol/executor.rs`)
   - Implement `RecoveryProtocolV1::recover(conn, request)` per pseudocode
     lines 72–357 using the four-phase model. [C5]
   - **Prepare phase** (no tx, pseudocode 130–175): load capsule via
@@ -111,24 +113,25 @@ marker re-snapshot [B6]), base ref, diagnostic.
 ## Verification Commands
 
 ```bash
+set -euo pipefail
 # All P10 tests now pass (green)
 cargo test --test recovery_protocol_integration_tests || exit 1
 
 # No test modifications during implementation
-git diff workflow/tests/recovery_protocol_integration_tests.rs | grep -E "^[+-]" | grep -v "^[+-]{3}" && echo "FAIL: tests modified"
+git diff workflow/tests/recovery_protocol_integration_tests.rs | grep -E "^[+-]" | grep -v "^[+-]{3}" && { echo "FAIL: tests modified"; exit 1; } || true
 
 # No debug code
-grep -rn "println!\|dbg!\|todo!\|unimplemented!" workflow/src/engine/recovery/protocol.rs workflow/src/engine/recovery/policy.rs && echo "FAIL"
+grep -rn "println!\|dbg!\|todo!\|unimplemented!" workflow/src/engine/recovery/protocol/ workflow/src/engine/recovery/policy.rs && { echo "FAIL"; exit 1; } || true
 
 # No placeholder comments
-grep -rn -E "(placeholder|not yet|will be)" workflow/src/engine/recovery/ && echo "FAIL"
+grep -rn -E "(placeholder|not yet|will be)" workflow/src/engine/recovery/ && { echo "FAIL"; exit 1; } || true
 
 # Plan + requirement markers
 grep -r "@plan:PLAN-20260723-SELFHOST-RELIABILITY.P11" workflow/src/engine/recovery/
-grep -r "@requirement:REQ-RP-001" workflow/src/engine/recovery/protocol.rs
+grep -r "@requirement:REQ-RP-001" workflow/src/engine/recovery/protocol/mod.rs
 
 # C4: no trusted_internal in protocol
-grep -rn "trusted_internal" workflow/src/engine/recovery/protocol.rs && echo "FAIL"
+grep -rn "trusted_internal" workflow/src/engine/recovery/protocol/ && { echo "FAIL"; exit 1; } || true
 
 # Full suite still passes
 cargo test || exit 1
@@ -148,7 +151,7 @@ cargo test || exit 1
 
 If this phase fails:
 
-1. `git checkout -- workflow/src/engine/recovery/protocol.rs workflow/src/engine/recovery/policy.rs`
+1. `git checkout -- workflow/src/engine/recovery/protocol/ workflow/src/engine/recovery/policy.rs`
 2. Re-run P11. Review-cycle cap: two cycles.
 
 ## Phase Completion Marker

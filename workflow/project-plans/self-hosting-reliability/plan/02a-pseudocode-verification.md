@@ -45,8 +45,8 @@ the 13 refinements applied in remediation cycle 2 (`[B1]`–`[B13]`).
 - [x] Serialized prior outcome on Completed (operations lines 101–112).
 - [x] Exact completed duplicate returns prior outcome (protocol lines 84–90).
 - [x] Pending duplicate executes/reconciles only after guarded lease adoption;
-      a still-owned duplicate returns `InProgress` (protocol lines 100–102,
-      244–262).
+      a still-owned duplicate returns `AlreadyApplied` (protocol lines 100–108,
+      244–263).
 - [x] Conflicting logical-request binding refuses (protocol lines 91–94,
       239–243).
 
@@ -149,7 +149,7 @@ the 13 refinements applied in remediation cycle 2 (`[B1]`–`[B13]`).
       (operations lines 11–12, 61–79).
 - [x] `find_adoptable_pending` + `try_adopt_pending` provide lease-expiry
       adoption; still-owned duplicates do not execute (operations lines 50–55,
-      83–97; protocol lines 100–102, 256–262).
+      83–97; protocol lines 100–108, 256–262).
 
 ### [B4] Durable execution_attempt_id at reserve; outcome append at finalize
 - [x] `record_attempt_start` allocates `execution_attempt_id` at reserve
@@ -276,7 +276,7 @@ the 13 refinements applied in remediation cycle 2 (`[B1]`–`[B13]`).
    `AlreadyApplied`]
 3. If the same operation is submitted twice while Pending, can both callers
    execute? [No — protocol lines 244–263 require guarded expired-lease adoption;
-   a still-owned operation returns `InProgress` without executing [B3]]
+   a still-owned operation returns `AlreadyApplied` without executing [B3]]
 4. Is the capsule ever mutated after first write? [No — envelope digest
    verified on load; component digests are metadata]
 5. Does `ContinueWorkspace` revalidate the workspace authorization inside the

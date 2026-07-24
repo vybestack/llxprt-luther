@@ -321,25 +321,9 @@ impl EngineRunner {
         let mut metadata = self.build_metadata(RunStatus::Starting);
         metadata.current_step = self.first_step_id();
         let conn = self.conn.borrow();
-        let outcome = crate::persistence::persist_launch_atomically(&conn, &metadata, capsule)
+        crate::persistence::persist_launch_atomically(&conn, &metadata, capsule)
             .map_err(|err| EngineError::PersistenceError(err.to_string()))?;
-        match outcome {
-            crate::persistence::LaunchPersistenceOutcome::Persisted => Ok(()),
-            crate::persistence::LaunchPersistenceOutcome::RunCollision => {
-                Err(EngineError::PersistenceError(format!(
-                    "launch collision: a run record already exists for run_id '{}'; refusing to \
-                     overwrite the existing launch record",
-                    self.instance.run_id
-                )))
-            }
-            crate::persistence::LaunchPersistenceOutcome::CapsuleCollision => {
-                Err(EngineError::PersistenceError(format!(
-                    "launch collision: an execution capsule already exists for run_id '{}'; \
-                     refusing to overwrite the immutable capsule",
-                    self.instance.run_id
-                )))
-            }
-        }
+        Ok(())
     }
 
     /// Best-effort persist of a run metadata record to the registry.

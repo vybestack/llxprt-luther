@@ -62,9 +62,12 @@ the complete library and binary suites now pass.
 
 Pre-existing engine modules outside the new recovery surface still host legacy
 persistence interactions. They were not introduced by this plan and are not an
-escape used by the qualified RecoveryProtocolV1/canary flow. Arbitrary legacy
-exact recovery, distributed persistence, async redesign, and broader llxprt
-roadmap work remain explicitly deferred.
+escape used by the qualified `RecoveryProtocolV1`/canary flow. The qualification
+gate covers the bounded self-hosting flow represented by the plan: the
+recovery protocol, capsule, typed-merge, failpoint, and canary surfaces. It does
+not cover unrelated engine modules, the legacy continuation path, or
+out-of-plan surfaces. Arbitrary legacy exact recovery, distributed persistence,
+async redesign, and broader llxprt roadmap work remain explicitly deferred.
 
 ## Verdict
 

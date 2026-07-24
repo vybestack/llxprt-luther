@@ -121,13 +121,14 @@ in-memory persistence facade is introduced at any point.
 ## Verification Commands
 
 ```bash
+set -euo pipefail
 cargo build --all-targets || exit 1
-cargo clippy -- -D warnings || exit 1
+cargo clippy --workspace --all-targets --all-features -- -D warnings || exit 1
 grep -r "@plan:PLAN-20260723-SELFHOST-RELIABILITY.P03" workflow/src/persistence/recovery_epoch.rs workflow/src/persistence/recovery_operations.rs workflow/src/persistence/attempts.rs workflow/src/persistence/effect_intents.rs workflow/src/persistence/mod.rs
 grep -r "@requirement:REQ-RP-003" workflow/src/persistence/attempts.rs
 grep -r "@requirement:REQ-RP-004" workflow/src/persistence/recovery_epoch.rs workflow/src/persistence/recovery_operations.rs
 grep -r "@requirement:REQ-RP-008" workflow/src/persistence/effect_intents.rs
-grep -rn "// TODO\|// FIXME" workflow/src/persistence/recovery_epoch.rs workflow/src/persistence/recovery_operations.rs workflow/src/persistence/attempts.rs workflow/src/persistence/effect_intents.rs && echo "FAIL"
+grep -rn "// TODO\|// FIXME" workflow/src/persistence/recovery_epoch.rs workflow/src/persistence/recovery_operations.rs workflow/src/persistence/attempts.rs workflow/src/persistence/effect_intents.rs && { echo "FAIL"; exit 1; } || true
 ```
 
 ## Success Criteria
