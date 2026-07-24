@@ -112,96 +112,83 @@ pub fn init_database(db_path: &Path) -> Result<(), checkpoint::PersistenceError>
             ))
         })?;
 
-    checkpoint::init_checkpoint_table(&tx).map_err(|e| {
-        checkpoint::PersistenceError::Database(format!("Failed to initialize schema: {e}"))
-    })?;
-    sqlite::init_runs_schema(&tx).map_err(|e| {
-        checkpoint::PersistenceError::Database(format!("Failed to initialize runs schema: {e}"))
-    })?;
-
-    // Initialize issue-lease table (daemon discovery/claiming).
-    // @plan:PLAN-20260415-DAEMON-DISCOVERY.P02
-    leases::init_leases_table(&tx).map_err(|e| {
-        checkpoint::PersistenceError::Database(format!("Failed to initialize leases schema: {e}"))
-    })?;
-    claim_metadata::init_claim_metadata_table(&tx).map_err(|e| {
-        checkpoint::PersistenceError::Database(format!(
-            "Failed to initialize claim metadata schema: {e}"
-        ))
-    })?;
-
-    wait_state::init_wait_states_table(&tx).map_err(|e| {
-        checkpoint::PersistenceError::Database(format!(
-            "Failed to initialize wait-state schema: {e}"
-        ))
-    })?;
-
-    // Initialize durable legacy-ownership-migration state table (issue 158).
-    // @plan:PLAN-20260722-ISSUE158-LEGACY-OWNERSHIP-MIGRATION
-    legacy_migration_state::init_legacy_migration_table(&tx).map_err(|e| {
-        checkpoint::PersistenceError::Database(format!(
-            "Failed to initialize legacy migration state schema: {e}"
-        ))
-    })?;
-
-    // Initialize durable recovery epoch, operations ledger, append-only
-    // attempts, and effect-intents tables (self-hosting reliability, M1).
-    // @plan:PLAN-20260723-SELFHOST-RELIABILITY.P03
-    // @requirement:REQ-RP-003,REQ-RP-004,REQ-RP-008
-    recovery_epoch::init_epoch_table(&tx).map_err(|e| {
-        checkpoint::PersistenceError::Database(format!(
-            "Failed to initialize recovery epoch schema: {e}"
-        ))
-    })?;
-    recovery_operations::init_operations_table(&tx).map_err(|e| {
-        checkpoint::PersistenceError::Database(format!(
-            "Failed to initialize recovery operations schema: {e}"
-        ))
-    })?;
-    attempts::init_attempts_table(&tx).map_err(|e| {
-        checkpoint::PersistenceError::Database(format!(
-            "Failed to initialize recovery attempts schema: {e}"
-        ))
-    })?;
-    effect_intents::init_effect_intents_table(&tx).map_err(|e| {
-        checkpoint::PersistenceError::Database(format!(
-            "Failed to initialize effect intents schema: {e}"
-        ))
-    })?;
-
-    // Initialize the immutable execution capsule store (self-hosting
-    // reliability, M2). [C8]
-    // @plan:PLAN-20260723-SELFHOST-RELIABILITY.P06
-    // @requirement:REQ-RP-002
-    capsule_store::init_capsules_table(&tx).map_err(|e| {
-        checkpoint::PersistenceError::Database(format!(
-            "Failed to initialize execution capsules schema: {e}"
-        ))
-    })?;
-
-    // Initialize the immutable salvage lineage table (self-hosting
-    // reliability, P15). [C9/B10]
-    // @plan:PLAN-20260723-SELFHOST-RELIABILITY.P15
-    // @requirement:REQ-RP-007
-    crate::engine::recovery::salvage::init_salvage_lineage_table(&tx).map_err(|e| {
-        checkpoint::PersistenceError::Database(format!(
-            "Failed to initialize salvage lineage schema: {e}"
-        ))
-    })?;
-
-    // Initialize the immutable merge artifacts table (self-hosting
-    // reliability, P17). [B12]
-    // @plan:PLAN-20260723-SELFHOST-RELIABILITY.P17
-    // @requirement:REQ-RP-010
-    crate::engine::recovery::typed_merge::init_merge_artifacts_table(&tx).map_err(|e| {
-        checkpoint::PersistenceError::Database(format!(
-            "Failed to initialize merge artifacts schema: {e}"
-        ))
-    })?;
+    initialize_schema(&tx)?;
 
     tx.commit().map_err(|e| {
         checkpoint::PersistenceError::Database(format!(
             "Failed to commit database initialization transaction: {e}"
+        ))
+    })
+}
+
+fn initialize_schema(conn: &Connection) -> Result<(), checkpoint::PersistenceError> {
+    initialize_table(conn, "schema", checkpoint::init_checkpoint_table)?;
+    initialize_table(conn, "runs schema", sqlite::init_runs_schema)?;
+    initialize_table(conn, "leases schema", leases::init_leases_table)?;
+    initialize_table(
+        conn,
+        "claim metadata schema",
+        claim_metadata::init_claim_metadata_table,
+    )?;
+    initialize_table(
+        conn,
+        "wait-state schema",
+        wait_state::init_wait_states_table,
+    )?;
+    initialize_table(
+        conn,
+        "legacy migration state schema",
+        legacy_migration_state::init_legacy_migration_table,
+    )?;
+    initialize_recovery_schema(conn)
+}
+
+fn initialize_recovery_schema(conn: &Connection) -> Result<(), checkpoint::PersistenceError> {
+    initialize_table(
+        conn,
+        "recovery epoch schema",
+        recovery_epoch::init_epoch_table,
+    )?;
+    initialize_table(
+        conn,
+        "recovery operations schema",
+        recovery_operations::init_operations_table,
+    )?;
+    initialize_table(
+        conn,
+        "recovery attempts schema",
+        attempts::init_attempts_table,
+    )?;
+    initialize_table(
+        conn,
+        "effect intents schema",
+        effect_intents::init_effect_intents_table,
+    )?;
+    initialize_table(
+        conn,
+        "execution capsules schema",
+        capsule_store::init_capsules_table,
+    )?;
+    initialize_table(
+        conn,
+        "salvage lineage schema",
+        crate::engine::recovery::salvage::init_salvage_lineage_table,
+    )?;
+    initialize_table(
+        conn,
+        "merge artifacts schema",
+        crate::engine::recovery::typed_merge::init_merge_artifacts_table,
+    )
+}
+
+fn initialize_table(
+    conn: &Connection,
+    description: &str,
+    initialize: impl FnOnce(&Connection) -> rusqlite::Result<()>,
+) -> Result<(), checkpoint::PersistenceError> {
+    initialize(conn).map_err(|error| {
+        checkpoint::PersistenceError::Database(format!(
+            "Failed to initialize {description}: {error}"
         ))
     })
 }
