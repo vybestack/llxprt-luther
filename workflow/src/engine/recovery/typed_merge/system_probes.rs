@@ -230,8 +230,8 @@ pub struct SystemMergeRemoteProbe {
     /// Working directory for local `git rev-list` parent-count queries. When
     /// set, `count_commit_parents` runs `git` in this directory (matching all
     /// other git invocations in this module). When unset, the ambient process
-    /// CWD is used — the commit SHA may not be resolvable, causing a fail-closed
-    /// single-parent default.
+    /// CWD is used; an unresolvable commit fails the observation rather than
+    /// fabricating structural evidence.
     work_dir: Option<PathBuf>,
 }
 
@@ -307,15 +307,18 @@ impl SystemMergeRemoteProbe {
 
     /// Count the number of parents of a commit SHA using `git rev-list
     /// --parents -n 1`. This provides structural evidence for strategy
-    /// verification. Returns 0 on failure (fail-closed to single-parent
-    /// default).
+    /// verification. Any inspection failure is propagated so strategy
+    /// verification cannot reinterpret missing evidence as a single-parent
+    /// commit.
     ///
     /// When `work_dir` is set, `git` runs in that directory — matching every
     /// other git invocation in this module. When unset, the ambient process
     /// CWD is used.
-    fn count_commit_parents(&self, sha: &str) -> Option<usize> {
+    fn count_commit_parents(&self, sha: &str) -> Result<usize, MergeError> {
         if sha.starts_with('-') || sha.is_empty() {
-            return None;
+            return Err(MergeError::ReachabilityFailed(
+                "invalid result SHA for parent inspection".to_string(),
+            ));
         }
         let mut command = Command::new("git");
         command
@@ -327,15 +330,26 @@ impl SystemMergeRemoteProbe {
         if let Some(dir) = &self.work_dir {
             command.current_dir(dir);
         }
-        let output = command.output().ok()?;
+        let output = command.output().map_err(|error| {
+            MergeError::ReachabilityFailed(format!(
+                "failed to inspect parents for result commit {sha}: {error}"
+            ))
+        })?;
         if !output.status.success() {
-            return None;
+            return Err(MergeError::ReachabilityFailed(format!(
+                "git rev-list failed for result commit {sha}: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            )));
         }
         // Output: "<sha> <parent1> <parent2> ..."
         let line = String::from_utf8_lossy(&output.stdout);
         let parts: Vec<&str> = line.split_whitespace().collect();
         // parts[0] is the commit itself; parents are parts[1..].
-        parts.len().checked_sub(1)
+        parts.len().checked_sub(1).ok_or_else(|| {
+            MergeError::ReachabilityFailed(format!(
+                "git rev-list returned no result commit for {sha}"
+            ))
+        })
     }
 }
 
@@ -385,7 +399,7 @@ impl MergeRemoteProbe for SystemMergeRemoteProbe {
             ));
         }
         // Structural strategy proof via parent count (cat-file). [P17]
-        let parent_count = self.count_commit_parents(&result_sha).unwrap_or(0);
+        let parent_count = self.count_commit_parents(&result_sha)?;
         let verified_strategy = self.cross_check_strategy(&result_sha, parent_count)?;
         Ok(MergeObservation {
             merged: true,
