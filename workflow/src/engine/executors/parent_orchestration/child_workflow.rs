@@ -143,6 +143,25 @@ fn launch_child_workflow(
     let launch_provenance =
         crate::persistence::LaunchProvenance::from_resolved(workflow_type, config, config_root)
             .map_err(|err| format!("record child launch provenance: {err}"))?;
+    // Build the immutable ExecutionCapsuleV1 from the exact resolved
+    // post-override workflow/config/config-root/provenance/base-ref before
+    // constructing the runner. The capsule must exist before any workflow
+    // execution/effects.
+    // @plan:PLAN-20260723-SELFHOST-RELIABILITY.P08B
+    let base_ref = config
+        .repo
+        .base_branch
+        .clone()
+        .unwrap_or_else(|| "main".to_string());
+    let capsule = crate::engine::recovery::capsule::build_capsule_v1(
+        request.run_id.clone(),
+        workflow_type,
+        config,
+        config_root,
+        &launch_provenance,
+        base_ref,
+    )
+    .map_err(|err| format!("build child execution capsule: {err}"))?;
     let mut run_context = child_run_context(config, request)?;
     run_context.launch_provenance = Some(launch_provenance);
     let instance = WorkflowInstance::create_with_run_id(
@@ -151,23 +170,38 @@ fn launch_child_workflow(
         &request.run_id,
     );
     // A fresh launch must fail closed if the initial Starting RunMetadata with
-    // Some provenance cannot be atomically inserted (run_id collision or DB
-    // error).
+    // Some provenance and the immutable capsule cannot be atomically inserted
+    // (run_id collision, capsule collision, or DB error). Neither row is
+    // durable on failure.
     let mut runner = EngineRunner::with_db_path_for_launch(
         instance,
         crate::engine::executor::ExecutorRegistry::with_defaults(),
         db_path,
         run_context,
+        capsule,
     )
     .map_err(|err| err.to_string())?;
     let outcome = runner.run().map_err(|err| err.to_string())?;
     child_result_from_run_outcome(outcome, request, config, db_path)
 }
 
-/// Resume an existing child workflow: perform complete read-only validation
+/// Resume an existing child workflow exclusively through
+/// [`RecoveryProtocolV1`]: perform the complete read-only validation
 /// (identity, provenance, workspace marker, current-step, checkpoint,
-/// authorization) BEFORE any durable mutation, then promote ownership, commit
-/// the checkpoint, construct the runner, and run.
+/// authorization) BEFORE any durable mutation, then promote workspace
+/// ownership, read the durable recovery epoch, construct the authoritative
+/// [`RunContext`] with descriptor-bound workspace authorization, build the
+/// production [`RunnerRecoveryExecutor`], and dispatch through
+/// [`RecoveryProtocolV1::recover_with_executor`]. The actual durable
+/// [`RunOutcome`] is mapped back to [`ChildWorkflowRunResult`]; no synthetic
+/// success is fabricated.
+///
+/// Lease ordering is preserved: the read-only preparation completes before any
+/// durable mutation (ownership promotion, epoch CAS, checkpoint commit, runner
+/// construction). No legacy `commit_continuation` + `EngineRunner` fallback
+/// path remains.
+///
+/// @plan:PLAN-20260723-SELFHOST-RELIABILITY.P14
 fn resume_child_workflow(
     request: &ChildWorkflowLaunchRequest,
     workflow_type: &crate::workflow::schema::WorkflowType,
@@ -189,42 +223,144 @@ fn resume_child_workflow(
     )?;
     // Promote verified existing evidence only AFTER the read-only
     // authorization succeeded. Resume never creates a first claim.
-    if let Some(work_dir) = request.work_dir.as_deref() {
-        crate::engine::workspace_ownership::ensure_durable_workspace_ownership(
-            work_dir,
-            &request.run_id,
+    let workspace_path = request.work_dir.as_deref().ok_or_else(|| {
+        format!(
+            "missing work_dir for child workflow resume {}",
+            request.run_id
         )
-        .map_err(|err| format!("verify child workspace ownership: {err}"))?;
-    }
-    // Commit the resume checkpoint using the identity selected during
-    // read-only preparation. The commit re-validates the identity inside its
-    // IMMEDIATE transaction.
-    child_resume_preparation::commit_prepared_resume_checkpoint(
-        db_path,
-        request,
-        prepared.checkpoint_identity(),
-    )?;
-    let run_context = child_run_context(config, request)?;
-    let instance = WorkflowInstance::create_with_run_id(
-        workflow_type.clone(),
-        config.clone(),
+    })?;
+    crate::engine::workspace_ownership::ensure_durable_workspace_ownership(
+        workspace_path,
         &request.run_id,
-    );
-    // Resume reuses the existing persisted row via the best-effort constructor.
-    let mut runner = EngineRunner::with_db_path_and_context(
-        instance,
-        crate::engine::executor::ExecutorRegistry::with_defaults(),
-        db_path,
-        run_context,
     )
-    .map_err(|err| err.to_string())?;
-    // Inject the ephemeral WorkspaceAuthorization reconstructed from the
-    // verified workspace descriptor BEFORE any resumed step executes.
+    .map_err(|err| format!("verify child workspace ownership: {err}"))?;
+    // Read the durable recovery epoch BEFORE constructing the RecoveryRequest.
+    // This is the caller's view of the current epoch; the protocol's reserve
+    // phase CAS-advances it.
+    let conn = open_parent_orchestration_connection(db_path)?;
+    let expected_epoch = crate::persistence::recovery_epoch::read_epoch(&conn, &request.run_id)
+        .map_err(|err| format!("read child recovery epoch: {err}"))?;
+    // Construct the authoritative RunContext with the descriptor-bound
+    // workspace authorization reconstructed during read-only preparation.
+    let mut run_context = child_run_context(config, request)?;
     if let Some(authorization) = prepared.authorization() {
-        runner.attach_workspace_authorization(authorization);
+        run_context.workspace_authorization = Some(authorization);
     }
-    let outcome = runner.run().map_err(|err| err.to_string())?;
-    child_result_from_run_outcome(outcome, request, config, db_path)
+    // Build the production capsule-backed recovery executor. The executor
+    // reconstructs the WorkflowInstance from the immutable capsule and runs
+    // the reserved step on its own connection, outside the protocol's
+    // transaction.
+    let executor =
+        crate::engine::recovery::RecoveryWiring.runner_executor(db_path.to_path_buf(), run_context);
+    let recovery_request = crate::engine::recovery::RecoveryRequest {
+        run_id: request.run_id.clone(),
+        step_id: prepared.resume_step_id().to_string(),
+        expected_epoch,
+        operator_verb: crate::engine::recovery::OperatorVerb::Resume,
+    };
+    // Dispatch through RecoveryProtocolV1. The protocol owns prepare → reserve
+    // (epoch CAS, attempt allocation, checkpoint revalidation) → execute
+    // (capsule-backed runner) → finalize (attempt outcome append). No legacy
+    // fallback.
+    let outcome = crate::engine::recovery::RecoveryProtocolV1
+        .recover_with_executor(&conn, workspace_path, &recovery_request, &executor)
+        .map_err(|err| format!("child recovery protocol failed: {err}"))?;
+    map_child_recovery_outcome(&conn, request, config, db_path, outcome)
+}
+
+/// Map the actual durable [`crate::engine::recovery::RecoveryOutcome`] back to
+/// [`ChildWorkflowRunResult`]. No synthetic success is fabricated: the durable
+/// attempt row is loaded to recover the exact `RunOutcome` recorded by the
+/// finalize phase.
+///
+/// - [`RecoveryOutcome::Recovered`] and [`RecoveryOutcome::AlreadyApplied`]
+///   load the durable attempt and decode the persisted `runner_result_json`,
+///   mapping `"success"` → [`CompletedSuccess`], `"waiting_external"` →
+///   [`WaitingExternal`] (after persisting the wait state), and anything else
+///   → [`CompletedFailure`].
+/// - [`RecoveryOutcome::Refused`], [`RecoveryOutcome::StaleEpoch`], and
+///   [`RecoveryOutcome::Conflict`] are hard failures.
+///
+/// @plan:PLAN-20260723-SELFHOST-RELIABILITY.P14
+fn map_child_recovery_outcome(
+    conn: &rusqlite::Connection,
+    request: &ChildWorkflowLaunchRequest,
+    config: &WorkflowConfig,
+    db_path: &Path,
+    outcome: crate::engine::recovery::RecoveryOutcome,
+) -> Result<ChildWorkflowRunResult, String> {
+    use crate::engine::recovery::RecoveryOutcome;
+    let attempt_id = match &outcome {
+        RecoveryOutcome::Recovered { attempt_id, .. }
+        | RecoveryOutcome::AlreadyApplied { attempt_id, .. } => *attempt_id,
+        RecoveryOutcome::Refused { reason } => {
+            return Err(format!("child recovery refused: {reason:?}"));
+        }
+        RecoveryOutcome::StaleEpoch {
+            persisted,
+            expected,
+        } => {
+            return Err(format!(
+                "child recovery stale epoch: persisted {persisted}, expected {expected}"
+            ));
+        }
+        RecoveryOutcome::Conflict { detail } => {
+            return Err(format!("child recovery conflict: {detail}"));
+        }
+    };
+    let attempt = crate::persistence::attempts::load_attempt(conn, attempt_id)
+        .map_err(|err| format!("load child recovery attempt: {err}"))?;
+    let runner_result: DurableChildRunnerResult = serde_json::from_value(
+        attempt
+            .runner_result_json
+            .ok_or_else(|| "child recovery attempt has no runner result".to_string())?,
+    )
+    .map_err(|err| format!("decode child recovery runner result: {err}"))?;
+    match runner_result.outcome.as_str() {
+        "success" => Ok(ChildWorkflowRunResult::CompletedSuccess),
+        "waiting_external" => {
+            super::child_wait::persist_child_external_wait_state(
+                request,
+                config,
+                db_path,
+                &runner_result.step_id,
+                &runner_result.reason,
+            )
+            .map_err(|err| err.to_string())?;
+            Ok(ChildWorkflowRunResult::WaitingExternal)
+        }
+        "interrupted" => {
+            super::child_wait::persist_child_interrupted_state(
+                request,
+                config,
+                db_path,
+                &runner_result.step_id,
+            )
+            .map_err(|err| err.to_string())?;
+            Ok(ChildWorkflowRunResult::WaitingExternal)
+        }
+        "failure" | "abandoned" => {
+            tracing::warn!(
+                run_id = %request.run_id,
+                step_id = %runner_result.step_id,
+                reason = %runner_result.reason,
+                "child workflow recovery ended in failure"
+            );
+            Ok(ChildWorkflowRunResult::CompletedFailure)
+        }
+        other => Err(format!("unknown child recovery runner outcome: {other}")),
+    }
+}
+
+/// Deserialized durable runner result recorded by the recovery executor's
+/// finalize phase. Mirrors the daemon path's `DurableDaemonRunnerResult`.
+#[derive(Debug, serde::Deserialize)]
+struct DurableChildRunnerResult {
+    outcome: String,
+    #[serde(default)]
+    step_id: String,
+    #[serde(default)]
+    reason: String,
 }
 
 /// Verify the persisted launch provenance for a child resume against the
@@ -261,3 +397,6 @@ pub(super) fn verify_child_resume_provenance(
         )),
     }
 }
+
+#[cfg(test)]
+mod tests;

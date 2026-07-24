@@ -1,8 +1,14 @@
 /// @plan:PLAN-20260404-INITIAL-RUNTIME.P05
 /// Persistence module - durable storage for run metadata and state.
 pub mod artifacts;
+pub mod attempts;
+/// @plan:PLAN-20260723-SELFHOST-RELIABILITY.P06
+/// @plan:PLAN-20260723-SELFHOST-RELIABILITY.P08B
+pub mod capsule_store;
 pub mod checkpoint;
 pub(crate) mod claim_metadata;
+/// @plan:PLAN-20260723-SELFHOST-RELIABILITY.P03
+pub mod effect_intents;
 /// Exact launch provenance: durable canonical serialization + SHA-256 digest
 /// of the resolved workflow type/config at launch time.
 /// @plan:PLAN-20260722-ISSUE158-LAUNCH-PROVENANCE
@@ -11,6 +17,8 @@ pub mod leases;
 /// Durable state machine table for recoverable legacy ownership migration.
 /// @plan:PLAN-20260722-ISSUE158-LEGACY-OWNERSHIP-MIGRATION
 pub mod legacy_migration_state;
+pub mod recovery_epoch;
+pub mod recovery_operations;
 pub mod run_metadata;
 pub mod sqlite;
 pub mod trace;
@@ -20,6 +28,10 @@ pub use artifacts::{
     default_artifacts_root, get_artifacts_dir, list_artifacts, read_artifact, write_artifact,
     write_poll_result_artifact, write_resume_decision_artifact, write_wait_state_artifact,
     ArtifactRecord,
+};
+pub use capsule_store::{
+    init_capsules_table, load_capsule_v1, persist_capsule_v1, persist_launch_atomically,
+    LaunchPersistenceError, LaunchPersistenceOutcome, EXECUTION_CAPSULES_TABLE,
 };
 pub use checkpoint::{
     append_event, append_event_with_conn, append_typed_event_with_conn, count_events_by_type,
@@ -36,8 +48,8 @@ pub use launch_provenance::{
 };
 pub use leases::{
     count_active_leases, count_active_leases_for_config, count_active_leases_for_repository,
-    create_lease, get_lease_for_issue, init_leases_table, list_all_leases, list_leases_by_config,
-    list_leases_by_status, list_ready_to_resume_leases, mark_stale_leases,
+    create_lease, get_lease_for_issue, get_lease_for_run, init_leases_table, list_all_leases,
+    list_leases_by_config, list_leases_by_status, list_ready_to_resume_leases, mark_stale_leases,
     mark_stale_ready_to_resume_leases, touch_owned_running_lease_heartbeat, try_claim,
     update_lease_status, update_lease_status_conditional,
     update_lease_status_conditional_exact_owner, IssueLease, LeaseStatus,
@@ -69,6 +81,7 @@ use std::path::Path;
 /// Initialize the checkpoint database at the given path.
 /// Creates the database directory if needed and initializes the schema.
 /// @plan:PLAN-20260404-INITIAL-RUNTIME.P12
+/// @plan:PLAN-20260723-SELFHOST-RELIABILITY.P03
 pub fn init_database(db_path: &Path) -> Result<(), checkpoint::PersistenceError> {
     // Ensure parent directory exists
     if let Some(parent) = db_path.parent() {
@@ -99,41 +112,83 @@ pub fn init_database(db_path: &Path) -> Result<(), checkpoint::PersistenceError>
             ))
         })?;
 
-    checkpoint::init_checkpoint_table(&tx).map_err(|e| {
-        checkpoint::PersistenceError::Database(format!("Failed to initialize schema: {e}"))
-    })?;
-    sqlite::init_runs_schema(&tx).map_err(|e| {
-        checkpoint::PersistenceError::Database(format!("Failed to initialize runs schema: {e}"))
-    })?;
-
-    // Initialize issue-lease table (daemon discovery/claiming).
-    // @plan:PLAN-20260415-DAEMON-DISCOVERY.P02
-    leases::init_leases_table(&tx).map_err(|e| {
-        checkpoint::PersistenceError::Database(format!("Failed to initialize leases schema: {e}"))
-    })?;
-    claim_metadata::init_claim_metadata_table(&tx).map_err(|e| {
-        checkpoint::PersistenceError::Database(format!(
-            "Failed to initialize claim metadata schema: {e}"
-        ))
-    })?;
-
-    wait_state::init_wait_states_table(&tx).map_err(|e| {
-        checkpoint::PersistenceError::Database(format!(
-            "Failed to initialize wait-state schema: {e}"
-        ))
-    })?;
-
-    // Initialize durable legacy-ownership-migration state table (issue 158).
-    // @plan:PLAN-20260722-ISSUE158-LEGACY-OWNERSHIP-MIGRATION
-    legacy_migration_state::init_legacy_migration_table(&tx).map_err(|e| {
-        checkpoint::PersistenceError::Database(format!(
-            "Failed to initialize legacy migration state schema: {e}"
-        ))
-    })?;
+    initialize_schema(&tx)?;
 
     tx.commit().map_err(|e| {
         checkpoint::PersistenceError::Database(format!(
             "Failed to commit database initialization transaction: {e}"
+        ))
+    })
+}
+
+fn initialize_schema(conn: &Connection) -> Result<(), checkpoint::PersistenceError> {
+    initialize_table(conn, "schema", checkpoint::init_checkpoint_table)?;
+    initialize_table(conn, "runs schema", sqlite::init_runs_schema)?;
+    initialize_table(conn, "leases schema", leases::init_leases_table)?;
+    initialize_table(
+        conn,
+        "claim metadata schema",
+        claim_metadata::init_claim_metadata_table,
+    )?;
+    initialize_table(
+        conn,
+        "wait-state schema",
+        wait_state::init_wait_states_table,
+    )?;
+    initialize_table(
+        conn,
+        "legacy migration state schema",
+        legacy_migration_state::init_legacy_migration_table,
+    )?;
+    initialize_recovery_schema(conn)
+}
+
+fn initialize_recovery_schema(conn: &Connection) -> Result<(), checkpoint::PersistenceError> {
+    initialize_table(
+        conn,
+        "recovery epoch schema",
+        recovery_epoch::init_epoch_table,
+    )?;
+    initialize_table(
+        conn,
+        "recovery operations schema",
+        recovery_operations::init_operations_table,
+    )?;
+    initialize_table(
+        conn,
+        "recovery attempts schema",
+        attempts::init_attempts_table,
+    )?;
+    initialize_table(
+        conn,
+        "effect intents schema",
+        effect_intents::init_effect_intents_table,
+    )?;
+    initialize_table(
+        conn,
+        "execution capsules schema",
+        capsule_store::init_capsules_table,
+    )?;
+    initialize_table(
+        conn,
+        "salvage lineage schema",
+        crate::engine::recovery::salvage::init_salvage_lineage_table,
+    )?;
+    initialize_table(
+        conn,
+        "merge artifacts schema",
+        crate::engine::recovery::typed_merge::init_merge_artifacts_table,
+    )
+}
+
+fn initialize_table(
+    conn: &Connection,
+    description: &str,
+    initialize: impl FnOnce(&Connection) -> rusqlite::Result<()>,
+) -> Result<(), checkpoint::PersistenceError> {
+    initialize(conn).map_err(|error| {
+        checkpoint::PersistenceError::Database(format!(
+            "Failed to initialize {description}: {error}"
         ))
     })
 }

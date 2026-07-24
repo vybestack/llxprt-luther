@@ -379,6 +379,8 @@ pub(super) fn workflow_config(request: &ChildWorkflowLaunchRequest) -> WorkflowC
         variables: std::collections::HashMap::new(),
         discovery: None,
         parent_orchestration: Default::default(),
+        merge_required: false,
+        merge_strategy: None,
         command_manifest: None,
         target_profile: None,
     }

@@ -149,23 +149,33 @@ impl EngineRunner {
 
     /// Create a new engine runner for a **fresh launch** with a custom database
     /// path and run context, failing closed if the initial `Starting`
-    /// `RunMetadata` row cannot be atomically inserted.
+    /// `RunMetadata` row and immutable `ExecutionCapsuleV1` cannot be
+    /// atomically inserted in a single SQLite `IMMEDIATE` transaction.
     ///
     /// Unlike [`with_db_path_and_context`](Self::with_db_path_and_context)
     /// (which best-effort upserts and is shared with resume), this constructor
-    /// uses an atomic `INSERT OR FAIL` so a `run_id` collision or DB error
-    /// surfaces immediately as an [`EngineError`] rather than silently
-    /// overwriting an existing row. When [`RunContext::launch_provenance`] is
-    /// `Some` (the normal case for new records), the provenance is persisted in
-    /// the same atomic insert, so the durable `Starting` row is the
-    /// authoritative launch record.
+    /// atomically inserts **both** the initial `Starting` `RunMetadata` and the
+    /// immutable `ExecutionCapsuleV1` via
+    /// [`persist_launch_atomically`](crate::persistence::persist_launch_atomically)
+    /// so a `run_id` collision, capsule collision, or DB error surfaces
+    /// immediately as an [`EngineError`] rather than silently overwriting an
+    /// existing row or leaving an orphan capsule. The capsule must exist before
+    /// any workflow execution/effects.
+    ///
+    /// The capsule is built by the caller from the exact resolved post-override
+    /// `WorkflowType`, `WorkflowConfig`, canonical config root,
+    /// `LaunchProvenance`, and resolved `base_ref` before this constructor is
+    /// called. There is no historical/backfill path and no separate persistence
+    /// call: the transaction owns the atomic pair.
     ///
     /// @plan:PLAN-20260722-ISSUE158-LAUNCH-PERSISTENCE
+    /// @plan:PLAN-20260723-SELFHOST-RELIABILITY.P08B
     pub fn with_db_path_for_launch(
         instance: WorkflowInstance,
         registry: ExecutorRegistry,
         db_path: impl AsRef<Path>,
         run_context: RunContext,
+        capsule: crate::engine::recovery::capsule::ExecutionCapsuleV1,
     ) -> Result<Self, EngineError> {
         let max_retries = instance.config.runtime.max_retries;
         let max_loops = instance.config.guard_limits.max_iterations.unwrap_or(10);
@@ -191,10 +201,12 @@ impl EngineRunner {
             terminal_ownership_failure: false,
         };
 
-        // Atomically insert the initial Starting row. Fail closed on collision
-        // or DB error rather than overwriting a prior run's record.
-        // @plan:PLAN-20260722-ISSUE158-LAUNCH-PERSISTENCE
-        runner.persist_initial_run_for_launch()?;
+        // Atomically insert the initial Starting row AND the immutable
+        // ExecutionCapsuleV1 in one SQLite IMMEDIATE transaction. Fail closed
+        // on collision, capsule collision, or DB error: neither row is durable
+        // on failure. The capsule exists before any workflow execution/effects.
+        // @plan:PLAN-20260723-SELFHOST-RELIABILITY.P08B
+        runner.persist_launch_with_capsule(&capsule)?;
 
         Ok(runner)
     }
@@ -288,36 +300,30 @@ impl EngineRunner {
         self.persist_metadata(&metadata);
     }
 
-    /// Atomically insert the initial `Starting` run record for a fresh launch,
-    /// failing closed on collision or DB error.
+    /// Atomically persist the initial `Starting` run record and the immutable
+    /// `ExecutionCapsuleV1` in one SQLite `IMMEDIATE` transaction, failing
+    /// closed on collision, capsule collision, or DB error.
     ///
-    /// Unlike [`persist_initial_run`](Self::persist_initial_run) (best-effort
-    /// upsert shared with resume), this uses
-    /// [`insert_initial_run_with_conn`](crate::persistence::insert_initial_run_with_conn)
-    /// so a `run_id` collision surfaces immediately and the existing row is
-    /// preserved. When `RunContext.launch_provenance` is `Some` the provenance
-    /// travels in the same atomic insert.
+    /// Uses
+    /// [`persist_launch_atomically`](crate::persistence::persist_launch_atomically)
+    /// so a `run_id` collision or capsule collision causes full rollback:
+    /// neither row is durable on failure. The capsule exists before any
+    /// workflow execution/effects.
     ///
-    /// @plan:PLAN-20260722-ISSUE158-LAUNCH-PERSISTENCE
-    fn persist_initial_run_for_launch(&mut self) -> Result<(), EngineError> {
+    /// @plan:PLAN-20260723-SELFHOST-RELIABILITY.P08B
+    fn persist_launch_with_capsule(
+        &mut self,
+        capsule: &crate::engine::recovery::capsule::ExecutionCapsuleV1,
+    ) -> Result<(), EngineError> {
         if !self.persist_registry {
             return Ok(());
         }
         let mut metadata = self.build_metadata(RunStatus::Starting);
         metadata.current_step = self.first_step_id();
         let conn = self.conn.borrow();
-        let outcome = crate::persistence::insert_initial_run_with_conn(&conn, &metadata)
+        crate::persistence::persist_launch_atomically(&conn, &metadata, capsule)
             .map_err(|err| EngineError::PersistenceError(err.to_string()))?;
-        match outcome {
-            crate::persistence::InitialRunInsert::Inserted => Ok(()),
-            crate::persistence::InitialRunInsert::Collision => {
-                Err(EngineError::PersistenceError(format!(
-                    "launch collision: a run record already exists for run_id '{}'; refusing to \
-                     overwrite the existing launch record",
-                    self.instance.run_id
-                )))
-            }
-        }
+        Ok(())
     }
 
     /// Best-effort persist of a run metadata record to the registry.

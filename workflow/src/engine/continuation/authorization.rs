@@ -61,10 +61,11 @@ impl ResumeAuthorization {
     ///
     /// For an ordinary Resume, returns [`ResumeAuthorization::OperatorCurrentWait`]
     /// only when run status, current step, and checkpoint status identify the
-    /// exact current external wait. For trusted internal Resume, returns
-    /// [`ResumeAuthorization::TrustedInternalWait`] only when a complete
-    /// `wait_states` row binds the same run, checkpoint identity, and resume
-    /// step. Otherwise the caller is a plain [`ResumeAuthorization::Operator`].
+    /// exact current external wait. A durable wait-state-backed
+    /// [`ResumeAuthorization::TrustedInternalWait`] is derived from the
+    /// presence of a matching `wait_states` row (not from any caller-controlled
+    /// bool), so a CLI `runs resume` and a daemon/child resume derive the same
+    /// authority from durable state. [C4]
     ///
     /// @plan:PLAN-20260623-LUTHER-CONTINUATION
     fn for_resume(
@@ -77,8 +78,7 @@ impl ResumeAuthorization {
             return ResumeAuthorization::Operator;
         }
         let identity = checkpoint_identity(checkpoint);
-        if !request.trusted_internal
-            && metadata.current_step.as_deref() == Some(checkpoint.step_id.as_str())
+        if metadata.current_step.as_deref() == Some(checkpoint.step_id.as_str())
             && metadata.status == RunStatus::WaitingExternal
             && checkpoint.state_snapshot.status == crate::persistence::CHECKPOINT_STATUS_WAITING
         {
@@ -87,8 +87,7 @@ impl ResumeAuthorization {
                 run_id: request.run_id.clone(),
             };
         }
-        if !request.trusted_internal
-            && metadata.current_step.as_deref() == Some(checkpoint.step_id.as_str())
+        if metadata.current_step.as_deref() == Some(checkpoint.step_id.as_str())
             && matches!(metadata.status, RunStatus::Running | RunStatus::Failed)
             && metadata.live_workflow_pid().is_none()
             && metadata.live_child_pid().is_none()
@@ -101,14 +100,11 @@ impl ResumeAuthorization {
                 run_id: request.run_id.clone(),
             };
         }
-        // TrustedInternalWait requires an explicit internal-trust capability
-        // (`request.trusted_internal`) in addition to a matching durable wait
-        // state. This ensures an ordinary CLI `runs resume` cannot infer
-        // internal trust from durable wait state alone — only the daemon
-        // launcher and parent-orchestration child-resume paths set this flag.
-        if !request.trusted_internal {
-            return ResumeAuthorization::Operator;
-        }
+        // TrustedInternalWait is derived from the durable wait_states row: a
+        // matching wait state (same run, checkpoint identity, and resume step)
+        // authorizes the bypass without any caller-controlled capability. This
+        // means CLI and daemon/child resume paths derive identical authority
+        // from durable state — there is no separate trusted_internal flag.
         let trusted = crate::persistence::get_wait_state(conn, &request.run_id)
             .ok()
             .flatten()

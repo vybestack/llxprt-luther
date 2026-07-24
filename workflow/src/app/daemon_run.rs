@@ -75,6 +75,7 @@ pub fn launch_daemon_workflow(
         &db_path,
         request.daemon_managed_claim,
         launch_provenance,
+        &config_root,
     )
     .map_err(|error| format!("create durable runner: {error}"))?;
     ensure_daemon_run_dirs(request)?;
@@ -173,6 +174,11 @@ pub fn ensure_daemon_run_dir(kind: &str, path: Option<&std::path::Path>) -> Resu
 pub fn resume_daemon_workflow(
     request: &luther_workflow::daemon::launcher::LaunchRequest,
 ) -> Result<luther_workflow::daemon::launcher::WorkflowLaunchResult, String> {
+    // P12 call site: capsule-driven resume wiring (designated P14 implementation).
+    // Once V1Adapter::build_instance is implemented (P14), this surface should
+    // load the persisted capsule, verify the envelope digest, and dispatch
+    // through adapter_for → Box<dyn CapsuleAdapter> instead of the ad-hoc
+    // type/config resolution below. @plan:PLAN-20260723-SELFHOST-RELIABILITY.P12
     let db_path = luther_workflow::runtime_paths::get_data_dir().join("checkpoints.db");
     let conn = rusqlite::Connection::open(&db_path).map_err(|e| e.to_string())?;
     let metadata = get_run_with_conn(&conn, &request.run_id)
@@ -284,45 +290,117 @@ struct DaemonResumeContext<'a> {
     workspace_path: &'a std::path::Path,
 }
 
-/// Promote workspace ownership, reconstruct the durable runner with persisted
-/// overrides, inject the verified authorization, commit the resume checkpoint,
-/// and run the workflow. All prior read-only checks must have passed.
+#[derive(Debug, serde::Deserialize)]
+struct DurableDaemonRunnerResult {
+    outcome: String,
+    #[serde(default)]
+    step_id: String,
+    #[serde(default)]
+    reason: String,
+}
+/// Execute an authorized daemon resume exclusively through RecoveryProtocolV1.
 fn execute_daemon_resume(
     ctx: &DaemonResumeContext<'_>,
     wait_config: &mut WorkflowConfig,
     persisted_overrides: &TargetProfileOverrides,
-    config_root: std::path::PathBuf,
+    _config_root: std::path::PathBuf,
     prepared: &luther_workflow::engine::continuation::PreparedResume,
 ) -> Result<luther_workflow::daemon::launcher::WorkflowLaunchResult, String> {
-    // Promote only after identity, ownership, current-step, checkpoint, and
-    // continuation authorization have all succeeded read-only.
     luther_workflow::engine::workspace_ownership::ensure_durable_workspace_ownership(
         ctx.workspace_path,
         &ctx.request.run_id,
     )
     .map_err(|error| format!("verify and promote workspace ownership: {error}"))?;
-    // Reconstruct overrides from persisted identity so the resume re-enters the
-    // original run's repo/issue/workspace/artifacts rather than trusting
-    // request-provided values that may not match persisted metadata.
     apply_target_profile_overrides(wait_config, persisted_overrides)
         .map_err(|e| format!("apply resume overrides: {e}"))?;
-    let config_dir = Some(config_root);
-    let mut runner = reconstruct_runner_with_daemon_provenance(
-        ctx.metadata,
-        &ctx.request.run_id,
-        ctx.db_path,
-        &config_dir,
-        wait_config.clone(),
-        ctx.request.daemon_managed_claim,
-    )?;
-    // Issue 158 slice 6: inject the ephemeral WorkspaceAuthorization
-    // reconstructed from the verified workspace descriptor into the resumed
-    // runner's RunContext BEFORE any resumed step executes, so resumed shell
-    // steps retain descriptor-anchored authorization without re-running the
-    // workspace_ownership_verify graph step.
-    runner.attach_workspace_authorization(prepared.authorization());
-    commit_resume_checkpoint(ctx.conn, &ctx.request.run_id, ctx.metadata)?;
-    run_daemon_runner(ctx.request, wait_config, ctx.db_path, &mut runner)
+
+    let step_id = select_daemon_resume_step(ctx)?;
+    let expected_epoch =
+        luther_workflow::persistence::recovery_epoch::read_epoch(ctx.conn, &ctx.request.run_id)
+            .map_err(|error| format!("read recovery epoch: {error}"))?;
+    let mut run_context =
+        crate::app::runs::run_context_from_metadata(ctx.metadata, &ctx.request.run_id);
+    run_context.daemon_managed = ctx.request.daemon_managed_claim;
+    run_context.workspace_authorization = Some(prepared.authorization());
+    let executor = luther_workflow::engine::recovery::RecoveryWiring
+        .runner_executor(ctx.db_path.to_path_buf(), run_context);
+    let recovery_request = luther_workflow::engine::recovery::RecoveryRequest {
+        run_id: ctx.request.run_id.clone(),
+        step_id,
+        expected_epoch,
+        operator_verb: luther_workflow::engine::recovery::OperatorVerb::Resume,
+    };
+    let outcome = luther_workflow::engine::recovery::RecoveryProtocolV1
+        .recover_with_executor(ctx.conn, ctx.workspace_path, &recovery_request, &executor)
+        .map_err(|error| format!("daemon recovery protocol failed: {error}"))?;
+    map_daemon_recovery_outcome(ctx, wait_config, outcome)
+}
+
+fn select_daemon_resume_step(ctx: &DaemonResumeContext<'_>) -> Result<String, String> {
+    let request = luther_workflow::engine::ContinuationRequest {
+        run_id: ctx.request.run_id.clone(),
+        kind: luther_workflow::engine::ContinuationKind::Resume,
+        force: true,
+    };
+    luther_workflow::engine::continuation::select_checkpoint(ctx.conn, &request, ctx.metadata)
+        .map(|checkpoint| checkpoint.step_id)
+        .map_err(|error| format!("select daemon recovery step: {error}"))
+}
+
+fn map_daemon_recovery_outcome(
+    ctx: &DaemonResumeContext<'_>,
+    wait_config: &WorkflowConfig,
+    outcome: luther_workflow::engine::recovery::RecoveryOutcome,
+) -> Result<luther_workflow::daemon::launcher::WorkflowLaunchResult, String> {
+    let attempt_id = match outcome {
+        luther_workflow::engine::recovery::RecoveryOutcome::Recovered { attempt_id, .. }
+        | luther_workflow::engine::recovery::RecoveryOutcome::AlreadyApplied {
+            attempt_id, ..
+        } => attempt_id,
+        other => return Err(format!("daemon recovery refused: {other:?}")),
+    };
+    let attempt = luther_workflow::persistence::attempts::load_attempt(ctx.conn, attempt_id)
+        .map_err(|error| format!("load recovery attempt: {error}"))?;
+    let runner_result: DurableDaemonRunnerResult = serde_json::from_value(
+        attempt
+            .runner_result_json
+            .ok_or_else(|| "recovery attempt has no runner result".to_string())?,
+    )
+    .map_err(|error| format!("decode recovery runner result: {error}"))?;
+    match runner_result.outcome.as_str() {
+        "success" => Ok(luther_workflow::daemon::launcher::WorkflowLaunchResult::CompletedSuccess),
+        "waiting_external" => {
+            persist_external_wait_state(
+                ctx.request,
+                wait_config,
+                ctx.db_path,
+                &runner_result.step_id,
+                &runner_result.reason,
+            )
+            .map_err(|error| format!("persist wait state: {error}"))?;
+            Ok(luther_workflow::daemon::launcher::WorkflowLaunchResult::SuspendedExternalWait)
+        }
+        "abandoned" | "failure" => classify_daemon_terminal(ctx),
+        "interrupted" => {
+            Ok(luther_workflow::daemon::launcher::WorkflowLaunchResult::CompletedFailure)
+        }
+        other => Err(format!("unknown recovery runner outcome: {other}")),
+    }
+}
+
+fn classify_daemon_terminal(
+    ctx: &DaemonResumeContext<'_>,
+) -> Result<luther_workflow::daemon::launcher::WorkflowLaunchResult, String> {
+    let metadata = get_run_with_conn(ctx.conn, &ctx.request.run_id)
+        .map_err(|error| format!("load run after recovery: {error}"))?
+        .ok_or_else(|| format!("missing run after recovery: {}", ctx.request.run_id))?;
+    if metadata.is_ownership_denied_terminal() {
+        Ok(luther_workflow::daemon::launcher::WorkflowLaunchResult::OwnershipDenied)
+    } else if metadata.is_cleanup_failure_abandonment() {
+        Ok(luther_workflow::daemon::launcher::WorkflowLaunchResult::CleanupAbandoned)
+    } else {
+        Ok(luther_workflow::daemon::launcher::WorkflowLaunchResult::CompletedFailure)
+    }
 }
 
 /// Resolve the workflow type and config for a daemon resume, applying the
@@ -408,7 +486,6 @@ fn authorize_daemon_resume_continuation(
         run_id: run_id.to_string(),
         kind: luther_workflow::engine::ContinuationKind::Resume,
         force: true,
-        trusted_internal: true,
     };
     let validation =
         luther_workflow::engine::continuation::validate_continuation(conn, &continuation_request)
@@ -567,29 +644,6 @@ pub(super) fn resolve_resume_workspace_path<'a>(
         }
     }
     Ok(persisted)
-}
-
-// Commit the request-selected checkpoint; the continuation transaction
-// revalidates the exact identity against concurrent replacement.
-fn commit_resume_checkpoint(
-    conn: &rusqlite::Connection,
-    run_id: &str,
-    metadata: &luther_workflow::persistence::RunMetadata,
-) -> Result<(), String> {
-    let resume_request = luther_workflow::engine::ContinuationRequest {
-        run_id: run_id.to_string(),
-        kind: luther_workflow::engine::ContinuationKind::Resume,
-        force: true,
-        trusted_internal: true,
-    };
-    let checkpoint =
-        luther_workflow::engine::continuation::select_checkpoint(conn, &resume_request, metadata)
-            .map_err(|e| format!("select resume checkpoint: {e}"))?;
-    let checkpoint_identity =
-        luther_workflow::engine::continuation::checkpoint_identity(&checkpoint);
-    luther_workflow::engine::commit_continuation(conn, &resume_request, &checkpoint_identity)
-        .map_err(|e| format!("commit resume: {e}"))?;
-    Ok(())
 }
 
 pub fn run_daemon_runner(

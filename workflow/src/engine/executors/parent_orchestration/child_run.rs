@@ -224,28 +224,6 @@ pub(super) fn require_current_step(
     Ok(())
 }
 
-/// Commit the resume continuation using a checkpoint identity selected
-/// during read-only preparation. This is the mutation-only companion to
-/// [`super::child_resume_preparation::prepare_child_resume_readonly`]: it
-/// re-validates the bound identity inside the `IMMEDIATE` transaction so a
-/// concurrent checkpoint replacement cannot sneak through as a stale or
-/// substituted resume point.
-pub(super) fn commit_resume_checkpoint_with_identity(
-    conn: &rusqlite::Connection,
-    request: &ChildWorkflowLaunchRequest,
-    checkpoint_identity: &str,
-) -> Result<(), String> {
-    let resume_request = crate::engine::ContinuationRequest {
-        run_id: request.run_id.clone(),
-        kind: crate::engine::ContinuationKind::Resume,
-        force: true,
-        trusted_internal: true,
-    };
-    crate::engine::commit_continuation(conn, &resume_request, checkpoint_identity)
-        .map(|_| ())
-        .map_err(|err| format!("commit child resume: {err}"))
-}
-
 pub fn child_run_context(
     config: &WorkflowConfig,
     request: &ChildWorkflowLaunchRequest,

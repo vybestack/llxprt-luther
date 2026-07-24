@@ -40,6 +40,8 @@ fn test_config() -> WorkflowConfig {
         .collect(),
         discovery: None,
         parent_orchestration: Default::default(),
+        merge_required: false,
+        merge_strategy: None,
         command_manifest: None,
         target_profile: None,
     }

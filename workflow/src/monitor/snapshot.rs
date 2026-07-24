@@ -80,7 +80,8 @@ impl RunCounts {
                 RunStatus::WaitingForChecks
                 | RunStatus::WaitingExternal
                 | RunStatus::Blocked
-                | RunStatus::Paused => {}
+                | RunStatus::Paused
+                | RunStatus::ReviewReady => {}
             }
         }
         counts

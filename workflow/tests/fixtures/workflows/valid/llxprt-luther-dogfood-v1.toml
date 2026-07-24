@@ -3,6 +3,8 @@
 # @requirement:REQ-LF-PROF-001,REQ-LF-DATA-001,REQ-LF-DATA-002,REQ-LF-DATA-003
 
 workflow_type_id = "llxprt-luther-dogfood-v1"
+merge_required = true
+merge_strategy = "squash"
 
 # =============================================================================
 # STEPS (14 total - write_issue_files eliminated, fetch_issue writes directly)
@@ -922,13 +924,35 @@ fi
 """
 
 [[steps]]
-step_id = "log_completion"
+step_id = "wait_for_merge"
 step_type = "shell"
-description = "Log successful PR creation"
+description = "Wait for the configured squash merge before typed completion"
 
 [steps.parameters]
 command = """
-echo "Luther dogfood PR created successfully for issue #{issue_number}: {pr_url}"
+set -euo pipefail
+STATE="$(gh pr view "{pr_number}" --repo "{target_repo}" --json state --jq .state)"
+if [ "$STATE" = "MERGED" ]; then
+  exit 0
+fi
+if [ "$STATE" = "CLOSED" ]; then
+  exit 10
+fi
+exit 2
+"""
+
+[steps.parameters.exit_code_map]
+"2" = "wait"
+"10" = "fatal"
+
+[[steps]]
+step_id = "log_completion"
+step_type = "shell"
+description = "Log successful PR merge observation"
+
+[steps.parameters]
+command = """
+echo "Luther dogfood PR merge observed for issue #{issue_number}: {pr_url}"
 """
 
 # =============================================================================
@@ -1282,8 +1306,19 @@ condition = "fatal"
 
 [[transitions]]
 from = "mark_coderabbit_feedback"
+to = "wait_for_merge"
+condition = "success"
+
+[[transitions]]
+from = "wait_for_merge"
 to = "log_completion"
 condition = "success"
+
+[[transitions]]
+from = "wait_for_merge"
+to = "post_pr_failure_terminal"
+condition = "fatal"
+max_iterations = 1
 
 [[transitions]]
 from = "mark_coderabbit_feedback"

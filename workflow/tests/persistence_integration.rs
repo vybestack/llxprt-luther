@@ -45,6 +45,7 @@ fn test_workflow_type() -> WorkflowType {
                 produces: None,
                 consumes: None,
                 terminal: None,
+                recovery_policy: None,
                 parameters: None,
             },
             luther_workflow::workflow::schema::StepDef {
@@ -54,6 +55,7 @@ fn test_workflow_type() -> WorkflowType {
                 produces: None,
                 consumes: None,
                 terminal: None,
+                recovery_policy: None,
                 parameters: None,
             },
         ],
@@ -94,6 +96,8 @@ fn test_workflow_config() -> WorkflowConfig {
         variables: std::collections::HashMap::new(),
         discovery: None,
         parent_orchestration: Default::default(),
+        merge_required: false,
+        merge_strategy: None,
         command_manifest: None,
         target_profile: None,
     }

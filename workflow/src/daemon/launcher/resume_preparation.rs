@@ -336,7 +336,6 @@ fn verify_resume_continuation_authorization(
         run_id: run_id.to_string(),
         kind: crate::engine::ContinuationKind::Resume,
         force: true,
-        trusted_internal: true,
     };
     let validation = crate::engine::continuation::validate_continuation(conn, &request)
         .map_err(|err| rusqlite::Error::ToSqlConversionFailure(err.into()))?;

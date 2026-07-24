@@ -401,6 +401,23 @@ pub fn get_leases_for_issues(
     Ok(leases)
 }
 
+/// Fetch the lease (if any) currently associated with the given run id.
+///
+/// Used by the recovery protocol's authority snapshot to capture and revalidate
+/// the exact lease state for a run between the prepare and reserve phases. A
+/// run without an associated lease (e.g. a non-daemon CLI run) returns `None`.
+///
+/// @plan:PLAN-20260723-SELFHOST-RELIABILITY.P11
+/// @requirement:REQ-RP-004
+pub fn get_lease_for_run(conn: &Connection, run_id: &str) -> SqliteResult<Option<IssueLease>> {
+    conn.query_row(
+        &format!("{SELECT_COLUMNS} WHERE run_id = ?1 ORDER BY updated_at DESC LIMIT 1"),
+        params![run_id],
+        row_to_lease,
+    )
+    .optional()
+}
+
 /// Update a lease's status (and optionally associate a run id).
 /// @plan:PLAN-20260415-DAEMON-DISCOVERY.P02
 pub fn update_lease_status(

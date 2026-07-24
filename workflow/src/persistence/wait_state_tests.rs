@@ -607,6 +607,7 @@ fn run_status_terminal_sql_matches_is_terminal() {
         RunStatus::Remediating,
         RunStatus::Blocked,
         RunStatus::Paused,
+        RunStatus::ReviewReady,
         RunStatus::Completed,
         RunStatus::Failed,
         RunStatus::Abandoned,

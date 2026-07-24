@@ -577,6 +577,7 @@ mod tests {
             produces: None,
             consumes: None,
             terminal: None,
+            recovery_policy: None,
         }
     }
 

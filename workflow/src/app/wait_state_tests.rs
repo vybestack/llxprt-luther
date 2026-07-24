@@ -34,6 +34,8 @@ fn workflow_config(artifact_dir: &std::path::Path) -> WorkflowConfig {
         )]),
         discovery: None,
         parent_orchestration: Default::default(),
+        merge_required: false,
+        merge_strategy: None,
         command_manifest: None,
         target_profile: None,
     }
@@ -588,6 +590,7 @@ fn resolve_step_parameters_handles_null_and_object() {
         produces: None,
         consumes: None,
         terminal: None,
+        recovery_policy: None,
     };
     assert_eq!(
         resolve_step_parameters(&config, &null_step).unwrap(),

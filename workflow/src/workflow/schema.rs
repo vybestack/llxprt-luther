@@ -41,6 +41,30 @@ pub struct WorkflowConfig {
     /// Parent/sub-issue orchestration policy (built-in defaults when unset).
     #[serde(default)]
     pub parent_orchestration: ParentOrchestrationConfig,
+    /// Whether this run requires an observed, verified merge before it may
+    /// reach terminal `Completed` semantics. When `true`, the normal runner
+    /// completion path writes [`crate::persistence::run_metadata::RunStatus::ReviewReady`]
+    /// instead of `Completed`; the run only reaches `Merged` via
+    /// [`crate::engine::recovery::typed_merge::complete_typed_merge`], which
+    /// atomically commits a typed merge artifact and the status transition.
+    /// Defaults to `false` for full backward compatibility with existing
+    /// non-merge workflows. [B12/C11]
+    /// @plan:PLAN-20260723-SELFHOST-RELIABILITY.P17
+    /// @requirement:REQ-RP-010
+    #[serde(default)]
+    pub merge_required: bool,
+    /// The expected PR merge strategy for a merge-required run. [P17]
+    ///
+    /// When `merge_required` is `true`, this field is the **authoritative**
+    /// strategy evidence that the typed merge verifier cross-checks against
+    /// the observed merge structure. The verifier never guesses: if the
+    /// observed merge structure is inconsistent with this declared strategy,
+    /// it fails closed. If `merge_required` is `true` but this is `None`, the
+    /// typed merge completion fails closed (no implicit default).
+    /// @plan:PLAN-20260723-SELFHOST-RELIABILITY.P17
+    /// @requirement:REQ-RP-010
+    #[serde(default)]
+    pub merge_strategy: Option<MergeStrategyConfig>,
     /// Optional argv-only command manifest for repository-specific gates.
     pub command_manifest: Option<CommandManifest>,
     /// Optional config-first target profile used to derive legacy runtime
@@ -324,6 +348,7 @@ impl WorkflowRunRef {
 
 /// Definition of a workflow step.
 /// @plan:PLAN-20260404-INITIAL-RUNTIME.P03
+/// @plan:PLAN-20260723-SELFHOST-RELIABILITY.P06
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct StepDef {
     pub step_id: String,
@@ -343,6 +368,14 @@ pub struct StepDef {
     /// for back-compat even when this is `None`.
     /// @plan:PLAN-20260404-INITIAL-RUNTIME.P03
     pub terminal: Option<bool>,
+    /// Explicit recovery policy declared on the canonical step definition.
+    /// When present, takes precedence over `SAFE_RERUN_STEPS` classification.
+    /// Persisted in canonical workflow bytes (canonicalize_workflow_type) so
+    /// the capsule envelope digest covers it. [B7]
+    /// @plan:PLAN-20260723-SELFHOST-RELIABILITY.P06
+    /// @requirement:REQ-RP-005
+    #[serde(default)]
+    pub recovery_policy: Option<crate::engine::recovery::policy::StepRecoveryPolicy>,
 }
 
 /// Definition of a transition between steps.
@@ -391,12 +424,44 @@ pub struct RepoConfig {
     pub diff_path_normalization: DiffPathNormalization,
 }
 
-#[derive(Debug, Clone, Default, serde::Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum DiffPathNormalization {
     #[default]
     RepoRelative,
     BaseRelative,
+}
+
+/// Config-declared expected merge strategy for a merge-required run. [P17]
+///
+/// This is the authoritative strategy evidence that the typed merge verifier
+/// cross-checks against the observed merge structure (parent count). The
+/// verifier never guesses; if `merge_required` is `true` but no strategy is
+/// declared, typed merge completion fails closed.
+///
+/// @plan:PLAN-20260723-SELFHOST-RELIABILITY.P17
+/// @requirement:REQ-RP-010
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MergeStrategyConfig {
+    /// A standard merge commit (2+ parents).
+    MergeCommit,
+    /// A squash merge (1 parent).
+    Squash,
+    /// A rebase merge (1 parent).
+    Rebase,
+}
+
+impl MergeStrategyConfig {
+    /// Convert to the typed-merge [`MergeStrategy`] domain enum. [P17]
+    #[must_use]
+    pub fn to_merge_strategy(self) -> crate::engine::recovery::typed_merge::MergeStrategy {
+        match self {
+            Self::MergeCommit => crate::engine::recovery::typed_merge::MergeStrategy::MergeCommit,
+            Self::Squash => crate::engine::recovery::typed_merge::MergeStrategy::Squash,
+            Self::Rebase => crate::engine::recovery::typed_merge::MergeStrategy::Rebase,
+        }
+    }
 }
 
 /// Guard limits for workflow execution.

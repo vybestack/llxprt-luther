@@ -10,6 +10,10 @@ pub mod continuation;
 pub mod executor;
 pub mod executors;
 pub mod instance;
+/// Execution capsule and recovery-protocol scaffolding. [C8]
+/// @plan:PLAN-20260723-SELFHOST-RELIABILITY.P06
+/// @plan:PLAN-20260723-SELFHOST-RELIABILITY.P09
+pub mod recovery;
 pub mod runner;
 /// Typed validation of identity-bearing tokens interpolated into shell
 /// commands. @plan:PLAN-20260722-ISSUE158-SHELL-SAFE-TOKENS

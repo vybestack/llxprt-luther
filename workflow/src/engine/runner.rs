@@ -26,6 +26,8 @@ mod construction;
 mod failure_cleanup;
 mod lease_coordination;
 
+pub use completion::status_for_completion;
+
 /// Contextual paths, GitHub references, and ephemeral authorities for a run.
 /// Workspace authorization is reconstructed from verified ownership on every
 /// process entry and is never persisted in run metadata.
@@ -250,7 +252,74 @@ impl EngineRunner {
     pub fn run(&mut self) -> Result<RunOutcome, EngineError> {
         self.resume_from_checkpoint()?;
         self.mark_run_started();
+        self.run_transition_loop()
+    }
 
+    /// Recovery-only execution entry point.
+    ///
+    /// Runs the **normal transition loop** from the runner's already
+    /// capsule-reconstructed/reserved current step (`self.instance.current_state`)
+    /// WITHOUT calling [`resume_from_checkpoint`](Self::resume_from_checkpoint)
+    /// and WITHOUT reopening or advancing the recovery epoch. This is the same
+    /// internal loop used by [`run`](Self::run), so recovery execution preserves
+    /// the exact ownership-denied handling, failure-cleanup routing, per-edge
+    /// loop limits, checkpoint persistence, interrupt checks, external waits,
+    /// and lease heartbeat semantics of a normal run.
+    ///
+    /// The caller (the capsule-backed recovery executor) is responsible for
+    /// reconstructing the [`WorkflowInstance`] from the immutable capsule,
+    /// transitioning it to the reserved step, and constructing the runner
+    /// through the resume construction path (which loads checkpoint state and
+    /// builds the step context). This method only executes the transition loop.
+    ///
+    /// Use [`state_snapshot`](Self::state_snapshot) after this returns to obtain
+    /// the exact final runner state snapshot (no fabricated default). Recovery
+    /// provenance must be derived from the actual [`RunOutcome`] plus that
+    /// exact snapshot; no synthetic success is ever produced.
+    ///
+    /// @plan:PLAN-20260723-SELFHOST-RELIABILITY.P14
+    /// @requirement:REQ-RP-002,REQ-RP-009
+    pub fn run_from_current_step(&mut self) -> Result<RunOutcome, EngineError> {
+        self.run_transition_loop()
+    }
+
+    /// Return the exact final runner state snapshot.
+    ///
+    /// Captures the live `retry_count`, `edge_loop_counts`, checkpointable
+    /// context, and the provided status string into a [`StateSnapshot`]. This
+    /// is the truthful snapshot of the runner's current state — never a
+    /// fabricated default. The capsule-backed recovery executor uses this to
+    /// map the actual post-execution runner state into the durable attempt row.
+    ///
+    /// @plan:PLAN-20260723-SELFHOST-RELIABILITY.P14
+    /// @requirement:REQ-RP-002
+    #[must_use]
+    pub fn state_snapshot(&self, status: &str) -> StateSnapshot {
+        StateSnapshot {
+            retry_count: self.retry_count,
+            loop_count: self.loop_count(),
+            edge_loop_counts: self.edge_loop_counts.clone(),
+            context: self.context.checkpoint_values(),
+            status: status.to_string(),
+        }
+    }
+
+    /// The shared transition loop.
+    ///
+    /// This is the single control-flow loop used by both [`run`](Self::run) and
+    /// [`run_from_current_step`](Self::run_from_current_step). It begins at
+    /// `self.instance.current_state` and runs the normal step → transition →
+    /// persist cycle to a terminal [`RunOutcome`], preserving all run-loop
+    /// semantics: interrupt checks, ownership-denied terminal handling,
+    /// failure-cleanup routing, per-edge loop limits, checkpoint persistence,
+    /// external waits, and lease heartbeats.
+    ///
+    /// Callers are responsible for pre-loop setup: [`run`](Self::run) calls
+    /// [`resume_from_checkpoint`](Self::resume_from_checkpoint) and
+    /// [`mark_run_started`](Self::mark_run_started) first, while
+    /// [`run_from_current_step`](Self::run_from_current_step) skips both
+    /// because the caller has already reconstructed/reserved the current step.
+    fn run_transition_loop(&mut self) -> Result<RunOutcome, EngineError> {
         let mut current_step_id = self.instance.current_state.clone();
 
         loop {
@@ -324,6 +393,12 @@ impl EngineRunner {
     }
 
     fn resume_from_checkpoint(&mut self) -> Result<(), EngineError> {
+        // P12 call site: capsule-driven resume wiring (designated P14 implementation).
+        // Once V1Adapter::build_instance is implemented (P14), the recovery
+        // protocol's capsule-backed executor will own the external step
+        // execution; this private method remains the engine-internal checkpoint
+        // restoration used by run() and reconstruct_runner.
+        // @plan:PLAN-20260723-SELFHOST-RELIABILITY.P12
         if let Some(failure) = self
             .load_metadata()
             .and_then(|metadata| metadata.failure_cleanup)

@@ -83,6 +83,7 @@ fn seq_step(step_id: &str) -> StepDef {
         produces: None,
         consumes: None,
         terminal: None,
+        recovery_policy: None,
         parameters: None,
     }
 }
@@ -118,6 +119,8 @@ fn make_config(max_iterations: Option<u32>) -> WorkflowConfig {
         variables: std::collections::HashMap::new(),
         discovery: None,
         parent_orchestration: Default::default(),
+        merge_required: false,
+        merge_strategy: None,
         command_manifest: None,
         target_profile: None,
     }
@@ -140,6 +143,7 @@ fn test_per_edge_limit_abandons_when_exceeded() {
             produces: None,
             consumes: None,
             terminal: None,
+            recovery_policy: None,
             parameters: None,
         },
         StepDef {
@@ -149,6 +153,7 @@ fn test_per_edge_limit_abandons_when_exceeded() {
             produces: None,
             consumes: None,
             terminal: None,
+            recovery_policy: None,
             parameters: None,
         },
     ];
@@ -233,6 +238,7 @@ fn test_per_edge_limit_allows_iterations_within_limit() {
             produces: None,
             consumes: None,
             terminal: None,
+            recovery_policy: None,
             parameters: None,
         },
         StepDef {
@@ -242,6 +248,7 @@ fn test_per_edge_limit_allows_iterations_within_limit() {
             produces: None,
             consumes: None,
             terminal: None,
+            recovery_policy: None,
             parameters: None,
         },
         StepDef {
@@ -251,6 +258,7 @@ fn test_per_edge_limit_allows_iterations_within_limit() {
             produces: None,
             consumes: None,
             terminal: None,
+            recovery_policy: None,
             parameters: None,
         },
     ];
@@ -427,6 +435,7 @@ fn test_global_fallback_used_when_no_per_edge_limit() {
             produces: None,
             consumes: None,
             terminal: None,
+            recovery_policy: None,
             parameters: None,
         },
         StepDef {
@@ -436,6 +445,7 @@ fn test_global_fallback_used_when_no_per_edge_limit() {
             produces: None,
             consumes: None,
             terminal: None,
+            recovery_policy: None,
             parameters: None,
         },
     ];
@@ -507,6 +517,7 @@ fn test_per_edge_limit_overrides_global() {
             produces: None,
             consumes: None,
             terminal: None,
+            recovery_policy: None,
             parameters: None,
         },
         StepDef {
@@ -516,6 +527,7 @@ fn test_per_edge_limit_overrides_global() {
             produces: None,
             consumes: None,
             terminal: None,
+            recovery_policy: None,
             parameters: None,
         },
     ];
@@ -636,6 +648,7 @@ fn test_abandoned_reason_identifies_edge() {
             produces: None,
             consumes: None,
             terminal: None,
+            recovery_policy: None,
             parameters: None,
         },
         StepDef {
@@ -645,6 +658,7 @@ fn test_abandoned_reason_identifies_edge() {
             produces: None,
             consumes: None,
             terminal: None,
+            recovery_policy: None,
             parameters: None,
         },
     ];
@@ -723,6 +737,7 @@ fn test_forward_transitions_not_counted() {
             produces: None,
             consumes: None,
             terminal: None,
+            recovery_policy: None,
             parameters: None,
         },
         StepDef {
@@ -732,6 +747,7 @@ fn test_forward_transitions_not_counted() {
             produces: None,
             consumes: None,
             terminal: None,
+            recovery_policy: None,
             parameters: None,
         },
         StepDef {
@@ -741,6 +757,7 @@ fn test_forward_transitions_not_counted() {
             produces: None,
             consumes: None,
             terminal: None,
+            recovery_policy: None,
             parameters: None,
         },
         StepDef {
@@ -750,6 +767,7 @@ fn test_forward_transitions_not_counted() {
             produces: None,
             consumes: None,
             terminal: None,
+            recovery_policy: None,
             parameters: None,
         },
     ];
@@ -822,6 +840,7 @@ fn test_loop_count_accessor_returns_sum_of_edge_counts() {
             produces: None,
             consumes: None,
             terminal: None,
+            recovery_policy: None,
             parameters: None,
         },
         StepDef {
@@ -831,6 +850,7 @@ fn test_loop_count_accessor_returns_sum_of_edge_counts() {
             produces: None,
             consumes: None,
             terminal: None,
+            recovery_policy: None,
             parameters: None,
         },
     ];

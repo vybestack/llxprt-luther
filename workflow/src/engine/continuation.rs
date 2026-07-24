@@ -149,15 +149,6 @@ pub struct ContinuationRequest {
     pub run_id: String,
     pub kind: ContinuationKind,
     pub force: bool,
-    /// Explicit internal-trust capability for engine-internal resume paths
-    /// (daemon launcher, parent-orchestration child resume). This is never
-    /// set by CLI handlers, so an operator `runs resume` cannot infer
-    /// `TrustedInternalWait` authorization from durable wait state alone.
-    /// The capability is revalidated against the durable `wait_states` row
-    /// during authorization and inside the commit transaction, failing closed
-    /// to [`ResumeAuthorization::Operator`] when the wait identity does not
-    /// match.
-    pub trusted_internal: bool,
 }
 
 /// Errors that make a continuation impossible to plan or apply.

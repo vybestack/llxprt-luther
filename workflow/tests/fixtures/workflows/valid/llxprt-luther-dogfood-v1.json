@@ -1,5 +1,7 @@
 {
   "workflow_type_id": "llxprt-luther-dogfood-v1",
+  "merge_required": true,
+  "merge_strategy": "squash",
   "steps": [
     {
       "step_id": "workspace_ownership_verify",
@@ -625,11 +627,23 @@
       }
     },
     {
+      "step_id": "wait_for_merge",
+      "step_type": "shell",
+      "description": "Wait for the configured squash merge before typed completion",
+      "parameters": {
+        "command": "set -euo pipefail\nSTATE=\"$(gh pr view \"{pr_number}\" --repo \"{target_repo}\" --json state --jq .state)\"\nif [ \"$STATE\" = \"MERGED\" ]; then\n  exit 0\nfi\nif [ \"$STATE\" = \"CLOSED\" ]; then\n  exit 10\nfi\nexit 2\n",
+        "exit_code_map": {
+          "2": "wait",
+          "10": "fatal"
+        }
+      }
+    },
+    {
       "step_id": "log_completion",
       "step_type": "shell",
-      "description": "Log successful PR creation",
+      "description": "Log successful PR merge observation",
       "parameters": {
-        "command": "echo \"Luther dogfood PR created successfully for issue #{issue_number}: {pr_url}\"\n"
+        "command": "echo \"Luther dogfood PR merge observed for issue #{issue_number}: {pr_url}\"\n"
       }
     }
   ],
@@ -972,8 +986,19 @@
     },
     {
       "from": "mark_coderabbit_feedback",
+      "to": "wait_for_merge",
+      "condition": "success"
+    },
+    {
+      "from": "wait_for_merge",
       "to": "log_completion",
       "condition": "success"
+    },
+    {
+      "from": "wait_for_merge",
+      "to": "post_pr_failure_terminal",
+      "condition": "fatal",
+      "max_iterations": 1
     },
     {
       "from": "mark_coderabbit_feedback",
