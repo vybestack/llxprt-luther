@@ -126,6 +126,9 @@ test('an unrecognized status degrades to partial', () => {
 });
 
 test('a skipped run is reported as skipped and passes', () => {
+  // The changed/reviewed inputs are deliberately non-empty and would otherwise
+  // resolve to 'partial'. Keeping them proves the skip is decided before the
+  // coverage comparison, which empty inputs could not distinguish.
   const result = evaluateGate({
     ...base,
     skipped: true,
