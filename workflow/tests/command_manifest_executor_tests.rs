@@ -973,3 +973,39 @@ fn diff_gate_sees_committed_work() {
         "committed work must remain visible to the diff gate, got: {committed:?}"
     );
 }
+
+/// An unresolvable base ref must degrade to "no committed range" rather than
+/// erroring, because some workspaces legitimately lack the base. Committed work
+/// then becomes invisible, which is why the workflow step must fail loudly when
+/// it cannot produce a changed-file list rather than letting an empty list read
+/// as full coverage.
+#[test]
+fn diff_gate_treats_an_unresolvable_base_ref_as_no_committed_range() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let root = temp.path();
+    let git = |args: &[&str]| {
+        let status = std::process::Command::new("git")
+            .args(args)
+            .current_dir(root)
+            .status()
+            .expect("git");
+        assert!(status.success(), "git {args:?} failed");
+    };
+    git(&["init", "-q"]);
+    git(&["config", "user.email", "t@example.com"]);
+    git(&["config", "user.name", "t"]);
+    std::fs::create_dir_all(root.join("workflow/src")).expect("mkdir");
+    std::fs::write(root.join("workflow/src/a.rs"), "fn a() {}\n").expect("write");
+    git(&["add", "-A"]);
+    git(&["commit", "-qm", "work"]);
+
+    let paths = luther_workflow::engine::executors::verify::changed_paths_for_test(
+        root,
+        Some("origin/does-not-exist"),
+    )
+    .expect("an unresolvable base must not be an error");
+    assert!(
+        !paths.iter().any(|p| p.contains("workflow/src/a.rs")),
+        "an unresolvable base yields no committed range, got: {paths:?}"
+    );
+}

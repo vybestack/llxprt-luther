@@ -126,6 +126,31 @@ fn seed_round(temp: &tempfile::TempDir, head_sha: &str, ci_failures: Option<usiz
         .expect("write ci failures");
 }
 
+/// Seed a round whose `ci-failures` artifact exists but whose `failures` key is
+/// not an array, which `seed_round` cannot express.
+fn seed_round_with_malformed_failures(temp: &tempfile::TempDir, head_sha: &str) {
+    seed_round(temp, head_sha, None);
+    let store = PrFollowupArtifactStore::new(temp.path().join("artifacts"));
+    store
+        .write_json_artifact(JsonArtifactWriteRequest::new(
+            ArtifactWriteContext::new(
+                &binding_for(head_sha),
+                "ci-failures",
+                "collect_ci_failures",
+                4,
+                &FixedClock,
+            ),
+            &serde_json::json!({
+                "collection_state": "collected",
+                "failures": null,
+                "fatal_source": null,
+                "watcher_fatal_source": null
+            }),
+            None,
+        ))
+        .expect("write malformed ci failures");
+}
+
 fn run_guard(temp: &tempfile::TempDir, head_sha: &str) -> StepOutcome {
     let mut context = context_for(temp);
     PostPrIterationGuardExecutor
@@ -146,7 +171,7 @@ fn guard_artifact(temp: &tempfile::TempDir, head_sha: &str) -> serde_json::Value
 #[test]
 fn objective_ci_failure_rounds_do_not_consume_the_review_budget() {
     let temp = tempfile::tempdir().expect("tempdir");
-    for head_sha in HEAD_SHAS.iter().take(4) {
+    for (round, head_sha) in HEAD_SHAS.iter().take(4).enumerate() {
         seed_round(&temp, head_sha, Some(2));
         let outcome = run_guard(&temp, head_sha);
         assert_eq!(
@@ -161,6 +186,16 @@ fn objective_ci_failure_rounds_do_not_consume_the_review_budget() {
                 .and_then(serde_json::Value::as_u64),
             Some(0),
             "rounds driven by concrete CI failures must never consume the review budget"
+        );
+        // The objective budget must still advance. Without this, an
+        // implementation that stopped counting objective rounds would satisfy
+        // the assertion above while permitting an unbounded remediation loop.
+        assert_eq!(
+            artifact
+                .get("iteration_index")
+                .and_then(serde_json::Value::as_u64),
+            Some(round as u64),
+            "each objective round must consume exactly one unit of the objective budget"
         );
     }
 }
@@ -266,5 +301,24 @@ fn same_head_reentry_does_not_consume_the_review_budget() {
         after_new_head,
         after_reentry.map(|index| index + 1),
         "a genuinely new head must consume exactly one unit of review budget"
+    );
+}
+
+/// A present `ci-failures` artifact whose `failures` key is not an array must
+/// be treated as objective, exactly like a missing artifact. Unreadable state
+/// must never silently drain the advisory review budget.
+#[test]
+fn malformed_ci_failures_payload_is_classified_as_objective() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    for head_sha in HEAD_SHAS.iter().take(4) {
+        seed_round_with_malformed_failures(&temp, head_sha);
+        run_guard(&temp, head_sha);
+    }
+    assert_eq!(
+        guard_artifact(&temp, HEAD_SHAS[3])
+            .get("review_iteration_index")
+            .and_then(serde_json::Value::as_u64),
+        Some(0),
+        "a malformed failures payload must fail closed to objective, not consume review budget"
     );
 }

@@ -26,8 +26,14 @@ is roughly 4 files, three of them tests, using a positive-allowlist
 ## 2. Never fix defects by growing agent prompts
 
 Luther exists to provide a consistent typed workflow. If a behaviour is
-deterministic, it belongs in a typed workflow step with tests in the Rust suite
-— never as prose in a step prompt.
+deterministic, it belongs in tested workflow code — never as prose in a step
+prompt.
+
+Prefer a typed Rust step covered by the Rust suite. Where the behaviour belongs
+to CI itself rather than to the engine, a tested module under `.github/scripts/`
+covered by the node test suite satisfies the same requirement: the point is that
+the behaviour is executable and asserted, not which language expresses it. The
+OCR completeness gate is CI-side and is therefore implemented and tested there.
 
 Deterministic work includes path resolution, null/empty handling, subprocess
 working directory, artifact selection, and output parsing.
