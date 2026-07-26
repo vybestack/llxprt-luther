@@ -1275,7 +1275,7 @@ fn test_ocr_pr_review_installs_locally_pinned_version() {
     let content = ocr_pr_review_workflow_content();
     // Single source of truth: OCR_VERSION must be the reviewed exact release.
     let pinned_version = ocr_version_from_workflow();
-    assert_eq!(pinned_version, "1.7.9");
+    assert_eq!(pinned_version, "1.7.16");
     assert!(
         content
             .contains(r#"OCR_PREFIX="${RUNNER_TEMP}/ocr-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}""#),

@@ -2,6 +2,11 @@
 /// @plan:PLAN-20260408-LLXPRT-FIRST.P08
 /// Verify executor - runs a configurable sequence of verification checks.
 /// @requirement:REQ-LF-VERIFY-001,REQ-LF-VERIFY-002,REQ-LF-VERIFY-003,REQ-LF-VERIFY-004,REQ-LF-VERIFY-005,REQ-LF-VERIFY-006,REQ-LF-VERIFY-007,REQ-LF-VERIFY-008,REQ-LF-VERIFY-009
+mod changed_paths;
+
+pub use changed_paths::changed_paths_for_test;
+use changed_paths::git_changed_paths;
+
 use crate::engine::executor::{interpolate_string, StepContext, StepExecutor};
 use crate::engine::executors::command_manifest::{
     manifest_path_context_from_step, resolve_entry_argv, resolve_manifest_group_id,
@@ -317,86 +322,6 @@ fn valid_existing_pr_number(existing_pr: &str) -> bool {
         .trim()
         .parse::<u64>()
         .is_ok_and(|number| number != 0)
-}
-
-/// Paths the run has changed, whether or not they are still uncommitted.
-///
-/// The gate asks whether the run produced qualifying changes. Committing does
-/// not undo that, so an uncommitted-only view would report no changes as soon
-/// as the work was committed. The committed range against the base is
-/// therefore consulted as well, and the two views are merged.
-/// Expose the changed-path computation so its committed-range behavior can be
-/// exercised directly against a real repository.
-pub fn changed_paths_for_test(
-    work_dir: &std::path::Path,
-    base_ref: Option<&str>,
-) -> Result<Vec<String>, EngineError> {
-    git_changed_paths(work_dir, base_ref)
-}
-
-fn git_changed_paths(
-    work_dir: &std::path::Path,
-    base_ref: Option<&str>,
-) -> Result<Vec<String>, EngineError> {
-    let mut paths = git_worktree_changed_paths(work_dir)?;
-    if let Some(base_ref) = base_ref {
-        for path in git_committed_changed_paths(work_dir, base_ref)? {
-            if !paths.contains(&path) {
-                paths.push(path);
-            }
-        }
-    }
-    Ok(paths)
-}
-
-/// Paths changed in commits the run has made on top of `base_ref`.
-///
-/// An unresolvable base, which happens when the remote ref is not present in
-/// the workspace, is not an error: it means there is no committed range to
-/// consult, and the working tree view stands alone.
-fn git_committed_changed_paths(
-    work_dir: &std::path::Path,
-    base_ref: &str,
-) -> Result<Vec<String>, EngineError> {
-    let output = Command::new("git")
-        .args(["diff", "--name-only", &format!("{base_ref}...HEAD")])
-        .current_dir(work_dir)
-        .output()
-        .map_err(|err| diff_gate_error(format!("failed to run git diff: {err}")))?;
-    if !output.status.success() {
-        return Ok(Vec::new());
-    }
-    Ok(String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .map(str::to_string)
-        .collect())
-}
-
-fn git_worktree_changed_paths(work_dir: &std::path::Path) -> Result<Vec<String>, EngineError> {
-    let output = Command::new("git")
-        .args(["status", "--porcelain", "--untracked-files=all"])
-        .current_dir(work_dir)
-        .output()
-        .map_err(|err| diff_gate_error(format!("failed to run git status: {err}")))?;
-    if !output.status.success() {
-        return Err(diff_gate_error(format!(
-            "git status failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        )));
-    }
-    Ok(String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter_map(parse_git_status_path)
-        .collect())
-}
-
-fn parse_git_status_path(line: &str) -> Option<String> {
-    line.get(3..)
-        .map(str::trim)
-        .filter(|path| !path.is_empty())
-        .map(|path| path.split(" -> ").last().unwrap_or(path).to_string())
 }
 
 fn normalize_diff_path(context: &StepContext, path: &str) -> Option<String> {

@@ -589,8 +589,9 @@ jobs:
       # The classification logic is ported from vybestack/llxprt-code PR #2716
       # and lives in tested modules under .github/scripts/ rather than inline
       # shell, so a regression fails a unit test instead of silently passing.
-      - name: Verify OCR reviewed-range completeness
-        id: ocr-completeness
+      # The modules are loaded through github-script from the trusted
+      # base-branch checkout; PR code is never executed.
+      - name: Collect changed files for completeness check
         if: always()
         shell: bash
         env:
@@ -598,18 +599,31 @@ jobs:
           HEAD_SHA: ${{ env.HEAD_SHA }}
         run: |
           set -euo pipefail
-          if [ -s ocr-infrastructure-failure.txt ] || [ -s ocr-policy-failure.txt ]; then
-            echo "::notice::Skipping completeness verification because an earlier OCR failure was recorded."
-            echo "completeness=skipped" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
           git diff --name-only --diff-filter=ACMRT "${BASE_SHA}..${HEAD_SHA}" > ocr-changed-files.txt || : > ocr-changed-files.txt
-          node -e '
-            const fs = require("fs");
-            const { evaluateWorkspace } = require("./.github/scripts/ocr-gate");
+          echo "changed files: $(wc -l < ocr-changed-files.txt)"
+      - name: Verify OCR reviewed-range completeness
+        id: ocr-completeness
+        if: always()
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # ratchet:actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            if (
+              (fs.existsSync('ocr-infrastructure-failure.txt') &&
+                fs.statSync('ocr-infrastructure-failure.txt').size > 0) ||
+              (fs.existsSync('ocr-policy-failure.txt') &&
+                fs.statSync('ocr-policy-failure.txt').size > 0)
+            ) {
+              core.info('Skipping completeness verification because an earlier OCR failure was recorded.');
+              core.setOutput('completeness', 'skipped');
+              return;
+            }
+            const { evaluateWorkspace } = require(
+              `${process.env.GITHUB_WORKSPACE}/.github/scripts/ocr-gate.js`,
+            );
             const changedFiles = fs
-              .readFileSync("ocr-changed-files.txt", "utf8")
-              .split("\n")
+              .readFileSync('ocr-changed-files.txt', 'utf8')
+              .split('\n')
               .map((line) => line.trim())
               .filter((line) => line.length > 0);
             const result = evaluateWorkspace({
@@ -617,32 +631,23 @@ jobs:
               artifactDir: process.cwd(),
               changedFiles,
             });
-            fs.writeFileSync("ocr-completeness.json", JSON.stringify(result, null, 2) + "\n");
-            const out = process.env.GITHUB_OUTPUT;
-            if (out) {
-              fs.appendFileSync(out, `completeness=${result.completeness}\n`);
-              fs.appendFileSync(out, `coverage=${result.coverage.completed}/${result.coverage.selected}\n`);
-            }
-            console.log(
+            fs.writeFileSync('ocr-completeness.json', JSON.stringify(result, null, 2) + '\n');
+            core.setOutput('completeness', result.completeness);
+            core.setOutput('coverage', `${result.coverage.completed}/${result.coverage.selected}`);
+            core.info(
               `completeness=${result.completeness} selected=${result.selected.length} ` +
                 `excluded=${result.excluded.length} unreviewed=${result.unreviewed.length}`,
             );
             if (!result.passed) {
               for (const file of result.unreviewed) {
-                console.log(`::error::Changed file was neither reviewed nor excluded: ${file}`);
+                core.error(`Changed file was neither reviewed nor excluded: ${file}`);
               }
-              console.log(
-                "phase=review; reason=incomplete OCR coverage for the reviewed range",
-              );
               fs.writeFileSync(
-                "ocr-policy-failure.txt",
-                "phase=review; reason=incomplete OCR coverage for the reviewed range\n",
+                'ocr-policy-failure.txt',
+                'phase=review; reason=incomplete OCR coverage for the reviewed range\n',
               );
-              process.exit(1);
+              core.setFailed('phase=review; reason=incomplete OCR coverage for the reviewed range');
             }
-          '
-
-
       - name: Post OCR results
         if: always()
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # ratchet:actions/github-script@v7
