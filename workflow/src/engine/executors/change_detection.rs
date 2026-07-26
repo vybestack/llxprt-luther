@@ -244,6 +244,15 @@ mod tests {
         assert!(!diff_requirements_met(&[], &["a".to_string()], &[]));
     }
 
+    /// The doc comment promises that no change satisfies the gate even when
+    /// both requirement lists are empty. That is the case where vacuous truth
+    /// would otherwise apply, so it is asserted directly rather than inferred
+    /// from the non-empty-requirement case above.
+    #[test]
+    fn diff_requirements_met_empty_paths_and_no_requirements_is_false() {
+        assert!(!diff_requirements_met(&[], &[], &[]));
+    }
+
     #[test]
     fn diff_requirements_met_exact_required_paths() {
         let paths = vec!["src/a.rs".to_string(), "src/b.rs".to_string()];

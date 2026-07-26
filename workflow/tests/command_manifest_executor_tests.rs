@@ -914,6 +914,27 @@ fn manifest_argv_fails_closed_on_unresolved_token() {
     );
 }
 
+/// Braces that are not interpolation tokens must survive. Rejecting every
+/// brace would make argv stricter than the shell-string path it replaced and
+/// break valid commands such as a printf format.
+#[test]
+fn manifest_argv_allows_braces_that_are_not_tokens() {
+    let context = StepContext::new(PathBuf::from("/tmp/work"), "run-1".to_string());
+    let entry = command_entry("printer", &["printf", "{%s}\n", "hello"]);
+
+    let resolved = resolve_entry_argv(&entry, &context).expect("non-token braces must be allowed");
+
+    assert_eq!(
+        resolved.argv,
+        vec![
+            "printf".to_string(),
+            "{%s}\n".to_string(),
+            "hello".to_string()
+        ],
+        "a printf format must be passed through untouched"
+    );
+}
+
 /// Entries without tokens are passed through unchanged.
 #[test]
 fn manifest_argv_without_tokens_is_unchanged() {

@@ -110,6 +110,30 @@ test('selection is not count-based, so extra empty sessions are harmless', () =>
   assert.strictEqual(selectReviewSession(dir).sessionId, 'real');
 });
 
+test('selection ranks by reviewed files, not by total event volume', () => {
+  const dir = makeSessionDir();
+  // Empty sessions cannot discriminate: a naive total-event ranking picks the
+  // same winner. This session has far more events yet reviewed fewer files, so
+  // it must lose to the one that actually reviewed more.
+  const noisy = [{ type: 'session_start', sessionId: 'noisy' }];
+  for (let i = 0; i < 20; i += 1) {
+    noisy.push({ type: 'tool_call', sessionId: 'noisy', index: i });
+  }
+  noisy.push(reviewEvent('noisy', 'src/only.ts'));
+  writeSession(dir, 'noisy', noisy);
+  writeSession(dir, 'thorough', [
+    reviewEvent('thorough', 'src/a.ts'),
+    reviewEvent('thorough', 'src/b.ts'),
+  ]);
+
+  const selected = selectReviewSession(dir);
+  assert.strictEqual(selected.sessionId, 'thorough');
+  assert.ok(
+    selected.eventCount < 21,
+    'the winner must be the one with more reviewed files, not more events',
+  );
+});
+
 test('an explicit session id must match exactly', () => {
   const dir = makeSessionDir();
   writeSession(dir, 'wanted', [reviewEvent('wanted', 'src/a.ts')]);

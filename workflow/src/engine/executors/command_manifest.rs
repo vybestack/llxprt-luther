@@ -474,9 +474,9 @@ pub fn resolve_entry_argv(
         .iter()
         .map(|argument| {
             let value = interpolate_string(argument, context);
-            if value.contains('{') || value.contains('}') {
+            if let Some(token) = unresolved_template_token(&value) {
                 return Err(format!(
-                    "command '{}' argv contains unresolved template token: {value}",
+                    "command '{}' argv contains unresolved template token '{token}': {value}",
                     entry.id
                 ));
             }
@@ -484,6 +484,31 @@ pub fn resolve_entry_argv(
         })
         .collect::<Result<Vec<_>, _>>()?;
     Ok(resolved)
+}
+
+/// Finds a leftover interpolation token in an already-interpolated argument.
+///
+/// Rejecting every brace would also reject arguments that legitimately contain
+/// them, such as a `printf` format like `{%s}`, making argv stricter than the
+/// shell-string path it replaced. Only the `{identifier}` shape that
+/// `interpolate_string` actually substitutes counts as unresolved, so a
+/// genuinely missing variable still fails closed.
+fn unresolved_template_token(value: &str) -> Option<&str> {
+    let mut rest = value;
+    while let Some(start) = rest.find('{') {
+        let after = &rest[start + 1..];
+        let end = after.find('}')?;
+        let candidate = &after[..end];
+        if !candidate.is_empty()
+            && candidate
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '.')
+        {
+            return Some(candidate);
+        }
+        rest = &after[end + 1..];
+    }
+    None
 }
 
 pub fn request_from_entry(
