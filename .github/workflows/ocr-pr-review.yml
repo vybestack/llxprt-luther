@@ -282,6 +282,13 @@ jobs:
         # Include patterns cover this Rust project (source lives under
         # `workflow/`): *_test.rs, *_tests.rs, tests/**, test/**, __tests__/**,
         # plus the cross-language patterns kept for mixed-language PRs.
+        #
+        # Markdown and plain text are excluded explicitly. OCR reviews code, so
+        # it silently declines to review prose; the reviewed-range completeness
+        # gate then fails because those files are neither reviewed nor excluded,
+        # which made every docs-only PR unmergeable. Excluding them states the
+        # intent rather than leaving them unclassified. Code review coverage is
+        # unaffected: no source or test pattern is excluded here.
         env:
           OCR_RULES_JSON: |
             {
@@ -306,7 +313,10 @@ jobs:
                 "**/build/**",
                 "**/*.min.js",
                 "**/generated/**",
-                "**/vendor/**"
+                "**/vendor/**",
+                "**/*.md",
+                "**/*.markdown",
+                "**/*.txt"
               ]
             }
         shell: bash
