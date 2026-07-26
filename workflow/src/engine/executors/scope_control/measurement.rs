@@ -561,7 +561,7 @@ pub fn compute_measurement(
     data: &GitPatchData,
     charter: &CanonicalTaskCharter,
     expected_run_id: &str,
-    daemon_managed: bool,
+    ownership_required: bool,
     measurement_config: &ScopeMeasurementConfig,
     work_dir: &Path,
     dependency_diffs: &[(String, Vec<String>)],
@@ -574,9 +574,10 @@ pub fn compute_measurement(
     }
 
     // Merge tracked changes and untracked files into a unified list. The one
-    // daemon-owned marker is control-plane state rather than an agent patch,
+    // workflow-owned marker is control-plane state rather than an agent patch,
     // but it is excluded only after exact ownership verification.
-    let untracked_files = patch_untracked_files(data, work_dir, expected_run_id, daemon_managed)?;
+    let untracked_files =
+        patch_untracked_files(data, work_dir, expected_run_id, ownership_required)?;
     let mut all_changes: Vec<FileChange> = data.tracked_changes.clone();
     for untracked in &untracked_files {
         all_changes.push(FileChange {

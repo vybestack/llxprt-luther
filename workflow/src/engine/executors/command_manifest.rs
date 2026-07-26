@@ -74,7 +74,8 @@ fn execute_manifest_group(
         let entry = commands_by_id
             .get(command_id.as_str())
             .ok_or_else(|| group_error(format!("unknown command manifest id '{command_id}'")))?;
-        let result = run_manifest_entry(entry, &path_context, default_timeout_seconds)
+        let entry = resolve_entry_argv(entry, context).map_err(group_error)?;
+        let result = run_manifest_entry(&entry, &path_context, default_timeout_seconds)
             .map_err(group_error)?;
         let ManifestEntryExecution::Completed(result) = result else {
             continue;
@@ -447,6 +448,71 @@ pub fn resolve_manifest_group_id(
     } else {
         Ok(group_id)
     }
+}
+
+/// Resolve template tokens in a manifest entry's `argv` against the step
+/// context, returning a copy of the entry whose argv is fully substituted.
+///
+/// Manifest commands are declared as argv arrays and as shell-string gates in
+/// the same configuration. The shell-string form is interpolated, so the argv
+/// form must be too; otherwise the same command expressed two ways behaves
+/// differently and a token such as `{task_charter_merge_base}` reaches the
+/// child process literally.
+///
+/// Unresolved tokens fail closed with the offending command and argument
+/// named, matching [`resolve_manifest_group_id`]. Failing closed matters here
+/// because an unsubstituted token otherwise produces a command that cannot
+/// succeed and is reported as a project failure rather than a configuration
+/// failure.
+pub fn resolve_entry_argv(
+    entry: &CommandEntry,
+    context: &StepContext,
+) -> Result<CommandEntry, String> {
+    let mut resolved = entry.clone();
+    resolved.argv = entry
+        .argv
+        .iter()
+        .map(|argument| {
+            let value = interpolate_string(argument, context);
+            if let Some(token) = unresolved_template_token(&value) {
+                return Err(format!(
+                    "command '{}' argv contains unresolved template token '{token}': {value}",
+                    entry.id
+                ));
+            }
+            Ok(value)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(resolved)
+}
+
+/// Finds a leftover interpolation token in an already-interpolated argument.
+///
+/// Rejecting every brace would also reject arguments that legitimately contain
+/// them, such as a `printf` format like `{%s}`, making argv stricter than the
+/// shell-string path it replaced. Only the `{identifier}` shape that
+/// `interpolate_string` actually substitutes counts as unresolved, so a
+/// genuinely missing variable still fails closed.
+fn unresolved_template_token(value: &str) -> Option<&str> {
+    let mut rest = value;
+    while let Some(start) = rest.find('{') {
+        let after = &rest[start + 1..];
+        let end = after.find('}')?;
+        let candidate = &after[..end];
+        if !candidate.is_empty()
+            && candidate
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '.')
+        {
+            return Some(candidate);
+        }
+        // Resume from just after this opening brace rather than past the
+        // closing one. In `{broken {missing}` the first `{` pairs with the
+        // final `}`, and skipping the whole span would step over the real
+        // `{missing}` token and let it reach the child process.
+        rest = after;
+    }
+    None
 }
 
 pub fn request_from_entry(

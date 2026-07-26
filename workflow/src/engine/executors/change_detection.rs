@@ -152,7 +152,19 @@ pub(crate) fn new_changed_paths(paths: &[String], initial_changed_paths: &[Strin
 }
 
 /// Decide whether the changed `paths` satisfy the required exact paths and
-/// substring patterns. An empty `paths` slice never satisfies the requirements.
+/// substring patterns.
+///
+/// An empty `paths` slice never satisfies the requirements, even when both
+/// requirement lists are empty: "nothing changed" is treated as a failure to
+/// produce work rather than as vacuous success.
+///
+/// The two requirement kinds are deliberately different quantifiers.
+/// `required_changed_paths` is a conjunction: every named path must be present,
+/// which suits a change that must always touch specific files. The patterns are
+/// a disjunction: at least one must match, because a pattern list enumerates the
+/// areas a change is permitted to land in, and a correctly scoped change touches
+/// only some of them. Requiring every pattern made a multi-area list
+/// unsatisfiable for any single-issue change.
 pub(crate) fn diff_requirements_met(
     paths: &[String],
     required_changed_paths: &[String],
@@ -165,9 +177,10 @@ pub(crate) fn diff_requirements_met(
     required_changed_paths
         .iter()
         .all(|required| paths.iter().any(|path| path == required))
-        && required_changed_path_patterns
-            .iter()
-            .all(|pattern| paths.iter().any(|path| path.contains(pattern)))
+        && (required_changed_path_patterns.is_empty()
+            || required_changed_path_patterns
+                .iter()
+                .any(|pattern| paths.iter().any(|path| path.contains(pattern))))
 }
 
 #[cfg(test)]
@@ -231,6 +244,15 @@ mod tests {
         assert!(!diff_requirements_met(&[], &["a".to_string()], &[]));
     }
 
+    /// The doc comment promises that no change satisfies the gate even when
+    /// both requirement lists are empty. That is the case where vacuous truth
+    /// would otherwise apply, so it is asserted directly rather than inferred
+    /// from the non-empty-requirement case above.
+    #[test]
+    fn diff_requirements_met_empty_paths_and_no_requirements_is_false() {
+        assert!(!diff_requirements_met(&[], &[], &[]));
+    }
+
     #[test]
     fn diff_requirements_met_exact_required_paths() {
         let paths = vec!["src/a.rs".to_string(), "src/b.rs".to_string()];
@@ -268,6 +290,50 @@ mod tests {
             &paths,
             &["src/a.rs".to_string()],
             &["nonexistent".to_string()]
+        ));
+    }
+
+    /// A pattern list enumerates the areas a change may land in, so matching
+    /// one is sufficient. Requiring every pattern made a multi-area list
+    /// unsatisfiable: no correctly scoped single-issue change touches all of
+    /// them at once.
+    #[test]
+    fn diff_requirements_met_patterns_are_a_disjunction() {
+        let paths = vec![
+            ".github/workflows/ocr-pr-review.yml".to_string(),
+            "workflow/docs/architecture/manifest.md".to_string(),
+            "workflow/tests/contract.rs".to_string(),
+        ];
+        let patterns = vec![
+            ".github/workflows/".to_string(),
+            "workflow/config/".to_string(),
+            "workflow/tests/".to_string(),
+            "workflow/src/".to_string(),
+            "workflow/docs/".to_string(),
+        ];
+        assert!(
+            diff_requirements_met(&paths, &[], &patterns),
+            "a change touching some permitted areas must satisfy the requirement"
+        );
+
+        assert!(
+            !diff_requirements_met(&["workflow/xtask/src/main.rs".to_string()], &[], &patterns),
+            "a change touching none of the permitted areas must not satisfy it"
+        );
+    }
+
+    /// Exact required paths remain a conjunction; only the pattern list is a
+    /// disjunction. A missing required path fails even when a pattern matches.
+    #[test]
+    fn diff_requirements_met_exact_paths_remain_conjunctive() {
+        let paths = vec!["workflow/src/a.rs".to_string()];
+        assert!(!diff_requirements_met(
+            &paths,
+            &[
+                "workflow/src/a.rs".to_string(),
+                "workflow/src/b.rs".to_string()
+            ],
+            &["workflow/src/".to_string()]
         ));
     }
 

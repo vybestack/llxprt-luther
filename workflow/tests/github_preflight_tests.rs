@@ -58,6 +58,9 @@ impl GithubCommandRunner for FixtureGithubCommandRunner {
             Some(Err(GithubError::RepositoryNotAccessible { repo })) => {
                 Err(GithubError::RepositoryNotAccessible { repo: repo.clone() })
             }
+            Some(Err(GithubError::RateLimited { repo })) => {
+                Err(GithubError::RateLimited { repo: repo.clone() })
+            }
             Some(Err(GithubError::CommandFailed {
                 argv: a,
                 exit_code,
@@ -170,6 +173,41 @@ fn repo_not_accessible_reports_repo() {
     }
     let diag = err.get_diagnostics();
     assert_eq!(diag.get("repo").unwrap(), "owner/name");
+}
+
+/// An exhausted API quota must not be reported as a repository or permission
+/// problem. `gh repo view` resolves through GraphQL, whose quota is separate
+/// from REST, so a repository that is present and writable still fails this
+/// check while the quota is spent. Reporting that as inaccessible sends the
+/// operator to verify credentials that are already correct.
+#[test]
+fn rate_limited_repo_check_is_not_reported_as_inaccessible() {
+    let runner = FixtureGithubCommandRunner::new().with_err(
+        &[
+            "gh",
+            "repo",
+            "view",
+            "owner/name",
+            "--json",
+            "nameWithOwner",
+        ],
+        GithubError::CommandFailed {
+            argv: repo_argv("owner/name"),
+            exit_code: Some(1),
+            stderr: "API rate limit already exceeded for user ID 42029.".to_string(),
+        },
+    );
+    let err = check_repo_access(&runner, "owner/name").unwrap_err();
+    match err {
+        GithubError::RateLimited { ref repo } => assert_eq!(repo, "owner/name"),
+        other => panic!("rate limit must not be classified as inaccessible: {other:?}"),
+    }
+    let diag = err.get_diagnostics();
+    assert_eq!(diag.get("transient").unwrap(), "true");
+    assert!(
+        diag.get("required_action").unwrap().contains("rate_limit"),
+        "required_action must point at the quota, not at permissions"
+    );
 }
 
 #[test]

@@ -2,10 +2,16 @@
 /// @plan:PLAN-20260408-LLXPRT-FIRST.P08
 /// Verify executor - runs a configurable sequence of verification checks.
 /// @requirement:REQ-LF-VERIFY-001,REQ-LF-VERIFY-002,REQ-LF-VERIFY-003,REQ-LF-VERIFY-004,REQ-LF-VERIFY-005,REQ-LF-VERIFY-006,REQ-LF-VERIFY-007,REQ-LF-VERIFY-008,REQ-LF-VERIFY-009
+mod changed_paths;
+
+#[cfg(debug_assertions)]
+pub use changed_paths::changed_paths_for_test;
+use changed_paths::git_changed_paths;
+
 use crate::engine::executor::{interpolate_string, StepContext, StepExecutor};
 use crate::engine::executors::command_manifest::{
-    manifest_path_context_from_step, resolve_manifest_group_id, run_manifest_entry,
-    ManifestEntryExecution, ManifestPathContext,
+    manifest_path_context_from_step, resolve_entry_argv, resolve_manifest_group_id,
+    run_manifest_entry, ManifestEntryExecution, ManifestPathContext,
 };
 use crate::engine::runner::EngineError;
 use crate::engine::transition::StepOutcome;
@@ -295,7 +301,8 @@ fn run_diff_or_existing_pr_check(
             String::new(),
         )));
     }
-    let changed_paths = git_changed_paths(context.work_dir())?;
+    let base_ref = optional_string(config, "base_ref", context);
+    let changed_paths = git_changed_paths(context.work_dir(), base_ref.as_deref())?;
     let matched_path = changed_paths
         .iter()
         .filter_map(|path| normalize_diff_path(context, path))
@@ -316,31 +323,6 @@ fn valid_existing_pr_number(existing_pr: &str) -> bool {
         .trim()
         .parse::<u64>()
         .is_ok_and(|number| number != 0)
-}
-
-fn git_changed_paths(work_dir: &std::path::Path) -> Result<Vec<String>, EngineError> {
-    let output = Command::new("git")
-        .args(["status", "--porcelain", "--untracked-files=all"])
-        .current_dir(work_dir)
-        .output()
-        .map_err(|err| diff_gate_error(format!("failed to run git status: {err}")))?;
-    if !output.status.success() {
-        return Err(diff_gate_error(format!(
-            "git status failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        )));
-    }
-    Ok(String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter_map(parse_git_status_path)
-        .collect())
-}
-
-fn parse_git_status_path(line: &str) -> Option<String> {
-    line.get(3..)
-        .map(str::trim)
-        .filter(|path| !path.is_empty())
-        .map(|path| path.split(" -> ").last().unwrap_or(path).to_string())
 }
 
 fn normalize_diff_path(context: &StepContext, path: &str) -> Option<String> {
@@ -877,6 +859,11 @@ fn run_manifest_check(
     };
     let default_timeout = timeout.map_or(900, |duration| duration.as_secs());
     let path_context = manifest_path_context(context);
+    let entry =
+        resolve_entry_argv(&entry, context).map_err(|message| EngineError::StepExecutionError {
+            step_id: "verify".to_string(),
+            message,
+        })?;
     let outcome =
         run_manifest_entry(&entry, &path_context, default_timeout).map_err(|message| {
             EngineError::StepExecutionError {

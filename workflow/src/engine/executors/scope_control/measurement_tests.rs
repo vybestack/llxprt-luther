@@ -374,7 +374,7 @@ fn daemon_measurement_requires_marker_even_when_git_does_not_list_it() {
 }
 
 #[test]
-fn non_daemon_measurement_does_not_require_workspace_marker() {
+fn unverifiable_workspace_marker_fails_closed_regardless_of_launcher() {
     let workspace = tempfile::tempdir().expect("workspace");
     let data = GitPatchData {
         head_sha: "abc".into(),
@@ -383,12 +383,59 @@ fn non_daemon_measurement_does_not_require_workspace_marker() {
         untracked_files: vec![WORKSPACE_OWNER_MARKER.into(), "README.md".into()],
     };
 
+    // The marker is present but the workspace carries no ownership evidence,
+    // so exclusion must be refused rather than silently granted. This holds
+    // whether or not ownership is mandatory for the run: a marker that cannot
+    // be verified is never excluded from the measured change set.
+    for ownership_required in [true, false] {
+        let error = patch_untracked_files(&data, workspace.path(), "run-owned", ownership_required)
+            .expect_err("unverified ownership must fail closed");
+        assert!(
+            matches!(error, MeasurementError::ControlMetadata(_)),
+            "expected control metadata error, got {error:?}"
+        );
+    }
+}
+
+/// A CLI-launched run writes the same bootstrap marker as a daemon-launched
+/// run, so verified ownership alone decides exclusion. Gating on the launcher
+/// made scope measurement report the workflow's own control metadata as agent
+/// scope creep outside the daemon.
+#[test]
+fn verified_workspace_marker_is_excluded_for_cli_launched_runs() {
+    let workspace = initialized_measurement_repo();
+    crate::engine::continuation::write_workspace_owner_marker(workspace.path(), "run-owned")
+        .expect("owner marker");
+    let data = GitPatchData {
+        head_sha: "abc".into(),
+        divergence: 0,
+        tracked_changes: vec![],
+        untracked_files: vec![WORKSPACE_OWNER_MARKER.into(), "README.md".into()],
+    };
+
+    // ownership_required is false because this models a CLI-launched run,
+    // which is exactly the case that previously mismeasured the marker.
     let files = patch_untracked_files(&data, workspace.path(), "run-owned", false)
-        .expect("ordinary runs do not own daemon control metadata");
-    assert_eq!(
-        files,
-        vec![WORKSPACE_OWNER_MARKER.to_string(), "README.md".to_string()]
-    );
+        .expect("verified ownership permits exclusion");
+    assert_eq!(files, vec!["README.md".to_string()]);
+}
+
+/// A workspace with no Luther ownership evidence at all is legitimate for a
+/// non-daemon run. There is no marker to exclude, so measurement proceeds
+/// rather than failing closed.
+#[test]
+fn unowned_workspace_measures_normally_when_ownership_is_optional() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let data = GitPatchData {
+        head_sha: "abc".into(),
+        divergence: 0,
+        tracked_changes: vec![],
+        untracked_files: vec!["README.md".into()],
+    };
+
+    let files = patch_untracked_files(&data, workspace.path(), "run-owned", false)
+        .expect("unowned workspace is measurable");
+    assert_eq!(files, vec!["README.md".to_string()]);
 }
 
 #[test]
@@ -564,7 +611,7 @@ fn measurement_rejects_charter_for_different_active_run() {
         &data,
         &charter,
         "active-run",
-        false,
+        true,
         &test_measurement_config(&[], &[]),
         workspace.path(),
         &[],

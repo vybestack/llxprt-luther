@@ -49,11 +49,15 @@ reviews:
     clippy:
       enabled: true
 
-# Retain CodeRabbit issue planning/enrichment, but prohibit automatic labels.
+# Disable CodeRabbit issue planning, and prohibit automatic labels.
+# Planning is disabled because Luther ingests issue comments as requirements:
+# auto-generated implementation plans anchored its planner on speculative
+# designs instead of the issue text. On issue 138 those plans accounted for
+# 69,636 of 70,230 comment bytes against 594 bytes of human requirement.
 # In particular, CodeRabbit must never apply "OK for Luther" or
 # "Luther working"; those labels control real workflow scheduling/ownership.
 issue_enrichment:
   planning:
-    enabled: true
+    enabled: false
   labeling:
     auto_apply_labels: false

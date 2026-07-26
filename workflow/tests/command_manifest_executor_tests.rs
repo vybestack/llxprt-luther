@@ -4,8 +4,10 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
+use luther_workflow::engine::executor::StepContext;
 use luther_workflow::engine::executors::command_manifest::{
-    request_from_entry, request_from_entry_with_paths, run_manifest_command, ManifestPathContext,
+    request_from_entry, request_from_entry_with_paths, resolve_entry_argv, run_manifest_command,
+    ManifestPathContext,
 };
 use luther_workflow::workflow::command_manifest::{
     ArtifactExpectation, ArtifactExpectations, ArtifactKind, CapturePolicy, CommandEntry,
@@ -852,4 +854,285 @@ fn command_manifest_group_rejects_backslash_runtime_paths() {
         err.contains("must stay under work_dir"),
         "unexpected error: {err}"
     );
+}
+
+/// Manifest commands are declared both as argv arrays and as shell-string
+/// gates. The shell-string form is interpolated, so the argv form must be too;
+/// otherwise a token such as `{task_charter_merge_base}` reaches the child
+/// process literally and the command fails in a way that looks like a project
+/// failure rather than a configuration failure.
+#[test]
+fn manifest_argv_resolves_context_tokens() {
+    let mut context = StepContext::new(PathBuf::from("/tmp/work"), "run-1".to_string());
+    context.set("task_charter_merge_base", "abc123");
+    let entry = command_entry(
+        "ocr_review",
+        &[
+            "cargo",
+            "xtask",
+            "ocr-review",
+            "--from",
+            "{task_charter_merge_base}",
+        ],
+    );
+
+    let resolved = resolve_entry_argv(&entry, &context).expect("argv must resolve");
+
+    assert_eq!(
+        resolved.argv,
+        vec![
+            "cargo".to_string(),
+            "xtask".to_string(),
+            "ocr-review".to_string(),
+            "--from".to_string(),
+            "abc123".to_string(),
+        ]
+    );
+}
+
+/// An unresolved token must fail closed, naming the command and the offending
+/// argument, rather than being handed to the child process verbatim.
+#[test]
+fn manifest_argv_fails_closed_on_unresolved_token() {
+    let context = StepContext::new(PathBuf::from("/tmp/work"), "run-1".to_string());
+    let entry = command_entry(
+        "ocr_review",
+        &[
+            "cargo",
+            "xtask",
+            "ocr-review",
+            "--from",
+            "{task_charter_merge_base}",
+        ],
+    );
+
+    let error = resolve_entry_argv(&entry, &context).expect_err("unresolved token must fail");
+
+    assert!(
+        error.contains("ocr_review") && error.contains("task_charter_merge_base"),
+        "error must name the command and the offending argument, got: {error}"
+    );
+}
+
+/// Braces that are not interpolation tokens must survive. Rejecting every
+/// brace would make argv stricter than the shell-string path it replaced and
+/// break valid commands such as a printf format.
+#[test]
+fn manifest_argv_allows_braces_that_are_not_tokens() {
+    let context = StepContext::new(PathBuf::from("/tmp/work"), "run-1".to_string());
+    let entry = command_entry("printer", &["printf", "{%s}\n", "hello"]);
+
+    let resolved = resolve_entry_argv(&entry, &context).expect("non-token braces must be allowed");
+
+    assert_eq!(
+        resolved.argv,
+        vec![
+            "printf".to_string(),
+            "{%s}\n".to_string(),
+            "hello".to_string()
+        ],
+        "a printf format must be passed through untouched"
+    );
+}
+
+/// A token following an unmatched opening brace must still be caught. Pairing
+/// the first brace with the last one and skipping the whole span would step
+/// over the real token and hand it to the child process.
+#[test]
+fn manifest_argv_finds_a_token_after_an_unmatched_brace() {
+    let context = StepContext::new(PathBuf::from("/tmp/work"), "run-1".to_string());
+    let entry = command_entry("mixed", &["echo", "{broken {task_charter_merge_base}"]);
+
+    let error = resolve_entry_argv(&entry, &context).expect_err("unresolved token must fail");
+
+    assert!(
+        error.contains("task_charter_merge_base"),
+        "error must name the token hidden behind the unmatched brace, got: {error}"
+    );
+}
+
+/// Entries without tokens are passed through unchanged.
+#[test]
+fn manifest_argv_without_tokens_is_unchanged() {
+    let context = StepContext::new(PathBuf::from("/tmp/work"), "run-1".to_string());
+    let entry = command_entry("check", &["cargo", "check"]);
+
+    let resolved = resolve_entry_argv(&entry, &context).expect("argv must resolve");
+
+    assert_eq!(resolved.argv, entry.argv);
+}
+
+/// The diff gate asks whether the run produced qualifying changes. Committing
+/// the work does not undo that, so a gate that inspected only the working tree
+/// reported no changes precisely because the changes had been committed. The
+/// committed range against the base must therefore also count.
+#[test]
+fn diff_gate_sees_committed_work() {
+    let repo = tempfile::tempdir().expect("repo");
+    let root = repo.path();
+    let git = |args: &[&str]| {
+        let status = Command::new("git")
+            .args(args)
+            .current_dir(root)
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@e")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@e")
+            .status()
+            .expect("git");
+        assert!(status.success(), "git {args:?}");
+    };
+    git(&["init", "-q", "-b", "main"]);
+    fs::write(root.join("seed.txt"), "seed").expect("seed");
+    git(&["add", "-A"]);
+    git(&["commit", "-qm", "seed"]);
+    git(&["branch", "base"]);
+
+    fs::create_dir_all(root.join("workflow/src")).expect("dirs");
+    fs::write(root.join("workflow/src/a.rs"), "fn a() {}").expect("write");
+
+    let uncommitted =
+        luther_workflow::engine::executors::verify::changed_paths_for_test(root, Some("base"))
+            .expect("uncommitted");
+    assert!(
+        uncommitted.iter().any(|p| p.contains("workflow/src/a.rs")),
+        "uncommitted work must be visible"
+    );
+
+    git(&["add", "-A"]);
+    git(&["commit", "-qm", "work"]);
+
+    let committed =
+        luther_workflow::engine::executors::verify::changed_paths_for_test(root, Some("base"))
+            .expect("committed");
+    assert!(
+        committed.iter().any(|p| p.contains("workflow/src/a.rs")),
+        "committed work must remain visible to the diff gate, got: {committed:?}"
+    );
+}
+
+/// An unresolvable base ref must degrade to "no committed range" rather than
+/// erroring, because some workspaces legitimately lack the base. Committed work
+/// then becomes invisible, which is why the workflow step must fail loudly when
+/// it cannot produce a changed-file list rather than letting an empty list read
+/// as full coverage.
+#[test]
+fn diff_gate_treats_an_unresolvable_base_ref_as_no_committed_range() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let root = temp.path();
+    let git = |args: &[&str]| {
+        let status = std::process::Command::new("git")
+            .args(args)
+            .current_dir(root)
+            .status()
+            .expect("git");
+        assert!(status.success(), "git {args:?} failed");
+    };
+    git(&["init", "-q"]);
+    git(&["config", "user.email", "t@example.com"]);
+    git(&["config", "user.name", "t"]);
+    fs::create_dir_all(root.join("workflow/src")).expect("mkdir");
+    fs::write(root.join("workflow/src/a.rs"), "fn a() {}\n").expect("write");
+    git(&["add", "-A"]);
+    git(&["commit", "-qm", "work"]);
+
+    let paths = luther_workflow::engine::executors::verify::changed_paths_for_test(
+        root,
+        Some("origin/does-not-exist"),
+    )
+    .expect("an unresolvable base must not be an error");
+    assert!(
+        !paths.iter().any(|p| p.contains("workflow/src/a.rs")),
+        "an unresolvable base yields no committed range, got: {paths:?}"
+    );
+}
+
+/// Omitting `base_ref` entirely must keep the original uncommitted-only
+/// behaviour rather than erroring. Only a present-but-malformed value is
+/// rejected, so a config that never set the key still works.
+#[test]
+fn diff_gate_without_a_base_ref_uses_the_worktree_only() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let root = temp.path();
+    let git = |args: &[&str]| {
+        std::process::Command::new("git")
+            .args(args)
+            .current_dir(root)
+            .output()
+            .expect("git");
+    };
+    git(&["init", "-q"]);
+    git(&["config", "user.email", "t@example.com"]);
+    git(&["config", "user.name", "t"]);
+    fs::create_dir_all(root.join("workflow/src")).expect("mkdir");
+    fs::write(root.join("workflow/src/committed.rs"), "fn a() {}\n").expect("write");
+    git(&["add", "-A"]);
+    git(&["commit", "-qm", "work"]);
+    fs::write(root.join("workflow/src/dirty.rs"), "fn b() {}\n").expect("write");
+
+    let paths = luther_workflow::engine::executors::verify::changed_paths_for_test(root, None)
+        .expect("an omitted base_ref must not be an error");
+
+    assert!(
+        paths.iter().any(|p| p.contains("workflow/src/dirty.rs")),
+        "the worktree view must still be reported, got: {paths:?}"
+    );
+    // Without this the test would also pass if omitting base_ref silently
+    // consulted a committed range, which is the behaviour it exists to rule out.
+    assert!(
+        !paths
+            .iter()
+            .any(|p| p.contains("workflow/src/committed.rs")),
+        "an omitted base_ref must not consult any committed range, got: {paths:?}"
+    );
+}
+
+/// A malformed `base_ref` must be rejected rather than silently producing an
+/// empty range.
+///
+/// The value is embedded as `{base_ref}...HEAD`, so git does not parse it as an
+/// option; `--output=/tmp/x...HEAD` and an empty value both exit 0 with no
+/// output. That is the hazard: without validation the gate would read a
+/// malformed ref as "nothing changed" and vacuously pass. Verified against git
+/// directly: those two exit 0, while `-x` and an embedded space exit 129/128.
+#[test]
+fn diff_gate_rejects_an_option_like_base_ref() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let root = temp.path();
+    // A real repository is required, otherwise every call would error for lack
+    // of a git repo and the test would pass without exercising the validation.
+    let git = |args: &[&str]| {
+        let status = std::process::Command::new("git")
+            .args(args)
+            .current_dir(root)
+            .status()
+            .expect("git");
+        assert!(status.success(), "git {args:?} failed");
+    };
+    git(&["init", "-q"]);
+    git(&["config", "user.email", "t@example.com"]);
+    git(&["config", "user.name", "t"]);
+    fs::write(root.join("a.rs"), "fn a() {}\n").expect("write");
+    git(&["add", "-A"]);
+    git(&["commit", "-qm", "work"]);
+    // Control: a resolvable ref succeeds in this same repository, so the
+    // rejections below are attributable to validation and nothing else.
+    luther_workflow::engine::executors::verify::changed_paths_for_test(root, Some("HEAD"))
+        .expect("a valid ref must be accepted");
+
+    for hostile in ["--output=/tmp/pwned", "-x", "origin/main HEAD", ""] {
+        let result =
+            luther_workflow::engine::executors::verify::changed_paths_for_test(root, Some(hostile));
+        let message = match result {
+            Err(error) => error.to_string(),
+            Ok(paths) => panic!("base_ref {hostile:?} must be rejected, got: {paths:?}"),
+        };
+        // Assert on our own diagnostic rather than merely on failure: git exits
+        // 0 for some of these, so a bare is_err() would pass even with the
+        // validation removed.
+        assert!(
+            message.contains("invalid base_ref"),
+            "base_ref {hostile:?} must be rejected by validation, got: {message}"
+        );
+    }
 }

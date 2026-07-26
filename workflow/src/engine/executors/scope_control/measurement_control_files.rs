@@ -57,27 +57,46 @@ pub(super) fn patch_untracked_files(
     data: &GitPatchData,
     work_dir: &Path,
     run_id: &str,
-    daemon_managed: bool,
+    ownership_required: bool,
 ) -> Result<Vec<String>, MeasurementError> {
-    if !daemon_managed {
-        return Ok(data.untracked_files.clone());
-    }
+    // The bootstrap `.luther/workspace-owner` marker is control-plane metadata
+    // written by the workflow itself, never by the implementing agent, so it is
+    // not part of the measured change set for a run that provably owns the
+    // workspace. The durable evidence lives beneath `.git`, which is naturally
+    // invisible to scope measurement (Git never reports `.git` contents as
+    // untracked files).
+    //
+    // Verification runs before any inspection of the Git file list so that
+    // suppressed or manipulated Git output cannot bypass the check.
+    let Some(reason) = verify_workspace_ownership(work_dir, run_id) else {
+        // Ownership is proven, so the marker is control-plane state for this
+        // run regardless of how the run was launched. Gating exclusion on the
+        // launcher made scope measurement report the workflow's own metadata
+        // as agent scope creep for every non-daemon run.
+        return Ok(data
+            .untracked_files
+            .iter()
+            .filter(|path| path.as_str() != WORKSPACE_OWNER_MARKER)
+            .cloned()
+            .collect());
+    };
 
-    // Scope measurement may exclude only the verified bootstrap
-    // `.luther/workspace-owner` marker. The durable evidence lives beneath
-    // `.git`, which is naturally invisible to scope measurement (Git never
-    // reports `.git` contents as untracked files). When workspace ownership
-    // is not trusted, fail closed rather than silently excluding or including
-    // the control-plane marker.
-    if let Some(reason) = verify_workspace_ownership(work_dir, run_id) {
+    // Ownership could not be verified. Where ownership is mandatory this is a
+    // hard failure; otherwise the workspace legitimately carries no Luther
+    // ownership evidence and there is simply nothing to exclude.
+    if ownership_required {
         return Err(MeasurementError::ControlMetadata(format!(
             "cannot exclude untrusted workspace ownership marker for run '{run_id}': {reason}"
         )));
     }
-    Ok(data
+    if data
         .untracked_files
         .iter()
-        .filter(|path| path.as_str() != WORKSPACE_OWNER_MARKER)
-        .cloned()
-        .collect())
+        .any(|path| path.as_str() == WORKSPACE_OWNER_MARKER)
+    {
+        return Err(MeasurementError::ControlMetadata(format!(
+            "workspace ownership marker present but unverified for run '{run_id}': {reason}"
+        )));
+    }
+    Ok(data.untracked_files.clone())
 }
