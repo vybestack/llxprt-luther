@@ -12,6 +12,13 @@ use luther_workflow::engine::executors::{
 };
 use luther_workflow::engine::transition::StepOutcome;
 
+/// Overall remediation budget configured for these tests. Named so the guard
+/// configuration and the expectations that depend on it cannot drift apart.
+const MAX_OBJECTIVE_ROUNDS: usize = 6;
+
+/// First zero-based round index that exceeds the objective budget.
+const FIRST_EXCEEDING_ROUND: usize = MAX_OBJECTIVE_ROUNDS + 1;
+
 const HEAD_SHAS: [&str; 8] = [
     "1111111111111111111111111111111111111111",
     "2222222222222222222222222222222222222222",
@@ -69,7 +76,7 @@ fn params_for(temp: &tempfile::TempDir, head_sha: &str) -> serde_json::Value {
         "base_ref": "main",
         "base_sha": "base-a",
         "step_order_index": 2,
-        "max_post_pr_remediation_iterations": 6,
+        "max_post_pr_remediation_iterations": MAX_OBJECTIVE_ROUNDS,
         "max_review_remediation_iterations": 2
     })
 }
@@ -224,6 +231,19 @@ fn review_driven_rounds_exhaust_the_review_budget_and_route_terminal() {
         StepOutcome::Success,
         "the initial entry must proceed"
     );
+    // Asserting only the first and last outcomes would let premature
+    // exhaustion pass: a budget that ran out at round 1 or 2 still leaves
+    // outcomes[3] fatal. The intermediate rounds must be proven to proceed.
+    assert_eq!(
+        outcomes[1],
+        StepOutcome::Success,
+        "the first review-driven round must still proceed"
+    );
+    assert_eq!(
+        outcomes[2],
+        StepOutcome::Success,
+        "the second review-driven round must still proceed"
+    );
     assert_eq!(
         outcomes[3],
         StepOutcome::Fatal,
@@ -261,6 +281,47 @@ fn missing_ci_failures_artifact_is_classified_as_objective() {
             .and_then(serde_json::Value::as_u64),
         Some(0),
         "unreadable failure state must never be charged to the review budget"
+    );
+    // Without this, a guard that stopped counting objective rounds entirely
+    // would still satisfy the assertion above, hiding an unbounded loop.
+    assert_eq!(
+        artifact
+            .get("iteration_index")
+            .and_then(serde_json::Value::as_u64),
+        Some(3),
+        "objective rounds must still advance the overall iteration budget"
+    );
+}
+
+/// Objective rounds must terminate once the overall budget is spent. Without
+/// this, a guard that only enforced the review budget would loop indefinitely
+/// on CI failures, which never charge the review budget.
+#[test]
+fn objective_rounds_terminate_when_the_overall_budget_is_exhausted() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut outcomes = Vec::new();
+    // The guard terminates when the zero-based index exceeds the budget, so
+    // with a budget of 6 the first round to exceed it is index 7.
+    for index in 0..=FIRST_EXCEEDING_ROUND {
+        let head_sha = format!("objective-head-{index}");
+        seed_round(&temp, &head_sha, None);
+        outcomes.push(run_guard(&temp, &head_sha));
+    }
+    assert_eq!(
+        outcomes[FIRST_EXCEEDING_ROUND - 1],
+        StepOutcome::Success,
+        "the last round within the objective budget must proceed"
+    );
+    assert_eq!(
+        outcomes[FIRST_EXCEEDING_ROUND],
+        StepOutcome::Fatal,
+        "exceeding the objective budget must terminate remediation"
+    );
+    let artifact = guard_artifact(&temp, &format!("objective-head-{FIRST_EXCEEDING_ROUND}"));
+    assert_eq!(
+        artifact.get("reason").and_then(serde_json::Value::as_str),
+        Some("max_iterations_exceeded"),
+        "exhaustion must be attributed to the objective budget"
     );
 }
 
