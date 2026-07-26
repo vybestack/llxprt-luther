@@ -13,6 +13,17 @@
 //
 // Fail-closed: only positive proof of completeness yields 'complete'. Every
 // unrecognized, empty, or missing signal degrades to 'partial'.
+/**
+ * Verdict vocabulary. Shared so a typo in one module cannot silently break a
+ * comparison in another.
+ */
+const STATUS = Object.freeze({
+  SKIPPED: 'skipped',
+  FAILED: 'failed',
+  PARTIAL: 'partial',
+  COMPLETE: 'complete',
+});
+
 
 /**
  * Normalize a path array: coerce to string, trim, drop empties, dedupe.
@@ -68,24 +79,24 @@ function collectValidWaivers(waivedFiles, failedSet) {
 function resolveCompleteness(params) {
   const options = params || {};
   if (options.skipped === true) {
-    return 'skipped';
+    return STATUS.SKIPPED;
   }
 
   // A missing, non-integer, or negative exit code means the result cannot be
   // trusted; treat it as a failure rather than coercing it to zero.
   const rawExitCode = options.ocrExitCode;
   if (!Number.isInteger(rawExitCode) || rawExitCode < 0) {
-    return 'failed';
+    return STATUS.FAILED;
   }
   if (rawExitCode !== 0) {
-    return 'failed';
+    return STATUS.FAILED;
   }
 
   // Positive allowlist: anything other than a recognized success status lacks
   // proof of completeness.
   const status = typeof options.ocrStatus === 'string' ? options.ocrStatus : '';
   if (status !== 'success' && status !== 'completed') {
-    return 'partial';
+    return STATUS.PARTIAL;
   }
 
   const selectedSet = normalizePaths(options.selectedFiles);
@@ -99,15 +110,17 @@ function resolveCompleteness(params) {
   // Every selected file must be resolved.
   for (const selectedPath of selectedSet) {
     if (!resolvedSet.has(selectedPath)) {
-      return 'partial';
+      return STATUS.PARTIAL;
     }
   }
 
   // No unresolved failures. A file appearing in both completed and failed is
   // considered resolved, because completion wins.
+  // resolvedSet already contains validWaiverPaths by construction, so
+  // membership in it is the whole test.
   for (const failedPath of failedSet) {
-    if (!resolvedSet.has(failedPath) && !validWaiverPaths.has(failedPath)) {
-      return 'partial';
+    if (!resolvedSet.has(failedPath)) {
+      return STATUS.PARTIAL;
     }
   }
 
@@ -116,11 +129,11 @@ function resolveCompleteness(params) {
   const selectedLookup = new Set(selectedSet);
   for (const completedPath of completedSet) {
     if (!selectedLookup.has(completedPath)) {
-      return 'partial';
+      return STATUS.PARTIAL;
     }
   }
 
-  return 'complete';
+  return STATUS.COMPLETE;
 }
 
 /**
@@ -135,6 +148,7 @@ function computeCoverage(params) {
 }
 
 module.exports = {
+  STATUS,
   resolveCompleteness,
   computeCoverage,
   normalizePaths,

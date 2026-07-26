@@ -24,7 +24,7 @@ const SECTION_REVIEWED = 'reviewed';
 const SECTION_EXCLUDED = 'excluded';
 
 function stripAnsi(text) {
-  return String(text == null ? '' : text).replace(ANSI_PATTERN, '');
+  return String(text ?? '').replace(ANSI_PATTERN, '');
 }
 
 /**
@@ -95,7 +95,7 @@ function parsePreview(text) {
   const excluded = [];
   let section = null;
 
-  for (const line of String(text == null ? '' : text).split('\n')) {
+  for (const line of String(text ?? '').split('\n')) {
     const detected = detectSection(line);
     if (detected !== undefined) {
       section = detected;
@@ -122,12 +122,12 @@ function parsePreview(text) {
   };
 }
 
+// parsePreview is the module's public API. The strip* helpers are exported
+// only because they carry parsing rules worth unit-testing directly; parseRow
+// and the section constants are internal and are not exported.
 module.exports = {
   parsePreview,
-  parseRow,
   stripAnsi,
   stripChurn,
   stripExclusionReason,
-  SECTION_REVIEWED,
-  SECTION_EXCLUDED,
 };

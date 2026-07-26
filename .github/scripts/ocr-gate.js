@@ -4,7 +4,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
-const { resolveCompleteness, computeCoverage } = require('./ocr-completeness');
+const { STATUS, resolveCompleteness, computeCoverage } = require('./ocr-completeness');
 const { parsePreview } = require('./ocr-preview');
 const { selectReviewSession, sessionSlugForWorkspace } = require('./ocr-session-evidence');
 
@@ -20,10 +20,29 @@ const { selectReviewSession, sessionSlugForWorkspace } = require('./ocr-session-
 // exclusion, not treated as missing coverage. Everything else must be proven
 // reviewed, or the verdict degrades from 'complete'.
 
+/**
+ * Normalize path inputs so every comparison uses the same representation.
+ */
+function normalizePaths(values) {
+  return (Array.isArray(values) ? values : [])
+    .map((value) => String(value ?? '').trim())
+    .filter((value) => value.length > 0);
+}
+
+/**
+ * Read an optional artifact.
+ *
+ * A missing artifact is an expected condition. Any other failure is not, and
+ * is surfaced so a permission or IO problem is debuggable rather than looking
+ * like an absent file.
+ */
 function readFileSafe(filePath) {
   try {
     return fs.readFileSync(filePath, 'utf8');
-  } catch {
+  } catch (error) {
+    if (error && error.code !== 'ENOENT') {
+      console.warn(`ocr-gate: could not read ${filePath}: ${error.message}`);
+    }
     return '';
   }
 }
@@ -36,27 +55,18 @@ function readExitCode(filePath) {
   return Number.parseInt(raw, 10);
 }
 
-function readStatus(resultPath) {
-  const raw = readFileSafe(resultPath).trim();
+/**
+ * Read one string field from a JSON artifact, or '' when it is absent,
+ * unparseable, or not a string.
+ */
+function readJsonField(filePath, fieldName) {
+  const raw = readFileSafe(filePath).trim();
   if (raw.length === 0) {
     return '';
   }
   try {
     const parsed = JSON.parse(raw);
-    return typeof parsed.status === 'string' ? parsed.status : '';
-  } catch {
-    return '';
-  }
-}
-
-function readSessionId(resultPath) {
-  const raw = readFileSafe(resultPath).trim();
-  if (raw.length === 0) {
-    return '';
-  }
-  try {
-    const parsed = JSON.parse(raw);
-    return typeof parsed.session_id === 'string' ? parsed.session_id : '';
+    return typeof parsed[fieldName] === 'string' ? parsed[fieldName] : '';
   } catch {
     return '';
   }
@@ -71,9 +81,12 @@ function readSessionId(resultPath) {
  */
 function evaluateGate(params) {
   const options = params || {};
-  const changedFiles = Array.isArray(options.changedFiles) ? options.changedFiles : [];
+  // Every path is normalized the same way before comparison. Comparing a
+  // trimmed set against untrimmed inputs would silently misclassify a file as
+  // unreviewed, or fail to match a declared exclusion.
+  const changedFiles = normalizePaths(options.changedFiles);
   const preview = parsePreview(options.previewText || '');
-  const excludedPaths = new Set(preview.excludedPaths);
+  const excludedPaths = new Set(normalizePaths(preview.excludedPaths));
 
   // Selected = changed minus declared exclusions. Falling back to the changed
   // set (rather than the preview's reviewed list) keeps the gate honest when
@@ -91,16 +104,12 @@ function evaluateGate(params) {
     waivedFiles: options.waivedFiles,
   });
 
-  const reviewedSet = new Set(
-    (Array.isArray(options.reviewedFiles) ? options.reviewedFiles : []).map((file) =>
-      String(file || '').trim(),
-    ),
-  );
+  const reviewedSet = new Set(normalizePaths(options.reviewedFiles));
   const unreviewed = selectedFiles.filter((file) => !reviewedSet.has(file));
 
   return {
     completeness,
-    passed: completeness === 'complete' || completeness === 'skipped',
+    passed: completeness === STATUS.COMPLETE || completeness === STATUS.SKIPPED,
     selected: selectedFiles,
     excluded: preview.excluded,
     unreviewed,
@@ -122,14 +131,12 @@ function evaluateWorkspace(params) {
 
   const sessionRoot =
     options.sessionRoot || path.join(os.homedir(), '.opencodereview', 'sessions');
-  let sessionDir = '';
-  try {
-    sessionDir = path.join(sessionRoot, sessionSlugForWorkspace(workspace));
-  } catch {
-    sessionDir = '';
-  }
+  // sessionSlugForWorkspace reports an unresolvable workspace as '' and logs
+  // the cause, so no try/catch is needed here.
+  const slug = sessionSlugForWorkspace(workspace);
+  const sessionDir = slug ? path.join(sessionRoot, slug) : '';
 
-  const expectedSessionId = readSessionId(resultPath);
+  const expectedSessionId = readJsonField(resultPath, 'session_id');
   const session = sessionDir ? selectReviewSession(sessionDir, expectedSessionId) : null;
 
   return evaluateGate({
@@ -138,7 +145,8 @@ function evaluateWorkspace(params) {
       options.ocrExitCode !== undefined
         ? options.ocrExitCode
         : readExitCode(path.join(artifactDir, 'ocr-exit-code.txt')),
-    ocrStatus: options.ocrStatus !== undefined ? options.ocrStatus : readStatus(resultPath),
+    ocrStatus:
+      options.ocrStatus !== undefined ? options.ocrStatus : readJsonField(resultPath, 'status'),
     changedFiles: options.changedFiles,
     previewText:
       options.previewText !== undefined

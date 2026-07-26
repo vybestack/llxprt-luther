@@ -66,7 +66,7 @@ test('a changed file that was neither reviewed nor excluded fails closed', () =>
   assert.deepStrictEqual(result.unreviewed, ['c.ts']);
 });
 
-test('an exclusion not declared by the preview cannot excuse a file', () => {
+test('a preview-declared review that was not completed remains unresolved', () => {
   // Only the preview may declare an exclusion; an unreviewed file that the
   // preview said it would review remains unresolved.
   const result = evaluateGate({
@@ -166,6 +166,33 @@ test('paths with spaces are reconciled correctly end to end', () => {
     changedFiles: ['src/my dir/a b.ts', 'docs/read me.md'],
     previewText: preview(['src/my dir/a b.ts'], ['docs/read me.md']),
     reviewedFiles: ['src/my dir/a b.ts'],
+  });
+  assert.strictEqual(result.completeness, 'complete');
+  assert.deepStrictEqual(result.unreviewed, []);
+});
+
+test('untrimmed changed paths still match reviewed evidence', () => {
+  // Reviewed evidence is normalized, so changed paths must be too. Comparing
+  // a trimmed set against untrimmed input would report a reviewed file as
+  // unreviewed and fail the gate on a formatting artifact.
+  const result = evaluateGate({
+    ocrExitCode: 0,
+    ocrStatus: 'completed',
+    changedFiles: ['  src/a.ts  ', 'src/b.ts'],
+    previewText: preview(['src/a.ts', 'src/b.ts'], []),
+    reviewedFiles: ['src/a.ts', '  src/b.ts'],
+  });
+  assert.strictEqual(result.completeness, 'complete');
+  assert.deepStrictEqual(result.unreviewed, []);
+});
+
+test('an untrimmed declared exclusion still excuses a file', () => {
+  const result = evaluateGate({
+    ocrExitCode: 0,
+    ocrStatus: 'completed',
+    changedFiles: ['src/a.ts', '  docs/x.md  '],
+    previewText: preview(['src/a.ts'], ['docs/x.md']),
+    reviewedFiles: ['src/a.ts'],
   });
   assert.strictEqual(result.completeness, 'complete');
   assert.deepStrictEqual(result.unreviewed, []);

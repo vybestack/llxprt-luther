@@ -599,7 +599,16 @@ jobs:
           HEAD_SHA: ${{ env.HEAD_SHA }}
         run: |
           set -euo pipefail
-          git diff --name-only --diff-filter=ACMRT "${BASE_SHA}..${HEAD_SHA}" > ocr-changed-files.txt || : > ocr-changed-files.txt
+          # A failed diff must not look like "nothing changed": an empty file
+          # list makes the completeness check vacuously pass, which is the
+          # exact fail-open this gate exists to prevent. Fail the step instead.
+          if ! git diff --name-only --diff-filter=ACMRT "${BASE_SHA}..${HEAD_SHA}" > ocr-changed-files.txt; then
+            rm -f ocr-changed-files.txt
+            echo "phase=review; reason=could not compute the changed-file set for ${BASE_SHA}..${HEAD_SHA}" \
+              > ocr-policy-failure.txt
+            echo "::error::Could not compute the changed-file set; refusing to verify coverage against an unknown range."
+            exit 1
+          fi
           echo "changed files: $(wc -l < ocr-changed-files.txt)"
       - name: Verify OCR reviewed-range completeness
         id: ocr-completeness
@@ -621,6 +630,19 @@ jobs:
             const { evaluateWorkspace } = require(
               `${process.env.GITHUB_WORKSPACE}/.github/scripts/ocr-gate.js`,
             );
+            // The collection step deletes this file rather than leaving an
+            // empty one behind when the range cannot be computed, so a missing
+            // file means "unknown range", not "no changes".
+            if (!fs.existsSync('ocr-changed-files.txt')) {
+              fs.writeFileSync(
+                'ocr-policy-failure.txt',
+                'phase=review; reason=changed-file set unavailable for the reviewed range\n',
+              );
+              core.setFailed(
+                'phase=review; reason=changed-file set unavailable for the reviewed range',
+              );
+              return;
+            }
             const changedFiles = fs
               .readFileSync('ocr-changed-files.txt', 'utf8')
               .split('\n')

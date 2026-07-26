@@ -26,8 +26,20 @@ const SESSION_END = 'session_end';
  * when a caller passes the unresolved path.
  */
 function sessionSlugForWorkspace(workspacePath) {
-  const resolved = fs.realpathSync(workspacePath);
-  return resolved.replace(/^\//, '').replace(/\//g, '-');
+  // An unresolvable path yields '' rather than throwing, so a caller cannot be
+  // crashed by an inaccessible workspace and every caller gets the same
+  // predictable "no slug" result. Path separators for both conventions are
+  // replaced so the slug never retains a separator.
+  let resolved;
+  try {
+    resolved = fs.realpathSync(workspacePath);
+  } catch (error) {
+    console.warn(
+      `ocr-session-evidence: could not resolve workspace ${workspacePath}: ${error.message}`,
+    );
+    return '';
+  }
+  return resolved.replace(/^\//, '').replace(/[/\\]/g, '-');
 }
 
 /**

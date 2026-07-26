@@ -6,10 +6,15 @@
 //! are therefore consulted and merged.
 use super::diff_gate_error;
 use crate::engine::runner::EngineError;
+use std::collections::HashSet;
 use std::process::Command;
 
 /// Expose the changed-path computation so its committed-range behavior can be
 /// exercised directly against a real repository.
+///
+/// Gated behind `debug_assertions` so it is not part of the release API
+/// surface; integration tests build with it enabled.
+#[cfg(debug_assertions)]
 pub fn changed_paths_for_test(
     work_dir: &std::path::Path,
     base_ref: Option<&str>,
@@ -23,11 +28,15 @@ pub(super) fn git_changed_paths(
     base_ref: Option<&str>,
 ) -> Result<Vec<String>, EngineError> {
     let mut paths = git_worktree_changed_paths(work_dir)?;
-    if let Some(base_ref) = base_ref {
-        for path in git_committed_changed_paths(work_dir, base_ref)? {
-            if !paths.contains(&path) {
-                paths.push(path);
-            }
+    let Some(base_ref) = base_ref else {
+        return Ok(paths);
+    };
+    // Order is meaningful to the caller, so membership is tracked separately
+    // rather than scanning the accumulating vector for each candidate.
+    let mut seen: HashSet<String> = paths.iter().cloned().collect();
+    for path in git_committed_changed_paths(work_dir, base_ref)? {
+        if seen.insert(path.clone()) {
+            paths.push(path);
         }
     }
     Ok(paths)
@@ -48,6 +57,13 @@ fn git_committed_changed_paths(
         .output()
         .map_err(|err| diff_gate_error(format!("failed to run git diff: {err}")))?;
     if !output.status.success() {
+        // Treated as "no committed range" rather than an error, because the
+        // base ref is legitimately absent in some workspaces. It is reported
+        // so a genuine git failure is not mistaken for an absent range.
+        eprintln!(
+            "verify: no committed range for base '{base_ref}': {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
         return Ok(Vec::new());
     }
     Ok(String::from_utf8_lossy(&output.stdout)

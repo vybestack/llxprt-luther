@@ -4,6 +4,7 @@
 /// @requirement:REQ-LF-VERIFY-001,REQ-LF-VERIFY-002,REQ-LF-VERIFY-003,REQ-LF-VERIFY-004,REQ-LF-VERIFY-005,REQ-LF-VERIFY-006,REQ-LF-VERIFY-007,REQ-LF-VERIFY-008,REQ-LF-VERIFY-009
 mod changed_paths;
 
+#[cfg(debug_assertions)]
 pub use changed_paths::changed_paths_for_test;
 use changed_paths::git_changed_paths;
 

@@ -170,9 +170,19 @@ fn objective_ci_failure_rounds_do_not_consume_the_review_budget() {
 fn review_driven_rounds_exhaust_the_review_budget_and_route_terminal() {
     let temp = tempfile::tempdir().expect("tempdir");
     let mut outcomes = Vec::new();
-    for head_sha in HEAD_SHAS.iter().take(4) {
+    for (round, head_sha) in HEAD_SHAS.iter().take(4).enumerate() {
         seed_round(&temp, head_sha, Some(0));
         outcomes.push(run_guard(&temp, head_sha));
+        // Each distinct head must advance the review index by exactly one, so
+        // exhaustion below is reached by real accumulation rather than by a
+        // single round being miscounted.
+        assert_eq!(
+            guard_artifact(&temp, head_sha)
+                .get("review_iteration_index")
+                .and_then(serde_json::Value::as_u64),
+            Some(round as u64),
+            "review round {round} must record a monotonically increasing index"
+        );
     }
     assert_eq!(
         outcomes[0],
@@ -242,5 +252,19 @@ fn same_head_reentry_does_not_consume_the_review_budget() {
     assert_eq!(
         after_first, after_reentry,
         "repeated same-head activations must not consume review budget"
+    );
+
+    // Positive control: without this, an implementation that never incremented
+    // the index would satisfy the equality above and the test would pass while
+    // the budget was entirely broken.
+    seed_round(&temp, HEAD_SHAS[2], Some(0));
+    run_guard(&temp, HEAD_SHAS[2]);
+    let after_new_head = guard_artifact(&temp, HEAD_SHAS[2])
+        .get("review_iteration_index")
+        .and_then(serde_json::Value::as_u64);
+    assert_eq!(
+        after_new_head,
+        after_reentry.map(|index| index + 1),
+        "a genuinely new head must consume exactly one unit of review budget"
     );
 }

@@ -12,9 +12,21 @@ const {
   sessionSlugForWorkspace,
 } = require('./ocr-session-evidence');
 
+// Temp dirs are tracked and removed after the run so repeated executions do
+// not accumulate directories under the system temp path.
+const tempDirs = [];
+
 function makeSessionDir() {
-  return fs.mkdtempSync(path.join(os.tmpdir(), 'ocr-evidence-'));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ocr-evidence-'));
+  tempDirs.push(dir);
+  return dir;
 }
+
+test.after(() => {
+  for (const dir of tempDirs) {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 function writeSession(dir, id, events) {
   const file = path.join(dir, `${id}.jsonl`);
@@ -69,6 +81,14 @@ test('a missing session file yields empty evidence rather than throwing', () => 
   const evidence = readSessionEvidence('/nonexistent/session.jsonl');
   assert.deepStrictEqual(evidence.reviewedFiles, []);
   assert.strictEqual(evidence.eventCount, 0);
+  // Every field must be the empty/false form, so a missing file can never be
+  // mistaken for a completed session.
+  assert.strictEqual(evidence.sessionId, '');
+  assert.strictEqual(evidence.ended, false);
+});
+
+test('an unresolvable workspace yields an empty slug rather than throwing', () => {
+  assert.strictEqual(sessionSlugForWorkspace('/nonexistent/workspace/path'), '');
 });
 
 test('selection ignores empty probe sessions and picks the one with evidence', () => {
@@ -113,10 +133,11 @@ test('no session containing evidence yields null rather than a false positive', 
 });
 
 test('the slug resolves symlinks so /tmp and /private/tmp agree', () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ocr-slug-'));
+  const dir = makeSessionDir();
   const slug = sessionSlugForWorkspace(dir);
   assert.ok(!slug.startsWith('-'), 'slug must not retain a leading separator');
   assert.ok(!slug.includes('/'), 'slug must not contain path separators');
+  assert.ok(!slug.includes('\\'), 'slug must not contain backslash separators');
   // The resolved path is what the store keys on.
   assert.strictEqual(slug, fs.realpathSync(dir).replace(/^\//, '').replace(/\//g, '-'));
 });

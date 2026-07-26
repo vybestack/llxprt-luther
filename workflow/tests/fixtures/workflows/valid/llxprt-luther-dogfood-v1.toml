@@ -273,7 +273,10 @@ fi
 ROUNDS=$((ROUNDS + 1))
 printf '%s' "$ROUNDS" > {artifact_dir}/plan-rounds.txt
 rm -f {artifact_dir}/plan-final-round.txt
-if [ "$ROUNDS" -ge 5 ]; then
+# evaluate_plan -> prepare_plan allows 5 revisions, so the 6th attempt is the
+# last permitted one. The counter is incremented above before this test, so the
+# final attempt is the one where ROUNDS reaches 6.
+if [ "$ROUNDS" -ge 6 ]; then
   printf 'final' > {artifact_dir}/plan-final-round.txt
 fi
 rm -f {artifact_dir}/plan.md {artifact_dir}/plan-evaluation.md

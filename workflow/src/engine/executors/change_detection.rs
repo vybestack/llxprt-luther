@@ -152,7 +152,11 @@ pub(crate) fn new_changed_paths(paths: &[String], initial_changed_paths: &[Strin
 }
 
 /// Decide whether the changed `paths` satisfy the required exact paths and
-/// substring patterns. An empty `paths` slice never satisfies the requirements.
+/// substring patterns.
+///
+/// An empty `paths` slice never satisfies the requirements, even when both
+/// requirement lists are empty: "nothing changed" is treated as a failure to
+/// produce work rather than as vacuous success.
 ///
 /// The two requirement kinds are deliberately different quantifiers.
 /// `required_changed_paths` is a conjunction: every named path must be present,
