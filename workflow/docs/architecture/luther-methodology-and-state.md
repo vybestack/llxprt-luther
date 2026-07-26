@@ -108,7 +108,7 @@ pre-PR-196 parent has implement at 5,991 chars. Treat as unverified chronology.
 
 ## 5. The QUALIFIED contradiction — the most important finding
 
-`project-plans/self-hosting-reliability/` reports **39 phases complete, Plan
+`project-plans/self-hosting-reliability/` reports **41 phases complete, Plan
 Status QUALIFIED, three consecutive nine-stage canaries, zero violations.**
 Simultaneously: 0 PRs in 28 real runs.
 
@@ -116,18 +116,20 @@ Both are true. **The canary does not run Luther.**
 
 From `tests/canary_harness_tests.rs`:
 - Never loads `llxprt-luther-dogfood-v1.toml` or runs `EngineRunner`;
-  `run_canary` hand-calls nine helpers and appends each stage label
-  (`:986-1030`). The final assertion proves the test called its own helpers in
-  order.
+  `run_canary` hand-calls eight stage helpers (stages 3 and 4 are combined),
+  records nine stage labels, and asserts the recorded vector (`:986-1030`). The
+  final assertion proves the test recorded its own labels in order.
 - Stage 2 creates "the work" by **directly writing a file** (`:635-653`). No
   issue, plan, LLM, or implement step.
 - `CanaryExecutor` unconditionally returns a completed snapshot and
   `{"status":"success"}` (`:238-289`).
-- Stage 6 supplies already-successful `head_sha`/`remote_ref_sha` (`:741-829`).
-  No Git commit or push.
-- Stage 7 **writes fabricated PR metadata straight into SQLite** (`:842-870`).
+- Stage 6 supplies already-successful `head_sha`/`remote_ref_sha` (`:748-765`,
+  `:805-822`). No Git commit or push.
+- Stage 7 **writes fabricated PR identity straight into SQLite** (`:842-870`).
   No PR is created.
-- Stage 9's probe returns `MergeObservation { merged: true }` (`:900-918`).
+- The merge probe returns whatever observation it was constructed with
+  (`observe_merge`, `:208-211`); stages 8 and 9 construct it as merged
+  (`:875-895`, `:900-918`).
 
 **The general principle:** a test that writes a postcondition, or injects the
 success observation, can prove safety and idempotency *conditional on that

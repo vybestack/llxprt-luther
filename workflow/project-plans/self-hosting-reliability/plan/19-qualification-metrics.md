@@ -1,5 +1,13 @@
 # Phase 19: Qualification Metrics & Gate
 
+> **Superseded (2026-07-26, issue #198).** This document's self-hosting
+> viability claim did not hold: the canary harness never invokes
+> `EngineRunner` and supplies the postcondition of every hard stage. The
+> plan is component-qualified only. Product reachability is defined and
+> measured by Gate A-R, Gate A-D, and Gate B in
+> `docs/architecture/product-gates.md`.
+
+
 ## Phase ID
 
 `PLAN-20260723-SELFHOST-RELIABILITY.P19`

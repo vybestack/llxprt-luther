@@ -72,7 +72,7 @@ P00 → P00A → P01 → P01A → P02 → P02A
 | 18 | P18 | [x] | 2026-07-24 | 2026-07-24 | PASS | [x] | **Canary harness** — 7 deterministic end-to-end tests over production RecoveryProtocolV1/persistence/capsule/typed-merge; three consecutive mixed canaries (MergeCommit/Squash/Rebase) traversing all nine viability-gate stages with zero invariant violations |
 | 18A | P18A | [x] | 2026-07-24 | 2026-07-24 | PASS | [x] | Canary verified: 7 harness + 14 failpoint + 38 typed merge tests green; strict Clippy/fmt/lizard all clean; REQ-QUAL-001/002 satisfied |
 | 19 | P19 | [x] | 2026-07-24 | 2026-07-24 | PASS | [x] | Qualification report: every metric measured, three canaries, zero prohibited escapes, 14/14 failpoints, strict gates green |
-| 19A | P19A | [x] | 2026-07-24 | 2026-07-24 | PASS — COMPONENT-QUALIFIED | [x] | Component gate verified under injected observations; reconstruction safety regression restored. Corrected 2026-07-24 (issue #198): this gate does not measure self-hosting viability |
+| 19A | P19A | [x] | 2026-07-24 | 2026-07-24 | PASS — COMPONENT-QUALIFIED | [x] | Component gate verified under injected observations; reconstruction safety regression restored. Corrected 2026-07-26 (issue #198): this gate does not measure self-hosting viability |
 
 ## P0 Prerequisite Milestone Gates
 

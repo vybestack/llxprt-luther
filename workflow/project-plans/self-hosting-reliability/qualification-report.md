@@ -2,11 +2,13 @@
 
 `@plan:PLAN-20260723-SELFHOST-RELIABILITY.P19`
 
-Date: 2026-07-24
-Result: **COMPONENT-QUALIFIED** — `RecoveryProtocolV1` and typed merge are
-qualified under deterministic injected observations.
+Date: 2026-07-24 (corrected 2026-07-26)
+Result: **COMPONENT-QUALIFIED** for the SQLite persistence, recovery state
+machine, idempotency, capsule, and typed merge-proof properties listed below.
+Those behaviors genuinely executed. External execution and all Git/GitHub
+observations were injected.
 
-> **Correction (2026-07-24, issue #198).** This report originally read
+> **Correction (2026-07-26, issue #198).** This report originally read
 > "QUALIFIED within the bounded scope of the plan", which was widely read as
 > evidence that Luther could self-host. It is not. The canary harness
 > (`tests/canary_harness_tests.rs`) never invokes `EngineRunner`. It constructs
@@ -14,9 +16,10 @@ qualified under deterministic injected observations.
 > workflow through the engine, and never loads the production config from disk.
 > It supplies the postcondition of every hard stage:
 > stage 2 creates the change by writing a file directly (`:635-653`), stage 6
-> supplies already-successful head and remote SHAs (`:741-829`), stage 7 inserts
-> fabricated PR metadata into SQLite (`:842-870`), and stage 9's probe returns
-> `MergeObservation { merged: true }` (`:900-918`).
+> supplies already-successful head and remote SHAs (`:748-765`, `:805-822`),
+> stage 7 persists fabricated PR identity into SQLite (`:842-870`), and the
+> merge probe returns an injected observation (`observe_merge` at `:208-211`,
+> constructed as merged at `:875-895` and `:900-918`).
 >
 > A gate that injects its own postcondition proves safety **conditional on that
 > postcondition**. It cannot prove **reachability** of it. Over the same period,
@@ -86,7 +89,7 @@ the complete library and binary suites now pass.
 Pre-existing engine modules outside the new recovery surface still host legacy
 persistence interactions. They were not introduced by this plan and are not an
 escape used by the qualified `RecoveryProtocolV1`/canary flow. The qualification
-gate covers the bounded self-hosting flow represented by the plan: the
+gate covers the bounded recovery/merge component surface represented by the plan: the
 recovery protocol, capsule, typed-merge, failpoint, and canary surfaces. It does
 not cover unrelated engine modules, the legacy continuation path, or
 out-of-plan surfaces. Arbitrary legacy exact recovery, distributed persistence,
@@ -104,6 +107,12 @@ production. Those are the questions Gate A-R, Gate A-D, and Gate B answer, and
 all three were unmeasured when this report was written.
 
 The canary harness that produced this evidence does not execute Luther's engine.
-It calls nine helpers in sequence and asserts that it called them, having
-supplied the result of each hard stage itself. That makes it a valid
-**component** test and an invalid **product** test.
+It calls eight stage helpers in sequence (stages 3 and 4 are combined), records
+nine stage labels, and asserts the recorded label vector — having supplied the
+result of each hard stage itself. That makes it a valid **component** test and an
+invalid **product** test.
+
+What genuinely ran: real SQLite persistence, `RecoveryProtocolV1` state
+transitions, epoch CAS and idempotency behavior, capsule integrity, the failpoint
+matrix, and typed strategy-specific merge-proof validation. What did not run:
+anything that reaches an external system.
