@@ -12,6 +12,13 @@ use luther_workflow::engine::executors::{
 };
 use luther_workflow::engine::transition::StepOutcome;
 
+/// Reads the overall (objective) iteration index from a guard artifact.
+fn objective_index(temp: &tempfile::TempDir, head_sha: &str) -> Option<u64> {
+    guard_artifact(temp, head_sha)
+        .get("iteration_index")
+        .and_then(serde_json::Value::as_u64)
+}
+
 /// Overall remediation budget configured for these tests. Named so the guard
 /// configuration and the expectations that depend on it cannot drift apart.
 const MAX_OBJECTIVE_ROUNDS: usize = 6;
@@ -337,6 +344,7 @@ fn same_head_reentry_does_not_consume_the_review_budget() {
     let after_first = guard_artifact(&temp, HEAD_SHAS[1])
         .get("review_iteration_index")
         .and_then(serde_json::Value::as_u64);
+    let objective_after_first = objective_index(&temp, HEAD_SHAS[1]);
 
     for _ in 0..3 {
         run_guard(&temp, HEAD_SHAS[1]);
@@ -348,6 +356,13 @@ fn same_head_reentry_does_not_consume_the_review_budget() {
     assert_eq!(
         after_first, after_reentry,
         "repeated same-head activations must not consume review budget"
+    );
+    // A retry must not consume the objective budget either. Checking only the
+    // review index would miss an implementation that drained the overall one.
+    assert_eq!(
+        objective_index(&temp, HEAD_SHAS[1]),
+        objective_after_first,
+        "repeated same-head activations must not consume objective budget"
     );
 
     // Positive control: without this, an implementation that never incremented

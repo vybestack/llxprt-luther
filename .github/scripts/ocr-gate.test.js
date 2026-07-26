@@ -219,6 +219,33 @@ test('a reused file counts as covered in the report, not just the verdict', () =
   assert.strictEqual(result.coverage.ratio, '1');
 });
 
+test('a waiver with a reason excuses the file that actually failed', () => {
+  // The complement of the negative case below. Without this, a gate that
+  // ignored every waiver would still satisfy that test.
+  const result = evaluateGate({
+    ocrExitCode: 0,
+    ocrStatus: 'completed',
+    changedFiles: ['src/a.ts', 'src/b.ts'],
+    previewText: preview(['src/a.ts', 'src/b.ts'], []),
+    reviewedFiles: ['src/a.ts'],
+    failedFiles: ['src/b.ts'],
+    waivedFiles: [{ path: 'src/b.ts', reason: 'binary blob, cannot review' }],
+  });
+  assert.strictEqual(result.completeness, 'complete');
+  assert.deepStrictEqual(result.unreviewed, []);
+});
+
+test('no changed files is complete rather than a vacuous failure', () => {
+  const result = evaluateGate({
+    ...base,
+    changedFiles: [],
+    previewText: preview([], []),
+    reviewedFiles: [],
+  });
+  assert.strictEqual(result.completeness, 'complete');
+  assert.deepStrictEqual(result.unreviewed, []);
+});
+
 test('a waiver naming a file that did not fail cannot excuse it', () => {
   // Waivers are only valid for failed files. Trusting the raw list would let
   // an arbitrary path mark an unreviewed file as covered.

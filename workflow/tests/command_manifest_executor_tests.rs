@@ -1077,6 +1077,14 @@ fn diff_gate_without_a_base_ref_uses_the_worktree_only() {
         paths.iter().any(|p| p.contains("workflow/src/dirty.rs")),
         "the worktree view must still be reported, got: {paths:?}"
     );
+    // Without this the test would also pass if omitting base_ref silently
+    // consulted a committed range, which is the behaviour it exists to rule out.
+    assert!(
+        !paths
+            .iter()
+            .any(|p| p.contains("workflow/src/committed.rs")),
+        "an omitted base_ref must not consult any committed range, got: {paths:?}"
+    );
 }
 
 /// A malformed `base_ref` must be rejected rather than silently producing an
