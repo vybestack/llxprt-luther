@@ -506,7 +506,11 @@ fn unresolved_template_token(value: &str) -> Option<&str> {
         {
             return Some(candidate);
         }
-        rest = &after[end + 1..];
+        // Resume from just after this opening brace rather than past the
+        // closing one. In `{broken {missing}` the first `{` pairs with the
+        // final `}`, and skipping the whole span would step over the real
+        // `{missing}` token and let it reach the child process.
+        rest = after;
     }
     None
 }

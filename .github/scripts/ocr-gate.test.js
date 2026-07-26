@@ -39,7 +39,8 @@ test('every selected file reviewed is complete', () => {
 });
 
 test('declared exclusions are resolved rather than counted as missing', () => {
-  // The real v30 shape: 30 changed, 28 reviewed, 2 declared unsupported_ext.
+  // Mirrors the shape seen on a real run, scaled down: every changed file is
+  // either reviewed or declared excluded, so coverage is complete.
   const result = evaluateGate({
     ...base,
     changedFiles: ['a.ts', 'b.ts', 'notes.md'],

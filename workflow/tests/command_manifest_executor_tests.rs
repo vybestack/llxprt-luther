@@ -935,6 +935,22 @@ fn manifest_argv_allows_braces_that_are_not_tokens() {
     );
 }
 
+/// A token following an unmatched opening brace must still be caught. Pairing
+/// the first brace with the last one and skipping the whole span would step
+/// over the real token and hand it to the child process.
+#[test]
+fn manifest_argv_finds_a_token_after_an_unmatched_brace() {
+    let context = StepContext::new(PathBuf::from("/tmp/work"), "run-1".to_string());
+    let entry = command_entry("mixed", &["echo", "{broken {task_charter_merge_base}"]);
+
+    let error = resolve_entry_argv(&entry, &context).expect_err("unresolved token must fail");
+
+    assert!(
+        error.contains("task_charter_merge_base"),
+        "error must name the token hidden behind the unmatched brace, got: {error}"
+    );
+}
+
 /// Entries without tokens are passed through unchanged.
 #[test]
 fn manifest_argv_without_tokens_is_unchanged() {
@@ -1028,6 +1044,38 @@ fn diff_gate_treats_an_unresolvable_base_ref_as_no_committed_range() {
     assert!(
         !paths.iter().any(|p| p.contains("workflow/src/a.rs")),
         "an unresolvable base yields no committed range, got: {paths:?}"
+    );
+}
+
+/// Omitting `base_ref` entirely must keep the original uncommitted-only
+/// behaviour rather than erroring. Only a present-but-malformed value is
+/// rejected, so a config that never set the key still works.
+#[test]
+fn diff_gate_without_a_base_ref_uses_the_worktree_only() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let root = temp.path();
+    let git = |args: &[&str]| {
+        std::process::Command::new("git")
+            .args(args)
+            .current_dir(root)
+            .output()
+            .expect("git");
+    };
+    git(&["init", "-q"]);
+    git(&["config", "user.email", "t@example.com"]);
+    git(&["config", "user.name", "t"]);
+    fs::create_dir_all(root.join("workflow/src")).expect("mkdir");
+    fs::write(root.join("workflow/src/committed.rs"), "fn a() {}\n").expect("write");
+    git(&["add", "-A"]);
+    git(&["commit", "-qm", "work"]);
+    fs::write(root.join("workflow/src/dirty.rs"), "fn b() {}\n").expect("write");
+
+    let paths = luther_workflow::engine::executors::verify::changed_paths_for_test(root, None)
+        .expect("an omitted base_ref must not be an error");
+
+    assert!(
+        paths.iter().any(|p| p.contains("workflow/src/dirty.rs")),
+        "the worktree view must still be reported, got: {paths:?}"
     );
 }
 
