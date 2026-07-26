@@ -25,6 +25,7 @@ impl StepExecutor for PostPrIterationGuardExecutor {
             return Ok(StepOutcome::Fatal);
         }
         let max_iterations = u64_param(params, "max_post_pr_remediation_iterations", 3);
+        let max_review_iterations = u64_param(params, "max_review_remediation_iterations", 2);
         let previous = latest_guard_for_current_run(&store, &binding)?;
         let predecessor_artifact_sequence = previous
             .as_ref()
@@ -55,26 +56,25 @@ impl StepExecutor for PostPrIterationGuardExecutor {
                 "head_sha_changed_after_remediation_push",
             ),
         };
-        let exceeded = iteration_index > max_iterations;
+        let budget = RemediationBudget::evaluate(
+            &store,
+            &binding,
+            previous.as_ref(),
+            iteration_index,
+            max_iterations,
+            max_review_iterations,
+        )?;
         let payload = json!({
-            "guard_state": if exceeded { "max_iterations_exceeded" } else { "proceed" },
+            "guard_state": budget.guard_state(),
             "iteration_index": iteration_index,
             "max_post_pr_remediation_iterations": max_iterations,
+            "review_iteration_index": budget.review_iteration_index,
+            "max_review_remediation_iterations": max_review_iterations,
             "previous_head_sha": previous_head_sha,
             "predecessor_artifact_sequence": predecessor_artifact_sequence,
-            "reason": if exceeded { "max_iterations_exceeded" } else { reason },
+            "reason": if budget.exceeded { budget.exceeded_reason() } else { reason },
             "ignored_stale_artifacts": [],
             "updated_at": SystemClockSleeper.now_rfc3339()
-        });
-        let failure = exceeded.then(|| {
-            (
-                "fatal",
-                "max_iterations_exceeded",
-                json!({
-                    "iteration_index": iteration_index,
-                    "max_post_pr_remediation_iterations": max_iterations
-                }),
-            )
         });
         store.write_json_artifact(JsonArtifactWriteRequest::new(
             ArtifactWriteContext::new(
@@ -85,9 +85,9 @@ impl StepExecutor for PostPrIterationGuardExecutor {
                 &SystemClockSleeper,
             ),
             &payload,
-            failure,
+            budget.failure(iteration_index, max_iterations, max_review_iterations),
         ))?;
-        if exceeded {
+        if budget.exceeded {
             Ok(StepOutcome::Fatal)
         } else {
             Ok(StepOutcome::Success)
@@ -171,6 +171,130 @@ fn review_changed_files(work_dir: &Path, merge_base: &str) -> Result<Vec<String>
     paths.sort();
     paths.dedup();
     Ok(paths)
+}
+
+/// Outcome of applying the cause-classified remediation budgets to a round.
+///
+/// Objective failures and reviewer opinion are bounded separately so that a
+/// run which keeps fixing genuinely failing checks is never stopped by review
+/// churn, and review churn can never expand scope without limit.
+struct RemediationBudget {
+    review_iteration_index: u64,
+    review_exceeded: bool,
+    exceeded: bool,
+}
+
+impl RemediationBudget {
+    fn evaluate(
+        store: &PrFollowupArtifactStore,
+        binding: &PrFollowupBinding,
+        previous: Option<&Value>,
+        iteration_index: u64,
+        max_iterations: u64,
+        max_review_iterations: u64,
+    ) -> Result<Self, EngineError> {
+        let review_iteration_index =
+            review_iteration_index(store, binding, previous, iteration_index)?;
+        let review_exceeded = review_iteration_index > max_review_iterations;
+        Ok(Self {
+            review_iteration_index,
+            review_exceeded,
+            exceeded: iteration_index > max_iterations || review_exceeded,
+        })
+    }
+
+    fn guard_state(&self) -> &'static str {
+        if self.exceeded {
+            "max_iterations_exceeded"
+        } else {
+            "proceed"
+        }
+    }
+
+    /// Distinguishes an advisory review terminal from an objective one so the
+    /// durable artifact records why remediation stopped.
+    fn exceeded_reason(&self) -> &'static str {
+        if self.review_exceeded {
+            "max_review_iterations_exceeded"
+        } else {
+            "max_iterations_exceeded"
+        }
+    }
+
+    fn failure(
+        &self,
+        iteration_index: u64,
+        max_iterations: u64,
+        max_review_iterations: u64,
+    ) -> Option<(&'static str, &'static str, Value)> {
+        self.exceeded.then(|| {
+            (
+                "fatal",
+                self.exceeded_reason(),
+                json!({
+                    "iteration_index": iteration_index,
+                    "max_post_pr_remediation_iterations": max_iterations,
+                    "review_iteration_index": self.review_iteration_index,
+                    "max_review_remediation_iterations": max_review_iterations
+                }),
+            )
+        })
+    }
+}
+
+/// Running count of remediation rounds that were driven by reviewer opinion
+/// rather than by objective CI failure.
+///
+/// The guard runs before this iteration's failures and feedback are collected,
+/// so the classification describes the round that has just completed: the
+/// artifacts still on disk belong to the previous head. A round counts as
+/// review-driven only when the collected CI failures were empty, meaning the
+/// only reason to mutate again was reviewer feedback.
+///
+/// A missing or unreadable `ci-failures` artifact is deliberately treated as
+/// objective. Failing open here would let unreadable state silently consume the
+/// review budget and strand a red pull request.
+fn review_iteration_index(
+    store: &PrFollowupArtifactStore,
+    binding: &PrFollowupBinding,
+    previous: Option<&Value>,
+    iteration_index: u64,
+) -> Result<u64, EngineError> {
+    let Some(previous) = previous else {
+        return Ok(0);
+    };
+    let carried = previous
+        .get("review_iteration_index")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    // A same-head re-entry did not complete a new remediation round.
+    if iteration_index
+        == previous
+            .get("iteration_index")
+            .and_then(Value::as_u64)
+            .unwrap_or(0)
+    {
+        return Ok(carried);
+    }
+    if previous_round_had_ci_failures(store, binding)? {
+        return Ok(carried);
+    }
+    Ok(carried.saturating_add(1))
+}
+
+/// Whether the completed round observed at least one concrete CI failure.
+fn previous_round_had_ci_failures(
+    store: &PrFollowupArtifactStore,
+    binding: &PrFollowupBinding,
+) -> Result<bool, EngineError> {
+    let Some(ci_failures) = store.read_optional_current_json_for_head(binding, "ci-failures")?
+    else {
+        return Ok(true);
+    };
+    let Some(failures) = ci_failures.get("failures").and_then(Value::as_array) else {
+        return Ok(true);
+    };
+    Ok(!failures.is_empty())
 }
 
 fn latest_guard_for_current_run(

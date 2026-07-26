@@ -4,8 +4,10 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
+use luther_workflow::engine::executor::StepContext;
 use luther_workflow::engine::executors::command_manifest::{
-    request_from_entry, request_from_entry_with_paths, run_manifest_command, ManifestPathContext,
+    request_from_entry, request_from_entry_with_paths, resolve_entry_argv, run_manifest_command,
+    ManifestPathContext,
 };
 use luther_workflow::workflow::command_manifest::{
     ArtifactExpectation, ArtifactExpectations, ArtifactKind, CapturePolicy, CommandEntry,
@@ -851,5 +853,123 @@ fn command_manifest_group_rejects_backslash_runtime_paths() {
     assert!(
         err.contains("must stay under work_dir"),
         "unexpected error: {err}"
+    );
+}
+
+/// Manifest commands are declared both as argv arrays and as shell-string
+/// gates. The shell-string form is interpolated, so the argv form must be too;
+/// otherwise a token such as `{task_charter_merge_base}` reaches the child
+/// process literally and the command fails in a way that looks like a project
+/// failure rather than a configuration failure.
+#[test]
+fn manifest_argv_resolves_context_tokens() {
+    let mut context = StepContext::new(PathBuf::from("/tmp/work"), "run-1".to_string());
+    context.set("task_charter_merge_base", "abc123");
+    let entry = command_entry(
+        "ocr_review",
+        &[
+            "cargo",
+            "xtask",
+            "ocr-review",
+            "--from",
+            "{task_charter_merge_base}",
+        ],
+    );
+
+    let resolved = resolve_entry_argv(&entry, &context).expect("argv must resolve");
+
+    assert_eq!(
+        resolved.argv,
+        vec![
+            "cargo".to_string(),
+            "xtask".to_string(),
+            "ocr-review".to_string(),
+            "--from".to_string(),
+            "abc123".to_string(),
+        ]
+    );
+}
+
+/// An unresolved token must fail closed, naming the command and the offending
+/// argument, rather than being handed to the child process verbatim.
+#[test]
+fn manifest_argv_fails_closed_on_unresolved_token() {
+    let context = StepContext::new(PathBuf::from("/tmp/work"), "run-1".to_string());
+    let entry = command_entry(
+        "ocr_review",
+        &[
+            "cargo",
+            "xtask",
+            "ocr-review",
+            "--from",
+            "{task_charter_merge_base}",
+        ],
+    );
+
+    let error = resolve_entry_argv(&entry, &context).expect_err("unresolved token must fail");
+
+    assert!(
+        error.contains("ocr_review") && error.contains("task_charter_merge_base"),
+        "error must name the command and the offending argument, got: {error}"
+    );
+}
+
+/// Entries without tokens are passed through unchanged.
+#[test]
+fn manifest_argv_without_tokens_is_unchanged() {
+    let context = StepContext::new(PathBuf::from("/tmp/work"), "run-1".to_string());
+    let entry = command_entry("check", &["cargo", "check"]);
+
+    let resolved = resolve_entry_argv(&entry, &context).expect("argv must resolve");
+
+    assert_eq!(resolved.argv, entry.argv);
+}
+
+/// The diff gate asks whether the run produced qualifying changes. Committing
+/// the work does not undo that, so a gate that inspected only the working tree
+/// reported no changes precisely because the changes had been committed. The
+/// committed range against the base must therefore also count.
+#[test]
+fn diff_gate_sees_committed_work() {
+    let repo = tempfile::tempdir().expect("repo");
+    let root = repo.path();
+    let git = |args: &[&str]| {
+        let status = Command::new("git")
+            .args(args)
+            .current_dir(root)
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@e")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@e")
+            .status()
+            .expect("git");
+        assert!(status.success(), "git {args:?}");
+    };
+    git(&["init", "-q", "-b", "main"]);
+    fs::write(root.join("seed.txt"), "seed").expect("seed");
+    git(&["add", "-A"]);
+    git(&["commit", "-qm", "seed"]);
+    git(&["branch", "base"]);
+
+    fs::create_dir_all(root.join("workflow/src")).expect("dirs");
+    fs::write(root.join("workflow/src/a.rs"), "fn a() {}").expect("write");
+
+    let uncommitted =
+        luther_workflow::engine::executors::verify::changed_paths_for_test(root, Some("base"))
+            .expect("uncommitted");
+    assert!(
+        uncommitted.iter().any(|p| p.contains("workflow/src/a.rs")),
+        "uncommitted work must be visible"
+    );
+
+    git(&["add", "-A"]);
+    git(&["commit", "-qm", "work"]);
+
+    let committed =
+        luther_workflow::engine::executors::verify::changed_paths_for_test(root, Some("base"))
+            .expect("committed");
+    assert!(
+        committed.iter().any(|p| p.contains("workflow/src/a.rs")),
+        "committed work must remain visible to the diff gate, got: {committed:?}"
     );
 }

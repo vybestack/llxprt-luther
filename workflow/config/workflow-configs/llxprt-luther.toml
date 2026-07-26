@@ -250,6 +250,12 @@ paths = [
   "workflow/src/engine/executors/pr_remediation.rs",
   "workflow/src/engine/executors/pr_remediation/**",
   "workflow/src/engine/continuation.rs",
+  # A declared module owns its sibling submodule directory; see the note in
+  # review-range-integration. Both of these modules already have submodule
+  # directories on disk, so without these entries any change to them would
+  # stall the run awaiting scope expansion.
+  "workflow/src/engine/executors/llxprt/",
+  "workflow/src/engine/continuation/",
 ]
 
 [[target_profile.scope_control.subsystems]]
@@ -281,15 +287,34 @@ paths = [
 id = "review-range-integration"
 paths = [
   ".github/workflows/ocr-pr-review.yml",
+  # The OCR CI workflow invokes helper scripts that live in this directory,
+  # and one OCR helper already ships there. Declaring only the workflow file
+  # meant that extracting workflow logic into a script — which is the correct
+  # shape for anything needing its own tests — reported as a path outside the
+  # charter and stalled the run awaiting scope expansion. A declared workflow
+  # owns the scripts it invokes.
+  ".github/scripts/",
   ".coderabbit.yaml",
   "workflow/xtask/src/ocr_review.rs",
+  # Planning requires semantic decomposition into cohesive submodules when a
+  # change hits file-size or complexity guardrails, and plan review rejects
+  # plans that do not decompose. Declaring only the parent file made that
+  # mandated decomposition report as a path outside the charter, so a correct
+  # implementation stalled awaiting scope expansion. A declared module owns
+  # its sibling submodule directory.
+  "workflow/xtask/src/ocr_review/",
 ]
 
 [[target_profile.scope_control.subsystems]]
 id = "behavioral-tests-and-docs"
 paths = [
   "workflow/tests/**",
-  "workflow/project-plans/scope-control/**",
+  # The approved plan is committed under project-plans/issue-<n>/ so it is
+  # reviewable in the pull request; without this the scope guard correctly
+  # reports the plan itself as a path outside the charter. Subsystem paths
+  # are matched by path prefix, not by glob, so a wildcard segment such as
+  # issue-*/ would never match.
+  "workflow/project-plans/**",
   "workflow/docs/architecture/**",
   "workflow/docs/guides/**",
 ]

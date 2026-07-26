@@ -111,7 +111,7 @@ jobs:
       # Single source of truth for the pinned OCR package version. The cache,
       # install, diagnostics, and guardrails all reference this value so a bump
       # cannot leave any workflow behavior pointing at the old version.
-      OCR_VERSION: "1.7.9"
+      OCR_VERSION: "1.7.16"
     # Infrastructure failures are intentionally non-blocking for PR checks, but
     # these outputs let the notification job distinguish a completed OCR review
     # from a review that could not run because of provider, install, or script
@@ -577,6 +577,71 @@ jobs:
             fi
           fi
           exit 0
+      # Issue #138: prove reviewed-range completeness before publishing.
+      #
+      # A parseable exit-zero OCR result is not proof that every changed file
+      # was reviewed. This step reconciles three deterministic inputs — the
+      # changed-file set, the preview's declared selection/exclusions, and the
+      # durable session evidence — and fails closed unless every selected file
+      # is proven reviewed. Files the tool explicitly declined (for example
+      # unsupported_ext) are resolved by their declared exclusion.
+      #
+      # The classification logic is ported from vybestack/llxprt-code PR #2716
+      # and lives in tested modules under .github/scripts/ rather than inline
+      # shell, so a regression fails a unit test instead of silently passing.
+      - name: Verify OCR reviewed-range completeness
+        id: ocr-completeness
+        if: always()
+        shell: bash
+        env:
+          BASE_SHA: ${{ env.BASE_SHA }}
+          HEAD_SHA: ${{ env.HEAD_SHA }}
+        run: |
+          set -euo pipefail
+          if [ -s ocr-infrastructure-failure.txt ] || [ -s ocr-policy-failure.txt ]; then
+            echo "::notice::Skipping completeness verification because an earlier OCR failure was recorded."
+            echo "completeness=skipped" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git diff --name-only --diff-filter=ACMRT "${BASE_SHA}..${HEAD_SHA}" > ocr-changed-files.txt || : > ocr-changed-files.txt
+          node -e '
+            const fs = require("fs");
+            const { evaluateWorkspace } = require("./.github/scripts/ocr-gate");
+            const changedFiles = fs
+              .readFileSync("ocr-changed-files.txt", "utf8")
+              .split("\n")
+              .map((line) => line.trim())
+              .filter((line) => line.length > 0);
+            const result = evaluateWorkspace({
+              workspace: process.cwd(),
+              artifactDir: process.cwd(),
+              changedFiles,
+            });
+            fs.writeFileSync("ocr-completeness.json", JSON.stringify(result, null, 2) + "\n");
+            const out = process.env.GITHUB_OUTPUT;
+            if (out) {
+              fs.appendFileSync(out, `completeness=${result.completeness}\n`);
+              fs.appendFileSync(out, `coverage=${result.coverage.completed}/${result.coverage.selected}\n`);
+            }
+            console.log(
+              `completeness=${result.completeness} selected=${result.selected.length} ` +
+                `excluded=${result.excluded.length} unreviewed=${result.unreviewed.length}`,
+            );
+            if (!result.passed) {
+              for (const file of result.unreviewed) {
+                console.log(`::error::Changed file was neither reviewed nor excluded: ${file}`);
+              }
+              console.log(
+                "phase=review; reason=incomplete OCR coverage for the reviewed range",
+              );
+              fs.writeFileSync(
+                "ocr-policy-failure.txt",
+                "phase=review; reason=incomplete OCR coverage for the reviewed range\n",
+              );
+              process.exit(1);
+            }
+          '
+
 
       - name: Post OCR results
         if: always()

@@ -205,7 +205,9 @@
             "workflow/src/engine/executors/llxprt.rs",
             "workflow/src/engine/executors/pr_remediation.rs",
             "workflow/src/engine/executors/pr_remediation/**",
-            "workflow/src/engine/continuation.rs"
+            "workflow/src/engine/continuation.rs",
+            "workflow/src/engine/executors/llxprt/",
+            "workflow/src/engine/continuation/"
           ]
         },
         {
@@ -237,15 +239,17 @@
           "id": "review-range-integration",
           "paths": [
             ".github/workflows/ocr-pr-review.yml",
+            ".github/scripts/",
             ".coderabbit.yaml",
-            "workflow/xtask/src/ocr_review.rs"
+            "workflow/xtask/src/ocr_review.rs",
+            "workflow/xtask/src/ocr_review/"
           ]
         },
         {
           "id": "behavioral-tests-and-docs",
           "paths": [
             "workflow/tests/**",
-            "workflow/project-plans/scope-control/**",
+            "workflow/project-plans/**",
             "workflow/docs/architecture/**",
             "workflow/docs/guides/**"
           ]

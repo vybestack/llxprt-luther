@@ -44,6 +44,16 @@ pub enum GithubError {
         /// The repository in `owner/name` form.
         repo: String,
     },
+    /// The GitHub API rejected the request for exhausted quota. The repository
+    /// and credentials are not implicated and the condition clears on reset.
+    #[error(
+        "GitHub API rate limit exhausted while checking `{repo}`; the repository and credentials \
+         are not at fault. Check `gh api rate_limit` and retry after the reset"
+    )]
+    RateLimited {
+        /// The repository in `owner/name` form.
+        repo: String,
+    },
     /// A `gh` command exited non-zero for an otherwise-unclassified reason.
     #[error("GitHub command {argv:?} failed with exit code {exit_code:?}: {stderr}")]
     CommandFailed {
@@ -103,6 +113,16 @@ impl GithubError {
                 diag.insert(
                     "required_action".to_string(),
                     "verify repository name and permissions".to_string(),
+                );
+            }
+            GithubError::RateLimited { repo } => {
+                diag.insert("repo".to_string(), repo.clone());
+                diag.insert("transient".to_string(), "true".to_string());
+                diag.insert(
+                    "required_action".to_string(),
+                    "wait for the GitHub API quota to reset, then retry; \
+                     check `gh api rate_limit` for the reset time"
+                        .to_string(),
                 );
             }
             GithubError::CommandFailed {
@@ -296,11 +316,29 @@ pub fn check_repo_access(runner: &dyn GithubCommandRunner, repo: &str) -> Result
         "nameWithOwner",
     ])) {
         Ok(_) => Ok(()),
+        Err(GithubError::CommandFailed { stderr, .. }) if is_rate_limited(&stderr) => {
+            Err(GithubError::RateLimited {
+                repo: repo.to_string(),
+            })
+        }
         Err(GithubError::CommandFailed { .. }) => Err(GithubError::RepositoryNotAccessible {
             repo: repo.to_string(),
         }),
         Err(other) => Err(other),
     }
+}
+
+/// Whether a failed `gh` invocation was rejected for exhausted API quota
+/// rather than for a missing repository or insufficient permissions.
+///
+/// `gh repo view` resolves through the GraphQL API, whose quota is consumed
+/// independently of the REST quota. When that quota is exhausted the command
+/// fails even though the repository is present and writable, so treating the
+/// failure as a permissions problem sends the operator to verify credentials
+/// that are already correct.
+fn is_rate_limited(stderr: &str) -> bool {
+    let lowered = stderr.to_ascii_lowercase();
+    lowered.contains("rate limit") || lowered.contains("rate_limit")
 }
 
 /// Run the full GitHub preflight gate.

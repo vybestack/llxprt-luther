@@ -74,7 +74,8 @@ fn execute_manifest_group(
         let entry = commands_by_id
             .get(command_id.as_str())
             .ok_or_else(|| group_error(format!("unknown command manifest id '{command_id}'")))?;
-        let result = run_manifest_entry(entry, &path_context, default_timeout_seconds)
+        let entry = resolve_entry_argv(entry, context).map_err(group_error)?;
+        let result = run_manifest_entry(&entry, &path_context, default_timeout_seconds)
             .map_err(group_error)?;
         let ManifestEntryExecution::Completed(result) = result else {
             continue;
@@ -447,6 +448,42 @@ pub fn resolve_manifest_group_id(
     } else {
         Ok(group_id)
     }
+}
+
+/// Resolve template tokens in a manifest entry's `argv` against the step
+/// context, returning a copy of the entry whose argv is fully substituted.
+///
+/// Manifest commands are declared as argv arrays and as shell-string gates in
+/// the same configuration. The shell-string form is interpolated, so the argv
+/// form must be too; otherwise the same command expressed two ways behaves
+/// differently and a token such as `{task_charter_merge_base}` reaches the
+/// child process literally.
+///
+/// Unresolved tokens fail closed with the offending command and argument
+/// named, matching [`resolve_manifest_group_id`]. Failing closed matters here
+/// because an unsubstituted token otherwise produces a command that cannot
+/// succeed and is reported as a project failure rather than a configuration
+/// failure.
+pub fn resolve_entry_argv(
+    entry: &CommandEntry,
+    context: &StepContext,
+) -> Result<CommandEntry, String> {
+    let mut resolved = entry.clone();
+    resolved.argv = entry
+        .argv
+        .iter()
+        .map(|argument| {
+            let value = interpolate_string(argument, context);
+            if value.contains('{') || value.contains('}') {
+                return Err(format!(
+                    "command '{}' argv contains unresolved template token: {value}",
+                    entry.id
+                ));
+            }
+            Ok(value)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(resolved)
 }
 
 pub fn request_from_entry(

@@ -2669,9 +2669,16 @@ fn dogfood_remediation_waits_for_agent_or_diff_instead_of_idle_abandoning() {
         params.get("idle_timeout_seconds"),
         Some(&serde_json::json!(1800))
     );
+    // Fix AB: the wall-clock budget must accommodate a full evaluator round,
+    // which can raise many independent correctness gaps at once and is closer
+    // in size to the original implementation than to a small patch. A 3600s
+    // budget expired mid-round while the step was still actively editing and
+    // running green test suites, discarding real work because the advertised
+    // timeout recovery is refused on resume. The idle timeout above remains the
+    // guard against a genuinely stalled agent.
     assert_eq!(
         params.get("timeout_seconds"),
-        Some(&serde_json::json!(3600))
+        Some(&serde_json::json!(7200))
     );
 }
 
@@ -3429,6 +3436,51 @@ fn production_and_fixture_llxprt_issue_fix_v1_are_equivalent() {
     load_workflow_toml("tests/fixtures/workflows/valid/llxprt-issue-fix-v1.toml");
 }
 
+/// Gates that review a commit range, such as the OCR review invoked with
+/// `--from <merge_base> --to HEAD`, can only see work that has been committed.
+/// While the commit happened at push time, `HEAD` was still the merge base
+/// during `run_tests`, so the range was empty and a coverage-based gate could
+/// never observe the change it was meant to review. The commit must therefore
+/// precede every range-reviewing gate, while still following scope measurement
+/// so scope control continues to dominate mutation.
+#[test]
+fn dogfood_commits_before_range_reviewing_gates_run() {
+    let workflow = load_workflow_toml("config/workflows/llxprt-luther-dogfood-v1.toml");
+
+    assert!(
+        workflow
+            .steps
+            .iter()
+            .any(|step| step.step_id == "commit_changes"),
+        "a commit step must exist before range-reviewing gates"
+    );
+
+    let has = |from: &str, to: &str| {
+        workflow
+            .transitions
+            .iter()
+            .any(|transition| transition.from == from && transition.to == to)
+    };
+
+    assert!(
+        has("scope_measure", "commit_changes"),
+        "scope measurement must still precede the commit"
+    );
+    assert!(
+        has("commit_changes", "run_tests"),
+        "the commit must precede the gates that review a commit range"
+    );
+    assert!(
+        !has("scope_measure", "run_tests") && !has("remediate", "run_tests"),
+        "no path may reach run_tests without committing first, or the review \
+         range would be empty"
+    );
+    assert!(
+        has("remediate", "commit_changes"),
+        "remediation output must also be committed before it is reviewed"
+    );
+}
+
 #[test]
 fn dogfood_scope_control_dominates_mutation_and_push() {
     let workflow = load_workflow_toml("config/workflows/llxprt-luther-dogfood-v1.toml");
@@ -3463,7 +3515,10 @@ fn dogfood_scope_control_dominates_mutation_and_push() {
         ("task_charter", "route_pr_path", Some("success")),
         ("workflow_auth_preflight_plan", "implement", Some("success")),
         ("implement", "scope_measure", Some("success")),
-        ("scope_measure", "run_tests", Some("success")),
+        // Scope measurement still dominates mutation: the commit that makes the
+        // work reviewable happens only after scope_measure has passed.
+        ("scope_measure", "commit_changes", Some("success")),
+        ("commit_changes", "run_tests", Some("success")),
         (
             "workflow_auth_preflight_pre_push",
             "scope_measure_pre_push",
@@ -3491,7 +3546,7 @@ fn dogfood_scope_control_dominates_mutation_and_push() {
     }
     for (from, to, iterations) in [
         ("task_charter", "route_pr_path", 1),
-        ("scope_measure", "run_tests", 2),
+        ("scope_measure", "commit_changes", 2),
         (
             "workflow_auth_preflight_pre_push",
             "scope_measure_pre_push",
