@@ -994,8 +994,8 @@ fn diff_gate_treats_an_unresolvable_base_ref_as_no_committed_range() {
     git(&["init", "-q"]);
     git(&["config", "user.email", "t@example.com"]);
     git(&["config", "user.name", "t"]);
-    std::fs::create_dir_all(root.join("workflow/src")).expect("mkdir");
-    std::fs::write(root.join("workflow/src/a.rs"), "fn a() {}\n").expect("write");
+    fs::create_dir_all(root.join("workflow/src")).expect("mkdir");
+    fs::write(root.join("workflow/src/a.rs"), "fn a() {}\n").expect("write");
     git(&["add", "-A"]);
     git(&["commit", "-qm", "work"]);
 
@@ -1035,7 +1035,7 @@ fn diff_gate_rejects_an_option_like_base_ref() {
     git(&["init", "-q"]);
     git(&["config", "user.email", "t@example.com"]);
     git(&["config", "user.name", "t"]);
-    std::fs::write(root.join("a.rs"), "fn a() {}\n").expect("write");
+    fs::write(root.join("a.rs"), "fn a() {}\n").expect("write");
     git(&["add", "-A"]);
     git(&["commit", "-qm", "work"]);
     // Control: a resolvable ref succeeds in this same repository, so the

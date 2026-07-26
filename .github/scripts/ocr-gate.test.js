@@ -200,3 +200,35 @@ test('an untrimmed declared exclusion still excuses a file', () => {
   assert.strictEqual(result.completeness, 'complete');
   assert.deepStrictEqual(result.unreviewed, []);
 });
+
+test('a reused file counts as covered in the report, not just the verdict', () => {
+  // resolveCompleteness treats reused files as resolved. The reported
+  // unreviewed list and coverage must agree, or the gate passes while
+  // reporting the file as unreviewed and coverage below 1.
+  const result = evaluateGate({
+    ocrExitCode: 0,
+    ocrStatus: 'completed',
+    changedFiles: ['src/a.ts', 'src/b.ts'],
+    previewText: preview(['src/a.ts', 'src/b.ts'], []),
+    reviewedFiles: ['src/a.ts'],
+    reusedFiles: ['src/b.ts'],
+  });
+  assert.strictEqual(result.completeness, 'complete');
+  assert.deepStrictEqual(result.unreviewed, []);
+  assert.strictEqual(result.coverage.ratio, '1');
+});
+
+test('a waiver naming a file that did not fail cannot excuse it', () => {
+  // Waivers are only valid for failed files. Trusting the raw list would let
+  // an arbitrary path mark an unreviewed file as covered.
+  const result = evaluateGate({
+    ocrExitCode: 0,
+    ocrStatus: 'completed',
+    changedFiles: ['src/a.ts', 'src/b.ts'],
+    previewText: preview(['src/a.ts', 'src/b.ts'], []),
+    reviewedFiles: ['src/a.ts'],
+    waivedFiles: [{ path: 'src/b.ts', reason: 'not actually failed' }],
+  });
+  assert.deepStrictEqual(result.unreviewed, ['src/b.ts']);
+  assert.strictEqual(result.passed, false);
+});

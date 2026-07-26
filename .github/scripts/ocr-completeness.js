@@ -149,6 +149,7 @@ function computeCoverage(params) {
 
 module.exports = {
   STATUS,
+  collectValidWaivers,
   resolveCompleteness,
   computeCoverage,
   normalizePaths,

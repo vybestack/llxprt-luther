@@ -6,6 +6,7 @@ const path = require('path');
 
 const {
   STATUS,
+  collectValidWaivers,
   resolveCompleteness,
   computeCoverage,
   normalizePaths,
@@ -101,7 +102,20 @@ function evaluateGate(params) {
   });
 
   const reviewedSet = new Set(normalizePaths(options.reviewedFiles));
-  const unreviewed = selectedFiles.filter((file) => !reviewedSet.has(file));
+  // The report must use the same notion of "resolved" as the verdict.
+  // resolveCompleteness counts reused and validly waived files as resolved, so
+  // omitting them here would report a file as unreviewed while the gate passes.
+  //
+  // Waivers are deliberately filtered through the same validator rather than
+  // trusted as given: a waiver only counts when it carries a reason and names a
+  // file that actually failed. Accepting the raw list would let an arbitrary
+  // path silently excuse an unreviewed file.
+  const resolvedSet = new Set([
+    ...reviewedSet,
+    ...normalizePaths(options.reusedFiles),
+    ...collectValidWaivers(options.waivedFiles, normalizePaths(options.failedFiles)),
+  ]);
+  const unreviewed = selectedFiles.filter((file) => !resolvedSet.has(file));
 
   return {
     completeness,
