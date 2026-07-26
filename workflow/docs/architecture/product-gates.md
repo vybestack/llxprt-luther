@@ -16,7 +16,8 @@ omitted the product boundary:
    128 of 1,668 engine lines were generic.
 2. The llxprt-first acceptance smoke: marked PASS with
    `0 passed; 0 failed; 2 ignored`.
-3. The self-hosting canary: marked QUALIFIED while never invoking `EngineRunner`.
+3. The self-hosting canary: marked QUALIFIED while never invoking `EngineRunner`
+   — it builds synthetic configs in memory but never executes one.
 4. PR 196: five review cycles against a gate that `pull_request_target` guaranteed
    never executed.
 

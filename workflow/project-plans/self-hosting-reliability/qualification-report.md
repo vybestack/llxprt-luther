@@ -9,8 +9,10 @@ qualified under deterministic injected observations.
 > **Correction (2026-07-24, issue #198).** This report originally read
 > "QUALIFIED within the bounded scope of the plan", which was widely read as
 > evidence that Luther could self-host. It is not. The canary harness
-> (`tests/canary_harness_tests.rs`) never loads a workflow config and never
-> invokes `EngineRunner`. It supplies the postcondition of every hard stage:
+> (`tests/canary_harness_tests.rs`) never invokes `EngineRunner`. It constructs
+> synthetic `WorkflowConfig` values in memory (`:395-396`) but never executes a
+> workflow through the engine, and never loads the production config from disk.
+> It supplies the postcondition of every hard stage:
 > stage 2 creates the change by writing a file directly (`:635-653`), stage 6
 > supplies already-successful head and remote SHAs (`:741-829`), stage 7 inserts
 > fabricated PR metadata into SQLite (`:842-870`), and stage 9's probe returns
@@ -101,7 +103,7 @@ take an approved issue and produce a pull request, nor that any workflow reaches
 production. Those are the questions Gate A-R, Gate A-D, and Gate B answer, and
 all three were unmeasured when this report was written.
 
-The canary harness that produced this evidence does not execute Luther. It calls
-nine helpers in sequence and asserts that it called them, having supplied the
-result of each hard stage itself. That makes it a valid **component** test and an
-invalid **product** test.
+The canary harness that produced this evidence does not execute Luther's engine.
+It calls nine helpers in sequence and asserts that it called them, having
+supplied the result of each hard stage itself. That makes it a valid
+**component** test and an invalid **product** test.
