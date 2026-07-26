@@ -101,6 +101,12 @@ P00 → P00A → P01 → P01A → P02 → P02A
 All three protocol-core milestone gates are checked; P12 may begin. Production
 reachability is not qualified until P12–P15 complete.
 
+> **Correction (2026-07-26, issue #198).** P12–P15 are complete and production
+> reachability is still **not** qualified. Completing these phases was never
+> sufficient to establish it: no phase in this plan measures whether an approved
+> issue reaches a pull request. That is measured by Gate A-R and Gate A-D in
+> `docs/architecture/product-gates.md`, and both are currently unmeasured.
+
 ## Review-Cycle Cap
 
 Per phase, no more than **two cycles** of each review/remediation type:

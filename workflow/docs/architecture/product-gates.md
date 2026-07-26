@@ -30,8 +30,11 @@ Two distinct failure kinds, conflated at cost:
 - **Scoring false positive** — a run reported as passing that did not meet the
   gate's terminal evidence.
 - **Harmful effect** — any wrong, trivial, unauthorized, duplicate, or
-  task-mismatched externally visible effect (PR, comment, push, merge) produced
-  during **any attempt**, including attempts scored as failures.
+  task-mismatched effect produced during **any attempt**, including attempts
+  scored as failures. This covers externally visible effects (PR, comment, push,
+  merge) **and** local damage: writes outside the authorized workspace, corruption
+  of product state, or destruction of unrelated files. A system that produces
+  correct PRs while corrupting state it does not own has not passed.
 
 Both are counted. A sample with eight correct PRs and two wrong ones is **not** a
 pass, even when the two wrong runs are correctly scored as failures. Emitting a
@@ -45,20 +48,43 @@ These are normative, not illustrative:
    Library-level API calls are not the product.
 2. **Production configuration.** The exact config shipped to users, by content
    hash. A test-specific workflow disqualifies the run.
-3. **Pinned and recorded identity.** Binary hash, config hash, tool versions,
-   model identity and version, simulator fixture version. Recorded per run.
-4. **Real model.** Work generation uses the production model endpoint. A fake or
+3. **Pinned and recorded invocation manifest.** Binary hash, config hash, tool
+   versions, model identity and version, simulator fixture version, **plus the
+   full invocation**: argv, allowlisted environment variables, feature flags,
+   config and runtime directory roots, credential and endpoint class by
+   non-secret identity, and process topology. Recorded per run and required to
+   match a documented supported production deployment. A gate-only mode — a flag,
+   environment variable, or subcommand not used in production — disqualifies the
+   run, because the same binary and config hashes can otherwise hide a path that
+   works only under test.
+4. **Per-trial state reset.** Every counted trial starts from fresh product
+   SQLite state, artifact roots, Git and GitHub simulator state, model session,
+   daemon process state, repository namespace, and workspace. Gate B may retain
+   only its explicitly declared starting PR. Without this, an ordered sample can
+   warm state in trial 1 and pass the rest from a condition production never
+   reaches.
+5. **Bounded observation for negative cases.** "Produces no PR" and "does not
+   merge" are not finitely checkable without a deadline. Every negative case
+   pre-registers: a minimum number of complete discovery/poll cycles, a durable
+   typed skip or refusal outcome with a recorded reason, no pending or runnable
+   work remaining for that input, and no prohibited transition in the simulator's
+   immutable log through the deadline. Checking immediately after delivery is
+   insufficient — it lets delayed unsafe behavior escape observation.
+6. **Real model.** Work generation uses the production model endpoint. A fake or
    replayed model disqualifies the run — it can encode the answers.
-5. **Simulators are permitted only at the named Git and GitHub boundaries.**
+7. **Simulators are permitted only at the named Git and GitHub boundaries.**
    Built from captured real contracts, fail closed on unknown calls, expose
    inspectable state, and log immutable transitions. A simulator that returns
    success without a modeled state transition is forbidden.
-6. **Causal provenance.** Launch, generated commit, PR, and terminal observation
+8. **Causal provenance.** Launch, generated commit, PR, and terminal observation
    must be bound to one run by recorded identifiers.
-7. **Retry accounting.** Infrastructure retries are permitted only for failures
+9. **Retry accounting.** Infrastructure retries are permitted only for failures
    provably outside the product, must be disclosed with cause, and are capped.
    Any undisclosed rerun invalidates the sample.
-8. **Zero harmful effects**, absolute, across every attempt in the sample.
+10. **Zero harmful effects**, absolute, across every attempt in the sample.
+
+Where a rule below says **"Gate A"** without a suffix, it applies to **both A-R and
+A-D**. Rules specific to one name it exactly.
 
 ## Gate A-R — runner reachability (diagnostic)
 
@@ -104,22 +130,34 @@ Gate A-D does not prove the engine is composable; that is #212.
 
 | Property | Definition |
 |---|---|
-| Causal start | An existing draft PR, **produced by a prior Gate A run** and identified by run ID |
-| Terminal evidence | Externally observed merged state, with the merge strategy, head, and base matching what the run intended, and merge proof validating |
+| Causal start | An existing draft PR, **produced by a prior Gate A-D run** and identified by run ID |
+| Terminal evidence | **Scenario-specific** — see below. Not uniform across scenarios |
 | Forbidden | A probe returning `merged: true` without a modeled transition; fabricating merge state in local storage; supplying the final head |
-| Sample | **5 of 5 predeclared distinct scenarios** (below) |
-| Scoring false positive | Merged state supplied rather than observed; strategy or head mismatch; proof not validated |
+| Sample | **4 of 4 merge-positive scenarios**, plus a separately scored zero-tolerance refusal scenario |
+| Scoring false positive | Merged state supplied rather than observed; strategy or head mismatch; proof not validated; a refusal scenario that merged |
 
-**Gate B starts from an existing PR by construction.** The clean-workspace and
-no-pre-existing-PR rules apply to Gate A only. The Gate B integrity requirement is
-different: the starting PR must be attributable to a prior Gate A run, and the
-ready → checks → merge transition must be produced by the run under test.
+**Gate B starts from an existing PR by construction.** The no-pre-existing-PR rule
+applies to Gate A only. The Gate B integrity requirement is different: the starting
+PR must be attributable to a prior Gate A-D run, and the ready → checks → merge
+transition must be produced by the run under test. All other shared invariants,
+including per-trial state reset, apply unchanged.
 
-**Five required scenarios** — repeating one deterministic case five times is not
+**Four merge-positive scenarios**, each with terminal evidence "externally observed
+merged state, with strategy, head, and base matching what the run intended, and
+merge proof validating". Repeating one deterministic case four times is not
 evidence:
 
-1. merge commit; 2. squash; 3. rebase; 4. delayed or transitioning checks;
-5. fail-closed contract mismatch (must be refused, not merged).
+1. merge commit; 2. squash; 3. rebase; 4. delayed or transitioning checks.
+
+**One refusal scenario**, scored separately at zero tolerance: a fail-closed
+contract mismatch. Its terminal evidence is the **opposite** — a durable typed
+refusal outcome, no merge transition in the simulator's immutable log through the
+observation deadline, and a recorded refusal reason. A merge here is a gate
+failure, not a success.
+
+Applying the merge-positive terminal evidence to the refusal scenario would make
+Gate B unsatisfiable by a correct fail-closed system, which is why the terminal
+evidence is scenario-specific rather than uniform.
 
 ## Forbidden substitutions
 
@@ -146,12 +184,21 @@ LLM steps are probabilistic, so a single run is not evidence.
 - **Gate B: 5 of 5** across the five distinct scenarios.
 - **Zero harmful effects and zero scoring false positives**, absolute.
 
-**These thresholds are release floors, not reliability estimates.** 8/10 has an
-exact 95% binomial interval of roughly 0.44–0.97; a system with a true 50% success
-rate still passes about 5% of the time, and a true 80% system fails the threshold
-about a third of the time. Every gate result must report the observed proportion
-**and its exact 95% interval**, and must not describe the floor as a demonstrated
-reliability level.
+**These thresholds are release floors, not reliability estimates.** For Gate A,
+8/10 has an exact 95% Clopper–Pearson interval of 0.444–0.975; a system with a true
+50% success rate still passes about 5.5% of the time, and a true 80% system fails
+the threshold about 32% of the time. Gate A results must report the observed
+proportion **and its exact 95% interval**, and must not describe the floor as a
+demonstrated reliability level.
+
+**The interval applies to Gate A only.** Gate A tasks are independent draws from a
+declared population — the target issue population, its random draw protocol, and a
+requirement of distinct task identities must all be pre-registered. Gate B's
+scenarios are fixed and deliberately heterogeneous, not independent draws from
+anything, so a binomial interval over them is meaningless. **Gate B reports
+scenario coverage**, not a confidence interval. Reliability inference for a Gate B
+scenario requires independently seeded repetitions within that scenario, reported
+per scenario.
 
 Floors may be raised, never lowered. Once pre-registered, a threshold is immutable;
 changing it requires a new pre-registration visible in history.

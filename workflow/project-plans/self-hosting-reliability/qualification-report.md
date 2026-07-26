@@ -62,8 +62,14 @@ All canaries ran sequentially and completed before the next began:
 Each used atomic launch/capsule persistence, deliberate post-delta interruption,
 `RecoveryProtocolV1`, exact workspace authorization, allowlisted effect intents,
 PR/final-head binding, and typed merge completion. No network, sleeps, direct SQL,
-manual Git/GitHub mutation, duplicate effect, historical binary, or test-only
-production bypass was used by the harness.
+manual Git/GitHub mutation, duplicate effect, or historical binary was used by the
+harness, and **no test-only backdoor was added to production code**.
+
+The harness does, however, substitute test doubles for production orchestration
+and all external effects: `CanaryExecutor` replaces real step execution
+(`canary_harness_tests.rs:657-669`) and `DeterministicRemoteProbe` replaces real
+Git and GitHub observation (`:875-910`). The original wording — "no test-only
+production bypass" — obscured that, and is corrected here (issue #198).
 
 ## Verification Transcript
 
