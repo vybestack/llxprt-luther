@@ -31,10 +31,13 @@ pub(super) fn git_changed_paths(
     let Some(base_ref) = base_ref else {
         return Ok(paths);
     };
-    // The value is interpolated from workflow context. Command::args does not
-    // involve a shell, but git still parses a leading dash as an option, so a
-    // value like "--output=..." would change the command's meaning rather than
-    // name a revision. Reject anything that cannot be a plain ref.
+    // The value is interpolated from workflow context and embedded as
+    // "{base_ref}...HEAD". Because it is embedded, git does not treat it as an
+    // option, which makes the failure silent rather than loud: verified
+    // directly, "--output=/tmp/x...HEAD" and an empty value both exit 0 with no
+    // output, while "-x" and an embedded space exit 129 and 128. An empty
+    // result is indistinguishable from "nothing changed", which the gate would
+    // read as full coverage, so a malformed ref must be rejected outright.
     if base_ref.is_empty() || base_ref.starts_with('-') || base_ref.chars().any(char::is_whitespace)
     {
         return Err(diff_gate_error(format!(

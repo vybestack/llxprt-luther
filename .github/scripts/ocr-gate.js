@@ -4,7 +4,12 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
-const { STATUS, resolveCompleteness, computeCoverage } = require('./ocr-completeness');
+const {
+  STATUS,
+  resolveCompleteness,
+  computeCoverage,
+  normalizePaths,
+} = require('./ocr-completeness');
 const { parsePreview } = require('./ocr-preview');
 const { selectReviewSession, sessionSlugForWorkspace } = require('./ocr-session-evidence');
 
@@ -19,15 +24,6 @@ const { selectReviewSession, sessionSlugForWorkspace } = require('./ocr-session-
 // Files the tool explicitly declined to review are resolved by their declared
 // exclusion, not treated as missing coverage. Everything else must be proven
 // reviewed, or the verdict degrades from 'complete'.
-
-/**
- * Normalize path inputs so every comparison uses the same representation.
- */
-function normalizePaths(values) {
-  return (Array.isArray(values) ? values : [])
-    .map((value) => String(value ?? '').trim())
-    .filter((value) => value.length > 0);
-}
 
 /**
  * Read an optional artifact.

@@ -1010,19 +1010,52 @@ fn diff_gate_treats_an_unresolvable_base_ref_as_no_committed_range() {
     );
 }
 
-/// A `base_ref` beginning with a dash would be parsed by git as an option
-/// rather than a revision, so it must be rejected before the command runs.
+/// A malformed `base_ref` must be rejected rather than silently producing an
+/// empty range.
+///
+/// The value is embedded as `{base_ref}...HEAD`, so git does not parse it as an
+/// option; `--output=/tmp/x...HEAD` and an empty value both exit 0 with no
+/// output. That is the hazard: without validation the gate would read a
+/// malformed ref as "nothing changed" and vacuously pass. Verified against git
+/// directly: those two exit 0, while `-x` and an embedded space exit 129/128.
 #[test]
 fn diff_gate_rejects_an_option_like_base_ref() {
     let temp = tempfile::tempdir().expect("tempdir");
+    let root = temp.path();
+    // A real repository is required, otherwise every call would error for lack
+    // of a git repo and the test would pass without exercising the validation.
+    let git = |args: &[&str]| {
+        let status = std::process::Command::new("git")
+            .args(args)
+            .current_dir(root)
+            .status()
+            .expect("git");
+        assert!(status.success(), "git {args:?} failed");
+    };
+    git(&["init", "-q"]);
+    git(&["config", "user.email", "t@example.com"]);
+    git(&["config", "user.name", "t"]);
+    std::fs::write(root.join("a.rs"), "fn a() {}\n").expect("write");
+    git(&["add", "-A"]);
+    git(&["commit", "-qm", "work"]);
+    // Control: a resolvable ref succeeds in this same repository, so the
+    // rejections below are attributable to validation and nothing else.
+    luther_workflow::engine::executors::verify::changed_paths_for_test(root, Some("HEAD"))
+        .expect("a valid ref must be accepted");
+
     for hostile in ["--output=/tmp/pwned", "-x", "origin/main HEAD", ""] {
-        let result = luther_workflow::engine::executors::verify::changed_paths_for_test(
-            temp.path(),
-            Some(hostile),
-        );
+        let result =
+            luther_workflow::engine::executors::verify::changed_paths_for_test(root, Some(hostile));
+        let message = match result {
+            Err(error) => error.to_string(),
+            Ok(paths) => panic!("base_ref {hostile:?} must be rejected, got: {paths:?}"),
+        };
+        // Assert on our own diagnostic rather than merely on failure: git exits
+        // 0 for some of these, so a bare is_err() would pass even with the
+        // validation removed.
         assert!(
-            result.is_err(),
-            "base_ref {hostile:?} must be rejected, got: {result:?}"
+            message.contains("invalid base_ref"),
+            "base_ref {hostile:?} must be rejected by validation, got: {message}"
         );
     }
 }
