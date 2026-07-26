@@ -1009,3 +1009,20 @@ fn diff_gate_treats_an_unresolvable_base_ref_as_no_committed_range() {
         "an unresolvable base yields no committed range, got: {paths:?}"
     );
 }
+
+/// A `base_ref` beginning with a dash would be parsed by git as an option
+/// rather than a revision, so it must be rejected before the command runs.
+#[test]
+fn diff_gate_rejects_an_option_like_base_ref() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    for hostile in ["--output=/tmp/pwned", "-x", "origin/main HEAD", ""] {
+        let result = luther_workflow::engine::executors::verify::changed_paths_for_test(
+            temp.path(),
+            Some(hostile),
+        );
+        assert!(
+            result.is_err(),
+            "base_ref {hostile:?} must be rejected, got: {result:?}"
+        );
+    }
+}

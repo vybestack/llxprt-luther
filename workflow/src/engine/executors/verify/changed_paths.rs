@@ -31,6 +31,17 @@ pub(super) fn git_changed_paths(
     let Some(base_ref) = base_ref else {
         return Ok(paths);
     };
+    // The value is interpolated from workflow context. Command::args does not
+    // involve a shell, but git still parses a leading dash as an option, so a
+    // value like "--output=..." would change the command's meaning rather than
+    // name a revision. Reject anything that cannot be a plain ref.
+    if base_ref.is_empty() || base_ref.starts_with('-') || base_ref.chars().any(char::is_whitespace)
+    {
+        return Err(diff_gate_error(format!(
+            "invalid base_ref {base_ref:?}: must be a non-empty ref without \
+             leading '-' or whitespace"
+        )));
+    }
     // Order is meaningful to the caller, so membership is tracked separately
     // rather than scanning the accumulating vector for each candidate.
     let mut seen: HashSet<String> = paths.iter().cloned().collect();
