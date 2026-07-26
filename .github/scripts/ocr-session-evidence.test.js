@@ -128,10 +128,42 @@ test('selection ranks by reviewed files, not by total event volume', () => {
 
   const selected = selectReviewSession(dir);
   assert.strictEqual(selected.sessionId, 'thorough');
+  // Compare the two candidates directly rather than against a literal event
+  // count, which would break if the fixture gained unrelated events.
+  const noisyEvidence = readSessionEvidence(path.join(dir, 'noisy.jsonl'));
   assert.ok(
-    selected.eventCount < 21,
+    selected.eventCount < noisyEvidence.eventCount,
     'the winner must be the one with more reviewed files, not more events',
   );
+  assert.ok(
+    selected.reviewedFiles.length > noisyEvidence.reviewedFiles.length,
+    'the winner must be the one that reviewed more files',
+  );
+});
+
+test('a renamed file falls back to newPath when filePath is absent', () => {
+  // The shared helper always sets both fields, so the fallback branch would
+  // otherwise never run and a regression in it would go unnoticed.
+  const dir = makeSessionDir();
+  const file = writeSession(dir, 'renamed', [
+    {
+      type: 'review_item_done',
+      sessionId: 'renamed',
+      oldPath: 'src/old.ts',
+      newPath: 'src/new.ts',
+    },
+  ]);
+  assert.deepStrictEqual(readSessionEvidence(file).reviewedFiles, ['src/new.ts']);
+});
+
+test('an existing but empty session file yields no evidence', () => {
+  const dir = makeSessionDir();
+  const file = path.join(dir, 'empty.jsonl');
+  fs.writeFileSync(file, '');
+  const evidence = readSessionEvidence(file);
+  assert.deepStrictEqual(evidence.reviewedFiles, []);
+  assert.strictEqual(evidence.eventCount, 0);
+  assert.strictEqual(evidence.ended, false);
 });
 
 test('an explicit session id must match exactly', () => {
