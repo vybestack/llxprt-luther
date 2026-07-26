@@ -3,7 +3,28 @@
 `@plan:PLAN-20260723-SELFHOST-RELIABILITY.P19`
 
 Date: 2026-07-24
-Result: **QUALIFIED** within the bounded scope of the plan.
+Result: **COMPONENT-QUALIFIED** — `RecoveryProtocolV1` and typed merge are
+qualified under deterministic injected observations.
+
+> **Correction (2026-07-24, issue #198).** This report originally read
+> "QUALIFIED within the bounded scope of the plan", which was widely read as
+> evidence that Luther could self-host. It is not. The canary harness
+> (`tests/canary_harness_tests.rs`) never loads a workflow config and never
+> invokes `EngineRunner`. It supplies the postcondition of every hard stage:
+> stage 2 creates the change by writing a file directly (`:635-653`), stage 6
+> supplies already-successful head and remote SHAs (`:741-829`), stage 7 inserts
+> fabricated PR metadata into SQLite (`:842-870`), and stage 9's probe returns
+> `MergeObservation { merged: true }` (`:900-918`).
+>
+> A gate that injects its own postcondition proves safety **conditional on that
+> postcondition**. It cannot prove **reachability** of it. Over the same period,
+> 28 fresh autonomous runs produced zero PRs and no log contains
+> `Executing step: create_pr`. Both results are consistent.
+>
+> The metrics below remain valid for what they measure: component behavior under
+> deterministic injected observations. Product reachability is defined and
+> measured by Gate A-R, Gate A-D, and Gate B in
+> `docs/architecture/product-gates.md`.
 
 ## Qualification Metrics
 
@@ -71,5 +92,16 @@ async redesign, and broader llxprt roadmap work remain explicitly deferred.
 
 ## Verdict
 
-All P19 metrics meet their targets. Luther is **QUALIFIED** for the bounded
-self-hosting flow represented by this plan.
+All P19 metrics meet their targets. `RecoveryProtocolV1` and typed merge are
+**COMPONENT-QUALIFIED** under deterministic injected observations.
+
+**What this verdict does not establish.** It does not establish that Luther can
+take an approved issue and produce a pull request, nor that any workflow reaches
+`create_pr`, nor that the recovery and merge machinery is reachable in
+production. Those are the questions Gate A-R, Gate A-D, and Gate B answer, and
+all three were unmeasured when this report was written.
+
+The canary harness that produced this evidence does not execute Luther. It calls
+nine helpers in sequence and asserts that it called them, having supplied the
+result of each hard stage itself. That makes it a valid **component** test and an
+invalid **product** test.
