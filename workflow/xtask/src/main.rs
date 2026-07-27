@@ -968,12 +968,19 @@ fn base_file_line_count(
     let rel_path = path
         .strip_prefix(workspace_root)
         .with_context(|| format!("relativize {}", path.display()))?;
-    let head_path = format!("{git_prefix}{}", rel_path.to_string_lossy());
+    // Git reports paths with forward slashes on every platform, while
+    // `to_string_lossy` yields the native separator. On Windows the two
+    // disagree, the lookup misses, and the fallback reinstates exactly the
+    // bug this resolves - silently, since a miss is indistinguishable from
+    // "not renamed".
+    let head_path = format!("{git_prefix}{}", rel_path.to_string_lossy()).replace('\\', "/");
     // A moved file does not exist at its new path in the base commit. Without
     // resolving the rename its base count is missing, which the caller reads
     // as "grew past the limit" - so relocating an already-large file would
     // fail the gate even though not a line was added.
-    let blob_path = renames.get(&head_path).cloned().unwrap_or(head_path);
+    let blob_path = renames
+        .get(&head_path)
+        .map_or(head_path.as_str(), |old| old.as_str());
     let output = command_in_dir(
         workspace_root,
         "git",
@@ -1954,6 +1961,28 @@ include!(
             result.is_err(),
             "a moved file that grew past the maximum must still fail; the \
              baseline is a floor, not an exemption"
+        );
+    }
+
+    /// The rename lookup key uses git's separators, not the platform's.
+    ///
+    /// CI is Linux-only, so a native-separator key would pass every existing
+    /// test while silently failing on Windows: the lookup misses, the code
+    /// falls back to the new path, and the moved file loses its baseline -
+    /// the exact defect the rename map exists to fix. Asserting the
+    /// normalisation directly is the only way to cover it from here.
+    #[test]
+    fn the_rename_lookup_key_always_uses_forward_slashes() {
+        let native = Path::new("moved").join("deeper").join("big.rs");
+        let key = format!("prefix/{}", native.to_string_lossy()).replace('\\', "/");
+        assert_eq!(
+            key, "prefix/moved/deeper/big.rs",
+            "git reports rename paths with forward slashes on every platform, \
+             so the lookup key must match regardless of the host separator"
+        );
+        assert!(
+            !key.contains('\\'),
+            "a backslash here would miss the rename map and silently drop the baseline"
         );
     }
 }
