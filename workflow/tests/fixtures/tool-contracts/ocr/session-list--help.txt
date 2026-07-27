@@ -1,0 +1,11 @@
+Usage:
+  ocr session list [flags]
+  ocr session ls [flags]
+
+List review sessions previously persisted to ~/.opencodereview/sessions/. The
+session id printed here can be passed to 'ocr review --resume <id>'.
+
+Flags:
+  --repo string   Root directory of the git repository (default: current dir)
+  --json          Emit JSON instead of a table
+  --limit int     Cap the number of listed sessions (default 20; 0 = unlimited)

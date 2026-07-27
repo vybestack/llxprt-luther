@@ -1,0 +1,8 @@
+Usage:
+  ocr session show [flags] <session-id>
+
+Show metadata and per-file items for a single session.
+
+Flags:
+  --repo string   Root directory of the git repository (default: current dir)
+  --json          Emit JSON instead of a table

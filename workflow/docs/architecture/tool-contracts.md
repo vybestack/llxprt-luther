@@ -12,7 +12,7 @@ ten campaign failures under a pre-registered rubric. Six share one shape:
 | Case | Caller assumed | Tool actually did |
 |---|---|---|
 | #174 | prints `Excluded (2):` | prints `Excluded from review (2):` |
-| #176 | keys on the resolved path | keys on the logical working directory |
+| #176 | keys on the canonical realpath | keys on the **logical** working directory |
 | #179 | keys on the build workspace root | keys on the Git root |
 | #182 | `--repo` behaves uniformly | honoured by one subcommand, ignored by another |
 | #183, #186 | honours `--json` | accepts it, prints a human table |
@@ -21,6 +21,14 @@ ten campaign failures under a pre-registered rubric. Six share one shape:
 In **every one**, the underlying operation succeeded and the gate reported
 failure because it could not retrieve or interpret the result. None was a
 routing failure, which is why a routing layer would not have helped.
+
+Two rows correct the record rather than restate it. The retrospective and issue
+#176 both say the tool keys on the *canonical* path; measured against the
+binary it keys on the **logical** path, which is the opposite error and needs
+the opposite fix. Issue #182 says `--repo` is ignored; it is honoured by
+`session list` and ignored by `session show`. Those sources are wrong, and the
+corrections belong here rather than silently applied upstream, so the audit
+trail survives.
 
 Both independent raters named the same gap. Stated by the rater who had not
 seen the other's labels:
@@ -127,28 +135,62 @@ reporting. All eleven fail the suite:
 | Mutation | Detects |
 |---|---|
 | Truncate the version pin to a prefix | a pin that is not a pin |
+| Accept an empty version string | failing open where it matters most |
 | Swap two declared capture filenames | captures not read through the contract |
-| Falsify fixture content | **#174** |
+| Falsify a fixture, leaving the digest stale | casual editing |
+| **Falsify a fixture and refresh its digest** | **#174** |
 | Replace a capture with a hand-written invention | fabricated evidence |
-| Hand-edit the version capture | undetectable fixture editing |
+| Reduce the version capture to a bare token | evidence hollowed out |
+| Pad the negative control with whitespace | a control that proves nothing |
 | Empty an ignored flag's alternative | a vacuous remediation |
+| Point a remediation at a flag the tool ignores | a remediation that is false |
+| Declare a flag that does not exist | a guess recorded as fact |
 | Add a subcommand with no capture | claims without evidence |
+| Claim the contract describes another tool | unanchored identity |
+| Deny in provenance that the tool was run | provenance as decoration |
+| Empty either subcommand's required fields | content checks silently disabled |
+| Empty a field's justification | a record without a reason |
 | Bump the version CI installs | a pin that does not track the gate |
-| Change a recorded state key | #176, #179, #182 |
+| Truncate the digest above 1 MB | integrity that stops at a threshold |
+| Change a recorded state key | #176, #182 |
 | Claim an ignored flag is honoured | #183, #186 |
 | Drop a required field | a contract weakened silently |
 
-The third matters most: it is the failure where the parser and its fixture
-agree with each other and only reality dissents. An earlier revision of this
-work claimed that mutation was caught when it was not — which is itself the
-pattern being guarded against, and the reason the battery is a script that can
-be re-run rather than a paragraph asserting it was done.
+The fifth is the one that matters. Digesting a capture only catches a *stale*
+digest; a maintainer who fabricates output will refresh the digest, because the
+re-capture procedure tells them to. What defeats fabrication is that the
+captures must agree with each other the way the tool's own output does — the
+store path derives from the repository path, the jsonl is named for its
+session, and both subcommands describe the same session. Forging one file now
+requires forging a coherent set.
+
+Two earlier revisions of this document claimed that mutation was caught when it
+was not. That is the same pattern the contract exists to prevent, arrived at
+twice, which is why the battery is an executable script that classifies a
+mutation as caught only when the suite genuinely fails — a mutation that does
+not compile, or whose anchor has drifted, is reported as invalid rather than
+counted as a pass.
 
 ## Scope
 
-Contracts cover the `open-code-review` subcommands whose output the gate
-parses. `ocr review`, `ocr preview`, `git` and `gh` do not yet have contracts.
-The contract is consumed by its own tests and by the version binding to CI; the
-integration that would route every flag through `require_honoured` before
-spawning, and drive retrieval from `ResultSource`, is the next step and is
-tracked separately.
+Contracts cover `ocr session list` and `ocr session show`. `ocr review`, `git`
+and `gh` do not yet have contracts.
+
+What this does **not** yet do, stated plainly because a partial mechanism
+described as a complete one is the failure this work exists to correct:
+
+- **No production code consumes the contract.** It is enforced by its own tests
+  and by the version binding to CI. Routing every flag through
+  `require_honoured` before spawning, and driving retrieval from
+  `ResultSource`, is the integration that would make it load-bearing.
+- **Of the failures cited above, two are modelled** — `--repo` per subcommand
+  (#182) and `--json` on `session show` (#183, #186) — and `session show`'s
+  path derivation (#176). #174 is a format-drift defect in printed output that
+  `RequiredField` cannot express, since it holds field names rather than output
+  literals; #179 and #195 have no representation.
+- **Captures are machine-specific.** They embed absolute paths from the
+  capturing machine and cannot be reproduced in CI, where no session store
+  exists. Nothing detects the captures drifting from the binary — only from
+  each other and from the pinned version.
+
+These are the reasons the contract is not yet the thing issue #239 asks for.
