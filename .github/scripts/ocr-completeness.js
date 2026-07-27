@@ -92,9 +92,33 @@ function resolveCompleteness(params) {
     return STATUS.FAILED;
   }
 
+  // OCR reports 'skipped' when its own filtering selected nothing -- a
+  // documentation-only change, for example.
+  //
+  // This is honoured ONLY when the caller's independently derived selection is
+  // also empty. OCR's aggregate status is a third-party claim, not proof of
+  // coverage: it is emitted after OCR's own filtering, so a misconfiguration or
+  // filter regression could report 'skipped' while real source files remain in
+  // the authoritative changed set. Trusting the status alone would pass those
+  // files unreviewed.
+  //
+  // The selected set is computed by the caller as changed-minus-declared-
+  // exclusions and stays authoritative. Absence of completed/failed evidence is
+  // additionally required, but is never sufficient on its own -- absence of
+  // evidence is not evidence of nothing to review.
+  const status = typeof options.ocrStatus === 'string' ? options.ocrStatus : '';
+  if (status === 'skipped') {
+    const selected = normalizePaths(options.selectedFiles);
+    const completed = normalizePaths(options.completedFiles);
+    const failed = normalizePaths(options.failedFiles);
+    if (selected.length === 0 && completed.length === 0 && failed.length === 0) {
+      return STATUS.SKIPPED;
+    }
+    return STATUS.PARTIAL;
+  }
+
   // Positive allowlist: anything other than a recognized success status lacks
   // proof of completeness.
-  const status = typeof options.ocrStatus === 'string' ? options.ocrStatus : '';
   if (status !== 'success' && status !== 'completed') {
     return STATUS.PARTIAL;
   }

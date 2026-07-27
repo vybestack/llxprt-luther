@@ -658,10 +658,31 @@ jobs:
               .split('\n')
               .map((line) => line.trim())
               .filter((line) => line.length > 0);
+            // The same exclusion globs OCR was configured with. OCR emits no
+            // preview when it selects nothing, so on a docs-only range the
+            // gate would otherwise see no declared exclusions at all.
+            //
+            // Read from the rule file this workflow wrote, so there is exactly
+            // one definition and the gate cannot drift from OCR's own
+            // configuration. The file is written from trusted base-branch
+            // config; no PR-supplied rules are ever loaded.
+            const rulePath = `${process.env.HOME}/.opencodereview/rule.json`;
+            let excludeGlobs = [];
+            try {
+              excludeGlobs = JSON.parse(fs.readFileSync(rulePath, 'utf8')).exclude || [];
+            } catch (error) {
+              // Fail closed: without the exclusions every changed file stays
+              // selected, so an unreadable rule file cannot silently pass.
+              core.setFailed(
+                `phase=review; reason=could not read OCR rules from ${rulePath}: ${error.message}`,
+              );
+              return;
+            }
             const result = evaluateWorkspace({
               workspace: process.cwd(),
               artifactDir: process.cwd(),
               changedFiles,
+              excludeGlobs,
             });
             fs.writeFileSync('ocr-completeness.json', JSON.stringify(result, null, 2) + '\n');
             core.setOutput('completeness', result.completeness);

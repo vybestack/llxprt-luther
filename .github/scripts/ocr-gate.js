@@ -76,6 +76,72 @@ function readJsonField(filePath, fieldName) {
  * declares selection and exclusions; session evidence proves what was
  * reviewed. Exclusions only excuse files the preview actually declared.
  */
+/**
+ * Convert one exclusion glob to a RegExp.
+ *
+ * Supports the subset the OCR rules actually use: `**` across separators, `*`
+ * within a segment, `?`, and `{a,b}` alternation. Every other character is
+ * escaped, so a malformed pattern cannot become a catch-all that silently
+ * excludes source files.
+ */
+function globToRegExp(glob) {
+  let out = '';
+  for (let i = 0; i < glob.length; i += 1) {
+    const ch = glob[i];
+    if (ch === '*') {
+      if (glob[i + 1] === '*') {
+        // `**/` also matches zero directories, so `**/*.md` matches `a.md`.
+        if (glob[i + 2] === '/') {
+          out += '(?:.*/)?';
+          i += 2;
+        } else {
+          out += '.*';
+          i += 1;
+        }
+      } else {
+        out += '[^/]*';
+      }
+    } else if (ch === '?') {
+      out += '[^/]';
+    } else if (ch === '{') {
+      out += '(?:';
+    } else if (ch === '}') {
+      out += ')';
+    } else if (ch === ',') {
+      out += '|';
+    } else {
+      out += ch.replace(/[.+^${}()|[\]\\]/g, '\\$&');
+    }
+  }
+  return new RegExp(`^${out}$`);
+}
+
+/**
+ * Paths matching any configured exclusion glob.
+ *
+ * A non-array or empty pattern list excludes nothing, which keeps unproven
+ * files selected rather than silently resolving them.
+ */
+function matchGlobs(paths, globs) {
+  if (!Array.isArray(globs) || globs.length === 0) {
+    return [];
+  }
+  const patterns = [];
+  for (const glob of globs) {
+    const text = String(glob || '').trim();
+    if (text.length === 0) {
+      continue;
+    }
+    try {
+      patterns.push(globToRegExp(text));
+    } catch {
+      // An uncompilable pattern must not exclude anything.
+      continue;
+    }
+  }
+  return paths.filter((file) => patterns.some((pattern) => pattern.test(file)));
+}
+
 function evaluateGate(params) {
   const options = params || {};
   // Every path is normalized the same way before comparison. Comparing a
@@ -84,6 +150,20 @@ function evaluateGate(params) {
   const changedFiles = normalizePaths(options.changedFiles);
   const preview = parsePreview(options.previewText || '');
   const excludedPaths = new Set(normalizePaths(preview.excludedPaths));
+
+  // Exclusions are also derived directly from the configured rules, not only
+  // from the preview. OCR emits no preview when it selects nothing, so on a
+  // documentation-only range the preview is empty and the configured
+  // exclusions would otherwise never reach the gate, leaving prose files
+  // permanently unresolvable.
+  //
+  // These globs come from the workflow definition, which pull_request_target
+  // loads from the base branch, so a pull request cannot widen its own
+  // exclusions.
+  const ruleExcluded = matchGlobs(changedFiles, options.excludeGlobs);
+  for (const file of ruleExcluded) {
+    excludedPaths.add(file);
+  }
 
   // Selected = changed minus declared exclusions. Falling back to the changed
   // set (rather than the preview's reviewed list) keeps the gate honest when
@@ -163,7 +243,8 @@ function evaluateWorkspace(params) {
         ? options.previewText
         : readFileSafe(path.join(artifactDir, 'ocr-preview.txt')),
     reviewedFiles: session ? session.reviewedFiles : [],
-    failedFiles: options.failedFiles,
+    excludeGlobs: options.excludeGlobs,
+    failedFiles: session ? session.failedFiles : options.failedFiles,
     reusedFiles: options.reusedFiles,
     waivedFiles: options.waivedFiles,
   });

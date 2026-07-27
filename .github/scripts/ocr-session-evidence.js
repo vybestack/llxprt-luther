@@ -16,6 +16,10 @@ const path = require('path');
 // a camelCase `filePath`.
 
 const REVIEW_ITEM_DONE = 'review_item_done';
+// OCR records a per-file failure as its own event. Ignoring it made every
+// failure invisible to the gate, so a run that failed files looked identical to
+// one that reviewed nothing.
+const REVIEW_ITEM_FAILED = 'review_item_failed';
 const SESSION_END = 'session_end';
 
 /**
@@ -50,6 +54,7 @@ function sessionSlugForWorkspace(workspacePath) {
  */
 function readSessionEvidence(sessionFile) {
   const reviewedFiles = new Set();
+  const failedFiles = new Set();
   let ended = false;
   let sessionId = '';
 
@@ -57,7 +62,7 @@ function readSessionEvidence(sessionFile) {
   try {
     contents = fs.readFileSync(sessionFile, 'utf8');
   } catch {
-    return { sessionId: '', reviewedFiles: [], eventCount: 0, ended: false };
+    return { sessionId: '', reviewedFiles: [], failedFiles: [], eventCount: 0, ended: false };
   }
 
   let eventCount = 0;
@@ -81,6 +86,11 @@ function readSessionEvidence(sessionFile) {
       if (filePath.length > 0) {
         reviewedFiles.add(filePath);
       }
+    } else if (event.type === REVIEW_ITEM_FAILED) {
+      const filePath = String(event.filePath || event.newPath || '').trim();
+      if (filePath.length > 0) {
+        failedFiles.add(filePath);
+      }
     } else if (event.type === SESSION_END) {
       ended = true;
     }
@@ -89,6 +99,7 @@ function readSessionEvidence(sessionFile) {
   return {
     sessionId,
     reviewedFiles: [...reviewedFiles],
+    failedFiles: [...failedFiles],
     eventCount,
     ended,
   };
@@ -117,7 +128,10 @@ function selectReviewSession(sessionDir, expectedSessionId) {
   const candidates = [];
   for (const entry of entries) {
     const evidence = readSessionEvidence(path.join(sessionDir, entry));
-    if (evidence.reviewedFiles.length === 0) {
+    // A session holding only failures is still review evidence. Requiring a
+    // completed file would discard it, making a run that failed every file
+    // indistinguishable from one that reviewed nothing.
+    if (evidence.reviewedFiles.length === 0 && evidence.failedFiles.length === 0) {
       continue;
     }
     const id = evidence.sessionId || path.basename(entry, '.jsonl');
@@ -132,11 +146,11 @@ function selectReviewSession(sessionDir, expectedSessionId) {
     return candidates.find((c) => c.sessionId === expectedSessionId) || null;
   }
 
-  candidates.sort((a, b) => b.reviewedFiles.length - a.reviewedFiles.length);
-  if (
-    candidates.length > 1 &&
-    candidates[0].reviewedFiles.length === candidates[1].reviewedFiles.length
-  ) {
+  // Ranked by total review events, so a failed-only session is not outranked by
+  // an emptier one.
+  const weight = (c) => c.reviewedFiles.length + c.failedFiles.length;
+  candidates.sort((a, b) => weight(b) - weight(a));
+  if (candidates.length > 1 && weight(candidates[0]) === weight(candidates[1])) {
     return null;
   }
   return candidates[0];

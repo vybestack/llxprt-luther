@@ -260,3 +260,115 @@ test('a waiver naming a file that did not fail cannot excuse it', () => {
   assert.deepStrictEqual(result.unreviewed, ['src/b.ts']);
   assert.strictEqual(result.passed, false);
 });
+
+// --- OCR-reported 'skipped' status ---------------------------------------
+//
+// These assert the gate DECISION (passed), not just the classification. A
+// classification test alone would not have caught that 'skipped' passes the
+// gate while real files sit unreviewed.
+
+const DOC_EXCLUDES = ['**/*.md', '**/*.markdown', '**/*.txt'];
+
+test('docs-only range passes when the rules exclude every changed file', () => {
+  // OCR selected nothing and emitted no preview. Exclusions come from the
+  // configured rules, so the changed files resolve and the gate passes.
+  const result = evaluateGate({
+    ocrExitCode: 0,
+    ocrStatus: 'skipped',
+    changedFiles: ['docs/a.md', 'notes/b.txt'],
+    previewText: '',
+    reviewedFiles: [],
+    excludeGlobs: DOC_EXCLUDES,
+  });
+  assert.strictEqual(result.passed, true);
+  assert.strictEqual(result.completeness, 'skipped');
+  assert.deepStrictEqual(result.selected, []);
+  assert.deepStrictEqual(result.unreviewed, []);
+});
+
+test('skipped status cannot pass a source file that no rule excludes', () => {
+  // The bypass this guards: OCR claims 'skipped' while a source file changed.
+  // The status is a third-party claim, so the changed set stays authoritative.
+  const result = evaluateGate({
+    ocrExitCode: 0,
+    ocrStatus: 'skipped',
+    changedFiles: ['src/auth.rs'],
+    previewText: '',
+    reviewedFiles: [],
+    excludeGlobs: DOC_EXCLUDES,
+  });
+  assert.strictEqual(result.passed, false);
+  assert.deepStrictEqual(result.unreviewed, ['src/auth.rs']);
+});
+
+test('mixed range fails on the unreviewed source file', () => {
+  const result = evaluateGate({
+    ocrExitCode: 0,
+    ocrStatus: 'skipped',
+    changedFiles: ['docs/a.md', 'src/auth.rs'],
+    previewText: '',
+    reviewedFiles: [],
+    excludeGlobs: DOC_EXCLUDES,
+  });
+  assert.strictEqual(result.passed, false);
+  assert.deepStrictEqual(result.selected, ['src/auth.rs']);
+  assert.deepStrictEqual(result.unreviewed, ['src/auth.rs']);
+});
+
+test('skipped status does not pass when files were actually reviewed', () => {
+  // Self-contradictory: a run reporting 'skipped' after reviewing something is
+  // not a clean no-selection run, so it must not be trusted.
+  const result = evaluateGate({
+    ocrExitCode: 0,
+    ocrStatus: 'skipped',
+    changedFiles: ['src/a.rs', 'src/b.rs'],
+    previewText: '',
+    reviewedFiles: ['src/a.rs'],
+    excludeGlobs: DOC_EXCLUDES,
+  });
+  assert.strictEqual(result.passed, false);
+});
+
+test('missing exclusion rules keep every changed file selected', () => {
+  // Fail closed: without rules nothing is excluded, so prose stays unresolved
+  // rather than being silently passed.
+  const result = evaluateGate({
+    ocrExitCode: 0,
+    ocrStatus: 'skipped',
+    changedFiles: ['docs/a.md'],
+    previewText: '',
+    reviewedFiles: [],
+  });
+  assert.strictEqual(result.passed, false);
+  assert.deepStrictEqual(result.unreviewed, ['docs/a.md']);
+});
+
+test('rule-derived exclusions do not resolve a failed file', () => {
+  // A file that failed review is unresolved even though a rule would have
+  // excluded a sibling; failures are never masked by exclusions.
+  const result = evaluateGate({
+    ocrExitCode: 0,
+    ocrStatus: 'success',
+    changedFiles: ['docs/a.md', 'src/auth.rs'],
+    previewText: '',
+    reviewedFiles: [],
+    failedFiles: ['src/auth.rs'],
+    excludeGlobs: DOC_EXCLUDES,
+  });
+  assert.strictEqual(result.passed, false);
+});
+
+test('exclusion globs match only their intended paths', () => {
+  // A malformed or overbroad pattern must not become a catch-all.
+  const result = evaluateGate({
+    ocrExitCode: 0,
+    ocrStatus: 'skipped',
+    changedFiles: ['src/markdown_parser.rs', 'a.md', 'deep/nested/b.md'],
+    previewText: '',
+    reviewedFiles: [],
+    excludeGlobs: DOC_EXCLUDES,
+  });
+  // Both .md files match, including one at the repository root.
+  assert.deepStrictEqual(result.selected, ['src/markdown_parser.rs']);
+  assert.strictEqual(result.passed, false);
+});
