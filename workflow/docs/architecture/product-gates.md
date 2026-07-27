@@ -99,6 +99,41 @@ A-D**. Rules specific to one name it exactly.
 **Diagnostic only.** Passing Gate A-R isolates workflow reachability from
 discovery. It does not license any product claim.
 
+### Current measurement
+
+Implemented by `workflow/tests/gate_a_reachability.rs`, wired into CI as
+**Gate A-R reachability (expected FAIL)**.
+
+The observed result is **FAIL**. The run stops at `implement`, having reached:
+
+    workspace_ownership_verify -> select_issue -> setup_workspace_init ->
+    git_config_publish -> workspace_ownership -> setup_workspace ->
+    task_charter -> route_pr_path -> fetch_issue -> prepare_plan ->
+    create_plan -> evaluate_plan -> plan_gate ->
+    workflow_auth_preflight_plan -> implement -> abandon_and_log
+
+Fifteen steps execute for real: real subprocesses, real Git against a local
+bare remote, real `gh` invocations against a fail-closed stand-in. No step is
+short-circuited and no postcondition is injected. `commit_changes`,
+`push_changes`, and `create_pr` are never reached, which is consistent with the
+campaign record of zero PRs across 28 runs.
+
+**The CI check is green while this result holds.** It fails if the outcome, the
+terminal step, or the step trajectory changes — in either direction. An
+unexplained improvement is therefore an alert, not a quiet win, which is the
+specific failure mode this project has repeated four times.
+
+Recorded expectations live in three constants: `EXPECTED_GATE_A_OUTCOME`,
+`EXPECTED_FURTHEST_STEP`, and `EXPECTED_STEPS_REACHED`. Changing any of them is
+a deliberate act that belongs in the PR that changes the behaviour, with the
+emitted report as evidence.
+
+**What the harness does not yet establish.** The agent is a deterministic
+stand-in, so this measures the *workflow's* reachability, not an LLM's ability
+to produce a correct change. Whether the product can pass Gate A-R with a real
+agent remains unmeasured. Sampling (8 of 10) applies to that measurement, not
+to this deterministic one, which is single-shot by construction.
+
 ## Gate A-D — approved issue to draft PR (official product gate)
 
 | Property | Definition |
