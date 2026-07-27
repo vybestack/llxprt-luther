@@ -291,11 +291,30 @@ fn llxprt_failures_reach_the_engine_with_their_message_intact() {
         "llxprt binary at `llxprt` failed version check: boom"
     );
 
+    // A binary that exists but cannot be executed is a permissions problem,
+    // not a failed version check. The previous conversion funnelled both
+    // through the version-check wording, so this asserts the distinction the
+    // adapter draws actually survives.
+    let not_executable: EngineError = LlxprtError::NotExecutable {
+        path: "llxprt".to_string(),
+        message: "permission denied".to_string(),
+    }
+    .into();
+    assert_eq!(
+        not_executable.to_string(),
+        "llxprt binary at `llxprt` is not executable: permission denied",
+        "a permissions failure must not be reported as a failed version check"
+    );
+
     // Both arrive as the same generic variant: the engine learns that a
     // required tool is unusable, and nothing more. That is all it ever did
     // with these — the three removed variants shared one match arm.
     assert!(matches!(not_found, EngineError::ToolUnavailable { .. }));
     assert!(matches!(version, EngineError::ToolUnavailable { .. }));
+    assert!(matches!(
+        not_executable,
+        EngineError::ToolUnavailable { .. }
+    ));
 }
 
 #[test]

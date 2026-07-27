@@ -156,9 +156,14 @@ impl From<crate::adapters::llxprt::LlxprtError> for EngineError {
             LlxprtError::BinaryNotFound { path } => EngineError::ToolUnavailable {
                 message: format!("llxprt binary not found at `{path}`"),
             },
-            LlxprtError::VersionCheckFailed { path, message }
-            | LlxprtError::NotExecutable { path, message } => EngineError::ToolUnavailable {
-                message: format!("llxprt binary at `{path}` failed version check: {message}"),
+            // Forwarded verbatim from the adapter's own Display rather than
+            // reformatted here. The previous code funnelled NotExecutable
+            // through the version-check wording, so a permissions failure was
+            // reported as a failed version check. Delegating removes the
+            // second place a message could be written and lets the two
+            // variants keep their distinct text.
+            other => EngineError::ToolUnavailable {
+                message: other.to_string(),
             },
         }
     }
