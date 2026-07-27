@@ -1273,9 +1273,24 @@ fn test_ocr_pr_review_sets_ocr_no_update_env() {
 #[test]
 fn test_ocr_pr_review_installs_locally_pinned_version() {
     let content = ocr_pr_review_workflow_content();
-    // Single source of truth: OCR_VERSION must be the reviewed exact release.
+    // Single source of truth: the workflow must install the version the tool
+    // contract was captured against. Comparing to the contract rather than to
+    // a literal is what makes this a consistency check; a literal here would
+    // freeze the version instead, and a version bump would have to edit this
+    // assertion, which is the drift it is supposed to detect.
+    //
+    // The contract carries a leading `v` because that is how the tool prints
+    // its version; npm wants the bare number. Compare on the bare form.
     let pinned_version = ocr_version_from_workflow();
-    assert_eq!(pinned_version, "1.7.16");
+    let contract_version = luther_workflow::tool_contract::ocr::PINNED_VERSION
+        .strip_prefix('v')
+        .expect("the contract version is written in the tool's own v-prefixed form");
+    assert_eq!(
+        pinned_version, contract_version,
+        "the workflow installs OCR {pinned_version} but the tool contract was captured against \
+         {contract_version}; re-capture the contract fixtures against the installed version, or \
+         correct the workflow, so the recorded behaviour matches the binary CI actually runs"
+    );
     assert!(
         content
             .contains(r#"OCR_PREFIX="${RUNNER_TEMP}/ocr-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}""#),
