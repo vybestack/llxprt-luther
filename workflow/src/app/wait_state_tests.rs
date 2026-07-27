@@ -11,7 +11,7 @@ fn workflow_config(artifact_dir: &std::path::Path) -> WorkflowConfig {
             parallel_steps: None,
             log_level: None,
         },
-        repo: luther_workflow::workflow::schema::RepoConfig {
+        repo: Some(luther_workflow::workflow::schema::RepoConfig {
             workspace_strategy: "reuse".to_string(),
             branch_template: "issue{issue_number}".to_string(),
             base_branch: Some("main".to_string()),
@@ -21,7 +21,7 @@ fn workflow_config(artifact_dir: &std::path::Path) -> WorkflowConfig {
             diff_path_base: None,
             diff_path_normalization:
                 luther_workflow::workflow::schema::DiffPathNormalization::RepoRelative,
-        },
+        }),
         guard_limits: luther_workflow::workflow::schema::GuardLimits {
             max_iterations: None,
             max_file_changes: None,

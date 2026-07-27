@@ -360,7 +360,7 @@ pub(super) fn workflow_config(request: &ChildWorkflowLaunchRequest) -> WorkflowC
             parallel_steps: None,
             log_level: None,
         },
-        repo: crate::workflow::schema::RepoConfig {
+        repo: Some(crate::workflow::schema::RepoConfig {
             workspace_strategy: "temp".to_string(),
             branch_template: "test-{run_id}".to_string(),
             base_branch: Some("main".to_string()),
@@ -369,7 +369,7 @@ pub(super) fn workflow_config(request: &ChildWorkflowLaunchRequest) -> WorkflowC
             artifact_path_base: None,
             diff_path_base: None,
             diff_path_normalization: crate::workflow::schema::DiffPathNormalization::RepoRelative,
-        },
+        }),
         guard_limits: crate::workflow::schema::GuardLimits {
             max_iterations: Some(3),
             max_file_changes: Some(50),

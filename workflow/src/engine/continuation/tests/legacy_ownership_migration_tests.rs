@@ -225,7 +225,7 @@ fn migration_refuses_non_legacy_row() {
                     parallel_steps: None,
                     log_level: None,
                 },
-                repo: crate::workflow::schema::RepoConfig {
+                repo: Some(crate::workflow::schema::RepoConfig {
                     workspace_strategy: "temp_clone".to_string(),
                     branch_template: "workflow-{run_id}".to_string(),
                     base_branch: Some("main".to_string()),
@@ -235,7 +235,7 @@ fn migration_refuses_non_legacy_row() {
                     diff_path_base: None,
                     diff_path_normalization:
                         crate::workflow::schema::DiffPathNormalization::RepoRelative,
-                },
+                }),
                 guard_limits: crate::workflow::schema::GuardLimits {
                     max_iterations: None,
                     max_file_changes: None,
@@ -834,7 +834,7 @@ fn unmigrated_legacy_null_provenance_denied_by_verify() {
                 parallel_steps: None,
                 log_level: None,
             },
-            repo: crate::workflow::schema::RepoConfig {
+            repo: Some(crate::workflow::schema::RepoConfig {
                 workspace_strategy: "temp_clone".to_string(),
                 branch_template: "workflow-{run_id}".to_string(),
                 base_branch: Some("main".to_string()),
@@ -844,7 +844,7 @@ fn unmigrated_legacy_null_provenance_denied_by_verify() {
                 diff_path_base: None,
                 diff_path_normalization:
                     crate::workflow::schema::DiffPathNormalization::RepoRelative,
-            },
+            }),
             guard_limits: crate::workflow::schema::GuardLimits {
                 max_iterations: None,
                 max_file_changes: None,

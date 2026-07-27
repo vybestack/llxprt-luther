@@ -185,19 +185,23 @@ fn assert_configs_equivalent(
     );
 
     assert_eq!(
-        toml_config.repo.workspace_strategy, json_config.repo.workspace_strategy,
+        toml_config.repo().workspace_strategy,
+        json_config.repo().workspace_strategy,
         "repo.workspace_strategy should match for {fixture_id}"
     );
     assert_eq!(
-        toml_config.repo.branch_template, json_config.repo.branch_template,
+        toml_config.repo().branch_template,
+        json_config.repo().branch_template,
         "repo.branch_template should match for {fixture_id}"
     );
     assert_eq!(
-        toml_config.repo.base_branch, json_config.repo.base_branch,
+        toml_config.repo().base_branch,
+        json_config.repo().base_branch,
         "repo.base_branch should match for {fixture_id}"
     );
     assert_eq!(
-        toml_config.repo.workspace_root, json_config.repo.workspace_root,
+        toml_config.repo().workspace_root,
+        json_config.repo().workspace_root,
         "repo.workspace_root should match for {fixture_id}"
     );
 

@@ -25,8 +25,25 @@ pub struct WorkflowConfig {
     pub config_id: String,
     pub workflow_type_id: String,
     pub runtime: RuntimeConfig,
+    /// Repository settings, present only for workflows that drive a
+    /// repository.
+    ///
+    /// Mandatory until B3. That single requirement was the hardest blocker to
+    /// composability in the whole schema: a workflow with nothing to do with
+    /// version control could not be *expressed* without inventing repository
+    /// data, so "the engine is generic" was false at the point of parsing,
+    /// before any executor ran.
+    ///
+    /// Optional here rather than moved behind an extension map because the
+    /// canonical digest is computed over `WorkflowType`, not `WorkflowConfig`
+    /// (`persistence::launch_provenance::canonicalize_workflow_type`), and
+    /// every existing config supplies the section — so this widens what parses
+    /// without altering any digest or any existing config's meaning.
+    /// No `default`: serde already deserialises a missing `Option` field as
+    /// `None`. A control that removed it changed nothing, which is how the
+    /// redundancy was found rather than assumed.
     #[serde(rename = "repository", alias = "repo")]
-    pub repo: RepoConfig,
+    pub repo: Option<RepoConfig>,
     #[serde(rename = "guards", alias = "guard_limits")]
     pub guard_limits: GuardLimits,
     /// Config variables loaded into StepContext at run start.
@@ -70,6 +87,43 @@ pub struct WorkflowConfig {
     /// Optional config-first target profile used to derive legacy runtime
     /// variables and repository-specific command/check conventions.
     pub target_profile: Option<TargetProfileConfig>,
+}
+
+impl WorkflowConfig {
+    /// The repository settings, for callers that require them.
+    ///
+    /// Panicking rather than substituting a default is deliberate. A
+    /// repository-driven step handed an invented repository would push to the
+    /// wrong branch or measure the wrong tree, and would do so silently; a
+    /// caller that needs this section and does not have it has been
+    /// misconfigured, and saying so at the point of use names the config that
+    /// is wrong. Callers that can proceed without it should match on
+    /// [`Self::repo`] directly.
+    #[must_use]
+    pub fn repo(&self) -> &RepoConfig {
+        self.repo.as_ref().unwrap_or_else(|| {
+            panic!(
+                "workflow config `{}` has no [repository] section, but a repository-driven \
+                 step required one; add the section or run a workflow that does not use \
+                 repository-driven steps",
+                self.config_id
+            )
+        })
+    }
+
+    /// Mutable repository settings, for the loader's normalisation passes.
+    ///
+    /// Same contract as [`Self::repo`]: a caller that reaches for this has
+    /// already decided the section is required.
+    pub fn repo_mut(&mut self) -> &mut RepoConfig {
+        let config_id = self.config_id.clone();
+        self.repo.as_mut().unwrap_or_else(|| {
+            panic!(
+                "workflow config `{config_id}` has no [repository] section, but normalisation \
+                 required one"
+            )
+        })
+    }
 }
 
 /// @plan:PLAN-20260715-SCOPE-CONTROL

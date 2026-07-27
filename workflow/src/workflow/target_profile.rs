@@ -178,7 +178,7 @@ fn merge_identity(config: &mut WorkflowConfig, profile: &TargetProfileConfig) ->
     }
 
     if let Some(base_branch) = profile.identity.base_branch.as_deref() {
-        config.repo.base_branch = Some(base_branch.to_string());
+        config.repo_mut().base_branch = Some(base_branch.to_string());
         insert_var(config, "base_branch", base_branch);
     }
     Ok(())
@@ -187,13 +187,13 @@ fn merge_identity(config: &mut WorkflowConfig, profile: &TargetProfileConfig) ->
 fn merge_paths(config: &mut WorkflowConfig, profile: &TargetProfileConfig) -> Result<()> {
     validate_profile_paths(profile)?;
     if let Some(value) = profile.paths.project_subdir.as_deref() {
-        config.repo.project_subdir = Some(value.to_string());
+        config.repo_mut().project_subdir = Some(value.to_string());
     }
     if let Some(value) = profile.paths.artifact_path_base.as_deref() {
-        config.repo.artifact_path_base = Some(value.to_string());
+        config.repo_mut().artifact_path_base = Some(value.to_string());
     }
     if let Some(value) = profile.paths.diff_path_base.as_deref() {
-        config.repo.diff_path_base = Some(value.to_string());
+        config.repo_mut().diff_path_base = Some(value.to_string());
     }
     insert_optional(
         config,
@@ -241,7 +241,7 @@ fn merge_conventions(config: &mut WorkflowConfig, profile: &TargetProfileConfig)
         profile.pr_conventions.body_guidance.as_deref(),
     );
     if let Some(branch) = profile.templates.branch.as_deref() {
-        config.repo.branch_template = branch.to_string();
+        config.repo_mut().branch_template = branch.to_string();
         insert_var(config, "branch_template", branch);
     }
     insert_optional(

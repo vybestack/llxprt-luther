@@ -236,7 +236,7 @@ fn test_workflow_config(workflow_type_id: &str) -> crate::workflow::schema::Work
             parallel_steps: None,
             log_level: None,
         },
-        repo: crate::workflow::schema::RepoConfig {
+        repo: Some(crate::workflow::schema::RepoConfig {
             workspace_strategy: "temp".to_string(),
             branch_template: "test-{run_id}".to_string(),
             base_branch: Some("main".to_string()),
@@ -245,7 +245,7 @@ fn test_workflow_config(workflow_type_id: &str) -> crate::workflow::schema::Work
             artifact_path_base: None,
             diff_path_base: None,
             diff_path_normalization: crate::workflow::schema::DiffPathNormalization::RepoRelative,
-        },
+        }),
         guard_limits: crate::workflow::schema::GuardLimits {
             max_iterations: Some(3),
             max_file_changes: Some(50),
@@ -366,7 +366,7 @@ fn engine_runner_can_be_created() {
             parallel_steps: None,
             log_level: None,
         },
-        repo: RepoConfig {
+        repo: Some(RepoConfig {
             workspace_strategy: "temp".to_string(),
             branch_template: "test-{run_id}".to_string(),
             base_branch: Some("main".to_string()),
@@ -375,7 +375,7 @@ fn engine_runner_can_be_created() {
             artifact_path_base: None,
             diff_path_base: None,
             diff_path_normalization: crate::workflow::schema::DiffPathNormalization::RepoRelative,
-        },
+        }),
         guard_limits: GuardLimits {
             max_iterations: Some(3),
             max_file_changes: Some(50),
@@ -435,7 +435,7 @@ fn seam_test_instance() -> WorkflowInstance {
             parallel_steps: None,
             log_level: None,
         },
-        repo: RepoConfig {
+        repo: Some(RepoConfig {
             workspace_strategy: "temp".to_string(),
             branch_template: "test-{run_id}".to_string(),
             base_branch: Some("main".to_string()),
@@ -444,7 +444,7 @@ fn seam_test_instance() -> WorkflowInstance {
             artifact_path_base: None,
             diff_path_base: None,
             diff_path_normalization: crate::workflow::schema::DiffPathNormalization::RepoRelative,
-        },
+        }),
         guard_limits: GuardLimits {
             max_iterations: Some(3),
             max_file_changes: Some(50),
@@ -762,7 +762,7 @@ fn single_step_terminal_instance(step_type: &str, step_id: &str) -> WorkflowInst
             parallel_steps: None,
             log_level: None,
         },
-        repo: RepoConfig {
+        repo: Some(RepoConfig {
             workspace_strategy: "temp".to_string(),
             branch_template: "test-{run_id}".to_string(),
             base_branch: Some("main".to_string()),
@@ -771,7 +771,7 @@ fn single_step_terminal_instance(step_type: &str, step_id: &str) -> WorkflowInst
             artifact_path_base: None,
             diff_path_base: None,
             diff_path_normalization: crate::workflow::schema::DiffPathNormalization::RepoRelative,
-        },
+        }),
         guard_limits: GuardLimits {
             max_iterations: Some(3),
             max_file_changes: Some(50),

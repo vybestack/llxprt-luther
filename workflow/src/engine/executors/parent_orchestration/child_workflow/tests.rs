@@ -331,7 +331,7 @@ fn resume_config() -> WorkflowConfig {
             parallel_steps: None,
             log_level: None,
         },
-        repo: RepoConfig {
+        repo: Some(RepoConfig {
             workspace_strategy: "temp_clone".to_string(),
             branch_template: "wf-{run_id}".to_string(),
             base_branch: Some("main".to_string()),
@@ -340,7 +340,7 @@ fn resume_config() -> WorkflowConfig {
             artifact_path_base: None,
             diff_path_base: None,
             diff_path_normalization: DiffPathNormalization::RepoRelative,
-        },
+        }),
         guard_limits: GuardLimits {
             max_iterations: None,
             max_file_changes: None,
@@ -375,7 +375,7 @@ fn seed_resume_fixture_without_marker(
         crate::persistence::LaunchProvenance::from_resolved(workflow_type, config, config_root)
             .unwrap();
     let base_ref = config
-        .repo
+        .repo()
         .base_branch
         .clone()
         .unwrap_or_else(|| "main".to_string());

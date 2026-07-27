@@ -161,7 +161,7 @@ fn sample_config() -> WorkflowConfig {
             parallel_steps: None,
             log_level: None,
         },
-        repo: RepoConfig {
+        repo: Some(RepoConfig {
             workspace_strategy: "temp_clone".to_string(),
             branch_template: "wf-{run_id}".to_string(),
             base_branch: Some("main".to_string()),
@@ -170,7 +170,7 @@ fn sample_config() -> WorkflowConfig {
             artifact_path_base: None,
             diff_path_base: None,
             diff_path_normalization: DiffPathNormalization::RepoRelative,
-        },
+        }),
         guard_limits: GuardLimits {
             max_iterations: None,
             max_file_changes: None,
@@ -282,7 +282,7 @@ fn config_for_workflow(workflow_type_id: &str) -> WorkflowConfig {
             parallel_steps: None,
             log_level: None,
         },
-        repo: RepoConfig {
+        repo: Some(RepoConfig {
             workspace_strategy: "temp_clone".to_string(),
             branch_template: "wf-{run_id}".to_string(),
             base_branch: Some("main".to_string()),
@@ -291,7 +291,7 @@ fn config_for_workflow(workflow_type_id: &str) -> WorkflowConfig {
             artifact_path_base: None,
             diff_path_base: None,
             diff_path_normalization: DiffPathNormalization::RepoRelative,
-        },
+        }),
         guard_limits: GuardLimits {
             max_iterations: None,
             max_file_changes: None,
