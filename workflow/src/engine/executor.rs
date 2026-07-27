@@ -514,7 +514,16 @@ impl ExecutorRegistry {
         )
     }
 
-    fn register_core_executors(&mut self) {
+    /// Step types with no domain meaning: run a command, write a file, do
+    /// nothing.
+    ///
+    /// This is a strict subset of what the previous `register_core_executors`
+    /// installed. That function was named "core" while registering `llxprt`,
+    /// `parent_orchestration`, `scope_measure`, and `git_config_publish` -
+    /// four step types that only make sense for the issue-fixing product. The
+    /// name asserted a boundary the body did not keep, which is how the whole
+    /// domain ended up behind a constructor called `with_defaults`.
+    pub fn register_core_bundle(&mut self) {
         self.register("shell", Box::new(crate::engine::executors::ShellExecutor));
         self.register(
             "failure_cleanup",
@@ -529,12 +538,21 @@ impl ExecutorRegistry {
             "command_manifest_group",
             Box::new(crate::engine::executors::command_manifest::CommandManifestGroupExecutor),
         );
+        self.register("noop", Box::new(crate::engine::executors::NoOpExecutor));
+    }
+
+    /// Step types belonging to changing software, independent of where the
+    /// work is tracked.
+    ///
+    /// These would still be meaningful driving a repository hosted anywhere;
+    /// they are not core, because a workflow engine orchestrating something
+    /// other than software has no use for them.
+    pub fn register_software_change_bundle(&mut self) {
         self.register("llxprt", Box::new(crate::engine::executors::LlxprtExecutor));
         self.register(
             "workflow_auth_preflight",
             Box::new(crate::engine::executors::WorkflowAuthPreflightExecutor),
         );
-        self.register("noop", Box::new(crate::engine::executors::NoOpExecutor));
         self.register(
             "parent_orchestration",
             Box::new(crate::engine::executors::ParentOrchestrationExecutor),
@@ -565,7 +583,7 @@ impl ExecutorRegistry {
         );
     }
 
-    fn register_github_followup_executors(&mut self) {
+    pub fn register_github_followup_executors(&mut self) {
         self.register(
             "github_pr_identity",
             Box::new(
@@ -608,7 +626,7 @@ impl ExecutorRegistry {
         );
     }
 
-    fn register_feedback_and_remediation_executors(&mut self) {
+    pub fn register_feedback_and_remediation_executors(&mut self) {
         self.register(
             "feedback_evaluator",
             Box::new(crate::engine::executors::FeedbackEvaluatorExecutor::new(
@@ -669,9 +687,23 @@ impl ExecutorRegistry {
     /// @requirement:REQ-LF-SEP-001,REQ-PRFU-020
     /// @pseudocode lines 1-53
     #[must_use]
+    /// The catalog the issue-fixing product runs on.
+    ///
+    /// Retained so this change moves the composition decision without
+    /// rewriting every call site, but it is now assembled from the same public
+    /// bundles the application uses rather than from private registration
+    /// functions only the engine could reach. The distinction that matters is
+    /// that a different product can now compose a different catalog; before,
+    /// the engine was the only thing that could.
+    ///
+    /// The name is the problem it leaves behind: "defaults" reads as a
+    /// harmless convenience, and what it installs is an entire product. The
+    /// application calls `app::composition::issue_fixing_catalog` by that
+    /// name instead. B5/B6 remove this once the components move.
     pub fn with_defaults() -> Self {
         let mut registry = Self::new();
-        registry.register_core_executors();
+        registry.register_core_bundle();
+        registry.register_software_change_bundle();
         registry.register_github_followup_executors();
         registry.register_feedback_and_remediation_executors();
         registry

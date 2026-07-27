@@ -4,7 +4,6 @@ use luther_workflow::adapters::github::{run_preflight, GithubError, SystemGithub
 use luther_workflow::adapters::llxprt::{
     run_preflight as run_llxprt_preflight, LlxprtError, SystemLlxprtCommandRunner,
 };
-use luther_workflow::engine::executor::ExecutorRegistry;
 use luther_workflow::engine::instance::WorkflowInstance;
 use luther_workflow::engine::runner::{EngineRunner, RunOutcome};
 use luther_workflow::persistence::{get_run_with_conn, init_database};
@@ -475,7 +474,7 @@ pub fn create_durable_runner_with_provenance(
     run_context.daemon_managed = daemon_managed;
     run_context.launch_provenance = Some(launch_provenance);
     let instance = WorkflowInstance::create_with_run_id(workflow_type, config, run_id);
-    let registry = ExecutorRegistry::with_defaults();
+    let registry = crate::app::composition::issue_fixing_catalog();
     // Attach the run context up front so the initial persisted `Starting` row
     // includes path and GitHub metadata, instead of chaining
     // `with_run_context` after the initial record has already been written.

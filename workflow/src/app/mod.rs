@@ -4,6 +4,7 @@
 //! cohesive command-handler modules declared here. Each submodule owns one
 //! command family (run, status, service, daemon, runs, monitor) or a shared
 //! support concern (wait-state persistence, config-token interpolation).
+pub mod composition;
 mod config_tokens;
 mod daemon;
 mod monitor;
