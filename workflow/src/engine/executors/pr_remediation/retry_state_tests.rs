@@ -201,7 +201,7 @@ fn spawn_validation_replay(
     durable: RetryState,
     entered: Arc<Barrier>,
     release: Arc<Barrier>,
-    result: Arc<Mutex<Option<Result<(), crate::engine::runner::EngineError>>>>,
+    result: Arc<Mutex<Option<Result<(), crate::engine::error::EngineError>>>>,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         let mut stale = durable;
@@ -341,7 +341,7 @@ fn spawn_validation_publication(
 fn spawn_later_reservation(
     store: Arc<PrFollowupArtifactStore>,
     binding: Arc<PrFollowupBinding>,
-    sent: mpsc::Sender<Result<RetryState, crate::engine::runner::EngineError>>,
+    sent: mpsc::Sender<Result<RetryState, crate::engine::error::EngineError>>,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         let result = reserve_launch(

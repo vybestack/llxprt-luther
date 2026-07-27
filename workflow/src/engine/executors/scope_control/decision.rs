@@ -410,7 +410,7 @@ pub fn enforce_scope_barrier(
     context: &crate::engine::executor::StepContext,
     collector: &dyn GitPatchCollector,
     scope_control: &crate::workflow::schema::ScopeControlConfig,
-) -> Result<ScopeBarrierResult, crate::engine::runner::EngineError> {
+) -> Result<ScopeBarrierResult, crate::engine::error::EngineError> {
     use crate::engine::executors::scope_control::evaluation::evaluate;
 
     let artifact_dir = resolve_artifact_dir(context);
@@ -480,8 +480,8 @@ fn load_charter(
     read_json::<CanonicalTaskCharter>(&charter_path(&dir))
 }
 
-fn barrier_error(message: String) -> crate::engine::runner::EngineError {
-    crate::engine::runner::EngineError::StepExecutionError {
+fn barrier_error(message: String) -> crate::engine::error::EngineError {
+    crate::engine::error::EngineError::StepExecutionError {
         step_id: "scope_barrier".into(),
         message,
     }

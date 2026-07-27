@@ -544,3 +544,53 @@ fn the_executor_contract_imports_nothing_from_persistence_or_the_runner() {
         offenders.join("\n  ")
     );
 }
+
+/// Nothing names `EngineError` through the runner re-export.
+///
+/// The alias exists so B7 can retire it as a deliberate decision. If call
+/// sites drift back onto it, that removal stops being a one-line change and
+/// starts breaking compilation somewhere unrelated - which is exactly what
+/// review predicted when 37 occurrences across six files were still routing
+/// through it after the first pass claimed they had all been migrated.
+#[test]
+fn no_call_site_reaches_engine_error_through_the_runner_alias() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut offenders: Vec<String> = Vec::new();
+    let mut scanned = 0usize;
+
+    for directory in ["src", "tests"] {
+        for path in rust_sources_under(&root.join(directory)) {
+            let source = std::fs::read_to_string(&path).expect("a source file is readable");
+            scanned += 1;
+            let relative = path
+                .strip_prefix(root)
+                .unwrap_or(&path)
+                .display()
+                .to_string();
+            // runner.rs declares the re-export itself; it is the one file
+            // allowed to name both sides.
+            if relative.ends_with("engine/runner.rs") {
+                continue;
+            }
+            // Assembled rather than written literally so this file does not
+            // match its own search string.
+            let alias = concat!("runner", "::EngineError");
+            for (number, line) in source.lines().enumerate() {
+                if line.contains(alias) {
+                    offenders.push(format!("{relative}:{}", number + 1));
+                }
+            }
+        }
+    }
+
+    assert!(
+        scanned > 0,
+        "no sources were scanned; the walk found nothing and would pass regardless"
+    );
+    assert!(
+        offenders.is_empty(),
+        "these name EngineError through the runner alias instead of `engine::error`:\n  {}\n\
+         B7 retires the alias; every one of these would break when it does.",
+        offenders.join("\n  ")
+    );
+}

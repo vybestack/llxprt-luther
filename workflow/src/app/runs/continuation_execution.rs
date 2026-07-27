@@ -159,7 +159,7 @@ pub(super) fn finalize_continuation_lease(
     store: &SqliteStore,
     metadata: &RunMetadata,
     run_id: &str,
-    outcome: &Result<RunOutcome, luther_workflow::engine::runner::EngineError>,
+    outcome: &Result<RunOutcome, luther_workflow::engine::error::EngineError>,
 ) -> Result<(), String> {
     let Some(lease) = resolve_continuation_lease(store, metadata, run_id)? else {
         // No lease to finalize for this run (and no missing-lease error).
@@ -240,7 +240,7 @@ fn verify_lease_ownership(
 fn lease_status_for_outcome(
     store: &SqliteStore,
     run_id: &str,
-    outcome: &Result<RunOutcome, luther_workflow::engine::runner::EngineError>,
+    outcome: &Result<RunOutcome, luther_workflow::engine::error::EngineError>,
 ) -> Result<luther_workflow::persistence::LeaseStatus, String> {
     use luther_workflow::persistence::LeaseStatus;
     let status = match outcome {
@@ -443,7 +443,7 @@ pub fn write_continuation_result(
     artifact_dir: &std::path::Path,
     kind: &luther_workflow::engine::ContinuationKind,
     step: &str,
-    outcome: &Result<RunOutcome, luther_workflow::engine::runner::EngineError>,
+    outcome: &Result<RunOutcome, luther_workflow::engine::error::EngineError>,
 ) {
     let status_label = match outcome {
         Ok(RunOutcome::Success) => "completed",
@@ -466,7 +466,7 @@ pub fn write_continuation_result(
 pub(super) fn continuation_outcome_exit_code(
     run_id: &str,
     step: &str,
-    outcome: &Result<RunOutcome, luther_workflow::engine::runner::EngineError>,
+    outcome: &Result<RunOutcome, luther_workflow::engine::error::EngineError>,
 ) -> i32 {
     match outcome {
         Ok(RunOutcome::Success) => {

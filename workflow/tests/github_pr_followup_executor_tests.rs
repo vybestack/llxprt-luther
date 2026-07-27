@@ -138,7 +138,7 @@ impl GithubPrCommandRunner for FixtureGithubPrCommandRunner {
     fn run_github_command(
         &self,
         argv: &[String],
-    ) -> Result<String, luther_workflow::engine::runner::EngineError> {
+    ) -> Result<String, luther_workflow::engine::error::EngineError> {
         if argv.iter().any(|arg| arg == "view") {
             Ok(
                 include_str!("fixtures/github_api_contract/pr_identity_gh_pr_view.json")
@@ -195,7 +195,7 @@ impl FeedbackEvaluationAdapter for ScriptedFeedbackEvaluationAdapter {
     fn evaluate(
         &self,
         request: &FeedbackEvaluationRequest,
-    ) -> Result<String, luther_workflow::engine::runner::EngineError> {
+    ) -> Result<String, luther_workflow::engine::error::EngineError> {
         self.requests
             .lock()
             .expect("requests")
@@ -204,7 +204,7 @@ impl FeedbackEvaluationAdapter for ScriptedFeedbackEvaluationAdapter {
             .lock()
             .expect("responses")
             .pop()
-            .ok_or_else(|| luther_workflow::engine::runner::EngineError::StepExecutionError {
+            .ok_or_else(|| luther_workflow::engine::error::EngineError::StepExecutionError {
                 step_id: "scripted_feedback_evaluation_adapter".to_string(),
                 message: format!(
                     "No scripted response left for item_id={} head_sha={} stable_marker_key={} body_hash={}",
@@ -328,7 +328,7 @@ impl GithubPrCommandRunner for FlakyThenGreenGithubRunner {
     fn run_github_command(
         &self,
         argv: &[String],
-    ) -> Result<String, luther_workflow::engine::runner::EngineError> {
+    ) -> Result<String, luther_workflow::engine::error::EngineError> {
         let mut calls = self.calls.lock().expect("runner calls");
         calls.push(argv.to_vec());
         if argv.iter().any(|arg| arg == "view") {
@@ -343,7 +343,7 @@ impl GithubPrCommandRunner for FlakyThenGreenGithubRunner {
                 .count();
             if check_calls == 1 {
                 Err(
-                    luther_workflow::engine::runner::EngineError::StepExecutionError {
+                    luther_workflow::engine::error::EngineError::StepExecutionError {
                         step_id: "watch_pr_checks".to_string(),
 
                         message: "temporary GitHub checks API failure".to_string(),
@@ -380,7 +380,7 @@ impl GithubPrCommandRunner for ScriptedGithubRunner {
     fn run_github_command(
         &self,
         argv: &[String],
-    ) -> Result<String, luther_workflow::engine::runner::EngineError> {
+    ) -> Result<String, luther_workflow::engine::error::EngineError> {
         self.calls.lock().expect("runner calls").push(argv.to_vec());
         if argv.iter().any(|arg| arg == "view") {
             Ok(self.pr_json.clone())
@@ -713,7 +713,7 @@ impl GithubPrCommandRunner for P08FeedbackRunner {
     fn run_github_command(
         &self,
         argv: &[String],
-    ) -> Result<String, luther_workflow::engine::runner::EngineError> {
+    ) -> Result<String, luther_workflow::engine::error::EngineError> {
         self.calls.lock().expect("p08 calls").push(argv.to_vec());
         if argv.iter().any(|arg| arg.contains("graphql")) {
             let page = argv
@@ -3675,7 +3675,7 @@ impl FeedbackEvaluatorCommandRunner for RecordingFeedbackEvaluatorRunner {
         &self,
         argv: &[String],
         stdin_json: &str,
-    ) -> Result<String, luther_workflow::engine::runner::EngineError> {
+    ) -> Result<String, luther_workflow::engine::error::EngineError> {
         self.calls
             .lock()
             .expect("feedback evaluator calls")
@@ -3699,13 +3699,13 @@ impl FeedbackEvaluatorCommandRunner for FailingFeedbackEvaluatorRunner {
         &self,
         argv: &[String],
         stdin_json: &str,
-    ) -> Result<String, luther_workflow::engine::runner::EngineError> {
+    ) -> Result<String, luther_workflow::engine::error::EngineError> {
         self.calls
             .lock()
             .expect("feedback evaluator calls")
             .push((argv.to_vec(), stdin_json.to_string()));
         Err(
-            luther_workflow::engine::runner::EngineError::StepExecutionError {
+            luther_workflow::engine::error::EngineError::StepExecutionError {
                 step_id: "evaluate_coderabbit_feedback".to_string(),
                 message: "feedback evaluator command timed out after 300 seconds".to_string(),
             },
@@ -9123,7 +9123,7 @@ impl GithubPrCommandRunner for P15MarkerRunner {
     fn run_github_command(
         &self,
         argv: &[String],
-    ) -> Result<String, luther_workflow::engine::runner::EngineError> {
+    ) -> Result<String, luther_workflow::engine::error::EngineError> {
         self.calls.lock().expect("p15 calls").push(argv.to_vec());
         let is_post = argv.iter().any(|arg| arg == "POST");
         if argv
@@ -9194,7 +9194,7 @@ impl GithubPrCommandRunner for P15MarkerRunner {
             }
             if self.fail_resolution {
                 return Err(
-                    luther_workflow::engine::runner::EngineError::StepExecutionError {
+                    luther_workflow::engine::error::EngineError::StepExecutionError {
                         step_id: "mark_coderabbit_feedback".to_string(),
                         message: "resolution failed".to_string(),
                     },
@@ -12078,7 +12078,7 @@ impl ArtifactPublicationHook for AfterHistoryBarrier {
         stage: ArtifactPublicationStage,
         _history_path: &std::path::Path,
         _canonical_path: &std::path::Path,
-    ) -> Result<(), luther_workflow::engine::runner::EngineError> {
+    ) -> Result<(), luther_workflow::engine::error::EngineError> {
         if stage != ArtifactPublicationStage::AfterHistory {
             return Ok(());
         }
@@ -12110,7 +12110,7 @@ impl ArtifactPublicationHook for FailAfterHistoryOnce {
         stage: ArtifactPublicationStage,
         _history_path: &std::path::Path,
         _canonical_path: &std::path::Path,
-    ) -> Result<(), luther_workflow::engine::runner::EngineError> {
+    ) -> Result<(), luther_workflow::engine::error::EngineError> {
         if stage == ArtifactPublicationStage::AfterHistory
             && self
                 .remaining_failures
@@ -12119,7 +12119,7 @@ impl ArtifactPublicationHook for FailAfterHistoryOnce {
                 })
                 .is_ok()
         {
-            return Err(luther_workflow::engine::runner::EngineError::InvalidState(
+            return Err(luther_workflow::engine::error::EngineError::InvalidState(
                 "injected failure after immutable history".to_string(),
             ));
         }
@@ -14179,7 +14179,7 @@ impl ArtifactPublicationHook for ReplaceCanonicalParentAfterHistory {
         stage: ArtifactPublicationStage,
         _history_path: &std::path::Path,
         canonical_path: &std::path::Path,
-    ) -> Result<(), luther_workflow::engine::runner::EngineError> {
+    ) -> Result<(), luther_workflow::engine::error::EngineError> {
         if stage != ArtifactPublicationStage::AfterHistory {
             return Ok(());
         }
@@ -14229,7 +14229,7 @@ impl ArtifactPublicationHook for SwapCanonicalParentAtBarrier {
         stage: ArtifactPublicationStage,
         _history_path: &std::path::Path,
         canonical_path: &std::path::Path,
-    ) -> Result<(), luther_workflow::engine::runner::EngineError> {
+    ) -> Result<(), luther_workflow::engine::error::EngineError> {
         use std::os::unix::fs::symlink;
         if stage != ArtifactPublicationStage::BeforeCanonical {
             return Ok(());

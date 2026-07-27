@@ -59,8 +59,12 @@ pub struct RunContext {
 }
 
 // The executor contract error type lives in `engine::error` so that the
-// contract does not depend on this module. Re-exported because many call
-// sites name it as `runner::EngineError`; B7 removes the alias.
+// contract does not depend on this module.
+//
+// Nothing in this repository names it through here any more: every call site
+// in `src/` and `tests/` imports it from `engine::error` directly. The alias
+// remains only so that removing it in B7 is a deliberate API decision rather
+// than a change that silently breaks an unmigrated caller.
 pub use crate::engine::error::{EngineError, OwnershipFailureDetails};
 
 /// Outcome of a workflow run.

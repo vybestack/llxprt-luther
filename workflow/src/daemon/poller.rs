@@ -384,7 +384,7 @@ fn pr_check_observed_state(
 fn write_pr_check_status_snapshot(
     record: &WaitStateRecord,
     state: &Value,
-) -> Result<(), crate::engine::runner::EngineError> {
+) -> Result<(), crate::engine::error::EngineError> {
     let artifact_root = record
         .wait_condition
         .get("artifact_root")

@@ -42,7 +42,7 @@ impl StepExecutor for SequenceExecutor {
         &self,
         _context: &mut StepContext,
         _params: &serde_json::Value,
-    ) -> Result<StepOutcome, luther_workflow::engine::runner::EngineError> {
+    ) -> Result<StepOutcome, luther_workflow::engine::error::EngineError> {
         let mut count = self.call_count.lock().unwrap();
         let outcomes = self.outcomes.lock().unwrap();
 

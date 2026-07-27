@@ -1,3 +1,4 @@
+use luther_workflow::engine::error::EngineError;
 /// @plan:PLAN-20260408-STEP-EXEC.P04
 /// Unit tests for executor module - `StepContext`, Registry, and Executor implementations.
 /// These tests expect REAL behavior and will fail until Phase 05 implementation.
@@ -5,7 +6,6 @@ use luther_workflow::engine::executor::{
     interpolate_string, ExecutorRegistry, StepContext, StepExecutor,
 };
 use luther_workflow::engine::executors::{NoOpExecutor, ShellExecutor, WriteFileExecutor};
-use luther_workflow::engine::runner::EngineError;
 use luther_workflow::engine::transition::StepOutcome;
 use serde_json::json;
 use std::path::PathBuf;
