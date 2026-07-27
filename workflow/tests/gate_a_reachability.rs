@@ -250,10 +250,9 @@ fn an_unrecognized_gh_invocation_fails_closed() {
     let path = root.path().join("gh");
     gate_a_harness::install_script(&path, &script);
 
-    let output = std::process::Command::new(&path)
-        .args(["release", "delete", "v1.0.0"])
-        .output()
-        .expect("fake gh runs");
+    let output = gate_a_harness::spawn_tolerating_busy_text(
+        std::process::Command::new(&path).args(["release", "delete", "v1.0.0"]),
+    );
 
     assert!(
         !output.status.success(),

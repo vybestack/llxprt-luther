@@ -243,7 +243,7 @@ pub fn run_gate_a(run: &GateRun) -> GateResult {
         .env("HOME", root.path())
         .current_dir(root.path());
 
-    let output = command.output().expect("shipping binary must start");
+    let output = spawn_tolerating_busy_text(&mut command);
 
     // Steps that redirect to files keep their diagnostics out of the parent's
     // stderr, so the harness reads them back. Without this a failure inside a
@@ -382,6 +382,30 @@ fn launcher_script(binary: &Path, exec_log: &Path) -> String {
         shell_quote(&binary.to_string_lossy()),
         log = shell_quote(&exec_log.to_string_lossy()),
     )
+}
+
+/// Runs a command, retrying briefly while the OS reports `ETXTBSY`.
+///
+/// Tests in this suite run concurrently and each installs scripts into its own
+/// directory. A child forked by one test inherits the write descriptors open
+/// in the parent at that instant, including another test's script, and Linux
+/// refuses to exec a file any process holds open for writing. Closing our own
+/// handle promptly (see `install_script`) shrinks the window but cannot close
+/// it, because the conflicting descriptor belongs to a different test.
+///
+/// Retrying is the remedy rather than serializing the suite: the condition is
+/// transient by definition and clears as soon as the other writer finishes.
+pub fn spawn_tolerating_busy_text(command: &mut Command) -> std::process::Output {
+    for attempt in 0..50 {
+        match command.output() {
+            Ok(output) => return output,
+            Err(error) if error.kind() == std::io::ErrorKind::ExecutableFileBusy => {
+                std::thread::sleep(std::time::Duration::from_millis(20 * (attempt + 1)));
+            }
+            Err(error) => panic!("shipping binary must start: {error}"),
+        }
+    }
+    panic!("shipping binary remained busy after repeated attempts");
 }
 
 /// Writes an executable script and guarantees the handle is closed first.
