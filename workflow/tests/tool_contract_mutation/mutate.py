@@ -143,16 +143,38 @@ def falsify_session_list():
     """
     target = FIX / "session-list--json.stdout"
     original = target.read_text()
-    entries = json.loads(original)
-    if not entries or "repo_dir" not in entries[0]:
+    try:
+        entries = json.loads(original)
+    except json.JSONDecodeError as error:
         raise MutationNotApplied(
-            "session-list capture has no repo_dir to falsify; re-capture it or update M3"
+            f"session-list capture is not JSON: {error}"
+        ) from error
+    # Shape is validated before indexing. main() catches MutationNotApplied
+    # and restores the tree; a KeyError or TypeError escaping here would
+    # instead abort the run and leave the working tree holding a falsified
+    # fixture, which is the worst outcome this battery can produce.
+    if not isinstance(entries, list) or not entries:
+        raise MutationNotApplied(
+            f"session-list capture is {type(entries).__name__}, expected a non-empty array; "
+            "re-capture it or update M3"
         )
-    real_repo_dir = entries[0]["repo_dir"]
+    first = entries[0]
+    if not isinstance(first, dict) or "repo_dir" not in first:
+        raise MutationNotApplied(
+            "session-list capture's first entry has no repo_dir to falsify; "
+            "re-capture it or update M3"
+        )
+    real_repo_dir = first["repo_dir"]
+    if not isinstance(real_repo_dir, str):
+        raise MutationNotApplied(
+            f"repo_dir is {type(real_repo_dir).__name__}, expected a string"
+        )
+    # Rewritten as text rather than re-serialised: re-serialising would
+    # normalise the tool's own formatting, so the mutation would also be
+    # testing json.dumps' layout rather than the falsified content alone.
     falsified = (original
                  .replace('"file_path"', '"filePath"')
-                 .replace(f'"repo_dir": "{real_repo_dir}"',
-                          '"repo_dir": "/completely/made/up"'))
+                 .replace(json.dumps(real_repo_dir), json.dumps("/completely/made/up")))
     if falsified == original:
         raise MutationNotApplied("M3 changed nothing; the capture format moved under it")
     target.write_text(falsified)
