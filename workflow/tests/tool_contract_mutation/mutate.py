@@ -48,6 +48,7 @@ def truncate_required_fields(subcommand):
     index = source.index(marker)
     field_start = source.index("required_fields: vec![", index)
     depth, cursor = 0, field_start + len("required_fields: vec!")
+    field_end = None
     for position in range(cursor, len(source)):
         if source[position] == "[":
             depth += 1
@@ -56,6 +57,15 @@ def truncate_required_fields(subcommand):
             if depth == 0:
                 field_end = position + 1
                 break
+    if field_end is None:
+        # Leaving this implicit bound field_end only when the scan succeeded,
+        # so an unbalanced vec raised UnboundLocalError from the write below
+        # and read as a bug in the script rather than a mutation that could
+        # not be applied. Both mean "this mutation proves nothing", but only
+        # one says so.
+        raise MutationNotApplied(
+            f"required_fields for {subcommand} has no balanced closing bracket"
+        )
     OCR.write_text(
         source[:field_start] + "required_fields: vec![]" + source[field_end:])
 
@@ -279,6 +289,13 @@ def run_suite():
         # available, because the working tree would silently hold falsified
         # fixtures. A timeout is scored "broken" rather than "caught": a
         # mutation that stalls the suite is not evidence that a guard works.
+        return "broken"
+    except OSError:
+        # Covers a missing or non-executable cargo. Catching only
+        # TimeoutExpired let these propagate out of run_suite, past the
+        # per-mutation handling, and abort the script - which skips the
+        # restore and leaves the mutated tree in place. Scored "broken" for the
+        # same reason a timeout is: the suite never ran.
         return "broken"
     if "test result: ok." in result.stdout:
         return "green"

@@ -54,21 +54,24 @@ fn capture_named(subcommand_name: &str, file: &str) -> String {
 /// reproduced inside the mechanism built to prevent it.
 #[test]
 fn every_capture_matches_its_recorded_digest() {
-    let contract = ocr_contract();
-    let mut checked = 0;
-
-    for capture in std::iter::once(&contract.version_capture) {
+    fn check(capture: &Capture) {
         let path = fixture_dir().join(&capture.file);
         let bytes =
             std::fs::read(&path).unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
         assert_eq!(
             sha256_hex(&bytes),
             capture.sha256,
-            "{} no longer matches its recorded digest",
+            "{} no longer matches its recorded digest; if the tool changed, re-capture and update \
+             the contract, and if it did not, this file was edited by hand",
             capture.file
         );
-        checked += 1;
     }
+
+    let contract = ocr_contract();
+    let mut checked = 0;
+
+    check(&contract.version_capture);
+    checked += 1;
 
     for subcommand in &contract.subcommands {
         assert!(
@@ -77,16 +80,7 @@ fn every_capture_matches_its_recorded_digest() {
             subcommand.subcommand
         );
         for capture in &subcommand.captures {
-            let path = fixture_dir().join(&capture.file);
-            let bytes = std::fs::read(&path)
-                .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
-            let actual = sha256_hex(&bytes);
-            assert_eq!(
-                actual, capture.sha256,
-                "{} no longer matches its recorded digest; if the tool changed, re-capture and \
-                 update the contract, and if it did not, this file was edited by hand",
-                capture.file
-            );
+            check(capture);
             checked += 1;
         }
     }
@@ -172,7 +166,7 @@ fn assert_captures_describe_the_same_session(sessions: &[serde_json::Value]) {
     let described = listed_ids
         .iter()
         .find(|id| shown.contains(id.as_str()))
-        .expect("the session show capture describes a session session list reports");
+        .expect("the session show capture describes a session that session list reports");
 
     // The table must also echo the durable path and repository that session
     // list reports for that same session. A one-line forgery carrying only
