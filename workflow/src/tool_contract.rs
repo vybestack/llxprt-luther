@@ -329,3 +329,11 @@ impl std::error::Error for ContractViolation {}
 #[cfg(test)]
 #[path = "tool_contract_tests.rs"]
 mod tool_contract_tests;
+
+#[cfg(test)]
+#[path = "tool_contract_reader_tests.rs"]
+mod tool_contract_reader_tests;
+
+#[cfg(test)]
+#[path = "tool_contract_writer_tests.rs"]
+mod tool_contract_writer_tests;
