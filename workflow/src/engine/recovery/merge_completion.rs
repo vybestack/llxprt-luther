@@ -46,6 +46,19 @@ pub trait MergeProbeFactory: Send + Sync {
 
     /// Create the remote probe bound to the config-declared expected strategy.
     fn remote_probe(&self, expected_strategy: MergeStrategy) -> Box<dyn MergeRemoteProbe>;
+
+    /// Return a factory whose probes run against `work_dir`.
+    ///
+    /// The caller that owns the working directory is not the one that chooses
+    /// the probes, so the directory is applied after construction rather than
+    /// passed to the constructor.
+    ///
+    /// Required rather than defaulted: a factory whose probes shell out to git
+    /// and silently ignored this would run them in the wrong repository, and a
+    /// default returning `self` would make that the easy mistake to make.
+    /// Doubles that touch no repository implement it by returning themselves,
+    /// which is a decision each one states rather than inherits.
+    fn bind_work_dir(&self, work_dir: &std::path::Path) -> std::sync::Arc<dyn MergeProbeFactory>;
 }
 
 /// Production probe factory that constructs system probes. [P17]
@@ -81,6 +94,10 @@ impl SystemMergeProbeFactory {
 impl MergeProbeFactory for SystemMergeProbeFactory {
     fn git_probe(&self) -> Box<dyn MergeGitProbe> {
         Box::new(SystemMergeGitProbe::new())
+    }
+
+    fn bind_work_dir(&self, work_dir: &std::path::Path) -> std::sync::Arc<dyn MergeProbeFactory> {
+        std::sync::Arc::new(Self::new().with_work_dir(work_dir.to_path_buf()))
     }
 
     fn remote_probe(&self, expected_strategy: MergeStrategy) -> Box<dyn MergeRemoteProbe> {
@@ -368,6 +385,7 @@ mod tests {
 
     // ---- Stub probe factory ----
 
+    #[derive(Clone)]
     struct StubProbeFactory {
         git: StubMergeGitProbe,
         remote_observation: MergeObservation,
@@ -376,6 +394,16 @@ mod tests {
     impl MergeProbeFactory for StubProbeFactory {
         fn git_probe(&self) -> Box<dyn MergeGitProbe> {
             Box::new(self.git.clone())
+        }
+
+        fn bind_work_dir(
+            &self,
+            _work_dir: &std::path::Path,
+        ) -> std::sync::Arc<dyn MergeProbeFactory> {
+            // These probes return canned observations and never reach a
+            // repository, so there is nothing for a working directory to
+            // change.
+            std::sync::Arc::new(self.clone())
         }
 
         fn remote_probe(&self, expected_strategy: MergeStrategy) -> Box<dyn MergeRemoteProbe> {

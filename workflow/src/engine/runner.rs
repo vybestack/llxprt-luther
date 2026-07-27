@@ -134,6 +134,15 @@ pub struct EngineRunner {
     /// `persist_step_result` to terminate the run with a terminal failure
     /// without advancing to the workspace-mutating cleanup step.
     terminal_ownership_failure: bool,
+    /// Supplies the probes that decide whether a merge-required run has
+    /// actually merged.
+    ///
+    /// Injected rather than constructed at the point of use: completion
+    /// previously built a `SystemMergeProbeFactory` inline, which runs
+    /// `git rev-list`, so finishing a run meant the engine spawned git
+    /// subprocesses. The decision is the same; who supplies it is not.
+    merge_probe_factory:
+        std::sync::Arc<dyn crate::engine::recovery::merge_completion::MergeProbeFactory>,
 }
 
 impl EngineRunner {

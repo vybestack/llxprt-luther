@@ -14,6 +14,30 @@ use std::path::Path;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
+use crate::engine::recovery::merge_completion::{MergeProbeFactory, SystemMergeProbeFactory};
+
+/// The probe factory a runner uses unless one is supplied.
+///
+/// Keeps the default in one place rather than repeated across the three
+/// constructors, so a caller that wants different probes overrides a single
+/// field instead of matching an inline construction.
+fn default_merge_probe_factory() -> Arc<dyn MergeProbeFactory> {
+    Arc::new(SystemMergeProbeFactory::new())
+}
+
+impl crate::engine::runner::EngineRunner {
+    /// Use `factory` to decide whether a merge-required run has merged.
+    ///
+    /// Without this the field is injectable in name only: every constructor
+    /// installs the system factory and nothing can replace it, so completion
+    /// would still be reachable only by spawning git.
+    #[must_use]
+    pub fn with_merge_probe_factory(mut self, factory: Arc<dyn MergeProbeFactory>) -> Self {
+        self.merge_probe_factory = factory;
+        self
+    }
+}
+
 use rusqlite::Connection;
 
 use crate::engine::executor::ExecutorRegistry;
@@ -83,6 +107,7 @@ impl EngineRunner {
             persist_registry: false,
             pending_failure_cleanup: None,
             terminal_ownership_failure: false,
+            merge_probe_factory: default_merge_probe_factory(),
         })
     }
 
@@ -135,6 +160,7 @@ impl EngineRunner {
             persist_registry: true,
             pending_failure_cleanup: None,
             terminal_ownership_failure: false,
+            merge_probe_factory: default_merge_probe_factory(),
         };
 
         // Persist an initial run record so in-flight runs are visible before
@@ -199,6 +225,7 @@ impl EngineRunner {
             persist_registry: true,
             pending_failure_cleanup: None,
             terminal_ownership_failure: false,
+            merge_probe_factory: default_merge_probe_factory(),
         };
 
         // Atomically insert the initial Starting row AND the immutable

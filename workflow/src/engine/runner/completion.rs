@@ -52,15 +52,24 @@ impl EngineRunner {
             })?;
             if status == RunStatus::ReviewReady {
                 use crate::engine::recovery::merge_completion::{
-                    complete_merge_required_run, MergeCompletionOutcome, SystemMergeProbeFactory,
+                    complete_merge_required_run, MergeCompletionOutcome,
                 };
-                let factory = SystemMergeProbeFactory::new()
-                    .with_work_dir(self.context.work_dir().to_path_buf());
+                // The factory is supplied to the runner rather than built
+                // here. Constructing it inline meant completion decided which
+                // probes to use and then ran `git rev-list` through them.
+                //
+                // The work dir is still bound here because only the runner
+                // knows it. Dropping that binding is not cosmetic: the remote
+                // probe resolves commit SHAs with a local `git rev-list`, and
+                // an unbound probe runs it in the wrong repository.
+                let factory = self
+                    .merge_probe_factory
+                    .bind_work_dir(self.context.work_dir());
                 match complete_merge_required_run(
                     &conn,
                     &self.instance.run_id,
                     self.context.work_dir(),
-                    &factory,
+                    factory.as_ref(),
                 ) {
                     MergeCompletionOutcome::Merged => status = RunStatus::Merged,
                     MergeCompletionOutcome::NotYetMerged => return Ok(()),
