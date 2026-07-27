@@ -46,8 +46,27 @@ pub struct Capture {
 /// Recorded because three campaign failures came from guessing wrong.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StateKey {
-    /// The logical working directory as inherited from the environment,
-    /// **without** symlink resolution.
+    /// The working directory as the process sees it: the logical path when the
+    /// environment's `$PWD` names the same directory as the physical cwd, and
+    /// the physical path otherwise.
+    ///
+    /// The name says "logical", but the logical form is **conditional**, and
+    /// the condition belongs in the contract rather than in a reader's head.
+    /// This is Go's `os.Getwd` rule, measured against 1.7.16 from a symlink to
+    /// a repository holding three sessions:
+    ///
+    /// ```text
+    /// PWD=/tmp/ocrlink (shell cd)   no sessions    logical alias honoured
+    /// PWD unset                     3 sessions     physical fallback
+    /// PWD=/tmp                      3 sessions     not an alias, rejected
+    /// PWD=/no/such/dir              3 sessions     not an alias, rejected
+    /// PWD=                          3 sessions     not an alias, rejected
+    /// ```
+    ///
+    /// So which form is used depends on **how the process was spawned**, not
+    /// on the path alone, and a caller cannot decide it by inspecting the path.
+    /// That is why the reader offers every reachable slug instead of deriving
+    /// one: whichever single form it picked, the other stays reachable.
     ///
     /// Distinct from [`Self::CanonicalWorkingDirectory`] because the two
     /// disagree under a symlinked path, and that disagreement is a real
