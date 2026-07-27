@@ -1,0 +1,14 @@
+Captured against open-code-review v1.7.16 (a0b49d5b) darwin/arm64.
+
+Demonstrates the state root for issue 179.
+
+  mkdir -p /tmp/gr179/sub/deep
+  cd /tmp/gr179 && git init && <two commits>
+  cd /tmp/gr179/sub/deep && ocr review --preview --from HEAD~1 --to HEAD
+
+The invocation directory was /tmp/gr179/sub/deep. The session store created
+was ~/.opencodereview/sessions/private-tmp-gr179 - the Git root, not the
+invocation directory, and not any parent of it below the root.
+
+Control: the same binary in /tmp/nogit179/sub, which is not a repository,
+created no store on a read and did not walk up past it.

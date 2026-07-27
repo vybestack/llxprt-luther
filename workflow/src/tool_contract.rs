@@ -73,6 +73,22 @@ pub enum StateKey {
     /// campaign failure: a caller that canonicalises before handing a path to
     /// a tool which does not will look in a directory the tool never uses.
     LogicalWorkingDirectory,
+    /// The root of the Git repository containing the working directory.
+    ///
+    /// Added only after measuring it, because the issue that asked for it
+    /// (179) had already been wrong twice in this area. Measured against
+    /// 1.7.16: `ocr review --preview` invoked from `/tmp/gr179/sub/deep`
+    /// created its session store under the slug for `/tmp/gr179`, the
+    /// repository root - not the invocation directory, and not any directory
+    /// between them.
+    ///
+    /// Control: the same binary invoked in a directory that is not inside a
+    /// repository created no store and did not walk up past it, so the
+    /// walk-up terminates at the root rather than continuing to `/`.
+    ///
+    /// This is why a reader handed a subdirectory must offer the root's slug:
+    /// the writer keyed on a directory the reader was never given.
+    GitRoot,
     /// A path argument, made absolute against the working directory and
     /// lexically cleaned, but **not** symlink-resolved.
     ///
