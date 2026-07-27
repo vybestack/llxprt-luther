@@ -272,6 +272,27 @@ jobs:
             exit 0
           fi
           cat ocr-version.txt
+          # The expected version was recorded above but never compared, so a
+          # different build than the one the contract was captured against ran
+          # the review and nothing said so. Every behaviour the contract
+          # records - which flags are honoured, which are accepted and
+          # ignored, what keys the session store - is measured against one
+          # build, so running another silently invalidates all of it.
+          #
+          # Matches the tool's own printed form, `v<version>` delimited by
+          # whitespace, and rejects everything the Rust contract tests already
+          # enumerate: v1.7.1 must not satisfy v1.7.16, nor v1.7.160,
+          # prev1.7.16, or v1.7.16-rc1. Verified against all of those, plus
+          # the `expected=` line written just above, which must not be able to
+          # satisfy the check by itself.
+          if ! grep -qE "(^|[[:space:]])v${OCR_VERSION//./\\.}([[:space:]]|$)" ocr-version.txt; then
+            echo "::warning::OpenCodeReview version mismatch: expected ${OCR_VERSION}."
+            echo "70" > ocr-exit-code.txt
+            printf 'phase=install; reason=OpenCodeReview version mismatch: expected %s, got %s\n' \
+              "$OCR_VERSION" "$("$OCR_BIN" version 2>/dev/null | tr -d '\n' || echo unknown)" \
+              > ocr-infrastructure-failure.txt
+            exit 0
+          fi
 
       - name: Configure OCR review rules
         # Project policy: changed test files must be reviewed. OCR's default
