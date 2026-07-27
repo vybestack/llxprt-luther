@@ -146,7 +146,7 @@ impl SubcommandContract {
             Some(FlagBehaviour::AcceptedAndIgnored { use_instead })
                 if use_instead.trim().is_empty() =>
             {
-                Err(ContractViolation::FlagNotRecorded {
+                Err(ContractViolation::MalformedRemediation {
                     subcommand: self.subcommand.clone(),
                     flag: flag.to_string(),
                 })
@@ -260,6 +260,15 @@ pub enum ContractViolation {
         subcommand: String,
         flag: String,
     },
+    /// The flag's behaviour is recorded but its remediation is empty.
+    ///
+    /// Distinct from `FlagNotRecorded` because the fix is different: the
+    /// contract needs editing, not re-capturing. Conflating the two sends a
+    /// maintainer to re-run the tool when the tool was never the problem.
+    MalformedRemediation {
+        subcommand: String,
+        flag: String,
+    },
 }
 
 impl std::fmt::Display for ContractViolation {
@@ -289,6 +298,12 @@ impl std::fmt::Display for ContractViolation {
                 f,
                 "{subcommand} has no recorded behaviour for {flag}; capture it against the real \
                  tool before depending on it"
+            ),
+            Self::MalformedRemediation { subcommand, flag } => write!(
+                f,
+                "{subcommand} records {flag} as ignored but names no alternative; the contract \
+                 entry is incomplete, so fix the recorded remediation rather than re-capturing \
+                 the tool"
             ),
         }
     }

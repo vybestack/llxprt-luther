@@ -56,6 +56,18 @@ class MutationNotApplied(RuntimeError):
     """A mutation could not be applied, so its result proves nothing."""
 
 
+def crlf(name):
+    """Rewrite a capture with CRLF endings, as a Windows checkout could.
+
+    The digest is over raw bytes, so this must be caught: otherwise the same
+    committed content would verify on one platform and fail on another, and
+    the failure would look like a fabricated capture.
+    """
+    path = FIX / name
+    data = path.read_bytes().replace(b"\r\n", b"\n").replace(b"\n", b"\r\n")
+    path.write_bytes(data)
+
+
 def fabricate(name, content):
     """Replace a capture and refresh only that capture's recorded digest.
 
@@ -178,6 +190,8 @@ fn fabricated() -> SubcommandContract {
     ("M23 version check accepts empty input",
      edit(TC, "pub fn verify_version(&self, observed: &str) -> Result<(), ContractViolation> {",
           "pub fn verify_version(&self, observed: &str) -> Result<(), ContractViolation> {\n        if observed.is_empty() {\n            return Ok(());\n        }")),
+    ("M27 capture rewritten with CRLF line endings",
+     lambda: crlf("version.txt")),
     ("M25 flag recorded that only prefixes a real one",
      edit(OCR, '("--json", FlagBehaviour::Honoured)',
           '("--jsonl", FlagBehaviour::Honoured)', 1)),

@@ -656,6 +656,44 @@ fn the_contract_names_the_tool_its_captures_came_from() {
     );
 }
 
+/// An empty remediation is reported as an incomplete contract entry, not as an
+/// uncaptured flag.
+///
+/// The two need different fixes: one is edited here, the other is re-captured
+/// from the tool. Reporting the first as the second sends a maintainer to run
+/// the binary when the binary was never involved.
+#[test]
+fn an_empty_remediation_blames_the_contract_not_the_tool() {
+    let ignored_with_no_alternative = SubcommandContract {
+        subcommand: "session show".to_string(),
+        state_key: StateKey::LogicalWorkingDirectory,
+        result_source: ResultSource::Stdout,
+        flags: std::iter::once((
+            "--json".to_string(),
+            FlagBehaviour::AcceptedAndIgnored {
+                use_instead: "   ".to_string(),
+            },
+        ))
+        .collect(),
+        required_fields: vec![],
+        captures: vec![],
+    };
+
+    let error = ignored_with_no_alternative
+        .require_honoured("--json")
+        .expect_err("a remediation naming nothing cannot be relied on");
+
+    assert!(
+        matches!(error, ContractViolation::MalformedRemediation { .. }),
+        "expected the contract entry to be blamed, got: {error}"
+    );
+    let message = error.to_string();
+    assert!(
+        message.contains("incomplete") && !message.contains("no recorded behaviour"),
+        "the diagnostic must point at the contract entry rather than at re-capturing: {message}"
+    );
+}
+
 /// `duration_ns` is present only on sessions that finished.
 ///
 /// The tool emits a sparse object: an unfinished session omits the field and

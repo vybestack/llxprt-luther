@@ -1,0 +1,6 @@
+# Captured tool output is compared by SHA-256 over the raw bytes, so a
+# checkout that rewrote line endings would break every digest while leaving
+# the content semantically unchanged. Pinning these to LF keeps the captures
+# byte-identical on every platform; without it the failure would look like a
+# fabricated capture on Windows.
+workflow/tests/fixtures/tool-contracts/** -text eol=lf
