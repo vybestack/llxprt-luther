@@ -146,9 +146,11 @@ function selectReviewSession(sessionDir, expectedSessionId) {
     return candidates.find((c) => c.sessionId === expectedSessionId) || null;
   }
 
-  // Ranked by total review events, so a failed-only session is not outranked by
-  // an emptier one.
-  const weight = (c) => c.reviewedFiles.length + c.failedFiles.length;
+  // Ranked by distinct paths carrying review evidence, so a failed-only session
+  // is not outranked by an emptier one. Counting the union rather than summing
+  // avoids double-counting a path that somehow carries both terminal events,
+  // which could otherwise manufacture a false tie.
+  const weight = (c) => new Set([...c.reviewedFiles, ...c.failedFiles]).size;
   candidates.sort((a, b) => weight(b) - weight(a));
   if (candidates.length > 1 && weight(candidates[0]) === weight(candidates[1])) {
     return null;

@@ -372,3 +372,79 @@ test('exclusion globs match only their intended paths', () => {
   assert.deepStrictEqual(result.selected, ['src/markdown_parser.rs']);
   assert.strictEqual(result.passed, false);
 });
+
+test('trailing whitespace in a filename cannot borrow an extension rule', () => {
+  // `evil.rs.md ` does not end in `.md`. OCR sees the real path and does not
+  // exclude it, so neither may the gate -- trimming here would drop a source
+  // file from review entirely.
+  const result = evaluateGate({
+    ocrExitCode: 0,
+    ocrStatus: 'skipped',
+    changedFiles: ['src/evil.rs.md '],
+    previewText: '',
+    reviewedFiles: [],
+    excludeGlobs: DOC_EXCLUDES,
+  });
+  assert.strictEqual(result.passed, false);
+  assert.deepStrictEqual(result.unreviewed, ['src/evil.rs.md ']);
+});
+
+test('unsupported exclusion syntax excludes nothing', () => {
+  // Rather than approximating another matcher's semantics, any pattern that is
+  // not exactly `**/*.ext` is refused. A literal comma must never become
+  // alternation, which would have excluded arbitrary source paths.
+  const result = evaluateGate({
+    ocrExitCode: 0,
+    ocrStatus: 'skipped',
+    changedFiles: ['src/auth.rs', 'evil-src/auth.rs'],
+    previewText: '',
+    reviewedFiles: [],
+    excludeGlobs: ['docs,src/**', '**/target/**', '{a,b}.rs', 'src/**/*.rs'],
+  });
+  assert.strictEqual(result.passed, false);
+  assert.deepStrictEqual(result.unreviewed, ['src/auth.rs', 'evil-src/auth.rs']);
+});
+
+test('extension exclusions are case-insensitive', () => {
+  // OCR lowercases patterns and paths, so a case-sensitive gate would leave
+  // README.MD selected and permanently unreviewable.
+  const result = evaluateGate({
+    ocrExitCode: 0,
+    ocrStatus: 'skipped',
+    changedFiles: ['README.MD', 'docs/Guide.Md'],
+    previewText: '',
+    reviewedFiles: [],
+    excludeGlobs: DOC_EXCLUDES,
+  });
+  assert.strictEqual(result.passed, true);
+});
+
+test('a dotfile named like an extension is not excluded', () => {
+  const result = evaluateGate({
+    ocrExitCode: 0,
+    ocrStatus: 'skipped',
+    changedFiles: ['.md', 'src/.txt'],
+    previewText: '',
+    reviewedFiles: [],
+    excludeGlobs: DOC_EXCLUDES,
+  });
+  assert.strictEqual(result.passed, false);
+  assert.deepStrictEqual(result.unreviewed, ['.md', 'src/.txt']);
+});
+
+test('reported exclusions account for the rule-derived decision', () => {
+  // The logged count must agree with the verdict; reporting excluded=0 while
+  // rule exclusions caused the pass would be actively misleading.
+  const result = evaluateGate({
+    ocrExitCode: 0,
+    ocrStatus: 'skipped',
+    changedFiles: ['docs/a.md'],
+    previewText: '',
+    reviewedFiles: [],
+    excludeGlobs: DOC_EXCLUDES,
+  });
+  assert.strictEqual(result.passed, true);
+  assert.deepStrictEqual(result.excluded, [
+    { path: 'docs/a.md', reason: 'excluded_by_configured_rule' },
+  ]);
+});

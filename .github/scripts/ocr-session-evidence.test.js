@@ -197,3 +197,87 @@ test('the slug resolves symlinks so /tmp and /private/tmp agree', () => {
   // The resolved path is what the store keys on.
   assert.strictEqual(slug, fs.realpathSync(dir).replace(/^\//, '').replace(/\//g, '-'));
 });
+
+// --- failed review events -------------------------------------------------
+//
+// OCR records a per-file failure as its own event type. These were ignored
+// entirely, so failedFiles was always empty in production: a run that failed
+// every file looked exactly like one that reviewed nothing.
+
+function failedEvent(sessionId, filePath, extra) {
+  return { type: 'review_item_failed', sessionId, filePath, ...(extra || {}) };
+}
+
+test('failed review events are recorded as failed files', () => {
+  const dir = makeSessionDir();
+  const file = writeSession(dir, 's-failed', [
+    reviewEvent('s-failed', 'src/a.rs'),
+    failedEvent('s-failed', 'src/b.rs'),
+  ]);
+  const evidence = readSessionEvidence(file);
+  assert.deepStrictEqual(evidence.reviewedFiles, ['src/a.rs']);
+  assert.deepStrictEqual(evidence.failedFiles, ['src/b.rs']);
+});
+
+test('a failed event falls back to newPath when filePath is absent', () => {
+  const dir = makeSessionDir();
+  const file = writeSession(dir, 's-newpath', [
+    { type: 'review_item_failed', sessionId: 's-newpath', newPath: 'src/renamed.rs' },
+  ]);
+  assert.deepStrictEqual(readSessionEvidence(file).failedFiles, ['src/renamed.rs']);
+});
+
+test('a session holding only failures is still selected as evidence', () => {
+  // Requiring a completed file discarded these sessions, so the gate saw no
+  // evidence at all and a wholly failed run could look like a clean skip.
+  const dir = makeSessionDir();
+  writeSession(dir, 's-onlyfailed', [
+    failedEvent('s-onlyfailed', 'src/a.rs'),
+    { type: 'session_end', sessionId: 's-onlyfailed' },
+  ]);
+  const session = selectReviewSession(dir);
+  assert.notStrictEqual(session, null);
+  assert.deepStrictEqual(session.reviewedFiles, []);
+  assert.deepStrictEqual(session.failedFiles, ['src/a.rs']);
+});
+
+test('a failed-only session is found by explicit session id', () => {
+  const dir = makeSessionDir();
+  writeSession(dir, 's-target', [failedEvent('s-target', 'src/a.rs')]);
+  writeSession(dir, 's-other', [reviewEvent('s-other', 'src/b.rs')]);
+  const session = selectReviewSession(dir, 's-target');
+  assert.strictEqual(session.sessionId, 's-target');
+  assert.deepStrictEqual(session.failedFiles, ['src/a.rs']);
+});
+
+test('ranking counts failed evidence, not just reviewed evidence', () => {
+  const dir = makeSessionDir();
+  writeSession(dir, 's-small', [reviewEvent('s-small', 'src/a.rs')]);
+  writeSession(dir, 's-big', [
+    failedEvent('s-big', 'src/b.rs'),
+    failedEvent('s-big', 'src/c.rs'),
+  ]);
+  assert.strictEqual(selectReviewSession(dir).sessionId, 's-big');
+});
+
+test('equal evidence weight remains ambiguous and fails closed', () => {
+  const dir = makeSessionDir();
+  writeSession(dir, 's-one', [reviewEvent('s-one', 'src/a.rs')]);
+  writeSession(dir, 's-two', [failedEvent('s-two', 'src/b.rs')]);
+  assert.strictEqual(selectReviewSession(dir), null);
+});
+
+test('a path with both terminal events is counted once', () => {
+  // Summing the two lists would double-count and could manufacture a false
+  // tie against a genuinely larger session.
+  const dir = makeSessionDir();
+  writeSession(dir, 's-dup', [
+    reviewEvent('s-dup', 'src/a.rs'),
+    failedEvent('s-dup', 'src/a.rs'),
+  ]);
+  writeSession(dir, 's-real', [
+    reviewEvent('s-real', 'src/x.rs'),
+    reviewEvent('s-real', 'src/y.rs'),
+  ]);
+  assert.strictEqual(selectReviewSession(dir).sessionId, 's-real');
+});

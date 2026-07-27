@@ -612,14 +612,15 @@ jobs:
           # A failed diff must not look like "nothing changed": an empty file
           # list makes the completeness check vacuously pass, which is the
           # exact fail-open this gate exists to prevent. Fail the step instead.
-          if ! git diff --name-only --diff-filter=ACMRT "${BASE_SHA}..${HEAD_SHA}" > ocr-changed-files.txt; then
+          if ! git diff --name-only -z --diff-filter=ACMRT "${BASE_SHA}..${HEAD_SHA}" > ocr-changed-files.txt; then
             rm -f ocr-changed-files.txt
             echo "phase=review; reason=could not compute the changed-file set for ${BASE_SHA}..${HEAD_SHA}" \
               > ocr-policy-failure.txt
             echo "::error::Could not compute the changed-file set; refusing to verify coverage against an unknown range."
             exit 1
           fi
-          echo "changed files: $(wc -l < ocr-changed-files.txt)"
+          # NUL-delimited, so count records rather than lines.
+          echo "changed files: $(tr -cd '\0' < ocr-changed-files.txt | wc -c | tr -d ' ')"
       - name: Verify OCR reviewed-range completeness
         id: ocr-completeness
         if: always()
@@ -653,11 +654,14 @@ jobs:
               );
               return;
             }
+            // NUL-delimited and never trimmed: whitespace is significant in a
+            // filename. Trimming would let `evil.rs.md ` (trailing space) be
+            // matched as markdown and excluded, while OCR -- which sees the
+            // real path -- never excluded it, silently dropping it from review.
             const changedFiles = fs
               .readFileSync('ocr-changed-files.txt', 'utf8')
-              .split('\n')
-              .map((line) => line.trim())
-              .filter((line) => line.length > 0);
+              .split('\0')
+              .filter((entry) => entry.length > 0);
             // The same exclusion globs OCR was configured with. OCR emits no
             // preview when it selects nothing, so on a docs-only range the
             // gate would otherwise see no declared exclusions at all.
@@ -673,9 +677,12 @@ jobs:
             } catch (error) {
               // Fail closed: without the exclusions every changed file stays
               // selected, so an unreadable rule file cannot silently pass.
-              core.setFailed(
-                `phase=review; reason=could not read OCR rules from ${rulePath}: ${error.message}`,
-              );
+              // Record the reason the same way the missing-range path does, so
+              // the failure is classified rather than reported as an unexplained
+              // red job.
+              const reason = `phase=review; reason=could not read OCR rules: ${error.message}`;
+              fs.writeFileSync('ocr-policy-failure.txt', `${reason}\n`);
+              core.setFailed(reason);
               return;
             }
             const result = evaluateWorkspace({

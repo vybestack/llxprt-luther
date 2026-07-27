@@ -76,70 +76,68 @@ function readJsonField(filePath, fieldName) {
  * declares selection and exclusions; session evidence proves what was
  * reviewed. Exclusions only excuse files the preview actually declared.
  */
+// Rule-derived exclusion deliberately does NOT reimplement OCR's matcher.
+//
+// Reproducing another tool's glob semantics is a losing game: any divergence
+// where this matcher is broader than OCR's silently drops a file from review.
+// Instead only one exact, unambiguous shape is recognised --
+//
+//     **/*.<extension>
+//
+// -- which covers every exclusion that needs to reach the gate (OCR emits no
+// preview when it selects nothing, which happens precisely for whole-file-type
+// exclusions like documentation). Anything else is refused and therefore
+// excludes nothing, so an unsupported pattern can only make the gate stricter.
+//
+// Matching is case-insensitive on the extension because OCR lowercases both
+// patterns and paths; a case-sensitive test here would leave `README.MD`
+// selected and unreviewable.
+const EXTENSION_RULE = /^\*\*\/\*(\.[A-Za-z0-9_-]+)$/;
+
 /**
- * Convert one exclusion glob to a RegExp.
+ * Extensions from patterns of the exact form `**\/*.ext`.
  *
- * Supports the subset the OCR rules actually use: `**` across separators, `*`
- * within a segment, `?`, and `{a,b}` alternation. Every other character is
- * escaped, so a malformed pattern cannot become a catch-all that silently
- * excludes source files.
+ * Every other pattern -- braces, commas, character classes, escapes, embedded
+ * `**`, directory anchors -- is ignored rather than approximated.
  */
-function globToRegExp(glob) {
-  let out = '';
-  for (let i = 0; i < glob.length; i += 1) {
-    const ch = glob[i];
-    if (ch === '*') {
-      if (glob[i + 1] === '*') {
-        // `**/` also matches zero directories, so `**/*.md` matches `a.md`.
-        if (glob[i + 2] === '/') {
-          out += '(?:.*/)?';
-          i += 2;
-        } else {
-          out += '.*';
-          i += 1;
-        }
-      } else {
-        out += '[^/]*';
-      }
-    } else if (ch === '?') {
-      out += '[^/]';
-    } else if (ch === '{') {
-      out += '(?:';
-    } else if (ch === '}') {
-      out += ')';
-    } else if (ch === ',') {
-      out += '|';
-    } else {
-      out += ch.replace(/[.+^${}()|[\]\\]/g, '\\$&');
+function supportedExtensions(globs) {
+  const extensions = [];
+  if (!Array.isArray(globs)) {
+    return extensions;
+  }
+  for (const glob of globs) {
+    const match = EXTENSION_RULE.exec(String(glob ?? ''));
+    if (match) {
+      extensions.push(match[1].toLowerCase());
     }
   }
-  return new RegExp(`^${out}$`);
+  return extensions;
 }
 
 /**
- * Paths matching any configured exclusion glob.
+ * Paths whose extension is excluded by a supported rule.
  *
- * A non-array or empty pattern list excludes nothing, which keeps unproven
- * files selected rather than silently resolving them.
+ * The path is compared exactly as Git reported it. Trailing whitespace is
+ * significant in a filename, so `evil.rs.md ` does not end with `.md` and stays
+ * selected -- trimming here would exclude a file OCR never excluded.
  */
 function matchGlobs(paths, globs) {
-  if (!Array.isArray(globs) || globs.length === 0) {
+  const extensions = supportedExtensions(globs);
+  if (extensions.length === 0) {
     return [];
   }
-  const patterns = [];
-  for (const glob of globs) {
-    const text = String(glob || '').trim();
-    if (text.length === 0) {
-      continue;
-    }
-    try {
-      patterns.push(globToRegExp(text));
-    } catch {
-      // An uncompilable pattern must not exclude anything.
-      continue;
-    }
-  }
-  return paths.filter((file) => patterns.some((pattern) => pattern.test(file)));
+  return paths.filter((file) => {
+    const lower = file.toLowerCase();
+    return extensions.some((extension) => {
+      if (!lower.endsWith(extension)) {
+        return false;
+      }
+      // Must be a real extension, not a whole filename: `.md` alone is a
+      // dotfile, not a markdown document.
+      const base = file.slice(file.lastIndexOf('/') + 1);
+      return base.length > extension.length;
+    });
+  });
 }
 
 function evaluateGate(params) {
@@ -147,9 +145,20 @@ function evaluateGate(params) {
   // Every path is normalized the same way before comparison. Comparing a
   // trimmed set against untrimmed inputs would silently misclassify a file as
   // unreviewed, or fail to match a declared exclusion.
-  const changedFiles = normalizePaths(options.changedFiles);
+  // Changed paths are NOT trimmed. Whitespace is significant in a filename, so
+  // normalizing here would let `evil.rs.md ` match a markdown exclusion that
+  // OCR never applied, dropping a source file from review. Only empty entries
+  // are discarded, and duplicates collapsed.
+  const changedFiles = [
+    ...new Set(
+      (Array.isArray(options.changedFiles) ? options.changedFiles : [])
+        .map((entry) => String(entry ?? ''))
+        .filter((entry) => entry.length > 0),
+    ),
+  ];
   const preview = parsePreview(options.previewText || '');
-  const excludedPaths = new Set(normalizePaths(preview.excludedPaths));
+  const previewExcludedPaths = new Set(normalizePaths(preview.excludedPaths));
+  const excludedPaths = new Set(previewExcludedPaths);
 
   // Exclusions are also derived directly from the configured rules, not only
   // from the preview. OCR emits no preview when it selects nothing, so on a
@@ -160,15 +169,22 @@ function evaluateGate(params) {
   // These globs come from the workflow definition, which pull_request_target
   // loads from the base branch, so a pull request cannot widen its own
   // exclusions.
+  // Rule-derived exclusions match the path exactly as Git reported it, with no
+  // trimming. These are inferred rather than declared by OCR, so a path must
+  // not be able to acquire an exclusion it does not literally have.
   const ruleExcluded = matchGlobs(changedFiles, options.excludeGlobs);
-  for (const file of ruleExcluded) {
-    excludedPaths.add(file);
-  }
+  const ruleExcludedSet = new Set(ruleExcluded);
+
+  // Preview exclusions are compared after trimming, because OCR named those
+  // paths explicitly and the preview is rendered text whose surrounding
+  // whitespace is a formatting artifact rather than part of the name.
+  const isExcluded = (file) =>
+    ruleExcludedSet.has(file) || excludedPaths.has(file) || excludedPaths.has(file.trim());
 
   // Selected = changed minus declared exclusions. Falling back to the changed
   // set (rather than the preview's reviewed list) keeps the gate honest when
   // the preview is missing or unparseable: unproven files stay unresolved.
-  const selectedFiles = changedFiles.filter((file) => !excludedPaths.has(file));
+  const selectedFiles = changedFiles.filter((file) => !isExcluded(file));
 
   const completeness = resolveCompleteness({
     skipped: options.skipped === true,
@@ -195,13 +211,26 @@ function evaluateGate(params) {
     ...normalizePaths(options.reusedFiles),
     ...collectValidWaivers(options.waivedFiles, normalizePaths(options.failedFiles)),
   ]);
-  const unreviewed = selectedFiles.filter((file) => !resolvedSet.has(file));
+  // Resolution accepts the trimmed form: review evidence names a file that was
+  // actually examined, so matching it more loosely cannot cause a file to
+  // escape review -- unlike exclusion, where looseness is a bypass.
+  const unreviewed = selectedFiles.filter(
+    (file) => !resolvedSet.has(file) && !resolvedSet.has(file.trim()),
+  );
 
   return {
     completeness,
     passed: completeness === STATUS.COMPLETE || completeness === STATUS.SKIPPED,
     selected: selectedFiles,
-    excluded: preview.excluded,
+    // Every exclusion that affected the decision, so the reported count cannot
+    // disagree with the verdict. Rule-derived entries carry their own reason
+    // rather than borrowing the preview's.
+    excluded: [
+      ...preview.excluded,
+      ...ruleExcluded
+        .filter((file) => !previewExcludedPaths.has(file))
+        .map((file) => ({ path: file, reason: 'excluded_by_configured_rule' })),
+    ],
     unreviewed,
     coverage: computeCoverage({
       selected: selectedFiles.length,
