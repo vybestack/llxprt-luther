@@ -139,6 +139,18 @@ impl SubcommandContract {
     pub fn require_honoured(&self, flag: &str) -> Result<(), ContractViolation> {
         match self.flag(flag) {
             Some(FlagBehaviour::Honoured) => Ok(()),
+            // An empty remediation would render as "rely on  instead",
+            // which sends the caller looking for a missing word rather than
+            // at the flag. Treated as an unrecorded behaviour, because a
+            // remedy that names nothing records nothing.
+            Some(FlagBehaviour::AcceptedAndIgnored { use_instead })
+                if use_instead.trim().is_empty() =>
+            {
+                Err(ContractViolation::FlagNotRecorded {
+                    subcommand: self.subcommand.clone(),
+                    flag: flag.to_string(),
+                })
+            }
             Some(FlagBehaviour::AcceptedAndIgnored { use_instead }) => {
                 Err(ContractViolation::FlagIgnored {
                     subcommand: self.subcommand.clone(),
@@ -215,9 +227,14 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
     hasher
         .finalize()
         .iter()
+        // Hex-encoded by indexing rather than by formatting: a discarded
+        // formatting Result could yield a short digest that then compares
+        // unequal for a reason having nothing to do with the capture, and
+        // this digest is what makes a capture evidence. Indexing cannot fail.
         .fold(String::with_capacity(64), |mut hex, byte| {
-            use std::fmt::Write;
-            let _ = write!(hex, "{byte:02x}");
+            const DIGITS: &[u8; 16] = b"0123456789abcdef";
+            hex.push(DIGITS[usize::from(byte >> 4)] as char);
+            hex.push(DIGITS[usize::from(byte & 0x0f)] as char);
             hex
         })
 }

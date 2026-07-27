@@ -243,10 +243,14 @@ fn assert_the_repo_argument_reaches_the_same_store(listed_ids: &[String]) {
 fn every_recorded_flag_exists_on_the_tool() {
     for subcommand in &ocr_contract().subcommands {
         let help = read_fixture(&help_capture_name(&subcommand.subcommand));
+        // Matched as a whole whitespace-delimited token, not as a substring:
+        // the help lists each flag as its own word, and a substring match
+        // would accept --json on the strength of a future --jsonl.
+        let help_tokens: Vec<&str> = help.split_whitespace().collect();
         for flag in subcommand.flags.keys() {
             assert!(
-                help.contains(flag.as_str()),
-                "{} records {flag}, which does not appear in the tool's help for that \
+                help_tokens.contains(&flag.as_str()),
+                "{} records {flag}, which does not appear as a flag in the tool's help for that \
                  subcommand; capture the flag against the real tool before recording it",
                 subcommand.subcommand
             );
@@ -553,8 +557,18 @@ fn every_ignored_flag_names_an_alternative_the_contract_supports() {
             // legitimate and common — session show's remedy is to use session
             // list --json — so the check applies only when the remediation
             // does not name a different subcommand to run.
+            // Compared as a run of whole words rather than by containment, so
+            // a subcommand named "list" is not matched by the word "listing"
+            // in a remediation, which would skip the check silently.
+            let words: Vec<&str> = use_instead.split_whitespace().collect();
             let names_another_subcommand = contract.subcommands.iter().any(|other| {
-                other.subcommand != subcommand.subcommand && use_instead.contains(&other.subcommand)
+                if other.subcommand == subcommand.subcommand {
+                    return false;
+                }
+                let wanted: Vec<&str> = other.subcommand.split_whitespace().collect();
+                words
+                    .windows(wanted.len())
+                    .any(|window| window == &wanted[..])
             });
             if names_another_subcommand {
                 continue;
@@ -752,6 +766,14 @@ fn the_fields_needed_to_reach_durable_evidence_stay_recorded() {
 }
 
 /// The pinned version must match the version CI actually installs.
+///
+/// Invariant for future maintainers: the path below must point at the workflow
+/// that installs the tool in CI. It is a fixed relative path on purpose. A
+/// configurable or defaulted path would let this test pass while comparing
+/// against nothing, and since no production code consumes the contract yet,
+/// this assertion is the only thing that keeps the pinned version tied to the
+/// version production actually runs. If the workflow moves or renames the
+/// variable, re-point this path; do not relax the check.
 ///
 /// Binding to the workflow rather than to a source comment is deliberate: a
 /// comment can drift silently, and issue #186 is what happens when tool
