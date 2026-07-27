@@ -30,6 +30,43 @@ fn workspace_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).to_path_buf()
 }
 
+/// Whether `haystack` contains `needle` as a whole word.
+///
+/// A raw substring test would fire on ordinary English: "branch" matches
+/// "branching" and "branchless", "issue" matches "reissue". A false positive
+/// here is worse than a miss, because the response to a test that fails on
+/// innocent prose is to weaken the list until it stops complaining, and a
+/// weakened list is what lets the real domain vocabulary back in.
+///
+/// Boundaries are non-alphanumeric characters, so `_` is *not* a boundary:
+/// `github_client` still matches "github". Multi-word entries such as
+/// "pull request" are matched the same way on their outer edges.
+fn contains_word(haystack: &str, needle: &str) -> bool {
+    let bytes = haystack.as_bytes();
+    haystack.match_indices(needle).any(|(index, matched)| {
+        let before_ok = index == 0 || !bytes[index - 1].is_ascii_alphanumeric();
+        let after = index + matched.len();
+        let after_ok = after == bytes.len() || !bytes[after].is_ascii_alphanumeric();
+        before_ok && after_ok
+    })
+}
+
+/// The word check separates real vocabulary from innocent prose.
+///
+/// Without this, the boundary logic itself is untested, and a change that
+/// silently reverted it to substring matching would look identical.
+#[test]
+fn the_vocabulary_check_matches_words_not_fragments() {
+    assert!(contains_word("open a github client", "github"));
+    assert!(
+        contains_word("call github_client here", "github"),
+        "an underscore must not hide the word, or `github_client` would pass"
+    );
+    assert!(!contains_word("branching factor of the tree", "branch"));
+    assert!(!contains_word("reissue the token", "issue"));
+    assert!(contains_word("the issue number", "issue"));
+}
+
 fn core_src() -> PathBuf {
     workspace_root().join("crates/luther-engine-core/src")
 }
@@ -61,7 +98,15 @@ fn declared_dependencies_of(package: &str) -> Vec<String> {
     );
     let json = String::from_utf8_lossy(&output.stdout);
 
-    let package_key = format!("\"name\":\"{package}\"");
+    // Anchored on the package's `id`, not on the first `"name"` match.
+    //
+    // A bare name search is order-dependent: the same string appears inside
+    // *other* packages' dependency lists, so it finds a package entry only
+    // because `cargo metadata` happens to emit packages before the entries
+    // that depend on them. Relying on that ordering would read the wrong
+    // object the moment it changed, and the resulting truncated list would
+    // still satisfy the "no forbidden name" assertions.
+    let package_key = format!("\"name\":\"{package}\",\"version\"");
     let start = json
         .find(&package_key)
         .unwrap_or_else(|| panic!("package `{package}` absent from cargo metadata"));
@@ -176,7 +221,7 @@ fn core_source_contains_no_domain_vocabulary() {
         let text = std::fs::read_to_string(&path).expect("core source is readable");
         let lowered = text.to_lowercase();
         for forbidden in FORBIDDEN_IN_CORE {
-            if lowered.contains(forbidden) {
+            if contains_word(&lowered, forbidden) {
                 findings.push(format!("{}: {forbidden}", path.display()));
             }
         }
