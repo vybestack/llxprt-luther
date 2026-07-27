@@ -81,6 +81,49 @@ const CONFIG_DIGESTS: &[(&str, &str)] = &[
     ),
 ];
 
+/// A database written before the move is still readable after it.
+///
+/// The digest fixtures above cover canonical bytes, but not the durable
+/// tables, and a control exposed the gap: renaming a column in the epoch
+/// table broke no test at all. Every suite starts from an empty database and
+/// the schema uses `CREATE TABLE IF NOT EXISTS`, so a renamed column silently
+/// creates a *second* table and the run proceeds against it — which is
+/// precisely the "stranded in-flight run" failure #205 warns about, invisible
+/// until a real run needs recovery.
+///
+/// This writes the table as it exists today, then reads it back through the
+/// moved code, so a schema change during the move fails here rather than in
+/// production.
+#[test]
+fn an_epoch_row_written_before_the_move_is_still_readable() {
+    use luther_engine_core::recovery_epoch;
+
+    let connection = rusqlite::Connection::open_in_memory().expect("in-memory database opens");
+    recovery_epoch::init_epoch_table(&connection).expect("the epoch table initialises");
+
+    // Written with explicit column names: an INSERT naming columns fails
+    // loudly if one was renamed, where `INSERT INTO t VALUES (...)` would
+    // bind positionally and keep working against a differently-shaped table.
+    connection
+        .execute(
+            "INSERT INTO recovery_epoch (run_id, epoch, updated_at) VALUES (?1, ?2, ?3)",
+            rusqlite::params!["run-pre-move", 7i64, "2026-01-01T00:00:00Z"],
+        )
+        .expect(
+            "the epoch table must still accept a row shaped as it was before the move; a \
+             renamed or dropped column strands every run whose database predates the change",
+        );
+
+    let epoch: i64 = connection
+        .query_row(
+            "SELECT epoch FROM recovery_epoch WHERE run_id = ?1",
+            rusqlite::params!["run-pre-move"],
+            |row| row.get(0),
+        )
+        .expect("the row written before the move must be readable after it");
+    assert_eq!(epoch, 7, "the persisted epoch value must survive unchanged");
+}
+
 #[test]
 fn workflow_type_digests_are_unchanged() {
     let mut drifted = Vec::new();

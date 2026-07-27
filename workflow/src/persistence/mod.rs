@@ -17,7 +17,14 @@ pub mod leases;
 /// Durable state machine table for recoverable legacy ownership migration.
 /// @plan:PLAN-20260722-ISSUE158-LEGACY-OWNERSHIP-MIGRATION
 pub mod legacy_migration_state;
-pub mod recovery_epoch;
+/// Durable recovery-epoch fencing, which now lives in the core package.
+///
+/// Re-exported under its original path so the ~6 call sites and every
+/// `persistence::recovery_epoch::` reference keep working unchanged. That
+/// keeps this a move: the alias is what lets the diff be read as "the file
+/// relocated" rather than "the file relocated and 6 call sites changed", and
+/// B7 removes it once the boundary is enforced mechanically.
+pub use luther_engine_core::recovery_epoch;
 pub mod recovery_operations;
 pub mod run_metadata;
 pub mod sqlite;

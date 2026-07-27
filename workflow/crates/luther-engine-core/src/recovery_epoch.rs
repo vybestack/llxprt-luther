@@ -114,7 +114,7 @@ pub fn read_epoch(conn: &Connection, run_id: &str) -> SqliteResult<u64> {
 ///
 /// On the very first insert for a run (no existing row), the INSERT path
 /// writes `expected_epoch + 1` and the CAS succeeds, advancing epoch `0 → 1`
-/// for the first reservation. The `WHERE` clause on the `ON CONFLICT` branch
+/// for the first reservation. The `WHERE` clause attached to `ON CONFLICT`
 /// guards the existing-row path so a concurrent advance is detected. [C1/B2]
 ///
 /// @plan:PLAN-20260723-SELFHOST-RELIABILITY.P05
