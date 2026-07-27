@@ -17,7 +17,6 @@
 
 use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection, OptionalExtension, Result as SqliteResult};
-use sha2::{Digest, Sha256};
 
 /// Table name for the idempotent recovery operations ledger. [C2/B3]
 pub const RECOVERY_OPERATIONS_TABLE: &str = "recovery_operations";
@@ -197,11 +196,7 @@ pub fn init_operations_table(conn: &Connection) -> SqliteResult<()> {
 }
 
 /// Compute the lowercase-hex SHA-256 digest of a byte slice.
-fn sha256_hex(data: &[u8]) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(data);
-    format!("{:x}", hasher.finalize())
-}
+use crate::digest::sha256_hex;
 
 /// Append a length-prefixed (u64 big-endian) byte slice to the canonical buffer.
 ///

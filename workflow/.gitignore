@@ -2,3 +2,7 @@ junk/
 target/
 .venv-lizard/
 artifacts/
+
+# Python bytecode from the mutation battery runner.
+__pycache__/
+*.pyc

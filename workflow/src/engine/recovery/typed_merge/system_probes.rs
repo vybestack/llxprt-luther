@@ -410,9 +410,4 @@ impl MergeRemoteProbe for SystemMergeRemoteProbe {
 }
 
 /// SHA-256 hex digest of a byte slice (lowercase hex).
-fn sha256_hex(data: &[u8]) -> String {
-    use sha2::{Digest, Sha256};
-    let mut hasher = Sha256::new();
-    hasher.update(data);
-    format!("{:x}", hasher.finalize())
-}
+use crate::digest::sha256_hex;

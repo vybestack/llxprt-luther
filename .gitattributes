@@ -1,0 +1,11 @@
+# Captured tool output is compared by SHA-256 over the raw bytes, so a
+# checkout that rewrote line endings would break every digest while leaving the
+# content semantically unchanged. Pinning these to LF keeps the captures
+# byte-identical on every platform; without it the failure would look like a
+# fabricated capture on Windows.
+#
+# "text eol=lf" and not "-text eol=lf": the leading dash marks the file binary
+# and disables conversion, which lets CRLF through unchanged and is the
+# opposite of what is wanted here. Verified with git check-attr and by
+# inspecting the staged bytes.
+workflow/tests/fixtures/tool-contracts/** text eol=lf
