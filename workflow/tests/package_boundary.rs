@@ -365,25 +365,54 @@ fn the_executor_error_type_names_no_domain_concept() {
         .split_once("pub enum EngineError {")
         .expect("EngineError must still be declared in runner.rs")
         .1;
-    let body = body
-        .split_once("\n}")
-        .expect("the EngineError declaration must be brace-terminated")
-        .0;
+
+    // Brace-matched, not first-`\n}`: a multi-line struct variant's inner
+    // closing brace would otherwise truncate the scan and leave later
+    // variants unexamined. The opening brace of the enum itself is consumed
+    // by the split above, so this counter starts at 1 and walks until it
+    // returns to 0 at the enum's true terminator.
+    let mut depth: i32 = 1;
+    let mut end = 0usize;
+    for (i, ch) in body.char_indices() {
+        match ch {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    end = i;
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    assert!(end > 0, "the EngineError declaration is not brace-balanced");
+    let body = &body[..end];
 
     // Only variant names are examined. Doc comments and `#[error(...)]`
     // strings legitimately mention tools: the message is written by whoever
     // raises the error, and telling an operator which binary is missing is
     // the point. It is the *type* that must stay domain-free.
+    //
+    // A variant line begins with an identifier whose first letter is
+    // uppercase and ends its name at `{`, `(`, or end-of-line. This excludes
+    // multi-line field lists (`step_id: String`) and stray closing braces,
+    // which a naive per-line scan admitted as spurious variants.
     let variants: Vec<&str> = body
         .lines()
         .map(str::trim)
         .filter(|line| {
-            !line.is_empty()
-                && !line.starts_with("//")
-                && !line.starts_with("#[")
-                && !line.starts_with("///")
+            if line.is_empty()
+                || line.starts_with("//")
+                || line.starts_with("#[")
+                || line.starts_with("///")
+            {
+                return false;
+            }
+            let first = line.chars().next().unwrap_or(' ');
+            first.is_ascii_uppercase()
         })
-        .filter_map(|line| line.split(['{', '(', ',']).next())
+        .filter_map(|line| line.split(['{', '(']).next())
         .map(str::trim)
         .filter(|name| !name.is_empty())
         .collect();
