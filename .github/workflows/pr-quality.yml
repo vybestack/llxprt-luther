@@ -94,6 +94,37 @@ jobs:
       - name: Run tests
         run: cargo test --workspace --all-features --lib --tests
 
+  gate-a-reachability:
+    # Measures whether Luther can carry an issue to a draft PR, by running the
+    # shipping binary against a local remote and a fail-closed GitHub stand-in.
+    #
+    # This check is GREEN while the observed result matches the expectation
+    # recorded in tests/gate_a_reachability.rs -- which is currently FAIL. It
+    # turns RED when the product's reachability changes in EITHER direction, so
+    # an unexplained improvement is surfaced rather than silently absorbed.
+    name: Gate A-R reachability (expected FAIL)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: workflow
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo + target
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: workflow -> target
+
+      # No --locked: Cargo.lock is intentionally untracked in this repository,
+      # so --locked fails before compiling anything.
+      - name: Measure Gate A-R
+        run: cargo test --test gate_a_reachability -- --nocapture
+        timeout-minutes: 20
+
   coverage:
     name: Coverage (llvm-cov gate)
     runs-on: ubuntu-latest

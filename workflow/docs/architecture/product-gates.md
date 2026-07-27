@@ -99,6 +99,66 @@ A-D**. Rules specific to one name it exactly.
 **Diagnostic only.** Passing Gate A-R isolates workflow reachability from
 discovery. It does not license any product claim.
 
+### Current measurement
+
+Implemented by `workflow/tests/gate_a_reachability.rs`, wired into CI as
+**Gate A-R reachability (expected FAIL)**.
+
+The observed result is **FAIL**. The run stops at `scope_measure`, having
+reached:
+
+    workspace_ownership_verify -> select_issue -> setup_workspace_init ->
+    git_config_publish -> workspace_ownership -> setup_workspace ->
+    task_charter -> route_pr_path -> fetch_issue -> prepare_plan ->
+    create_plan -> evaluate_plan -> plan_gate ->
+    workflow_auth_preflight_plan -> implement -> scope_measure
+
+The agent is invoked three times, including for `implement`, and produces a
+real diff that the workflow detects. `commit_changes`, `push_changes`, and
+`create_pr` are never reached, consistent with the campaign record of zero PRs
+across 28 runs.
+
+**Reachability depends on the fixture.** An earlier version of this harness
+seeded a repository containing only `README.md` and reported a stop at
+`implement`. That was not a product limitation: the shipping config declares a
+dependency manifest at `workflow/Cargo.toml`, and the scope barrier reads it
+*before* the agent is spawned, so the run died at a barrier the fixture itself
+tripped. The agent was never invoked, which also made the no-change control
+vacuous — both arms failed identically, at a point neither reached.
+
+The lesson generalizes: **a harness that stops early measures the harness until
+proven otherwise.** `the_implementation_agent_is_actually_invoked` exists to
+make that failure mode impossible to report as a product result.
+
+**The CI check is green while this result holds.** It fails if the outcome, the
+terminal step, or the step trajectory changes — in either direction. An
+unexplained improvement is therefore an alert, not a quiet win, which is the
+specific failure mode this project has repeated four times.
+
+Recorded expectations live in five constants: `EXPECTED_GATE_A_OUTCOME`,
+`EXPECTED_FURTHEST_STEP`, `EXPECTED_STEPS_REACHED`,
+`EXPECTED_RESOLVED_WORKFLOW_DIGEST`, and `EXPECTED_IMPLEMENTATION_PROFILE`.
+Changing any of them is a deliberate act that belongs in the PR that changes
+the behaviour, with the emitted report as evidence.
+
+Evidence is child-observed wherever it can be. The executed binary and its
+digest are reported by the launched process; the resolved workflow digest and
+config root are read back from the provenance the run persisted; the resolved
+profile is captured from what the product passed to the agent. Asserting on
+values the harness itself chose would confirm only that the harness was
+configured as written — an earlier revision did exactly that, and a mutation
+replacing the child with `/usr/bin/true` left it green.
+
+A pass additionally requires a **draft** PR recorded as created by the
+simulator, not merely an observed `gh pr create` invocation, so a failed or
+non-draft creation cannot score as a pass.
+
+**What the harness does not yet establish.** The agent is a deterministic
+stand-in, so this measures the *workflow's* reachability, not an LLM's ability
+to produce a correct change. Whether the product can pass Gate A-R with a real
+agent remains unmeasured. Sampling (8 of 10) applies to that measurement, not
+to this deterministic one, which is single-shot by construction.
+
 ## Gate A-D — approved issue to draft PR (official product gate)
 
 | Property | Definition |
