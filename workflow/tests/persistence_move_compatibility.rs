@@ -99,29 +99,86 @@ fn an_epoch_row_written_before_the_move_is_still_readable() {
     use luther_engine_core::recovery_epoch;
 
     let connection = rusqlite::Connection::open_in_memory().expect("in-memory database opens");
-    recovery_epoch::init_epoch_table(&connection).expect("the epoch table initialises");
 
-    // Written with explicit column names: an INSERT naming columns fails
-    // loudly if one was renamed, where `INSERT INTO t VALUES (...)` would
-    // bind positionally and keep working against a differently-shaped table.
+    // The schema is written out here rather than obtained from
+    // `init_epoch_table`, and that is the whole point: a database on disk was
+    // created by the *old* code, so building the fixture with the *current*
+    // code would move the goalposts with the implementation and agree with
+    // any schema it happened to produce. This literal is what a pre-move
+    // database actually contains.
+    connection
+        .execute(
+            "CREATE TABLE recovery_epoch (
+                run_id TEXT PRIMARY KEY,
+                epoch INTEGER NOT NULL DEFAULT 0,
+                updated_at TEXT NOT NULL
+            )",
+            [],
+        )
+        .expect("the pre-move schema is valid SQL");
+
+    // Column names are explicit: `INSERT INTO t VALUES (...)` binds
+    // positionally and would keep working against a differently-shaped table.
     connection
         .execute(
             "INSERT INTO recovery_epoch (run_id, epoch, updated_at) VALUES (?1, ?2, ?3)",
             rusqlite::params!["run-pre-move", 7i64, "2026-01-01T00:00:00Z"],
         )
-        .expect(
-            "the epoch table must still accept a row shaped as it was before the move; a \
-             renamed or dropped column strands every run whose database predates the change",
-        );
+        .expect("a row shaped as it was before the move must still be insertable");
 
-    let epoch: i64 = connection
-        .query_row(
-            "SELECT epoch FROM recovery_epoch WHERE run_id = ?1",
-            rusqlite::params!["run-pre-move"],
-            |row| row.get(0),
-        )
-        .expect("the row written before the move must be readable after it");
+    // Reading through the moved code is what proves compatibility. Raw SQL
+    // here would only prove that SQLite works.
+    let epoch = recovery_epoch::read_epoch(&connection, "run-pre-move").expect(
+        "the moved reader must understand a database written before the move; if it cannot, \
+         every run whose database predates the change is stranded",
+    );
     assert_eq!(epoch, 7, "the persisted epoch value must survive unchanged");
+
+    // `init_epoch_table` must also accept a database that already has the
+    // table, since that is what every restart does.
+    recovery_epoch::init_epoch_table(&connection)
+        .expect("initialisation must be idempotent against a pre-existing table");
+    assert_eq!(
+        recovery_epoch::read_epoch(&connection, "run-pre-move").expect("still readable"),
+        7,
+        "initialising over an existing table must not disturb the row it already held"
+    );
+}
+
+/// A missing epoch table is reported, not silently read as epoch zero.
+///
+/// `read_epoch` combines `.optional()` with `unwrap_or(0)`, which looks like
+/// it would flatten every failure into "epoch 0". It does not: `.optional()`
+/// converts only `QueryReturnedNoRows`, and the `?` after it propagates a
+/// missing-table error. The two cases are genuinely different and the code
+/// already distinguishes them.
+///
+/// The distinction is worth pinning because epoch 0 is not a neutral value —
+/// it is the fencing token meaning "no recovery has happened". If a lost
+/// table ever did read as 0, a database with a failed migration would be
+/// indistinguishable from a fresh run and would be allowed to advance from
+/// zero, which is the stale-fencing case the epoch exists to prevent.
+///
+/// Written after a control on the DDL failed to fire and I attributed it to
+/// this flattening. That was wrong, and this test is what proved it wrong.
+/// The DDL control does not fire because `init_epoch_table` and the fixture
+/// both define the schema, so renaming a column renames it consistently in
+/// both — not because errors are being swallowed.
+#[test]
+fn a_missing_epoch_table_is_an_error_not_epoch_zero() {
+    use luther_engine_core::recovery_epoch;
+
+    let connection = rusqlite::Connection::open_in_memory().expect("in-memory database opens");
+    // Deliberately not initialised: this is a database whose epoch table is
+    // absent, which is what a failed or partial migration leaves behind.
+    let result = recovery_epoch::read_epoch(&connection, "run-without-table");
+
+    assert!(
+        result.is_err(),
+        "reading an absent epoch table returned {result:?} instead of an error; epoch 0 is \
+         indistinguishable from a run that has never advanced, so a lost table would silently \
+         re-enable advancement from zero"
+    );
 }
 
 #[test]

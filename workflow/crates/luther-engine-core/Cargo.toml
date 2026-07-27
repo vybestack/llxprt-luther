@@ -17,5 +17,5 @@ sha2 = "0.10"
 # compare-and-swap inside a SQL transaction, and an epoch row records when it
 # was claimed. Versions match the workspace so the two packages cannot resolve
 # to different rusqlite builds and disagree about SQLite behaviour.
-chrono = { version = "0.4", features = ["serde"] }
-rusqlite = { version = "0.34", features = ["bundled", "chrono", "uuid"] }
+chrono = { workspace = true }
+rusqlite = { workspace = true }

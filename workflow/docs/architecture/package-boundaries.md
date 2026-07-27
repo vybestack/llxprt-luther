@@ -70,9 +70,14 @@ boundary, and a test that cannot tell the difference is decoration.
 
 ## Current contents of core
 
-`sha256_hex` only. It qualifies on the evidence rather than on intent: zero
-domain references, no dependency on any other module in the crate, and five
-existing callers spread across persistence, recovery, and the tool contract.
+`sha256_hex` and `recovery_epoch`. Each qualifies on evidence rather than on
+intent: zero domain references in code, and no dependency on any other module
+in the domain crate.
+
+`sha256_hex` arrived with B1 and has five callers across persistence,
+recovery, and the tool contract. `recovery_epoch` arrived with B4 and brought
+`rusqlite` and `chrono` with it — see the B4 section below, which records why
+that is a change of character worth stating rather than a detail.
 
 The bulk of the executors, the schema split, and registry composition are
 explicitly out of scope here and are handled by B2 through B6. This change
@@ -113,7 +118,7 @@ Five persistence modules carry domain state and could not move:
 
 These are not naming problems that a rename would fix. `leases` in particular
 would need generalising to an opaque claim key — a semantic change, which
-#205 explicitly places out of scope, and which is tracked separately so it can
+issue #205 explicitly places out of scope, and which is tracked separately so it can
 be reviewed as a behaviour change rather than smuggled inside a move.
 
 The remaining domain-free modules (`attempts`, `effect_intents`,
