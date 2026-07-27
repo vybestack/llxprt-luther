@@ -18,7 +18,10 @@ use crate::engine::executor::{interpolate_string, StepContext, StepExecutor};
 use crate::engine::runner::EngineError;
 use crate::engine::transition::StepOutcome;
 use crate::engine::workspace_ownership::{descriptor_matches_authorization, WorkspaceAnchor};
-use crate::workflow::target_profile::{default_transport_url, GIT_TRANSPORT_URL_VAR};
+use crate::workflow::target_profile::GIT_TRANSPORT_URL_VAR;
+
+/// The template token that expands to the resolved transport URL.
+const GIT_TRANSPORT_URL_PLACEHOLDER: &str = "{git_transport_url}";
 
 const STEP_ID: &str = "git_config_publish";
 const MAX_CONFIG_BYTES: usize = 64 * 1024;
@@ -75,22 +78,20 @@ impl StepExecutor for GitConfigPublishExecutor {
     }
 }
 
-/// Resolve the origin URL, filling in the derived transport when the context
-/// does not already carry one.
+/// Resolve the origin URL from the template.
 ///
-/// The transport variable is normally resolved at config load. A caller that
-/// builds a context directly still has logical identity, so the production
-/// default is derived from it here rather than failing on an unresolved
-/// template. There is one definition of that default, so the two paths cannot
-/// drift apart.
-fn resolve_origin_url(template: &str, context: &mut StepContext) -> Result<String, EngineError> {
-    if context.get(GIT_TRANSPORT_URL_VAR).is_none() {
-        let derived = context
-            .get("target_repo")
-            .map(|target_repo| default_transport_url(target_repo));
-        if let Some(derived) = derived {
-            context.set(GIT_TRANSPORT_URL_VAR, &derived);
-        }
+/// The template references the transport variable, which typed config
+/// resolution is responsible for populating. This deliberately does NOT derive
+/// a default when the variable is missing: doing so would let a resolution gap
+/// succeed silently, which is exactly the class of defect this step exists to
+/// catch. A missing variable is a configuration error and fails here.
+fn resolve_origin_url(template: &str, context: &StepContext) -> Result<String, EngineError> {
+    if template.contains(GIT_TRANSPORT_URL_PLACEHOLDER)
+        && context.get(GIT_TRANSPORT_URL_VAR).is_none()
+    {
+        return Err(fatal(
+            "git_transport_url is not resolved; target profile resolution must run before this step",
+        ));
     }
     Ok(interpolate_string(template, context))
 }
@@ -254,6 +255,12 @@ mod tests {
         let mut context = StepContext::new(workspace.to_path_buf(), "run-A".to_string());
         context.set_workspace_authorization(authorization);
         context.set("target_repo", "owner/repo");
+        // Resolution normally supplies this; derived through the shared
+        // function so the fixture cannot drift from the production default.
+        context.set(
+            GIT_TRANSPORT_URL_VAR,
+            &crate::workflow::target_profile::default_transport_url("owner/repo"),
+        );
         context.set_current_step_id(STEP_ID);
         context
     }
@@ -269,19 +276,29 @@ mod tests {
     }
 
     #[test]
-    fn derives_the_production_transport_when_context_lacks_one() {
-        // A context built directly (as tests and some callers do) carries
-        // logical identity but no resolved transport variable. The derived
-        // default must match production exactly rather than leaving the
-        // template unresolved.
+    fn fails_closed_when_the_transport_variable_is_unresolved() {
+        // A missing transport means typed resolution did not run. Deriving a
+        // default here would let that gap succeed silently, so the step fails
+        // instead -- and fails before touching the workspace.
         let workspace = tempfile::tempdir().unwrap();
         repository(workspace.path());
-        let mut context = context(workspace.path());
+        let authorization =
+            crate::engine::workspace_ownership::capture_workspace_authorization(workspace.path())
+                .unwrap();
+        let mut context =
+            StepContext::new(workspace.path().to_path_buf(), "run-unresolved".to_string());
+        context.set_workspace_authorization(authorization);
+        context.set("target_repo", "owner/repo");
+        context.set_current_step_id(STEP_ID);
 
-        assert_eq!(execute(&mut context).unwrap(), StepOutcome::Success);
-        assert_eq!(
-            std::fs::read(workspace.path().join(".git/config")).unwrap(),
-            render_config("https://github.com/owner/repo.git")
+        let error = execute(&mut context).unwrap_err();
+        assert!(
+            format!("{error}").contains("git_transport_url is not resolved"),
+            "unexpected error: {error}"
+        );
+        assert!(
+            !workspace.path().join(".git/config").exists(),
+            "config must not be published when transport is unresolved"
         );
     }
 

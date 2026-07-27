@@ -34,6 +34,15 @@ impl TargetProfileOverrides {
 /// Variable holding the resolved Git transport URL.
 pub const GIT_TRANSPORT_URL_VAR: &str = "git_transport_url";
 
+/// Records that the transport was supplied explicitly rather than derived.
+///
+/// Provenance has to be stored, not inferred. Once a derived URL is written
+/// into the variable map it is textually indistinguishable from an explicit
+/// one, so a later repository override could not tell whether it was allowed to
+/// recompute -- and would leave Git pointing at the previous repository while
+/// the GitHub API addressed the new one.
+const GIT_TRANSPORT_EXPLICIT_VAR: &str = "git_transport_url_explicit";
+
 /// Production transport for a logical repository.
 ///
 /// The single definition of the default, so the derived value cannot drift from
@@ -50,11 +59,18 @@ pub fn default_transport_url(target_repo: &str) -> String {
 /// the config) wins; otherwise it is derived from `target_repo`. With no
 /// override the result is byte-identical to the previously hardcoded URL.
 fn resolve_transport_url(config: &mut WorkflowConfig) -> Result<()> {
-    if let Some(existing) = config.variables.get(GIT_TRANSPORT_URL_VAR) {
-        let existing = existing.clone();
+    // An explicit transport is authoritative and is never recomputed.
+    if config.variables.contains_key(GIT_TRANSPORT_EXPLICIT_VAR) {
+        let existing = config
+            .variables
+            .get(GIT_TRANSPORT_URL_VAR)
+            .cloned()
+            .unwrap_or_default();
         validate_transport_url(&existing)?;
         return Ok(());
     }
+    // A derived transport always tracks current logical identity, so changing
+    // the repository moves the push target with it.
     let Some(target_repo) = config.variables.get("target_repo").cloned() else {
         return Ok(());
     };
@@ -89,15 +105,74 @@ fn validate_transport_url(url: &str) -> Result<()> {
     if url.starts_with('-') {
         return invalid("must not begin with '-', which Git would read as an option");
     }
-    // Local paths are permitted so a test can push to a bare repository on
+    // Local paths are permitted so a harness can push to a bare repository on
     // disk; that is the whole point of separating transport from identity.
-    let recognized = url.starts_with("https://")
-        || url.starts_with("ssh://")
-        || url.starts_with("git@")
-        || url.starts_with("file://")
-        || url.starts_with('/');
-    if !recognized {
-        return invalid("must be an https, ssh, file, or absolute-path transport");
+    //
+    // Each form is checked for an actual authority or path rather than a bare
+    // prefix, because "https://" and "git@" are prefixes of themselves and
+    // would otherwise be accepted as valid transports.
+    if let Some(rest) = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("ssh://"))
+    {
+        let (authority, path) = rest.split_once('/').unwrap_or((rest, ""));
+        if authority.is_empty() {
+            return invalid("is missing a host");
+        }
+        if path.is_empty() {
+            return invalid("is missing a repository path");
+        }
+        return Ok(());
+    }
+    if let Some(rest) = url.strip_prefix("file://") {
+        // Only the local form file:///path is supported; a remote authority
+        // would not be a local transport at all.
+        if !rest.starts_with('/') {
+            return invalid("must be of the form file:///absolute/path");
+        }
+        return validate_local_transport_path(url, Path::new(rest));
+    }
+    if let Some((user_host, path)) = url.split_once(':') {
+        // scp-style: user@host:path
+        if let Some((user, host)) = user_host.split_once('@') {
+            if user.is_empty() || host.is_empty() {
+                return invalid("is missing a user or host");
+            }
+            if path.is_empty() {
+                return invalid("is missing a repository path");
+            }
+            return Ok(());
+        }
+    }
+    if url.starts_with('/') {
+        return validate_local_transport_path(url, Path::new(url));
+    }
+    invalid("must be an https, ssh, file, scp-style, or absolute-path transport")
+}
+
+/// A local transport must exist and look like a Git repository.
+///
+/// A nonexistent path would otherwise be accepted here and only fail during
+/// fetch or push -- after the workspace has already been mutated, which is
+/// exactly what "fails closed before any mutation" forbids.
+fn validate_local_transport_path(url: &str, path: &Path) -> Result<()> {
+    let invalid = |detail: &str| {
+        Err(ConfigError {
+            message: format!("invalid git transport url {url:?}: {detail}"),
+            source_path: None,
+            kind: ConfigErrorKind::ValidationError,
+        })
+    };
+    if !path.exists() {
+        return invalid("points at a path that does not exist");
+    }
+    if !path.is_dir() {
+        return invalid("points at something that is not a directory");
+    }
+    // Bare repository (HEAD + objects) or a working tree with .git.
+    let bare = path.join("HEAD").exists() && path.join("objects").is_dir();
+    if !bare && !path.join(".git").exists() {
+        return invalid("does not look like a Git repository");
     }
     Ok(())
 }
@@ -130,11 +205,32 @@ pub fn resolve_target_profile(config: &mut WorkflowConfig) -> Result<()> {
     merge_list_variables(config, &profile);
     merge_prompt_guidance(config, &profile);
     merge_bootstrap(config, &profile);
+    // A transport authored directly in the config is an explicit choice and
+    // must survive a later repository override.
+    if config.variables.contains_key(GIT_TRANSPORT_URL_VAR) {
+        insert_var(config, GIT_TRANSPORT_EXPLICIT_VAR, "true");
+    }
     resolve_transport_url(config)?;
     Ok(())
 }
 
+/// Apply overrides atomically: either every field lands, or none does.
+///
+/// Overrides are applied to a clone and swapped in only after all validation
+/// passes. Without this, a request pairing a valid repository with an invalid
+/// transport would return an error having already changed the repository and
+/// issue, leaving a partially overridden config behind.
 pub fn apply_target_profile_overrides(
+    config: &mut WorkflowConfig,
+    overrides: &TargetProfileOverrides,
+) -> Result<()> {
+    let mut candidate = config.clone();
+    apply_overrides_unchecked(&mut candidate, overrides)?;
+    *config = candidate;
+    Ok(())
+}
+
+fn apply_overrides_unchecked(
     config: &mut WorkflowConfig,
     overrides: &TargetProfileOverrides,
 ) -> Result<()> {
@@ -163,6 +259,7 @@ pub fn apply_target_profile_overrides(
     if let Some(transport_url) = overrides.transport_url.as_deref() {
         validate_transport_url(transport_url)?;
         insert_var(config, GIT_TRANSPORT_URL_VAR, transport_url);
+        insert_var(config, GIT_TRANSPORT_EXPLICIT_VAR, "true");
     }
 
     // Always resolve, so a config that never carried the variable still gets

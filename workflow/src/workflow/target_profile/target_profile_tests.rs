@@ -404,6 +404,14 @@ fn config_with_repo(repo: &str) -> WorkflowConfig {
     config
 }
 
+/// A real bare repository on disk, since a local transport must be usable.
+fn bare_repo(root: &std::path::Path) -> String {
+    let path = root.join("remote.git");
+    std::fs::create_dir_all(path.join("objects")).unwrap();
+    std::fs::write(path.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+    path.to_string_lossy().into_owned()
+}
+
 fn overrides_with_transport(transport: Option<&str>) -> TargetProfileOverrides {
     TargetProfileOverrides {
         transport_url: transport.map(str::to_string),
@@ -427,34 +435,24 @@ fn default_transport_is_byte_identical_to_the_previous_hardcoded_url() {
 fn logical_identity_and_transport_may_disagree() {
     // The whole point of the seam: GitHub API calls keep addressing the logical
     // repository while Git addresses somewhere else entirely.
+    let root = tempfile::tempdir().unwrap();
+    let bare = bare_repo(root.path());
     let mut config = config_with_repo("vybestack/llxprt-luther");
-    apply_target_profile_overrides(
-        &mut config,
-        &overrides_with_transport(Some("/tmp/bare.git")),
-    )
-    .unwrap();
+    apply_target_profile_overrides(&mut config, &overrides_with_transport(Some(&bare))).unwrap();
     assert_eq!(
         config.variables.get("target_repo").unwrap(),
         "vybestack/llxprt-luther"
     );
-    assert_eq!(
-        config.variables.get(GIT_TRANSPORT_URL_VAR).unwrap(),
-        "/tmp/bare.git"
-    );
+    assert_eq!(config.variables.get(GIT_TRANSPORT_URL_VAR).unwrap(), &bare);
 }
 
 #[test]
 fn an_explicit_transport_is_not_overwritten_by_the_derived_default() {
+    let root = tempfile::tempdir().unwrap();
+    let bare = bare_repo(root.path());
     let mut config = config_with_repo("owner/name");
-    apply_target_profile_overrides(
-        &mut config,
-        &overrides_with_transport(Some("file:///srv/mirror.git")),
-    )
-    .unwrap();
-    assert_eq!(
-        config.variables.get(GIT_TRANSPORT_URL_VAR).unwrap(),
-        "file:///srv/mirror.git"
-    );
+    apply_target_profile_overrides(&mut config, &overrides_with_transport(Some(&bare))).unwrap();
+    assert_eq!(config.variables.get(GIT_TRANSPORT_URL_VAR).unwrap(), &bare);
 }
 
 #[test]
@@ -483,16 +481,19 @@ fn a_malformed_transport_fails_before_any_mutation() {
 
 #[test]
 fn transport_accepts_the_shapes_a_harness_needs() {
+    let root = tempfile::tempdir().unwrap();
+    let bare = bare_repo(root.path());
+    let file_url = format!("file://{bare}");
     for good in [
         "https://github.com/owner/name.git",
         "ssh://git@github.com/owner/name.git",
         "git@github.com:owner/name.git",
-        "file:///tmp/bare.git",
-        "/tmp/bare.git",
+        &file_url,
+        &bare,
     ] {
         let mut config = config_with_repo("owner/name");
         apply_target_profile_overrides(&mut config, &overrides_with_transport(Some(good)))
-            .expect("expected {good:?} to be accepted");
+            .unwrap_or_else(|error| panic!("expected {good:?} to be accepted: {error}"));
         assert_eq!(config.variables.get(GIT_TRANSPORT_URL_VAR).unwrap(), good);
     }
 }
@@ -501,6 +502,6 @@ fn transport_accepts_the_shapes_a_harness_needs() {
 fn a_transport_override_alone_makes_the_override_set_non_empty() {
     // Otherwise the override would be silently skipped by callers that check
     // is_empty before applying.
-    assert!(!overrides_with_transport(Some("/tmp/bare.git")).is_empty());
+    assert!(!overrides_with_transport(Some("https://example.com/x.git")).is_empty());
     assert!(TargetProfileOverrides::default().is_empty());
 }
