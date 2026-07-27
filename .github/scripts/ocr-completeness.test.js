@@ -206,3 +206,77 @@ test('coverage ratio reports selection progress', () => {
     ratio: '1',
   });
 });
+
+test("OCR's own skipped status resolves when nothing was selected", () => {
+  // A docs-only PR: OCR exits zero and reports 'skipped' because the changed
+  // set contains nothing it reviews. The caller excludes those files via the
+  // configured rules, so the selection is empty and the run is genuinely a
+  // no-op. Classifying this as partial made docs-only PRs unmergeable.
+  assert.strictEqual(
+    resolveCompleteness({
+      ocrExitCode: 0,
+      ocrStatus: 'skipped',
+      selectedFiles: [],
+      completedFiles: [],
+      failedFiles: [],
+    }),
+    'skipped',
+  );
+});
+
+test("OCR's skipped status never resolves a non-empty selection", () => {
+  // The status is OCR's own claim, produced after its internal filtering. If
+  // the caller's independently derived selection still holds files, they are
+  // unproven and must not be passed -- absence of evidence is not evidence
+  // that nothing needed review.
+  assert.strictEqual(
+    resolveCompleteness({
+      ocrExitCode: 0,
+      ocrStatus: 'skipped',
+      selectedFiles: ['src/auth.rs'],
+      completedFiles: [],
+      failedFiles: [],
+    }),
+    'partial',
+  );
+});
+
+test("OCR's skipped status stays partial when work was actually done", () => {
+  // A run that reviewed or failed files and still reported 'skipped' is
+  // self-contradictory. Honouring it would let a partial review pass, so the
+  // skip is refused in both directions.
+  assert.strictEqual(
+    resolveCompleteness({
+      ocrExitCode: 0,
+      ocrStatus: 'skipped',
+      selectedFiles: ['src/a.rs', 'src/b.rs'],
+      completedFiles: ['src/a.rs'],
+      failedFiles: [],
+    }),
+    'partial',
+  );
+  assert.strictEqual(
+    resolveCompleteness({
+      ocrExitCode: 0,
+      ocrStatus: 'skipped',
+      selectedFiles: ['src/a.rs'],
+      completedFiles: [],
+      failedFiles: ['src/a.rs'],
+    }),
+    'partial',
+  );
+});
+
+test("OCR's skipped status does not rescue a nonzero exit", () => {
+  // Exit code is checked first: a crashed run cannot claim a clean skip.
+  assert.strictEqual(
+    resolveCompleteness({
+      ocrExitCode: 1,
+      ocrStatus: 'skipped',
+      selectedFiles: ['docs/a.md'],
+      completedFiles: [],
+      failedFiles: [],
+    }),
+    'failed',
+  );
+});
