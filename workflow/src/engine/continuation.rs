@@ -108,8 +108,9 @@ pub fn continuation_overrides(md: &RunMetadata) -> TargetProfileOverrides {
         artifact_dir: md.artifact_root.as_ref().map(PathBuf::from),
         // Not carried in run metadata: transport is resolved from the reloaded
         // config, which either carries an explicit value or derives the
-        // production default from the logical repository. A resumed run
-        // therefore reaches the same transport it started with.
+        // production default from the effective logical repository. Capsule
+        // recovery restores the exact resolved config bytes and so preserves an
+        // explicit transport; this path only supplies the override set.
         transport_url: None,
     }
 }
