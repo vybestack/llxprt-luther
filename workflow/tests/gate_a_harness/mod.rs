@@ -574,9 +574,19 @@ fn tool_versions() -> Vec<(String, String)> {
         .collect()
 }
 
+/// Last `limit` bytes of `text`, truncated at a character boundary.
+///
+/// Slicing on a raw byte offset panics when the cut lands inside a multi-byte
+/// character. Workflow output carries non-ASCII (engine diagnostics use box
+/// drawing and arrows), so this is reachable in normal operation, and a
+/// harness that panics while reporting a failure hides the failure.
 fn tail(text: &str, limit: usize) -> String {
     if text.len() <= limit {
         return text.to_string();
     }
-    text[text.len() - limit..].to_string()
+    let start = text.len() - limit;
+    let boundary = (start..text.len())
+        .find(|index| text.is_char_boundary(*index))
+        .unwrap_or(text.len());
+    text[boundary..].to_string()
 }

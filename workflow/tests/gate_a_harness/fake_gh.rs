@@ -103,7 +103,7 @@ impl FakeGitHub {
         let _ = writeln!(script, "  \"issue view\"*)");
         let _ = writeln!(
             script,
-            "    printf '%s' {}",
+            "    printf '%s\\n' {}",
             shell_quote(&payload.to_string())
         );
         let _ = writeln!(script, "    ;;");
@@ -119,7 +119,7 @@ impl FakeGitHub {
         let _ = writeln!(script, "  \"issue list\"*)");
         let _ = writeln!(
             script,
-            "    printf '%s' {}",
+            "    printf '%s\\n' {}",
             shell_quote(&payload.to_string())
         );
         let _ = writeln!(script, "    ;;");
@@ -150,7 +150,7 @@ impl FakeGitHub {
                 });
                 let _ = writeln!(
                     script,
-                    "    printf '%s' {}",
+                    "    printf '%s\\n' {}",
                     shell_quote(&payload.to_string())
                 );
             }
@@ -166,18 +166,25 @@ impl FakeGitHub {
     }
 
     fn write_pr_list(&self, script: &mut String) {
+        // Return the union of fields any caller might select, for the same
+        // reason as `issue view`: omitting a requested field makes jq iterate
+        // over null, which surfaces as a product failure when it is really a
+        // gap in this fake.
         let payload = match &self.existing_pr {
             Some(pr) => serde_json::json!([{
                 "number": pr.number,
                 "state": pr.state,
                 "isDraft": pr.is_draft,
+                "title": "Pre-existing pull request",
+                "url": format!("https://github.com/example/repo/pull/{}", pr.number),
+                "headRefName": format!("issue{}", self.issue_number),
             }]),
             None => serde_json::json!([]),
         };
         let _ = writeln!(script, "  \"pr list\"*)");
         let _ = writeln!(
             script,
-            "    printf '%s' {}",
+            "    printf '%s\\n' {}",
             shell_quote(&payload.to_string())
         );
         let _ = writeln!(script, "    ;;");
@@ -194,9 +201,12 @@ impl FakeGitHub {
                 script,
                 "    printf 'created draft=%s\\n' \"$(case \"$*\" in *--draft*) echo true;; *) echo false;; esac)\" >> \"$LUTHER_FAKE_GH_STATE\""
             );
+            // Derive the PR URL from the issue under test so the fake is
+            // self-consistent across endpoints rather than pinned to one run.
             let _ = writeln!(
                 script,
-                "    printf '%s' 'https://github.com/example/repo/pull/4242'"
+                "    printf '%s\\n' 'https://github.com/example/repo/pull/{}'",
+                self.issue_number
             );
         } else {
             let _ = writeln!(script, "    echo 'pr create refused by harness' >&2");
@@ -211,7 +221,7 @@ impl FakeGitHub {
         let _ = writeln!(script, "  \"api repos\"*)");
         let _ = writeln!(
             script,
-            "    printf '%s' {}",
+            "    printf '%s\\n' {}",
             shell_quote(&payload.to_string())
         );
         let _ = writeln!(script, "    ;;");

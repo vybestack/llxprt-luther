@@ -6,6 +6,13 @@
 //! succeeded. The expectation is currently FAIL, and an unexplained move to
 //! PASS fails the assertion and demands an explanation.
 
+// The harness generates bash scripts, installs them with Unix execute
+// permissions, and intercepts tools by name on PATH. Those mechanics are
+// Unix-specific by construction, so the suite is gated rather than partially
+// adapted -- a half-ported harness would report platform gaps as product
+// failures.
+#![cfg(unix)]
+
 mod gate_a_harness;
 
 use gate_a_harness::{run_gate_a, GateOutcome, GateRun};
@@ -215,13 +222,18 @@ fn a_pre_existing_open_pr_cannot_satisfy_the_gate() {
 
     let result = run_gate_a(&run);
 
+    // Both conditions independently. An `A || B` form would pass when the
+    // workflow failed to notice the existing PR and called `pr create` anyway,
+    // so long as the gate happened to fail for some unrelated reason.
+    assert_eq!(
+        result.outcome,
+        GateOutcome::Fail,
+        "a pre-existing PR must not satisfy the gate; report:\n{}",
+        serde_json::to_string_pretty(&result).unwrap()
+    );
     assert!(
-        !result
-            .gh_invocations
-            .iter()
-            .any(|call| call.contains("pr create"))
-            || result.outcome == GateOutcome::Fail,
-        "an existing PR must not be reported as a newly created one; report:\n{}",
+        !result.created_draft_pr,
+        "no new draft PR may be recorded when one already exists; report:\n{}",
         serde_json::to_string_pretty(&result).unwrap()
     );
 }
