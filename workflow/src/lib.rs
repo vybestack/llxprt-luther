@@ -17,6 +17,9 @@ pub mod repo;
 pub mod runtime_paths;
 /// @plan:PLAN-20260404-INITIAL-RUNTIME.P09
 pub mod service;
+/// Typed records of what external tools actually do, as distinct from what
+/// callers assume. See `docs/architecture/convergence-retrospective.md`.
+pub mod tool_contract;
 /// @plan:PLAN-20260404-INITIAL-RUNTIME.P03
 pub mod workflow;
 
