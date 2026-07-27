@@ -642,6 +642,51 @@ fn the_contract_names_the_tool_its_captures_came_from() {
     );
 }
 
+/// `duration_ns` is present only on sessions that finished.
+///
+/// The tool emits a sparse object: an unfinished session omits the field and
+/// carries the zero time in `end_time`. A caller that reads it unconditionally
+/// fails on precisely the sessions worth investigating, so the field must stay
+/// out of the required set and the capture must keep holding an example.
+#[test]
+fn an_unfinished_session_omits_its_duration() {
+    let sessions: Vec<serde_json::Value> =
+        serde_json::from_str(&read_fixture("session-list--json.stdout"))
+            .expect("session list emits JSON");
+
+    let unfinished: Vec<&serde_json::Value> = sessions
+        .iter()
+        .filter(|session| {
+            session
+                .get("end_time")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|end| end.starts_with("0001-01-01"))
+        })
+        .collect();
+
+    assert!(
+        !unfinished.is_empty(),
+        "the capture must retain an unfinished session, otherwise this asymmetry stops being \
+         evidenced; re-capture only from a store that has one"
+    );
+    for session in &unfinished {
+        assert!(
+            session.get("duration_ns").is_none(),
+            "an unfinished session is expected to omit duration_ns: {session}"
+        );
+    }
+
+    assert!(
+        !ocr_contract()
+            .subcommand("session list")
+            .expect("recorded")
+            .required_fields
+            .iter()
+            .any(|field| field.name == "duration_ns"),
+        "duration_ns must not be required, because the tool does not always emit it"
+    );
+}
+
 /// Provenance must describe a capture that was actually run.
 ///
 /// This is a weak guard by nature — prose cannot be fully verified — but it
@@ -716,14 +761,31 @@ fn the_fields_needed_to_reach_durable_evidence_stay_recorded() {
 fn the_pinned_version_matches_the_version_ci_installs() {
     let workflow = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../.github/workflows/ocr-pr-review.yml");
-    let source = std::fs::read_to_string(&workflow)
-        .unwrap_or_else(|error| panic!("read {}: {error}", workflow.display()));
+    // Deliberately coupled to the workflow file: this assertion is the only
+    // thing tying the contract to the version production actually installs,
+    // so it must fail rather than skip when the file moves. Both failure
+    // paths below say where to re-point it, because a maintainer who renames
+    // the workflow should be told what to update, not left guessing.
+    let source = std::fs::read_to_string(&workflow).unwrap_or_else(|error| {
+        panic!(
+            "cannot read {} ({error}); this test binds the contract to the version CI installs, \
+             so if the review workflow moved, update this path rather than deleting the check",
+            workflow.display()
+        )
+    });
 
     let declared = source
         .lines()
         .find_map(|line| line.trim().strip_prefix("OCR_VERSION:"))
         .map(|value| value.trim().trim_matches('"').to_string())
-        .expect("the review workflow declares OCR_VERSION");
+        .unwrap_or_else(|| {
+            panic!(
+                "{} no longer declares OCR_VERSION; if the version moved to another variable or \
+                 file, re-point this assertion at it so the contract stays bound to what CI \
+                 installs",
+                workflow.display()
+            )
+        });
 
     let pinned = ocr_contract().version;
     assert_eq!(

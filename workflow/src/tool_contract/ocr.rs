@@ -126,6 +126,12 @@ fn session_list() -> SubcommandContract {
                 "confirms the listed session belongs to the intended repository",
             ),
         ],
+        // duration_ns is deliberately absent from the required set: the tool
+        // omits it for a session that did not finish, and stamps end_time
+        // with the zero time rather than a real one. A caller that reads it
+        // unconditionally gets a decode error on exactly the sessions worth
+        // investigating. The capture holds one such session so this stays
+        // evidenced rather than remembered.
         captures: vec![
             capture(
                 "session-list--help.txt",

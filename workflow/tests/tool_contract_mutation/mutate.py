@@ -52,6 +52,10 @@ def truncate_required_fields(subcommand):
         source[:field_start] + "required_fields: vec![]" + source[field_end:])
 
 
+class MutationNotApplied(RuntimeError):
+    """A mutation could not be applied, so its result proves nothing."""
+
+
 def fabricate(name, content):
     """Replace a capture and refresh only that capture's recorded digest.
 
@@ -72,14 +76,24 @@ def fabricate(name, content):
     marker = f'"{name}",'
     index = source.index(marker)
     before, after = source[:index], source[index:]
-    assert old_digest in after, f"digest for {name} not found after its filename"
+    if old_digest not in after:
+        # Raised rather than asserted: under python -O an assert vanishes, the
+        # digest refresh is skipped, and the suite then fails because the
+        # digest is stale instead of because the content is unconstrained.
+        # That would report a pass for the wrong reason.
+        raise MutationNotApplied(f"digest for {name} not found after its filename")
     OCR.write_text(before + after.replace(old_digest, new_digest, 1))
 
 
 def edit(path, old, new, count=0):
     def apply():
         text = path.read_text()
-        assert old in text, f"anchor not found in {path.name}: {old[:60]}"
+        if old not in text:
+            # Not an assert: stripped under python -O, str.replace would be a
+            # no-op and the mutation would be scored UNDETECTED without ever
+            # having been applied.
+            raise MutationNotApplied(
+                f"anchor not found in {path.name}: {old[:60]}")
         path.write_text(text.replace(old, new) if count == 0 else text.replace(old, new, count))
     return apply
 
@@ -165,8 +179,8 @@ fn fabricated() -> SubcommandContract {
      edit(TC, "pub fn verify_version(&self, observed: &str) -> Result<(), ContractViolation> {",
           "pub fn verify_version(&self, observed: &str) -> Result<(), ContractViolation> {\n        if observed.is_empty() {\n            return Ok(());\n        }")),
     ("M24 digest silently truncates large input",
-     edit(TC, "let mut message = bytes.to_vec();",
-          "let mut message = bytes.to_vec();\n    if message.len() > 1_000_000 {\n        message.truncate(1_000_000);\n    }")),
+     edit(TC, "hasher.update(bytes);",
+          "hasher.update(&bytes[..bytes.len().min(1_000_000)]);")),
     ("M9 wrong state key for session list",
      edit(OCR, 'state_key: StateKey::PathArgumentAbsoluteCleaned { flag: "--repo" }',
           "state_key: StateKey::LogicalWorkingDirectory")),
@@ -237,7 +251,7 @@ def main():
             restore(backup)
             try:
                 mutation()
-            except (AssertionError, ValueError) as error:
+            except (MutationNotApplied, AssertionError, ValueError) as error:
                 # A mutation whose anchor has drifted tests nothing. Treating
                 # it as a skip lets the battery report success while silently
                 # covering less than it claims, so it is a failure.
