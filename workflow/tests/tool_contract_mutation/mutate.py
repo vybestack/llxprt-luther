@@ -4,6 +4,7 @@ Each mutation is applied to a clean tree, the suite is run, and the tree is
 restored. A mutation that does not fail the suite is a gap.
 """
 
+import json
 import hashlib
 import pathlib
 import shutil
@@ -131,6 +132,32 @@ def overwrite(path, content):
     return lambda: path.write_text(content)
 
 
+def falsify_session_list():
+    """Rewrite the session-list capture to disagree with the real tool.
+
+    The repo_dir is read out of the capture rather than written in here. A
+    literal would embed whoever captured the fixture's home directory, and
+    worse, would silently stop matching if the fixture were ever re-captured
+    elsewhere - leaving the mutation a no-op that the runner would score as
+    caught. MutationNotApplied makes that failure loud instead.
+    """
+    target = FIX / "session-list--json.stdout"
+    original = target.read_text()
+    entries = json.loads(original)
+    if not entries or "repo_dir" not in entries[0]:
+        raise MutationNotApplied(
+            "session-list capture has no repo_dir to falsify; re-capture it or update M3"
+        )
+    real_repo_dir = entries[0]["repo_dir"]
+    falsified = (original
+                 .replace('"file_path"', '"filePath"')
+                 .replace(f'"repo_dir": "{real_repo_dir}"',
+                          '"repo_dir": "/completely/made/up"'))
+    if falsified == original:
+        raise MutationNotApplied("M3 changed nothing; the capture format moved under it")
+    target.write_text(falsified)
+
+
 MUTATIONS = [
     ("M1 truncated version pin (prefix must not validate)",
      edit(OCR, '"v1.7.16"', '"v1.7.1"')),
@@ -138,11 +165,7 @@ MUTATIONS = [
      edit(OCR, '"session-list--json.stdout",\n                "30425b13',
           '"session-show--json.stdout",\n                "30425b13')),
     ("M3 falsified session-list fixture content (#174)",
-     lambda: (FIX / "session-list--json.stdout").write_text(
-         (FIX / "session-list--json.stdout").read_text()
-         .replace('"file_path"', '"filePath"')
-         .replace('"repo_dir": "/Users/acoliver/projects/luther"',
-                  '"repo_dir": "/completely/made/up"'))),
+     lambda: falsify_session_list()),
     ("M4 hand-written session-show invention",
      overwrite(FIX / "session-show--json.stdout",
                "Session: not-a-real-id\n  Bogus:  invented field\n")),
