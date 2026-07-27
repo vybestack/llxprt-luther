@@ -917,7 +917,7 @@ fn push_optional<'a>(
     }
 }
 
-mod transport;
+pub(crate) mod transport;
 pub use transport::{
     default_transport_url, GIT_TRANSPORT_SOURCE_VAR, GIT_TRANSPORT_URL_VAR, TRANSPORT_EXPLICIT,
 };

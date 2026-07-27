@@ -25,7 +25,7 @@ pub const GIT_TRANSPORT_URL_VAR: &str = "git_transport_url";
 /// URL to an explicit one, which would freeze it against later overrides.
 pub const GIT_TRANSPORT_SOURCE_VAR: &str = "git_transport_url_source";
 pub const TRANSPORT_EXPLICIT: &str = "explicit";
-const TRANSPORT_DERIVED: &str = "derived";
+pub(crate) const TRANSPORT_DERIVED: &str = "derived";
 
 /// Production transport for a logical repository.
 ///
@@ -89,7 +89,7 @@ pub(super) fn validate_transport_url(url: &str) -> Result<()> {
     if url.contains(['{', '}']) {
         return invalid("contains an unresolved template placeholder");
     }
-    if url.chars().any(|ch| ch.is_control() || ch == '\0') {
+    if url.chars().any(char::is_control) {
         return invalid("contains control characters");
     }
     if url.starts_with('-') {

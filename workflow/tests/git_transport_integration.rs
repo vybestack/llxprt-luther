@@ -42,6 +42,30 @@ fn git_env_lock() -> std::sync::MutexGuard<'static, ()> {
     LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
+/// Sets `GIT_CONFIG_GLOBAL` and restores the previous value on drop.
+///
+/// Restoration has to survive a panic: an unwinding assertion between the set
+/// and the reset would otherwise leave a hostile Git configuration active for
+/// every later test in this binary.
+struct HostileGitEnv(Option<String>);
+
+impl HostileGitEnv {
+    fn set(value: &Path) -> Self {
+        let previous = std::env::var("GIT_CONFIG_GLOBAL").ok();
+        std::env::set_var("GIT_CONFIG_GLOBAL", value);
+        Self(previous)
+    }
+}
+
+impl Drop for HostileGitEnv {
+    fn drop(&mut self) {
+        match self.0.take() {
+            Some(previous) => std::env::set_var("GIT_CONFIG_GLOBAL", previous),
+            None => std::env::remove_var("GIT_CONFIG_GLOBAL"),
+        }
+    }
+}
+
 fn git(dir: &Path, args: &[&str]) -> std::process::Output {
     let _guard = git_env_lock();
     let output = Command::new("git")
@@ -286,17 +310,13 @@ fn the_shipping_push_step_neutralizes_hostile_global_git_configuration() {
     // otherwise the rewrite leaks into their pushes and fails them.
     let outcome = {
         let _guard = git_env_lock();
-        let restore = std::env::var("GIT_CONFIG_GLOBAL").ok();
-        std::env::set_var("GIT_CONFIG_GLOBAL", &hostile);
-        let outcome = ShellExecutor.execute(
+        // Restored on drop, so a panic inside execute cannot leak the hostile
+        // configuration into the rest of the binary.
+        let _hostile_env = HostileGitEnv::set(&hostile);
+        ShellExecutor.execute(
             &mut context,
             &shipped_step_params(&workflow, "push_changes"),
-        );
-        match restore {
-            Some(previous) => std::env::set_var("GIT_CONFIG_GLOBAL", previous),
-            None => std::env::remove_var("GIT_CONFIG_GLOBAL"),
-        }
-        outcome
+        )
     };
     assert_eq!(
         outcome.unwrap(),
@@ -638,4 +658,43 @@ fn shipping_workflows_that_use_pipefail_are_run_by_a_capable_interpreter() {
             String::from_utf8_lossy(&probe.stderr)
         );
     }
+}
+
+/// Every shipping step that pushes must neutralize hostile Git configuration.
+///
+/// The dogfood workflow hardened its push step while the issue-fix workflow did
+/// not, so a global `insteadOf` rewrite could redirect a push away from the
+/// resolved transport on one path but not the other. Asymmetry between two
+/// copies of the same step is invisible to a test that only reads one of them,
+/// so this derives its cases from the shipping configs themselves.
+#[test]
+fn every_shipping_push_step_neutralizes_hostile_git_configuration() {
+    let mut checked = 0;
+    for name in ["llxprt-luther-dogfood-v1.toml", "llxprt-issue-fix-v1.toml"] {
+        let path = std::path::Path::new("config/workflows").join(name);
+        let raw = std::fs::read_to_string(&path).expect("shipping workflow readable");
+        let workflow: toml::Value = toml::from_str(&raw).expect("shipping workflow parses");
+        let steps = workflow["steps"].as_array().expect("steps array");
+
+        let push = steps
+            .iter()
+            .find(|step| step["step_id"].as_str() == Some("push_changes"))
+            .unwrap_or_else(|| panic!("{name} must define push_changes"));
+        let command = push["parameters"]["command"]
+            .as_str()
+            .expect("push_changes has a command");
+
+        assert!(
+            command.contains("GIT_CONFIG_GLOBAL=/dev/null")
+                && command.contains("GIT_CONFIG_SYSTEM=/dev/null")
+                && command.contains("GIT_CONFIG_NOSYSTEM=1"),
+            "{name} push_changes must neutralize global and system Git configuration"
+        );
+        assert!(
+            command.contains("unset GIT_DIR"),
+            "{name} push_changes must clear inherited Git environment variables"
+        );
+        checked += 1;
+    }
+    assert_eq!(checked, 2, "both shipping workflows must be covered");
 }

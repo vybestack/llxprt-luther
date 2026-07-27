@@ -926,7 +926,10 @@ fn orchestration_state_captures_only_an_explicit_transport() {
     let mut derived = context(temp.path());
     derived.set("current_step_id", "launch_or_resume_child_workflow");
     derived.set(GIT_TRANSPORT_URL_VAR, "https://github.com/owner/repo.git");
-    derived.set(GIT_TRANSPORT_SOURCE_VAR, "derived");
+    derived.set(
+        GIT_TRANSPORT_SOURCE_VAR,
+        crate::workflow::target_profile::transport::TRANSPORT_DERIVED,
+    );
     let state = OrchestrationState::from_context(&derived, &json!({})).unwrap();
     assert_eq!(state.transport_url, None);
 }
