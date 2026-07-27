@@ -34,6 +34,74 @@ fn core_src() -> PathBuf {
     workspace_root().join("crates/luther-engine-core/src")
 }
 
+/// The names a package declares as dependencies, read from `cargo metadata`.
+///
+/// `cargo metadata --format-version 1` is a versioned, documented contract;
+/// `cargo tree` renders for humans and is free to change its layout. Matching
+/// on rendered text also admits a false positive from any package whose name
+/// merely contains the string being searched for.
+///
+/// Scanned rather than deserialised because adding a JSON dependency to the
+/// workspace to support one test is a heavier change than this warrants. The
+/// scan is bracket-matched, not stopped at the first `]`: a dependency object
+/// carries its own arrays, so a naive scan truncates inside the first entry.
+/// That is not hypothetical — the first version of this function reported
+/// `luther-workflow` as depending only on `anyhow`, which would have made the
+/// boundary assertion pass while reading almost nothing.
+fn declared_dependencies_of(package: &str) -> Vec<String> {
+    let output = Command::new(env!("CARGO"))
+        .args(["metadata", "--format-version", "1", "--no-deps"])
+        .current_dir(workspace_root())
+        .output()
+        .expect("cargo metadata runs");
+    assert!(
+        output.status.success(),
+        "cargo metadata failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json = String::from_utf8_lossy(&output.stdout);
+
+    let package_key = format!("\"name\":\"{package}\"");
+    let start = json
+        .find(&package_key)
+        .unwrap_or_else(|| panic!("package `{package}` absent from cargo metadata"));
+    let deps_start = json[start..]
+        .find("\"dependencies\":[")
+        .map(|offset| start + offset)
+        .expect("every package object carries a dependencies array");
+
+    let array_open = deps_start + "\"dependencies\":".len();
+    let mut depth = 0usize;
+    let mut deps_end = None;
+    for (offset, character) in json[array_open..].char_indices() {
+        match character {
+            '[' => depth += 1,
+            ']' => {
+                depth -= 1;
+                if depth == 0 {
+                    deps_end = Some(array_open + offset);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let deps_end = deps_end.expect("the dependencies array is terminated");
+    let deps_block = &json[array_open..deps_end];
+
+    deps_block
+        .match_indices("\"name\":\"")
+        .map(|(index, needle)| {
+            let value_start = index + needle.len();
+            let value_end = deps_block[value_start..]
+                .find('"')
+                .map(|offset| value_start + offset)
+                .expect("a dependency name is a terminated string");
+            deps_block[value_start..value_end].to_string()
+        })
+        .collect()
+}
+
 /// `cargo tree` for core must show no edge to any workspace domain package.
 ///
 /// Asserted against the resolved graph rather than against the manifest: a
@@ -41,24 +109,13 @@ fn core_src() -> PathBuf {
 /// and a transitive edge would appear only in the latter.
 #[test]
 fn core_has_no_dependency_on_any_domain_package() {
-    let output = Command::new(env!("CARGO"))
-        .args(["tree", "-p", "luther-engine-core", "--prefix", "none"])
-        .current_dir(workspace_root())
-        .output()
-        .expect("cargo tree runs");
-    assert!(
-        output.status.success(),
-        "cargo tree failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let tree = String::from_utf8_lossy(&output.stdout);
-
+    let deps = declared_dependencies_of("luther-engine-core");
     for domain in ["luther-workflow", "xtask"] {
         assert!(
-            !tree.contains(domain),
+            !deps.iter().any(|dep| dep == domain),
             "luther-engine-core depends on the domain package `{domain}`, which inverts the \
              allowed direction. The DAG in docs/architecture/package-boundaries.md permits \
-             core <- domain only.\n{tree}"
+             core <- domain only.\ndeclared dependencies: {deps:?}"
         );
     }
 }
@@ -69,16 +126,36 @@ fn core_has_no_dependency_on_any_domain_package() {
 /// simply never referenced each other, which would pass while proving nothing.
 #[test]
 fn the_domain_package_does_depend_on_core() {
-    let output = Command::new(env!("CARGO"))
-        .args(["tree", "-p", "luther-workflow", "--prefix", "none"])
-        .current_dir(workspace_root())
-        .output()
-        .expect("cargo tree runs");
-    let tree = String::from_utf8_lossy(&output.stdout);
+    let deps = declared_dependencies_of("luther-workflow");
     assert!(
-        tree.contains("luther-engine-core"),
+        deps.iter().any(|dep| dep == "luther-engine-core"),
         "luther-workflow must depend on luther-engine-core; if it does not, the boundary test \
-         above is vacuous because the two packages are simply unrelated.\n{tree}"
+         above is vacuous because the two packages are simply unrelated.\n\
+         declared dependencies: {deps:?}"
+    );
+}
+
+/// The metadata scan finds dependencies that are known to exist.
+///
+/// Without this, a change to `cargo metadata`'s shape would make the scanner
+/// return an empty list, and every dependency assertion above would pass by
+/// finding no forbidden name in nothing at all. This is the guard against the
+/// boundary tests becoming vacuous together.
+#[test]
+fn the_metadata_scan_actually_finds_dependencies() {
+    let core_deps = declared_dependencies_of("luther-engine-core");
+    assert!(
+        core_deps.iter().any(|dep| dep == "sha2"),
+        "the scanner did not find sha2, which core certainly depends on, so it is reading the \
+         wrong thing and the boundary assertions are worthless.\nfound: {core_deps:?}"
+    );
+
+    let domain_deps = declared_dependencies_of("luther-workflow");
+    assert!(
+        domain_deps.len() > 1,
+        "the scanner found {} dependency for luther-workflow; the array was almost certainly \
+         truncated inside the first entry.\nfound: {domain_deps:?}",
+        domain_deps.len()
     );
 }
 
