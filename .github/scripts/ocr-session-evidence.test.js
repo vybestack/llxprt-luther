@@ -10,6 +10,7 @@ const {
   readSessionEvidence,
   selectReviewSession,
   sessionSlugForWorkspace,
+  sessionSlugCandidatesForWorkspace,
 } = require('./ocr-session-evidence');
 
 // Temp dirs are tracked and removed after the run so repeated executions do
@@ -87,8 +88,14 @@ test('a missing session file yields empty evidence rather than throwing', () => 
   assert.strictEqual(evidence.ended, false);
 });
 
-test('an unresolvable workspace yields an empty slug rather than throwing', () => {
-  assert.strictEqual(sessionSlugForWorkspace('/nonexistent/workspace/path'), '');
+test('an unresolvable workspace yields its logical slug rather than throwing', () => {
+  // Previously this returned '' and the caller reported no evidence. An
+  // unresolvable path is still a real path the tool may have keyed on, so the
+  // logical form is returned and the caller reports a missing store instead.
+  assert.strictEqual(
+    sessionSlugForWorkspace('/nonexistent/workspace/path'),
+    'nonexistent-workspace-path',
+  );
 });
 
 test('selection ignores empty probe sessions and picks the one with evidence', () => {
@@ -188,14 +195,86 @@ test('no session containing evidence yields null rather than a false positive', 
   assert.strictEqual(selectReviewSession('/nonexistent/dir'), null);
 });
 
-test('the slug resolves symlinks so /tmp and /private/tmp agree', () => {
+test('a slug is a separator-free key', () => {
   const dir = makeSessionDir();
   const slug = sessionSlugForWorkspace(dir);
   assert.ok(!slug.startsWith('-'), 'slug must not retain a leading separator');
   assert.ok(!slug.includes('/'), 'slug must not contain path separators');
   assert.ok(!slug.includes('\\'), 'slug must not contain backslash separators');
-  // The resolved path is what the store keys on.
-  assert.strictEqual(slug, fs.realpathSync(dir).replace(/^\//, '').replace(/\//g, '-'));
+});
+
+// --- store slug resolution ------------------------------------------------
+//
+// The tool derives its store directory from its own working directory via Go's
+// os.Getwd, which honours $PWD only when $PWD names the same directory as the
+// physical cwd. So the slug depends on how the tool's process was spawned, and
+// either form is reachable. Measured against 1.7.16 from a symlinked workspace:
+// with a symlinked $PWD the tool found no sessions where the physical path held
+// three, and with $PWD unset or non-aliasing it found all three.
+//
+// The earlier implementation resolved symlinks and asserted that the resolved
+// path "is what the store keys on". These two tests fail that implementation,
+// which is the point: a fix handling only one form is the same defect mirrored.
+
+// A symlinked workspace plus an empty store root, so a test can create exactly
+// one of the two slug directories and assert which one is chosen.
+function makeSymlinkedWorkspace(suffix) {
+  const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'ocr-ws-'));
+  const link = path.join(os.tmpdir(), `ocr-link-${Date.now()}-${suffix}`);
+  fs.symlinkSync(workspace, link);
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ocr-root-'));
+  const slugOf = (value) => path.resolve(value).replace(/^\//, '').replace(/\//g, '-');
+  return {
+    link,
+    root,
+    logical: slugOf(link),
+    physical: fs.realpathSync(link).replace(/^\//, '').replace(/\//g, '-'),
+    cleanup: () => {
+      fs.rmSync(root, { recursive: true, force: true });
+      fs.unlinkSync(link);
+      fs.rmSync(workspace, { recursive: true, force: true });
+    },
+  };
+}
+
+test('a store written under the physical slug is found through a symlink', () => {
+  const ws = makeSymlinkedWorkspace('a');
+  try {
+    assert.notStrictEqual(ws.logical, ws.physical, 'the symlink must alias a different path');
+    // The workspace is reached through the symlink, but the tool wrote its store
+    // under the physical name. Deriving the logical slug alone misses it.
+    fs.mkdirSync(path.join(ws.root, ws.physical), { recursive: true });
+    assert.strictEqual(sessionSlugForWorkspace(ws.link, ws.root), ws.physical);
+  } finally {
+    ws.cleanup();
+  }
+});
+
+test('a store written under the logical slug is found when the path resolves elsewhere', () => {
+  const ws = makeSymlinkedWorkspace('b');
+  try {
+    // Only the logical form exists, which is what happens when the tool ran with
+    // a symlinked $PWD that aliased its cwd. Resolving symlinks misses it.
+    fs.mkdirSync(path.join(ws.root, ws.logical), { recursive: true });
+    assert.strictEqual(sessionSlugForWorkspace(ws.link, ws.root), ws.logical);
+  } finally {
+    ws.cleanup();
+  }
+});
+
+test('both slug forms are offered as candidates for a symlinked workspace', () => {
+  const real = makeSessionDir();
+  const link = path.join(os.tmpdir(), `ocr-link-${Date.now()}-c`);
+  fs.symlinkSync(real, link);
+  try {
+    const candidates = sessionSlugCandidatesForWorkspace(link);
+    const logical = path.resolve(link).replace(/^\//, '').replace(/\//g, '-');
+    const physical = fs.realpathSync(link).replace(/^\//, '').replace(/\//g, '-');
+    assert.ok(candidates.includes(logical), 'the logical form must be a candidate');
+    assert.ok(candidates.includes(physical), 'the physical form must be a candidate');
+  } finally {
+    fs.unlinkSync(link);
+  }
 });
 
 // --- failed review events -------------------------------------------------

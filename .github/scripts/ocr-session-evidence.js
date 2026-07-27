@@ -23,27 +23,86 @@ const REVIEW_ITEM_FAILED = 'review_item_failed';
 const SESSION_END = 'session_end';
 
 /**
- * Convert a workspace path into the slug the OCR session store uses.
+ * Convert an absolute path into a session-store slug.
  *
- * The store keys off the resolved (symlink-free) path, so `/tmp/...` on macOS
- * becomes `/private/tmp/...`. Resolving here avoids the mismatch that occurs
- * when a caller passes the unresolved path.
+ * The store replaces separators with dashes and drops the leading one. This
+ * performs no resolution: which path to hand it is the caller's decision, and
+ * getting that decision wrong is the defect this module previously carried.
  */
-function sessionSlugForWorkspace(workspacePath) {
-  // An unresolvable path yields '' rather than throwing, so a caller cannot be
-  // crashed by an inaccessible workspace and every caller gets the same
-  // predictable "no slug" result. Path separators for both conventions are
-  // replaced so the slug never retains a separator.
-  let resolved;
+function slugForPath(absolutePath) {
+  return absolutePath.replace(/^\//, '').replace(/[/\\]/g, '-');
+}
+
+/**
+ * Every slug the OCR session store might have used for this workspace, most
+ * likely first.
+ *
+ * The tool derives its store directory from its own working directory via Go's
+ * `os.Getwd`, which honours `$PWD` only when `$PWD` names the same directory as
+ * the physical cwd, and otherwise falls back to the physical path. So the slug
+ * depends on how the process was spawned, not on the path alone. Measured
+ * against 1.7.16 from `/tmp/ocrlink`, a symlink to a repo holding three
+ * sessions:
+ *
+ *     PWD=/tmp/ocrlink (shell cd)  -> no sessions   logical alias honoured
+ *     PWD unset                    -> 3 sessions    physical fallback
+ *     PWD=/tmp, /no/such/dir, ''   -> 3 sessions    not an alias, rejected
+ *
+ * Deriving a single slug therefore cannot be correct: whichever one this module
+ * picked, the other is reachable. Both are returned and the caller uses the
+ * store that exists. The earlier version resolved symlinks and documented that
+ * the store "keys off the resolved (symlink-free) path", which is the opposite
+ * of the aliasing case - a stated justification for the wrong behaviour, which
+ * is how it survived.
+ *
+ * An unresolvable workspace still yields the logical form rather than throwing,
+ * so a caller cannot be crashed by an inaccessible workspace.
+ */
+function sessionSlugCandidatesForWorkspace(workspacePath) {
+  const candidates = [];
+  const add = (value) => {
+    const slug = slugForPath(value);
+    if (slug && !candidates.includes(slug)) {
+      candidates.push(slug);
+    }
+  };
+
+  add(path.resolve(workspacePath));
   try {
-    resolved = fs.realpathSync(workspacePath);
+    add(fs.realpathSync(workspacePath));
   } catch (error) {
+    // Not fatal: the logical form is still a valid candidate, and a store
+    // written under it is still findable. Warn rather than return nothing,
+    // because returning nothing here reports "no evidence" for a review that
+    // may well have completed.
     console.warn(
       `ocr-session-evidence: could not resolve workspace ${workspacePath}: ${error.message}`,
     );
+  }
+  return candidates;
+}
+
+/**
+ * The slug for this workspace, preferring a store directory that exists.
+ *
+ * Retained for callers that want a single answer. When no candidate store
+ * exists the first candidate is returned so the caller reports a missing store
+ * for a real path rather than an empty string.
+ */
+function sessionSlugForWorkspace(workspacePath, sessionRoot) {
+  const candidates = sessionSlugCandidatesForWorkspace(workspacePath);
+  if (candidates.length === 0) {
     return '';
   }
-  return resolved.replace(/^\//, '').replace(/[/\\]/g, '-');
+  if (sessionRoot) {
+    const existing = candidates.find((slug) =>
+      fs.existsSync(path.join(sessionRoot, slug)),
+    );
+    if (existing) {
+      return existing;
+    }
+  }
+  return candidates[0];
 }
 
 /**
@@ -160,6 +219,7 @@ function selectReviewSession(sessionDir, expectedSessionId) {
 
 module.exports = {
   sessionSlugForWorkspace,
+  sessionSlugCandidatesForWorkspace,
   readSessionEvidence,
   selectReviewSession,
   REVIEW_ITEM_DONE,

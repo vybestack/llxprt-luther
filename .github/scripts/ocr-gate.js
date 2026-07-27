@@ -250,9 +250,11 @@ function evaluateWorkspace(params) {
 
   const sessionRoot =
     options.sessionRoot || path.join(os.homedir(), '.opencodereview', 'sessions');
-  // sessionSlugForWorkspace reports an unresolvable workspace as '' and logs
-  // the cause, so no try/catch is needed here.
-  const slug = sessionSlugForWorkspace(workspace);
+  // The store slug depends on whether the tool's process saw a symlinked $PWD
+  // that aliased its cwd, so sessionRoot is passed and the slug whose store
+  // actually exists is preferred. Deriving one form and trusting it reported no
+  // evidence for reviews that had completed.
+  const slug = sessionSlugForWorkspace(workspace, sessionRoot);
   const sessionDir = slug ? path.join(sessionRoot, slug) : '';
 
   const expectedSessionId = readJsonField(resultPath, 'session_id');
