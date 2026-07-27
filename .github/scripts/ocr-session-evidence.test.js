@@ -296,6 +296,79 @@ test('a broken symlink yields its logical candidate without throwing', { skip: !
   ]);
 });
 
+// --- the workspace is below the repository root ---------------------------
+//
+// The writer keys on the repository root; the reader is handed whatever path
+// its caller supplies. Those coincide for every caller today, which is why no
+// test above covers the case where they do not.
+
+function makeRepoWithSubdir() {
+  const repo = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'ocr-repo-')));
+  tempDirs.push(repo);
+  fs.mkdirSync(path.join(repo, '.git'));
+  const nested = path.join(repo, 'packages', 'thing');
+  fs.mkdirSync(nested, { recursive: true });
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ocr-root-'));
+  tempDirs.push(root);
+  const slugOf = (value) => value.replace(/^\//, '').replace(/\//g, '-');
+  return { repo, nested, root, repoSlug: slugOf(repo), nestedSlug: slugOf(nested) };
+}
+
+test('a workspace below the repository root offers the root slug too', () => {
+  const { nested, repoSlug, nestedSlug } = makeRepoWithSubdir();
+  const candidates = sessionSlugCandidatesForWorkspace(nested);
+  assert.ok(
+    candidates.includes(nestedSlug),
+    'the given path stays a candidate: a store may exist under it',
+  );
+  assert.ok(
+    candidates.includes(repoSlug),
+    'the repository root is where the writer keys its store',
+  );
+});
+
+test('a store written by the writer is found from a subdirectory', () => {
+  const { nested, root, repoSlug } = makeRepoWithSubdir();
+  // Only the root store exists, which is what a review invoked anywhere in
+  // the repository produces.
+  fs.mkdirSync(path.join(root, repoSlug));
+  assert.strictEqual(sessionSlugForWorkspace(nested, root), repoSlug);
+});
+
+test('a worktree root is not mistaken for the repository enclosing it', () => {
+  const { repo } = makeRepoWithSubdir();
+  const worktree = path.join(repo, 'wt');
+  fs.mkdirSync(worktree);
+  // In a linked worktree `.git` is a file, not a directory. Treating only
+  // directories as roots would walk past this one and key on `repo`.
+  fs.writeFileSync(path.join(worktree, '.git'), 'gitdir: /elsewhere/.git/worktrees/wt\n');
+  const slugOf = (value) => value.replace(/^\//, '').replace(/\//g, '-');
+  // Assert on a NESTED path, not on the worktree itself: the worktree's own
+  // slug is already present as the given path, so asserting on it would pass
+  // whatever the walk-up decided. Only a subdirectory forces the walk to
+  // choose, and choosing `repo` over `worktree` is the failure being excluded.
+  const inside = path.join(worktree, 'src');
+  fs.mkdirSync(inside);
+  const candidates = sessionSlugCandidatesForWorkspace(inside);
+  assert.ok(
+    candidates.includes(slugOf(worktree)),
+    'the worktree root is its own repository root, and `.git` there is a file',
+  );
+  assert.ok(
+    !candidates.includes(slugOf(repo)),
+    'the walk must stop at the worktree, not continue to the repository around it',
+  );
+});
+
+test('a workspace outside any repository yields no root candidate', () => {
+  const outside = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'ocr-bare-')));
+  tempDirs.push(outside);
+  const candidates = sessionSlugCandidatesForWorkspace(outside);
+  // os.tmpdir() is not inside a repository, so the walk reaches the filesystem
+  // root and stops. Reaching it must not add a slug for `/` or throw.
+  assert.deepStrictEqual(candidates, [outside.replace(/^\//, '').replace(/\//g, '-')]);
+});
+
 // --- failed review events -------------------------------------------------
 //
 // OCR records a per-file failure as its own event type. These were ignored
