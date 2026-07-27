@@ -1865,4 +1865,95 @@ include!(
 );"#;
         assert_eq!(scan_lines(source), vec![3]);
     }
+
+    /// Build a throwaway git repository containing `name` with `lines` lines,
+    /// committed. Returns the repo root.
+    fn repo_with_committed_file(name: &str, lines: usize) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let root = dir.path();
+        let run = |args: &[&str]| {
+            let status = command_in_dir(root, "git", args.iter().copied())
+                .status()
+                .expect("run git");
+            assert!(status.success(), "git {args:?} failed");
+        };
+        run(&["init", "--quiet"]);
+        run(&["config", "user.email", "gate@test"]);
+        run(&["config", "user.name", "gate"]);
+        let body = (0..lines)
+            .map(|i| format!("// line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        fs::write(root.join(name), format!("{body}\n")).expect("write file");
+        run(&["add", "."]);
+        run(&["commit", "--quiet", "-m", "base"]);
+        dir
+    }
+
+    /// A file over the limit that is moved without growing must pass.
+    ///
+    /// This is the defect the rename map exists to fix: the moved file has no
+    /// blob at its new path in the base commit, so an unresolved lookup
+    /// reports no baseline and the gate reads that as unbounded growth.
+    #[test]
+    fn a_large_file_moved_without_growing_passes_the_line_gate() {
+        let over_limit = FILE_LINES_MAX + 50;
+        let dir = repo_with_committed_file("big.rs", over_limit);
+        let root = dir.path();
+
+        fs::create_dir_all(root.join("moved")).expect("create dir");
+        fs::rename(root.join("big.rs"), root.join("moved/big.rs")).expect("rename");
+        let commit = |root: &Path| {
+            for args in [vec!["add", "-A"], vec!["commit", "--quiet", "-m", "move"]] {
+                let status = command_in_dir(root, "git", args.iter().copied())
+                    .status()
+                    .expect("run git");
+                assert!(status.success());
+            }
+        };
+        commit(root);
+
+        // The gate compares against the commit before the move, which is what
+        // CI passes as origin/main. Diffing HEAD against itself finds nothing.
+        let renames = rename_map(root, "HEAD~1").expect("build rename map");
+        assert!(
+            renames.contains_key("moved/big.rs"),
+            "git must report the move as a rename; without that the rest of \
+             this test would pass for the wrong reason"
+        );
+
+        let result = enforce_changed_file_line_limits(root, "HEAD~1", &[root.join("moved/big.rs")]);
+        assert!(
+            result.is_ok(),
+            "a file that moved without growing must not fail the gate: {:?}",
+            result.err()
+        );
+    }
+
+    /// Moving a file is not an exemption: one that also grows still fails.
+    #[test]
+    fn a_large_file_that_moves_and_grows_still_fails_the_line_gate() {
+        let over_limit = FILE_LINES_MAX + 50;
+        let dir = repo_with_committed_file("big.rs", over_limit);
+        let root = dir.path();
+
+        fs::create_dir_all(root.join("moved")).expect("create dir");
+        fs::rename(root.join("big.rs"), root.join("moved/big.rs")).expect("rename");
+        let mut grown = fs::read_to_string(root.join("moved/big.rs")).expect("read");
+        grown.push_str("// one more line\n");
+        fs::write(root.join("moved/big.rs"), grown).expect("write");
+        for args in [vec!["add", "-A"], vec!["commit", "--quiet", "-m", "move"]] {
+            let status = command_in_dir(root, "git", args.iter().copied())
+                .status()
+                .expect("run git");
+            assert!(status.success());
+        }
+
+        let result = enforce_changed_file_line_limits(root, "HEAD~1", &[root.join("moved/big.rs")]);
+        assert!(
+            result.is_err(),
+            "a moved file that grew past the maximum must still fail; the \
+             baseline is a floor, not an exemption"
+        );
+    }
 }
