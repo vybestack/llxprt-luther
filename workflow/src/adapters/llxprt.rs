@@ -225,6 +225,32 @@ pub fn run_preflight(
     Ok(validated)
 }
 
+// business.
+use crate::engine::error::EngineError;
+
+impl From<LlxprtError> for EngineError {
+    fn from(err: LlxprtError) -> Self {
+        match err {
+            // The messages are formatted here, by the code that knows what
+            // LLxprt is, and match the text the removed variants produced
+            // exactly. Tests assert these strings, and a user-visible message
+            // is not something a boundary change should quietly reword.
+            LlxprtError::BinaryNotFound { path } => EngineError::ToolUnavailable {
+                message: format!("llxprt binary not found at `{path}`"),
+            },
+            // Forwarded verbatim from the adapter's own Display rather than
+            // reformatted here. The previous code funnelled NotExecutable
+            // through the version-check wording, so a permissions failure was
+            // reported as a failed version check. Delegating removes the
+            // second place a message could be written and lets the two
+            // variants keep their distinct text.
+            other => EngineError::ToolUnavailable {
+                message: other.to_string(),
+            },
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -415,3 +441,7 @@ mod tests {
         }
     }
 }
+
+// The conversion into the engine error lives here, beside the type it
+// understands, rather than inside the engine. The engine only needs to
+// learn that a required tool is unusable; the wording is this module's

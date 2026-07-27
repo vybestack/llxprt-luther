@@ -7,6 +7,7 @@
 /// earlier `dagrs`-backed scaffold was removed because the `dagrs` static DAG
 /// model does not fit Luther's dynamic, resumable, transition-routed semantics.
 pub mod continuation;
+pub mod error;
 pub mod executor;
 pub mod executors;
 pub mod instance;

@@ -356,14 +356,33 @@ fn core_manifest_names_no_workspace_member() {
 /// The error type in the executor signature names no specific tool or host.
 #[test]
 fn the_executor_error_type_names_no_domain_concept() {
-    let source = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/engine/runner.rs"),
-    )
-    .expect("the runner source is readable");
+    // The declaration is located by searching, not by a hardcoded path.
+    // `EngineError` moved from `runner.rs` to `error.rs` as part of extracting
+    // the executor contract, and a hardcoded path turned that move into a
+    // panic about a missing file rather than a boundary result. Review flagged
+    // this before the move happened; it was declined as premature and the move
+    // proved otherwise within the same series.
+    let mut source = String::new();
+    let mut found_in = String::new();
+    let src_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    for entry in rust_sources_under(&src_root) {
+        let text = std::fs::read_to_string(&entry).expect("a source file under src is readable");
+        if text.contains("pub enum EngineError {") {
+            source = text;
+            found_in = entry.display().to_string();
+            break;
+        }
+    }
+    assert!(
+        !source.is_empty(),
+        "no file under src/ declares `pub enum EngineError {{`. Either the executor contract's \
+         error type was renamed, or this scan can no longer find it - both leave the boundary \
+         unchecked, so this fails rather than passing on an empty search."
+    );
 
     let body = source
         .split_once("pub enum EngineError {")
-        .expect("EngineError must still be declared in runner.rs")
+        .unwrap_or_else(|| panic!("EngineError declaration vanished from {found_in}"))
         .1;
 
     // Brace-matched, not first-`\n}`: a multi-line struct variant's inner
@@ -449,5 +468,52 @@ fn the_executor_error_type_names_no_domain_concept() {
         "EngineError variants name domain concepts: {offenders:?}. This type is returned by \
          every component, so a variant naming a tool blocks relocating any component into a \
          domain-free package. Carry the detail in a message formatted by the domain instead."
+    );
+}
+
+/// The executor contract must not reach into persistence, the runner, or a domain.
+///
+/// Every component implements `StepExecutor`, whose signature names
+/// `EngineError`, so anything the error module imports becomes a dependency of
+/// every future component package. Asserting the import set rather than only
+/// that it compiles is the point: a transitive reach into persistence compiles
+/// perfectly well today and would only fail once something real was moved out.
+#[test]
+fn the_executor_contract_imports_nothing_from_persistence_or_the_runner() {
+    let src_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let contract = src_root.join("engine/error.rs");
+    let source =
+        std::fs::read_to_string(&contract).expect("the executor contract error module is readable");
+
+    let imports: Vec<&str> = source
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.starts_with("use "))
+        .collect();
+
+    assert!(
+        !imports.is_empty(),
+        "no imports were parsed from {}; the scan is looking at the wrong thing and would pass \
+         no matter what the module depended on",
+        contract.display()
+    );
+
+    let forbidden = [
+        "persistence",
+        "runner",
+        "adapters",
+        "workflow::",
+        "instance",
+    ];
+    let offenders: Vec<&&str> = imports
+        .iter()
+        .filter(|line| forbidden.iter().any(|word| line.contains(word)))
+        .collect();
+
+    assert!(
+        offenders.is_empty(),
+        "the executor contract imports {offenders:?}. Every component implements this contract, \
+         so each of these becomes a dependency of every component package. Move the conversion \
+         to the side that owns the other type instead."
     );
 }
