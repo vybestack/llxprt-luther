@@ -4,11 +4,12 @@ Each mutation is applied to a clean tree, the suite is run, and the tree is
 restored. A mutation that does not fail the suite is a gap.
 """
 
+import hashlib
 import pathlib
 import shutil
 import subprocess
-import tempfile
 import sys
+import tempfile
 
 ROOT = pathlib.Path(__file__).resolve().parents[3]
 WF = ROOT / "workflow"
@@ -77,7 +78,6 @@ def fabricate(name, content):
     documented re-capture procedure would actually do, and is therefore the
     honest test of whether content is constrained.
     """
-    import hashlib
 
     path = FIX / name
     old_digest = hashlib.sha256(path.read_bytes()).hexdigest()
@@ -195,9 +195,9 @@ fn fabricated() -> SubcommandContract {
     ("M25 flag recorded that only prefixes a real one",
      edit(OCR, '("--json", FlagBehaviour::Honoured)',
           '("--jsonl", FlagBehaviour::Honoured)', 1)),
-    ("M26 remediation names nothing",
+    ("M26 remediation points at an uncaptured flag",
      edit(OCR, 'use_instead: "the session jsonl named by session list --json"',
-          'use_instead: ""')),
+          'use_instead: "session list --uncaptured-flag"')),
     ("M24 digest silently truncates large input",
      edit(TC, "hasher.update(bytes);",
           "hasher.update(&bytes[..bytes.len().min(1_000_000)]);")),
@@ -226,8 +226,6 @@ def snapshot():
     # nothing to restore from. That happened, and a mutated contract survived
     # into a later run.
     backup = pathlib.Path(tempfile.mkdtemp(prefix="luther-mutation-backup-"))
-    shutil.rmtree(backup)
-    backup.mkdir(parents=True)
     for path in [OCR, TC, TESTS, YML]:
         shutil.copy2(path, backup / path.name)
     shutil.copytree(FIX, backup / "fixtures")

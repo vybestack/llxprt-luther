@@ -561,7 +561,7 @@ fn every_ignored_flag_names_an_alternative_the_contract_supports() {
             // a subcommand named "list" is not matched by the word "listing"
             // in a remediation, which would skip the check silently.
             let words: Vec<&str> = use_instead.split_whitespace().collect();
-            let names_another_subcommand = contract.subcommands.iter().any(|other| {
+            let names_another_subcommand = contract.subcommands.iter().find(|other| {
                 if other.subcommand == subcommand.subcommand {
                     return false;
                 }
@@ -570,9 +570,10 @@ fn every_ignored_flag_names_an_alternative_the_contract_supports() {
                     .windows(wanted.len())
                     .any(|window| window == &wanted[..])
             });
-            if names_another_subcommand {
-                continue;
-            }
+            // A remedy that names another subcommand is checked against that
+            // subcommand rather than skipped. Skipping left the most important
+            // case unvalidated: the remedy a caller is actually told to follow.
+            let target = names_another_subcommand.unwrap_or(subcommand);
 
             for word in use_instead.split_whitespace() {
                 let Some(bare) = word.strip_prefix("--") else {
@@ -582,14 +583,17 @@ fn every_ignored_flag_names_an_alternative_the_contract_supports() {
                     "--{}",
                     bare.trim_matches(|c: char| !c.is_alphanumeric() && c != '-')
                 );
+                // Requiring Honoured rather than merely "not ignored" matters:
+                // an unrecorded flag yields None, which would satisfy a
+                // negated check and let a remedy recommend a flag the contract
+                // never observed. Silence is not evidence of support.
                 assert!(
-                    !matches!(
-                        subcommand.flag(&recommended),
-                        Some(FlagBehaviour::AcceptedAndIgnored { .. } | FlagBehaviour::Rejected)
-                    ),
-                    "{}'s remediation for {flag} recommends {recommended}, which the same \
-                     subcommand records as not honoured",
-                    subcommand.subcommand
+                    matches!(target.flag(&recommended), Some(FlagBehaviour::Honoured)),
+                    "{}'s remediation for {flag} recommends {recommended} on {}, which is not \
+                     recorded there as honoured; a remedy may only point at behaviour the \
+                     contract has actually captured",
+                    subcommand.subcommand,
+                    target.subcommand
                 );
             }
         }

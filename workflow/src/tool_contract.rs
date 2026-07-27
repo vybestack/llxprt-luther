@@ -107,7 +107,7 @@ pub struct RequiredField {
 }
 
 /// One subcommand's observed behaviour.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SubcommandContract {
     pub subcommand: String,
     pub state_key: StateKey,
@@ -171,7 +171,7 @@ impl SubcommandContract {
 }
 
 /// A tool's contract, pinned to the exact version it was captured from.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolContract {
     pub tool: String,
     /// Exact version token this contract was verified against.
