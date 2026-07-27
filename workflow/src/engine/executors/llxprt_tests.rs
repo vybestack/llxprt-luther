@@ -285,10 +285,7 @@ fn spawn_failure_precreates_diagnostic_files() {
     let params = json!({"binary_path": temp.path().join("missing-llxprt")});
     let result = LlxprtExecutorWithDetector::new(NoChanges).execute(&mut context, &params);
 
-    assert!(matches!(
-        result,
-        Err(EngineError::LlxprtBinaryNotFound { .. })
-    ));
+    assert!(matches!(result, Err(EngineError::ToolUnavailable { .. })));
     assert!(PathBuf::from(context.get("stdout_artifact_path").unwrap()).exists());
     assert!(PathBuf::from(context.get("stderr_artifact_path").unwrap()).exists());
     assert!(PathBuf::from(context.get("llxprt_diagnostic_manifest_path").unwrap()).exists());

@@ -263,30 +263,39 @@ fn test_workflow_config(workflow_type_id: &str) -> crate::workflow::schema::Work
 }
 
 #[test]
-fn llxprt_engine_error_variants_render() {
-    let not_found = EngineError::LlxprtBinaryNotFound {
+fn llxprt_failures_reach_the_engine_with_their_message_intact() {
+    use crate::adapters::llxprt::LlxprtError;
+
+    // Converted through the real `From` impl rather than by constructing the
+    // engine error directly. The message is now formatted by the LLxprt
+    // adapter instead of by a variant that named LLxprt, and this asserts the
+    // text survives that handoff — going through the conversion is what makes
+    // it a test of the handoff rather than of `format!`.
+    let not_found: EngineError = LlxprtError::BinaryNotFound {
         path: "/opt/llxprt".to_string(),
-    };
+    }
+    .into();
     assert_eq!(
         not_found.to_string(),
-        "llxprt binary not found at `/opt/llxprt`"
+        "llxprt binary not found at `/opt/llxprt`",
+        "the message a user sees must not change because the variant moved"
     );
-    let version = EngineError::LlxprtVersionError {
+
+    let version: EngineError = LlxprtError::VersionCheckFailed {
         path: "llxprt".to_string(),
         message: "boom".to_string(),
-    };
+    }
+    .into();
     assert_eq!(
         version.to_string(),
         "llxprt binary at `llxprt` failed version check: boom"
     );
-    let profile = EngineError::LlxprtProfileError {
-        profile: "fast".to_string(),
-        message: "missing".to_string(),
-    };
-    assert_eq!(
-        profile.to_string(),
-        "llxprt profile `fast` could not be resolved: missing"
-    );
+
+    // Both arrive as the same generic variant: the engine learns that a
+    // required tool is unusable, and nothing more. That is all it ever did
+    // with these — the three removed variants shared one match arm.
+    assert!(matches!(not_found, EngineError::ToolUnavailable { .. }));
+    assert!(matches!(version, EngineError::ToolUnavailable { .. }));
 }
 
 #[test]
@@ -296,19 +305,19 @@ fn llxprt_error_maps_to_engine_error() {
         path: "llxprt".to_string(),
     }
     .into();
-    assert!(matches!(mapped, EngineError::LlxprtBinaryNotFound { .. }));
+    assert!(matches!(mapped, EngineError::ToolUnavailable { .. }));
     let mapped: EngineError = LlxprtError::VersionCheckFailed {
         path: "llxprt".to_string(),
         message: "x".to_string(),
     }
     .into();
-    assert!(matches!(mapped, EngineError::LlxprtVersionError { .. }));
+    assert!(matches!(mapped, EngineError::ToolUnavailable { .. }));
     let mapped: EngineError = LlxprtError::NotExecutable {
         path: "llxprt".to_string(),
         message: "x".to_string(),
     }
     .into();
-    assert!(matches!(mapped, EngineError::LlxprtVersionError { .. }));
+    assert!(matches!(mapped, EngineError::ToolUnavailable { .. }));
 }
 
 #[test]

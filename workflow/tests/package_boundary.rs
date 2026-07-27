@@ -344,3 +344,69 @@ fn core_manifest_names_no_workspace_member() {
         );
     }
 }
+
+// --- the executor contract's error type -----------------------------------
+//
+// `EngineError` is returned by `StepExecutor::execute`, which every component
+// implements. A variant naming a tool or a repository host makes it impossible
+// to relocate any component into a domain-free package: the package would have
+// to depend on a type that knows what LLxprt is. This is the check that stops
+// that coupling from being reintroduced once it has been removed.
+
+/// The error type in the executor signature names no specific tool or host.
+#[test]
+fn the_executor_error_type_names_no_domain_concept() {
+    let source = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/engine/runner.rs"),
+    )
+    .expect("the runner source is readable");
+
+    let body = source
+        .split_once("pub enum EngineError {")
+        .expect("EngineError must still be declared in runner.rs")
+        .1;
+    let body = body
+        .split_once("\n}")
+        .expect("the EngineError declaration must be brace-terminated")
+        .0;
+
+    // Only variant names are examined. Doc comments and `#[error(...)]`
+    // strings legitimately mention tools: the message is written by whoever
+    // raises the error, and telling an operator which binary is missing is
+    // the point. It is the *type* that must stay domain-free.
+    let variants: Vec<&str> = body
+        .lines()
+        .map(str::trim)
+        .filter(|line| {
+            !line.is_empty()
+                && !line.starts_with("//")
+                && !line.starts_with("#[")
+                && !line.starts_with("///")
+        })
+        .filter_map(|line| line.split(['{', '(', ',']).next())
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .collect();
+
+    assert!(
+        !variants.is_empty(),
+        "no variants were parsed out of EngineError; the scan is looking at the wrong thing and \
+         would pass no matter what the type contained"
+    );
+
+    let forbidden = ["llxprt", "github", "coderabbit", "pullrequest", "issue"];
+    let offenders: Vec<&&str> = variants
+        .iter()
+        .filter(|name| {
+            let lowered = name.to_lowercase();
+            forbidden.iter().any(|word| lowered.contains(word))
+        })
+        .collect();
+
+    assert!(
+        offenders.is_empty(),
+        "EngineError variants name domain concepts: {offenders:?}. This type is returned by \
+         every component, so a variant naming a tool blocks relocating any component into a \
+         domain-free package. Carry the detail in a message formatted by the domain instead."
+    );
+}
