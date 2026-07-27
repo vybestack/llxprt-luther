@@ -27,11 +27,11 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::engine::error::EngineError;
-use crate::engine::executor::{interpolate_string, StepContext, StepExecutor};
-use crate::engine::executors::change_detection::{
+use crate::components::generic::change_detection::{
     ChangeDetectionMode, ChangedPathDetector, GitChangedPathDetector,
 };
+use crate::engine::error::EngineError;
+use crate::engine::executor::{interpolate_string, StepContext, StepExecutor};
 use crate::engine::executors::llxprt_diff::{
     detect_initial_changed_paths, string_array_param, success_condition_met, DiffDetection,
 };

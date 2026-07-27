@@ -8,12 +8,12 @@ mod changed_paths;
 pub use changed_paths::changed_paths_for_test;
 use changed_paths::git_changed_paths;
 
-use crate::engine::error::EngineError;
-use crate::engine::executor::{interpolate_string, StepContext, StepExecutor};
-use crate::engine::executors::command_manifest::{
+use crate::components::generic::command_manifest::{
     manifest_path_context_from_step, resolve_entry_argv, resolve_manifest_group_id,
     run_manifest_entry, ManifestEntryExecution, ManifestPathContext,
 };
+use crate::engine::error::EngineError;
+use crate::engine::executor::{interpolate_string, StepContext, StepExecutor};
 use crate::engine::transition::StepOutcome;
 use crate::workflow::command_manifest::{CommandEntry, CommandManifest, FailureOutcome};
 use crate::workflow::config_loader::validate_command_manifest;

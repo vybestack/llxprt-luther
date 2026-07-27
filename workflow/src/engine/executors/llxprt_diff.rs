@@ -1,7 +1,7 @@
-use crate::engine::executor::{interpolate_string, StepContext};
-use crate::engine::executors::change_detection::{
+use crate::components::generic::change_detection::{
     diff_requirements_met, new_changed_paths, ChangeDetectionMode, ChangedPathDetector,
 };
+use crate::engine::executor::{interpolate_string, StepContext};
 
 /// Bundles the changed-path detector with its selected mode.
 #[derive(Clone, Copy)]

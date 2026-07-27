@@ -4,9 +4,9 @@
 //! scope-control snapshot when the llxprt child process is killed for exceeding
 //! its wall-clock or idle budget and scope control is active.
 
+use crate::components::generic::change_detection::new_changed_paths;
 use crate::engine::error::EngineError;
 use crate::engine::executor::StepContext;
-use crate::engine::executors::change_detection::new_changed_paths;
 use crate::engine::transition::StepOutcome;
 
 use super::{DiffDetection, ProcessResult};

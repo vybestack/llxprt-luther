@@ -4,11 +4,11 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use luther_workflow::engine::executor::StepContext;
-use luther_workflow::engine::executors::command_manifest::{
+use luther_workflow::components::generic::command_manifest::{
     request_from_entry, request_from_entry_with_paths, resolve_entry_argv, run_manifest_command,
     ManifestPathContext,
 };
+use luther_workflow::engine::executor::StepContext;
 use luther_workflow::workflow::command_manifest::{
     ArtifactExpectation, ArtifactExpectations, ArtifactKind, CapturePolicy, CommandEntry,
     FailureOutcome, RetryPolicy, StreamExpectations,

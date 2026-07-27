@@ -14,6 +14,8 @@ pub mod daemon;
 /// B4/B5/B6 can retire this alias once the callers themselves move.
 pub use luther_engine_core as digest;
 /// @plan:PLAN-20260404-INITIAL-RUNTIME.P03
+pub mod components;
+/// @plan:PLAN-20260404-INITIAL-RUNTIME.P03
 pub mod engine;
 /// @plan:PLAN-20260404-INITIAL-RUNTIME.P09
 pub mod monitor;
@@ -28,7 +30,6 @@ pub mod service;
 /// Typed records of what external tools actually do, as distinct from what
 /// callers assume. See `docs/architecture/convergence-retrospective.md`.
 pub mod tool_contract;
-/// @plan:PLAN-20260404-INITIAL-RUNTIME.P03
 pub mod workflow;
 
 #[must_use]
