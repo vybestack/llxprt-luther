@@ -9,6 +9,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::OnceLock;
 
 /// Names that carry domain meaning and must never appear in core.
 ///
@@ -30,6 +31,29 @@ fn workspace_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).to_path_buf()
 }
 
+/// Every `.rs` file at or below `root`.
+///
+/// `read_dir` lists only one level, so a scan built on it would silently skip
+/// any module core grows in a subdirectory — and skipping files makes the
+/// vocabulary assertion pass by finding nothing, which is the failure mode
+/// this file exists to prevent. Core is a single `lib.rs` today; the point is
+/// that it will not quietly stop being checked when that changes.
+fn rust_sources_under(root: &Path) -> Vec<PathBuf> {
+    let mut sources = Vec::new();
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        for entry in std::fs::read_dir(&dir).expect("core src is readable") {
+            let path = entry.expect("dir entry").path();
+            if path.is_dir() {
+                pending.push(path);
+            } else if path.extension().is_some_and(|ext| ext == "rs") {
+                sources.push(path);
+            }
+        }
+    }
+    sources
+}
+
 /// Whether `haystack` contains `needle` as a whole word.
 ///
 /// A raw substring test would fire on ordinary English: "branch" matches
@@ -38,8 +62,10 @@ fn workspace_root() -> PathBuf {
 /// innocent prose is to weaken the list until it stops complaining, and a
 /// weakened list is what lets the real domain vocabulary back in.
 ///
-/// Boundaries are non-alphanumeric characters, so `_` is *not* a boundary:
-/// `github_client` still matches "github". Multi-word entries such as
+/// A boundary is any non-alphanumeric character, which includes `_`. That is
+/// deliberate in this direction: it means `github_client` still matches
+/// "github", so an identifier cannot smuggle the vocabulary past the check by
+/// joining it to another word with an underscore. Multi-word entries such as
 /// "pull request" are matched the same way on their outer edges.
 fn contains_word(haystack: &str, needle: &str) -> bool {
     let bytes = haystack.as_bytes();
@@ -49,6 +75,29 @@ fn contains_word(haystack: &str, needle: &str) -> bool {
         let after_ok = after == bytes.len() || !bytes[after].is_ascii_alphanumeric();
         before_ok && after_ok
     })
+}
+
+/// A bracket inside a string value does not end the dependency array.
+///
+/// JSON does not require `[` or `]` to be escaped inside a string, so a
+/// dependency whose feature list or path contains one is well-formed input
+/// that a naive depth counter mis-parses. Measured against the naive version,
+/// the array below closes early and yields only `weird`, losing `sha2` — and
+/// a short list still passes every "no forbidden name" assertion, so the
+/// mis-parse would never announce itself.
+#[test]
+fn a_bracket_inside_a_string_does_not_close_the_dependency_array() {
+    let crafted = concat!(
+        r#"{"packages":[{"name":"pkg","version":"0.1.0","dependencies":["#,
+        r#"{"name":"weird","features":["a]b"]},"#,
+        r#"{"name":"sha2","features":[]}"#,
+        r#"]}]}"#
+    );
+    assert_eq!(
+        dependencies_in_metadata(crafted, "pkg"),
+        vec!["weird".to_string(), "sha2".to_string()],
+        "the scan stopped at a bracket inside a string value and truncated the list"
+    );
 }
 
 /// The word check separates real vocabulary from innocent prose.
@@ -85,19 +134,35 @@ fn core_src() -> PathBuf {
 /// That is not hypothetical — the first version of this function reported
 /// `luther-workflow` as depending only on `anyhow`, which would have made the
 /// boundary assertion pass while reading almost nothing.
-fn declared_dependencies_of(package: &str) -> Vec<String> {
-    let output = Command::new(env!("CARGO"))
-        .args(["metadata", "--format-version", "1", "--no-deps"])
-        .current_dir(workspace_root())
-        .output()
-        .expect("cargo metadata runs");
-    assert!(
-        output.status.success(),
-        "cargo metadata failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let json = String::from_utf8_lossy(&output.stdout);
+/// The workspace metadata, read once per test binary.
+///
+/// Each call previously spawned `cargo metadata` afresh. Caching keeps the
+/// subprocess cost at one invocation and, more usefully, makes the parsing
+/// below a pure function of a string — which is what allows it to be tested
+/// against a crafted fixture rather than only against whatever this workspace
+/// happens to contain today.
+fn workspace_metadata() -> &'static str {
+    static METADATA: OnceLock<String> = OnceLock::new();
+    METADATA.get_or_init(|| {
+        let output = Command::new(env!("CARGO"))
+            .args(["metadata", "--format-version", "1", "--no-deps"])
+            .current_dir(workspace_root())
+            .output()
+            .expect("cargo metadata runs");
+        assert!(
+            output.status.success(),
+            "cargo metadata failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).expect("cargo metadata emits UTF-8")
+    })
+}
 
+fn declared_dependencies_of(package: &str) -> Vec<String> {
+    dependencies_in_metadata(workspace_metadata(), package)
+}
+
+fn dependencies_in_metadata(json: &str, package: &str) -> Vec<String> {
     // Anchored on the package's `id`, not on the first `"name"` match.
     //
     // A bare name search is order-dependent: the same string appears inside
@@ -116,10 +181,27 @@ fn declared_dependencies_of(package: &str) -> Vec<String> {
         .expect("every package object carries a dependencies array");
 
     let array_open = deps_start + "\"dependencies\":".len();
+    // Brackets inside string values are skipped. JSON does not require `[` or
+    // `]` to be escaped inside a string, so a dependency carrying one in a
+    // feature name or path would close the array early for a counter that
+    // ignored strings — and a truncated dependency list satisfies every
+    // "no forbidden name" assertion in this file rather than failing.
     let mut depth = 0usize;
     let mut deps_end = None;
+    let mut in_string = false;
+    let mut escaped = false;
     for (offset, character) in json[array_open..].char_indices() {
+        if in_string {
+            match character {
+                _ if escaped => escaped = false,
+                '\\' => escaped = true,
+                '"' => in_string = false,
+                _ => {}
+            }
+            continue;
+        }
         match character {
+            '"' => in_string = true,
             '[' => depth += 1,
             ']' => {
                 depth -= 1;
@@ -213,11 +295,14 @@ fn the_metadata_scan_actually_finds_dependencies() {
 #[test]
 fn core_source_contains_no_domain_vocabulary() {
     let mut findings = Vec::new();
-    for entry in std::fs::read_dir(core_src()).expect("core src is readable") {
-        let path = entry.expect("dir entry").path();
-        if path.extension().is_none_or(|ext| ext != "rs") {
-            continue;
-        }
+    let sources = rust_sources_under(&core_src());
+    assert!(
+        !sources.is_empty(),
+        "the vocabulary scan found no source files at all, so it would pass whatever core \
+         contained; check that {} still holds the crate's sources",
+        core_src().display()
+    );
+    for path in sources {
         let text = std::fs::read_to_string(&path).expect("core source is readable");
         let lowered = text.to_lowercase();
         for forbidden in FORBIDDEN_IN_CORE {
