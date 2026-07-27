@@ -364,6 +364,15 @@ target_ecosystem_name = "rust"
         apply_child_overrides(&mut config, &request(Some(&transport))).expect("overrides apply");
 
         assert_eq!(config.variables[GIT_TRANSPORT_URL_VAR], transport);
+        // Provenance has to carry too. A child that pushes to the inherited
+        // URL but is marked derived would drop the override when launching
+        // its own children, since explicit_transport_url only forwards
+        // explicit values.
+        assert_eq!(
+            config.variables[crate::workflow::target_profile::GIT_TRANSPORT_SOURCE_VAR],
+            crate::workflow::target_profile::TRANSPORT_EXPLICIT,
+            "an inherited transport must stay explicit for multi-level propagation"
+        );
     }
 
     #[test]

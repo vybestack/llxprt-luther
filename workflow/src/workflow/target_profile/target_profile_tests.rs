@@ -453,6 +453,21 @@ fn an_explicit_transport_is_not_overwritten_by_the_derived_default() {
     let mut config = config_with_repo("owner/name");
     apply_target_profile_overrides(&mut config, &overrides_with_transport(Some(&bare))).unwrap();
     assert_eq!(config.variables.get(GIT_TRANSPORT_URL_VAR).unwrap(), &bare);
+
+    // Re-apply with no transport, which is the path that derives a default.
+    // Without this second call the test only proves the override was written
+    // once, never that it survives a later derivation.
+    apply_target_profile_overrides(&mut config, &TargetProfileOverrides::default()).unwrap();
+    assert_eq!(
+        config.variables.get(GIT_TRANSPORT_URL_VAR).unwrap(),
+        &bare,
+        "an explicit transport must survive a subsequent derivation"
+    );
+    assert_eq!(
+        config.variables.get(GIT_TRANSPORT_SOURCE_VAR).unwrap(),
+        TRANSPORT_EXPLICIT,
+        "provenance must remain explicit so later overrides cannot recompute it"
+    );
 }
 
 #[test]
