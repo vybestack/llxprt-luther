@@ -214,30 +214,10 @@ impl ToolContract {
 
 /// Hex-encoded SHA-256 of `bytes`.
 ///
-/// Uses the same audited implementation the persistence layer already relies
-/// on, rather than a local one: the digest is what makes a capture evidence,
-/// so a subtle padding or endianness bug here would silently accept a
-/// fabricated fixture.
-#[must_use]
-pub fn sha256_hex(bytes: &[u8]) -> String {
-    use sha2::{Digest, Sha256};
-
-    let mut hasher = Sha256::new();
-    hasher.update(bytes);
-    hasher
-        .finalize()
-        .iter()
-        // Hex-encoded by indexing rather than by formatting: a discarded
-        // formatting Result could yield a short digest that then compares
-        // unequal for a reason having nothing to do with the capture, and
-        // this digest is what makes a capture evidence. Indexing cannot fail.
-        .fold(String::with_capacity(64), |mut hex, byte| {
-            const DIGITS: &[u8; 16] = b"0123456789abcdef";
-            hex.push(DIGITS[usize::from(byte >> 4)] as char);
-            hex.push(DIGITS[usize::from(byte & 0x0f)] as char);
-            hex
-        })
-}
+/// Re-exported from [`crate::digest`] rather than reimplemented: the digest is
+/// what makes a capture evidence, so every caller must produce the same string
+/// for the same bytes.
+pub use crate::digest::sha256_hex;
 
 /// A caller assumption the contract contradicts.
 #[derive(Debug, Clone, PartialEq, Eq)]

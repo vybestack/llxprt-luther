@@ -18,7 +18,6 @@
 
 use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection, OptionalExtension, Result as SqliteResult};
-use sha2::{Digest, Sha256};
 
 use crate::persistence::checkpoint::StateSnapshot;
 
@@ -151,11 +150,7 @@ pub struct AttemptStart<'a> {
 }
 
 /// Compute the lowercase-hex SHA-256 digest of a byte slice.
-fn sha256_hex(data: &[u8]) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(data);
-    format!("{:x}", hasher.finalize())
-}
+use crate::digest::sha256_hex;
 
 /// Canonicalize a [`StateSnapshot`] into deterministic JSON bytes.
 ///

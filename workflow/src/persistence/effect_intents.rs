@@ -18,7 +18,6 @@
 
 use chrono::Utc;
 use rusqlite::{params, Connection, OptionalExtension, Result as SqliteResult};
-use sha2::{Digest, Sha256};
 
 /// Table name for the durable effect-intent state machine. [C7/B5]
 pub const EFFECT_INTENTS_TABLE: &str = "effect_intents";
@@ -185,11 +184,7 @@ pub fn init_effect_intents_table(conn: &Connection) -> SqliteResult<()> {
 }
 
 /// Compute the lowercase-hex SHA-256 digest of a byte slice.
-fn sha256_hex(data: &[u8]) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(data);
-    format!("{:x}", hasher.finalize())
-}
+use crate::digest::sha256_hex;
 
 /// Append a length-prefixed (u64 big-endian) byte slice to the canonical buffer.
 fn push_len_prefixed(buf: &mut Vec<u8>, bytes: &[u8]) {

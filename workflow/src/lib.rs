@@ -4,6 +4,9 @@ pub mod adapters;
 pub mod cli;
 /// @plan:PLAN-20260404-INITIAL-RUNTIME.P09
 pub mod daemon;
+/// @plan:PLAN-20260404-INITIAL-RUNTIME.P09
+/// Hex-encoded SHA-256, shared by every caller that needs one.
+pub mod digest;
 /// @plan:PLAN-20260404-INITIAL-RUNTIME.P03
 pub mod engine;
 /// @plan:PLAN-20260404-INITIAL-RUNTIME.P09
@@ -15,7 +18,6 @@ pub mod polling;
 pub mod repo;
 /// @plan:PLAN-20260404-INITIAL-RUNTIME.P10
 pub mod runtime_paths;
-/// @plan:PLAN-20260404-INITIAL-RUNTIME.P09
 pub mod service;
 /// Typed records of what external tools actually do, as distinct from what
 /// callers assume. See `docs/architecture/convergence-retrospective.md`.
