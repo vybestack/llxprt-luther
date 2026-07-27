@@ -23,6 +23,34 @@ const REVIEW_ITEM_FAILED = 'review_item_failed';
 const SESSION_END = 'session_end';
 
 /**
+ * The repository root containing `absolutePath`, or null if there is none.
+ *
+ * Walks up looking for a `.git` entry. `existsSync` rather than a directory
+ * check is deliberate: in a linked worktree `.git` is a **file** pointing at
+ * the main repository, so requiring a directory would walk straight past the
+ * worktree root and key on whatever repository happens to enclose it.
+ *
+ * This reimplements `git rev-parse --show-toplevel` rather than shelling out.
+ * Verified to agree with it on a plain repository, a subdirectory, a linked
+ * worktree, and a path outside any repository. Submodules are unverified.
+ * Avoiding a subprocess keeps this module free of `child_process`, which it
+ * has never needed, and keeps it usable where git is absent.
+ */
+function gitRootFor(absolutePath) {
+  let current = path.resolve(absolutePath);
+  for (;;) {
+    if (fs.existsSync(path.join(current, '.git'))) {
+      return current;
+    }
+    const parent = path.dirname(current);
+    if (parent === current) {
+      return null;
+    }
+    current = parent;
+  }
+}
+
+/**
  * Convert an absolute path into a session-store slug.
  *
  * The store replaces separators with dashes and drops the leading one. This
@@ -66,6 +94,11 @@ function slugForPath(absolutePath) {
 function sessionSlugCandidatesForWorkspace(workspacePath) {
   const candidates = [];
   const add = (value) => {
+    // gitRootFor yields null outside a repository, which is a real answer
+    // rather than an error: there is no root slug to add.
+    if (!value) {
+      return;
+    }
     const slug = slugForPath(value);
     if (slug && !candidates.includes(slug)) {
       candidates.push(slug);
@@ -74,7 +107,13 @@ function sessionSlugCandidatesForWorkspace(workspacePath) {
 
   add(path.resolve(workspacePath));
   try {
-    add(fs.realpathSync(workspacePath));
+    const resolved = fs.realpathSync(workspacePath);
+    add(resolved);
+    // The writer keys on the repository root, not on the directory it was
+    // invoked from, so a workspace below the root needs the root's slug too.
+    // Added last: it only matters when the workspace is a subdirectory, and
+    // when it is not it collapses into a candidate already present.
+    add(gitRootFor(resolved));
   } catch (error) {
     // Not fatal: the logical form is still a valid candidate, and a store
     // written under it is still findable. Warn rather than return nothing,
