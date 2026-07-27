@@ -18,7 +18,6 @@
 //!   and output helpers used by operator recovery wiring and tests.
 
 #[cfg(test)]
-use luther_workflow::engine::executor::ExecutorRegistry;
 #[cfg(test)]
 use luther_workflow::engine::instance::WorkflowInstance;
 #[cfg(test)]
@@ -103,7 +102,7 @@ fn reconstruct_runner_with_config_and_provenance(
     }
     EngineRunner::with_db_path_and_context(
         instance,
-        ExecutorRegistry::with_defaults(),
+        crate::app::composition::issue_fixing_catalog(),
         db_path,
         run_context,
     )
