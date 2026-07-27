@@ -21,6 +21,12 @@ TESTS = WF / "src/tool_contract_tests.rs"
 YML = ROOT / ".github/workflows/ocr-pr-review.yml"
 DOC = ROOT / "workflow/docs/architecture/tool-contracts.md"
 
+# Generous next to a suite that runs in seconds, but bounded: an unbounded wait
+# on a hung suite would skip the restore and leave falsified fixtures in place.
+SUITE_TIMEOUT_SECONDS = 300
+
+DIGEST = ROOT / "workflow/src/digest.rs"
+
 INVENTED_LIST = """[
   {
     "session_id": "00000000-0000-0000-0000-000000000000",
@@ -195,10 +201,13 @@ fn fabricated() -> SubcommandContract {
      edit(OCR, '("--limit", FlagBehaviour::Honoured)',
           '("--limit", FlagBehaviour::AcceptedAndIgnored { use_instead: "nothing".to_string() })')),
     ("M29 documented mutation count drifts from the battery",
-     edit(DOC, "All 30 fail the suite", "All 99 fail the suite")),
+     edit(DOC, "All 31 fail the suite", "All 99 fail the suite")),
     ("M30 duplicate flag recorded twice",
      edit(OCR, '("--limit", FlagBehaviour::Honoured)',
           '("--limit", FlagBehaviour::Honoured), ("--limit", FlagBehaviour::Rejected)')),
+    ("M31 multi-subcommand remediation names an unhonoured flag",
+     edit(OCR, 'use_instead: "the session jsonl named by session list --json"',
+          'use_instead: "the session jsonl named by session list --json or session show --repo"')),
     ("M27 capture rewritten with CRLF line endings",
      lambda: crlf("version.txt")),
     ("M25 flag recorded that only prefixes a real one",
@@ -208,7 +217,7 @@ fn fabricated() -> SubcommandContract {
      edit(OCR, 'use_instead: "the session jsonl named by session list --json"',
           'use_instead: "session list --uncaptured-flag"')),
     ("M24 digest silently truncates large input",
-     edit(TC, "hasher.update(bytes);",
+     edit(DIGEST, "hasher.update(bytes);",
           "hasher.update(&bytes[..bytes.len().min(1_000_000)]);")),
     ("M9 wrong state key for session list",
      edit(OCR, 'state_key: StateKey::PathArgumentAbsoluteCleaned { flag: "--repo" }',
@@ -235,14 +244,14 @@ def snapshot():
     # nothing to restore from. That happened, and a mutated contract survived
     # into a later run.
     backup = pathlib.Path(tempfile.mkdtemp(prefix="luther-mutation-backup-"))
-    for path in [OCR, TC, TESTS, YML, DOC]:
+    for path in [OCR, TC, TESTS, YML, DOC, DIGEST]:
         shutil.copy2(path, backup / path.name)
     shutil.copytree(FIX, backup / "fixtures")
     return backup
 
 
 def restore(backup):
-    for path in [OCR, TC, TESTS, YML, DOC]:
+    for path in [OCR, TC, TESTS, YML, DOC, DIGEST]:
         shutil.copy2(backup / path.name, path)
     # Copy over the fixtures rather than removing the directory first: an
     # interruption mid-restore then leaves stale content rather than no
@@ -260,9 +269,17 @@ def run_suite():
     A mutation that does not compile is not evidence that a guard works, so a
     compile error must never be scored as a catch.
     """
-    result = subprocess.run(
-        ["cargo", "test", "--lib", "tool_contract"],
-        cwd=WF, capture_output=True, text=True)
+    try:
+        result = subprocess.run(
+            ["cargo", "test", "--lib", "--", "tool_contract", "digest"],
+            cwd=WF, capture_output=True, text=True, timeout=SUITE_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired:
+        # Without a bound, a hung suite would leave the tree mutated and never
+        # reach the restore in main's finally block - the worst outcome
+        # available, because the working tree would silently hold falsified
+        # fixtures. A timeout is scored "broken" rather than "caught": a
+        # mutation that stalls the suite is not evidence that a guard works.
+        return "broken"
     if "test result: ok." in result.stdout:
         return "green"
     if "test result: FAILED" in result.stdout:

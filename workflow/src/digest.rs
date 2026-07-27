@@ -94,6 +94,26 @@ mod tests {
         }
     }
 
+    /// Input beyond any plausible internal threshold still changes the digest.
+    ///
+    /// A digest that silently stopped reading at some size would return the
+    /// same value for two different inputs, so a caller comparing captured
+    /// evidence would accept a file whose tail had been rewritten. The two
+    /// inputs here differ only after the first megabyte.
+    #[test]
+    fn it_does_not_stop_reading_at_a_size_threshold() {
+        let mut base = vec![b'a'; 1_000_000];
+        base.push(b'x');
+        let mut altered = vec![b'a'; 1_000_000];
+        altered.push(b'y');
+
+        assert_ne!(
+            sha256_hex(&base),
+            sha256_hex(&altered),
+            "inputs differing only past one megabyte must not share a digest"
+        );
+    }
+
     /// Every digest is exactly 64 lowercase hex characters.
     ///
     /// The formatting path is the one that could silently shorten a digest,

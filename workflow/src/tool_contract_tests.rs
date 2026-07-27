@@ -560,25 +560,35 @@ fn every_ignored_flag_names_an_alternative_the_contract_supports() {
             // Compared as a run of whole words rather than by containment, so
             // a subcommand named "list" is not matched by the word "listing"
             // in a remediation, which would skip the check silently.
+            // Each flag is attributed to the nearest subcommand named before
+            // it, so a remediation mentioning more than one - "use session
+            // list --json or session show --help" - checks each flag against
+            // the command it belongs to. Resolving one target for the whole
+            // text would check the second subcommand's flags against the
+            // first and fail for a reason that has nothing to do with the
+            // contract.
             let words: Vec<&str> = use_instead.split_whitespace().collect();
-            let names_another_subcommand = contract.subcommands.iter().find(|other| {
-                if other.subcommand == subcommand.subcommand {
-                    return false;
-                }
-                let wanted: Vec<&str> = other.subcommand.split_whitespace().collect();
-                words
-                    .windows(wanted.len())
-                    .any(|window| window == &wanted[..])
-            });
-            // A remedy that names another subcommand is checked against that
-            // subcommand rather than skipped. Skipping left the most important
-            // case unvalidated: the remedy a caller is actually told to follow.
-            let target = names_another_subcommand.unwrap_or(subcommand);
+            let subcommand_at = |index: usize| {
+                contract.subcommands.iter().find(|other| {
+                    let wanted: Vec<&str> = other.subcommand.split_whitespace().collect();
+                    // Whole words, so a subcommand named "list" is not matched
+                    // by "listing", which would silently misattribute a flag.
+                    index + wanted.len() <= words.len()
+                        && words[index..index + wanted.len()] == wanted[..]
+                })
+            };
 
-            for word in use_instead.split_whitespace() {
+            for (index, word) in words.iter().enumerate() {
                 let Some(bare) = word.strip_prefix("--") else {
                     continue;
                 };
+                // The nearest subcommand named at or before this flag; falling
+                // back to the subcommand being validated when none is named,
+                // which is the "use --other-flag here" case.
+                let target = (0..=index)
+                    .rev()
+                    .find_map(subcommand_at)
+                    .unwrap_or(subcommand);
                 let recommended = format!(
                     "--{}",
                     bare.trim_matches(|c: char| !c.is_alphanumeric() && c != '-')
