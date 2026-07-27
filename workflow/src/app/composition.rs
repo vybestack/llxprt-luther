@@ -14,7 +14,7 @@ use luther_workflow::engine::executor::ExecutorRegistry;
 
 /// The catalog for the GitHub issue-fixing product.
 ///
-/// Composed of all three bundles, which is exactly what the previous
+/// Composed of all four bundles, which is exactly what the previous
 /// `with_defaults` installed. The set is deliberately unchanged: B2 moves the
 /// decision, not the behaviour, and every in-flight run must resolve the same
 /// step types after this change as before it.
@@ -59,6 +59,29 @@ mod tests {
     /// was previously not expressible at all. Asserting `shell` survives
     /// while `llxprt` does not is the difference between a real alternative
     /// composition and an empty registry that trivially excludes everything.
+    /// The composed catalog is identical to what the engine installed before.
+    ///
+    /// This is the claim the whole change rests on — that composition moved
+    /// out of the engine without altering what runs. Asserting the two
+    /// catalogs are equal is the only thing that makes "no behaviour change"
+    /// a checked statement rather than an assertion in a commit message.
+    /// `with_defaults` is now assembled from the same public bundles, so this
+    /// also guards the recovery path, which still calls it.
+    #[test]
+    fn the_composed_catalog_equals_what_the_engine_installed() {
+        // `registered_step_types` returns a BTreeSet, so both sides are
+        // already ordered and comparable directly.
+        let composed = issue_fixing_catalog().registered_step_types();
+        let engine_defaults = luther_workflow::engine::executor::ExecutorRegistry::with_defaults()
+            .registered_step_types();
+        assert_eq!(
+            composed, engine_defaults,
+            "the application composes a different catalog than the engine installs; one of the \
+             two paths is missing a bundle, and runs would differ depending on which entry \
+             point started them"
+        );
+    }
+
     #[test]
     fn the_core_only_catalog_excludes_the_product_without_being_empty() {
         let core = core_only_catalog();
