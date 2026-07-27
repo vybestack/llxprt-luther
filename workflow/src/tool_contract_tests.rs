@@ -719,15 +719,30 @@ fn the_documented_mutation_count_matches_the_battery() {
         .lines()
         .filter(|line| line.trim_start().starts_with("(\"M"))
         .count();
-    let claimed = doc
+    // Both the count and the row count are read from the mutation table's own
+    // section, so they cannot end up anchored to different parts of the
+    // document. An unscoped search would take the first "N fail" anywhere in
+    // the file and then compare it against this table's rows, reporting a
+    // mismatch that says nothing about the battery.
+    let section: Vec<&str> = doc
         .lines()
+        .skip_while(|line| !line.starts_with("## Verified mutations"))
+        .collect();
+    assert!(
+        !section.is_empty(),
+        "the doc should contain a Verified mutations section; if it was renamed, update this test \
+         rather than removing the check"
+    );
+
+    let claimed = section
+        .iter()
         .find_map(|line| {
             line.split_whitespace()
                 .zip(line.split_whitespace().skip(1))
                 .find(|(_, next)| *next == "fail")
                 .and_then(|(count, _)| count.parse::<usize>().ok())
         })
-        .expect("the doc should state how many mutations fail the suite");
+        .expect("the Verified mutations section should state how many fail the suite");
 
     assert_eq!(
         claimed, defined,
@@ -736,8 +751,8 @@ fn the_documented_mutation_count_matches_the_battery() {
 
     // Scoped to the mutation table specifically: the document contains other
     // tables, and counting all of them would compare unrelated rows.
-    let rows = doc
-        .lines()
+    let rows = section
+        .iter()
         .skip_while(|line| !line.starts_with("| Mutation"))
         .skip(2)
         .take_while(|line| line.starts_with("| "))
