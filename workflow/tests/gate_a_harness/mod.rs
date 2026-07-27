@@ -12,6 +12,7 @@
 
 pub mod fake_gh;
 
+use fake_gh::shell_quote;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -29,11 +30,25 @@ pub struct GateResult {
     /// the path without changing where it stops. This records the trajectory
     /// so a lost step is visible even when the terminal step is unchanged.
     pub steps_reached: Vec<String>,
-    /// Absolute path of the process the harness actually started.
-    pub executed_binary: PathBuf,
-    /// Digest of the workflow config as loaded from disk.
-    pub config_digest: String,
-    pub config_path: PathBuf,
+    /// Path the child reported for itself, and its digest. Both are written by
+    /// the running process, not by harness setup.
+    pub observed_binary: Option<String>,
+    pub observed_binary_digest: Option<String>,
+    /// Steps for which the agent stand-in actually ran, in order. Distinguishes
+    /// "the agent produced nothing" from "the agent never ran".
+    pub agent_invocations: Vec<String>,
+    /// The profile the child resolved from config and passed to the agent.
+    pub resolved_profile: Option<String>,
+    /// Whether the simulator recorded a successfully created DRAFT pull
+    /// request. Distinct from `gh pr create` merely having been invoked.
+    pub created_draft_pr: bool,
+    /// Config identity as recorded BY THE CHILD at launch, read back from the
+    /// provenance it persisted. Hashing a harness-selected file instead would
+    /// only confirm the harness's own choice, and would not change when the
+    /// configuration actually loaded changed.
+    pub resolved_workflow_digest: Option<String>,
+    pub resolved_config_digest: Option<String>,
+    pub canonical_config_root: Option<String>,
     pub tool_versions: Vec<(String, String)>,
     /// Every `gh` invocation the run made, in order.
     pub gh_invocations: Vec<String>,
@@ -55,9 +70,9 @@ pub enum GateOutcome {
 pub struct GateRun {
     pub issue_number: u64,
     pub github: fake_gh::FakeGitHub,
-    /// Replaces the implementation step's agent with a script. The default
-    /// makes a real edit; a control makes none.
-    pub agent_script: String,
+    /// Whether the agent stand-in makes a real edit. `false` is the primary
+    /// construct-validity control.
+    pub agent_makes_change: bool,
 }
 
 impl GateRun {
@@ -66,20 +81,9 @@ impl GateRun {
         Self {
             issue_number,
             github: fake_gh::FakeGitHub::new(issue_number),
-            agent_script: default_agent_script(),
+            agent_makes_change: true,
         }
     }
-}
-
-/// An agent stand-in that makes a real, verifiable edit.
-///
-/// Standing in for the LLM keeps the harness deterministic. It does not stand
-/// in for anything downstream: the workflow still has to detect the change,
-/// stage it, commit it, push it, and open the PR. Those are the steps under
-/// test.
-#[must_use]
-pub fn default_agent_script() -> String {
-    agent_script(true)
 }
 
 /// Builds the agent stand-in.
@@ -92,7 +96,7 @@ pub fn default_agent_script() -> String {
 /// `makes_change` controls only whether a real file edit occurs; every other
 /// behaviour is identical, which is what makes the no-change control a clean
 /// single-variable comparison.
-fn agent_script(makes_change: bool) -> String {
+fn agent_script(makes_change: bool, invocation_log: &Path, profile_log: &Path) -> String {
     // The implement step requires the diff to touch a path the workflow
     // recognizes as product surface (`required_changed_path_patterns`). An
     // edit outside those paths is correctly rejected, so the stand-in writes
@@ -103,6 +107,8 @@ fn agent_script(makes_change: bool) -> String {
     } else {
         ":"
     };
+    let log = shell_quote(&invocation_log.to_string_lossy());
+    let profile_log = shell_quote(&profile_log.to_string_lossy());
     format!(
         r#"#!/usr/bin/env bash
 set -euo pipefail
@@ -110,6 +116,22 @@ set -euo pipefail
 # The prompt arrives on stdin or as an argument depending on the step.
 prompt="$*"
 if [ -t 0 ]; then :; else prompt="$prompt$(cat || true)"; fi
+
+# Record that the agent actually ran, and for which step. Without this the
+# harness cannot distinguish "the agent produced nothing" from "the agent was
+# never spawned" -- a distinction that decides whether a no-change control
+# means anything at all.
+step_marker=$(printf '%s' "$prompt" | grep -oE 'IMPLEMENTATION_COMPLETE|IMPL_APPROVED|PLAN_APPROVED|pr-description' | head -1 || true)
+printf '%s\n' "${{step_marker:-unclassified}}" >> {log}
+
+# Record the profile the product resolved and passed in. This is the config
+# value as the child computed it, so a change to the loaded configuration is
+# observable without pinning a digest that embeds per-run paths.
+prev=""
+for arg in "$@"; do
+  if [ "$prev" = "--profile-load" ]; then printf '%s\n' "$arg" >> {profile_log}; fi
+  prev="$arg"
+done
 
 # Steps that gate on an artifact name it in the prompt. Writing the file the
 # prompt asks for keeps the stand-in honest: it satisfies the step's stated
@@ -161,15 +183,6 @@ esac
     )
 }
 
-/// An agent that reports success without changing anything.
-///
-/// The primary construct-validity control. A harness that passes with this
-/// installed is measuring its own scaffolding.
-#[must_use]
-pub fn no_change_agent_script() -> String {
-    agent_script(false)
-}
-
 /// Runs Gate A-R end to end and reports what happened.
 pub fn run_gate_a(run: &GateRun) -> GateResult {
     let root = tempfile::tempdir().expect("harness scratch dir");
@@ -178,6 +191,10 @@ pub fn run_gate_a(run: &GateRun) -> GateResult {
     let artifacts = root.path().join("artifacts");
     let remote = root.path().join("remote.git");
     let gh_log = root.path().join("gh-invocations.log");
+    let agent_log = root.path().join("agent-invocations.log");
+    let exec_log = root.path().join("executed-binary.log");
+    let profile_log = root.path().join("resolved-profile.log");
+    let gh_state = root.path().join("gh-state.log");
     std::fs::create_dir_all(&bin_dir).unwrap();
     std::fs::create_dir_all(&artifacts).unwrap();
 
@@ -186,13 +203,22 @@ pub fn run_gate_a(run: &GateRun) -> GateResult {
     // The agent is resolved by name through PATH (workflow variable
     // `llxprt_binary_path` defaults to "llxprt"), so the stand-in is installed
     // under that name. Same interception the real binary would go through.
-    install_script(&bin_dir.join("llxprt"), &run.agent_script);
+    install_script(
+        &bin_dir.join("llxprt"),
+        &agent_script(run.agent_makes_change, &agent_log, &profile_log),
+    );
 
     let binary = PathBuf::from(env!("CARGO_BIN_EXE_luther-workflow"));
-    let config_path = shipping_config_path();
-    let config_digest = digest_of(&config_path);
 
-    let mut command = Command::new(&binary);
+    // Execution identity is recorded by a wrapper that resolves and reports the
+    // binary it is about to exec, then hands off. Asserting on the path this
+    // harness *intended* to run proves only that the harness was configured;
+    // swapping the child for `/usr/bin/true` would leave such an assertion
+    // green. The wrapper reports what actually ran.
+    let launcher = bin_dir.join("launch-product");
+    install_script(&launcher, &launcher_script(&binary, &exec_log));
+
+    let mut command = Command::new(&launcher);
     command
         .arg("run")
         .arg("--config-dir")
@@ -213,6 +239,7 @@ pub fn run_gate_a(run: &GateRun) -> GateResult {
         .arg(&artifacts)
         .arg("--skip-preflight")
         .env("PATH", prepended_path(&bin_dir))
+        .env("LUTHER_FAKE_GH_STATE", &gh_state)
         .env("HOME", root.path())
         .current_dir(root.path());
 
@@ -222,6 +249,7 @@ pub fn run_gate_a(run: &GateRun) -> GateResult {
     // stderr, so the harness reads them back. Without this a failure inside a
     // redirected step is invisible and easy to misattribute.
     let step_logs = collect_step_logs(&artifacts);
+    let provenance = read_launch_provenance(root.path());
     let stderr = format!("{}{step_logs}", String::from_utf8_lossy(&output.stderr));
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let pushed_ref = observed_pushed_ref(&remote, run.issue_number);
@@ -230,7 +258,7 @@ pub fn run_gate_a(run: &GateRun) -> GateResult {
         gate: "A-R".to_string(),
         // Terminal evidence is the ref in the bare remote plus an observed
         // `pr create`. Neither is supplied by the harness.
-        outcome: if pushed_ref.is_some() && gh_log_contains(&gh_log, "pr create") {
+        outcome: if pushed_ref.is_some() && created_draft_pr(&gh_state) {
             GateOutcome::Pass
         } else {
             GateOutcome::Fail
@@ -245,9 +273,14 @@ pub fn run_gate_a(run: &GateRun) -> GateResult {
             .or_else(|| last_step(&stderr))
             .or_else(|| last_step(&stdout)),
         steps_reached: steps_reached(&stderr),
-        executed_binary: binary,
-        config_digest,
-        config_path,
+        observed_binary: exec_field(&exec_log, "path="),
+        observed_binary_digest: exec_field(&exec_log, "sha256="),
+        agent_invocations: read_lines(&agent_log),
+        created_draft_pr: created_draft_pr(&gh_state),
+        resolved_profile: read_lines(&profile_log).into_iter().next_back(),
+        resolved_workflow_digest: provenance.as_ref().map(|p| p.0.clone()),
+        resolved_config_digest: provenance.as_ref().map(|p| p.1.clone()),
+        canonical_config_root: provenance.as_ref().map(|p| p.2.clone()),
         tool_versions: tool_versions(),
         gh_invocations: read_lines(&gh_log),
         pushed_ref,
@@ -265,8 +298,8 @@ fn seed_remote(remote: &Path, workspace: &Path) {
     let seed = remote.parent().unwrap().join("seed");
     std::fs::create_dir_all(&seed).unwrap();
     git(&seed, &["init", "-b", "main"]);
-    std::fs::write(seed.join("README.md"), "seed\n").unwrap();
-    git(&seed, &["add", "README.md"]);
+    seed_repository_contents(&seed);
+    git(&seed, &["add", "-A"]);
     git(&seed, &["commit", "-m", "seed"]);
     git(
         &seed,
@@ -277,6 +310,36 @@ fn seed_remote(remote: &Path, workspace: &Path) {
     // takes ownership of it (issue #158), and pre-creating it trips the
     // adoption guard. Letting the product own that step is the point.
     let _ = workspace;
+}
+
+/// Seeds a repository that satisfies the production target profile.
+///
+/// The shipping config declares a dependency manifest at `workflow/Cargo.toml`
+/// (`llxprt-luther.toml`), and the scope barrier reads it *before* the agent is
+/// spawned. A repository without it cannot reach the implementation step at
+/// all, so a fixture missing these paths measures the fixture rather than the
+/// product.
+fn seed_repository_contents(seed: &Path) {
+    let manifest = seed.join("workflow/Cargo.toml");
+    std::fs::create_dir_all(manifest.parent().unwrap()).unwrap();
+    std::fs::write(
+        &manifest,
+        "[package]\n\
+         name = \"gate-a-fixture\"\n\
+         version = \"0.1.0\"\n\
+         edition = \"2021\"\n\n\
+         [dependencies]\n\n\
+         [dev-dependencies]\n\n\
+         [build-dependencies]\n",
+    )
+    .unwrap();
+
+    let src = seed.join("workflow/src");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(src.join("lib.rs"), "pub fn seeded() -> u32 {\n    1\n}\n").unwrap();
+
+    std::fs::create_dir_all(seed.join("workflow/docs")).unwrap();
+    std::fs::write(seed.join("README.md"), "Gate A-R fixture repository.\n").unwrap();
 }
 
 fn git(dir: &Path, args: &[&str]) -> std::process::Output {
@@ -298,6 +361,27 @@ fn git(dir: &Path, args: &[&str]) -> std::process::Output {
         String::from_utf8_lossy(&output.stderr)
     );
     output
+}
+
+/// A wrapper that records the resolved product binary and its digest, then
+/// execs it. The record is written by the child, so it reflects what ran
+/// rather than what the harness meant to run.
+fn launcher_script(binary: &Path, exec_log: &Path) -> String {
+    format!(
+        "#!/usr/bin/env bash\n\
+         set -euo pipefail\n\
+         target={}\n\
+         printf 'path=%s\\n' \"$target\" >> {log}\n\
+         if command -v sha256sum >/dev/null 2>&1; then\n\
+         \x20 digest=$(sha256sum \"$target\" | cut -d' ' -f1)\n\
+         else\n\
+         \x20 digest=$(shasum -a 256 \"$target\" | cut -d' ' -f1)\n\
+         fi\n\
+         printf 'sha256=%s\\n' \"$digest\" >> {log}\n\
+         exec \"$target\" \"$@\"\n",
+        shell_quote(&binary.to_string_lossy()),
+        log = shell_quote(&exec_log.to_string_lossy()),
+    )
 }
 
 fn install_script(path: &Path, body: &str) {
@@ -332,10 +416,6 @@ fn observed_pushed_ref(remote: &Path, issue_number: u64) -> Option<String> {
         .then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
-fn gh_log_contains(log: &Path, needle: &str) -> bool {
-    read_lines(log).iter().any(|line| line.contains(needle))
-}
-
 /// Reads back per-step stdout/stderr artifacts the workflow redirected.
 fn collect_step_logs(artifacts: &Path) -> String {
     let Ok(entries) = std::fs::read_dir(artifacts) else {
@@ -364,6 +444,70 @@ fn collect_step_logs(artifacts: &Path) -> String {
         }
     }
     collected
+}
+
+/// Reads the launch provenance the child persisted: (workflow digest, config
+/// digest, canonical config root).
+///
+/// Located by searching the sandboxed HOME for the checkpoint database, so the
+/// harness reads what the product recorded rather than recomputing it.
+fn read_launch_provenance(home: &Path) -> Option<(String, String, String)> {
+    let db = find_file(home, "checkpoints.db")?;
+    let connection = rusqlite::Connection::open(&db).ok()?;
+    let mut statement = connection
+        .prepare("SELECT launch_provenance FROM runs WHERE launch_provenance IS NOT NULL LIMIT 1")
+        .ok()?;
+    let raw: String = statement.query_row([], |row| row.get(0)).ok()?;
+    let parsed: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    Some((
+        parsed.get("workflow_digest")?.as_str()?.to_string(),
+        parsed.get("config_digest")?.as_str()?.to_string(),
+        parsed.get("canonical_config_root")?.as_str()?.to_string(),
+    ))
+}
+
+/// Depth-limited search for a file by name.
+fn find_file(root: &Path, name: &str) -> Option<PathBuf> {
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.filter_map(Result::ok) {
+            let path = entry.path();
+            if path.is_dir() {
+                pending.push(path);
+            } else if path.file_name().and_then(|n| n.to_str()) == Some(name) {
+                return Some(path);
+            }
+        }
+    }
+    None
+}
+
+/// Directory holding the shipping `workflows/` and `workflow-configs/` trees,
+/// so the product resolves configuration the way it does in production rather
+/// than from files copied into the scratch directory.
+fn config_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("config")
+}
+
+/// Whether the simulator recorded a successful DRAFT PR creation.
+///
+/// Gate A-R requires a *new draft* PR. Treating an invocation of `gh pr create`
+/// as evidence would score a command that failed, or that created a
+/// non-draft PR, as a pass.
+fn created_draft_pr(state: &Path) -> bool {
+    read_lines(state)
+        .iter()
+        .any(|line| line == "created draft=true")
+}
+
+/// Reads a `key=value` field the launched child recorded about itself.
+fn exec_field(exec_log: &Path, prefix: &str) -> Option<String> {
+    read_lines(exec_log)
+        .into_iter()
+        .find_map(|line| line.strip_prefix(prefix).map(str::to_string))
 }
 
 fn read_lines(path: &Path) -> Vec<String> {
@@ -413,22 +557,6 @@ fn last_step(text: &str) -> Option<String> {
         .filter_map(|line| line.find(MARKER).map(|at| &line[at + MARKER.len()..]))
         .map(|step| step.trim().to_string())
         .next_back()
-}
-
-/// Directory holding the shipping `workflows/` tree, resolved the way the
-/// product resolves it rather than by copying files into the scratch dir.
-fn config_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("config")
-}
-
-fn shipping_config_path() -> PathBuf {
-    config_root().join("workflows/llxprt-luther-dogfood-v1.toml")
-}
-
-fn digest_of(path: &Path) -> String {
-    use sha2::{Digest, Sha256};
-    let bytes = std::fs::read(path).unwrap_or_default();
-    format!("{:x}", Sha256::digest(&bytes))
 }
 
 fn tool_versions() -> Vec<(String, String)> {

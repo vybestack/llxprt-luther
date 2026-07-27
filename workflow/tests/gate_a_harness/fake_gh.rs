@@ -186,6 +186,14 @@ impl FakeGitHub {
     fn write_pr_create(&self, script: &mut String) {
         let _ = writeln!(script, "  \"pr create\"*)");
         if self.allow_pr_create {
+            // Record the created PR as modeled state only on success. Scoring
+            // reads this record rather than the fact that the command was
+            // invoked, so a `pr create` that fails cannot be counted as a
+            // created pull request.
+            let _ = writeln!(
+                script,
+                "    printf 'created draft=%s\\n' \"$(case \"$*\" in *--draft*) echo true;; *) echo false;; esac)\" >> \"$LUTHER_FAKE_GH_STATE\""
+            );
             let _ = writeln!(
                 script,
                 "    printf '%s' 'https://github.com/example/repo/pull/4242'"
@@ -211,6 +219,6 @@ impl FakeGitHub {
 }
 
 /// Single-quotes a value for POSIX shell.
-fn shell_quote(value: &str) -> String {
+pub fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', r"'\''"))
 }

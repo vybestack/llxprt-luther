@@ -8,7 +8,7 @@
 
 mod gate_a_harness;
 
-use gate_a_harness::{no_change_agent_script, run_gate_a, GateOutcome, GateRun};
+use gate_a_harness::{run_gate_a, GateOutcome, GateRun};
 
 /// The recorded expectation for Gate A-R on this commit.
 ///
@@ -21,7 +21,23 @@ const EXPECTED_GATE_A_OUTCOME: GateOutcome = GateOutcome::Fail;
 /// Recorded so that regression *and* progress are both visible. A run that
 /// stops earlier than this is a regression; one that gets further is progress
 /// that should be recorded here in the same PR.
-const EXPECTED_FURTHEST_STEP: &str = "implement";
+const EXPECTED_FURTHEST_STEP: &str = "scope_measure";
+
+/// Digest of the workflow definition the child actually resolved.
+///
+/// Pinned so that changing the workflow the run loads is a visible event.
+/// Recording a digest without asserting on it detects nothing.
+///
+/// Only the workflow digest is pinned. The resolved *config* digest embeds
+/// per-run values (workspace and artifact paths under a fresh temporary
+/// directory) and therefore differs on every run; asserting on it would be a
+/// flake rather than a control. Config drift is covered instead by
+/// `the_resolved_config_reflects_the_file_on_disk`.
+/// Implementation profile the shipping config declares.
+const EXPECTED_IMPLEMENTATION_PROFILE: &str = "gpt56solhigh";
+
+const EXPECTED_RESOLVED_WORKFLOW_DIGEST: &str =
+    "565057dee0bc503abac403172750608a26737d9ce380553727bf8ed1f084a8f1";
 
 /// Steps the product is currently observed to reach, in order.
 ///
@@ -44,7 +60,7 @@ const EXPECTED_STEPS_REACHED: &[&str] = &[
     "plan_gate",
     "workflow_auth_preflight_plan",
     "implement",
-    "abandon_and_log",
+    "scope_measure",
 ];
 
 /// Gate A-R: explicit work item -> run -> new draft PR.
@@ -84,19 +100,80 @@ fn gate_a_reachability_matches_the_recorded_expectation() {
 fn the_harness_executes_the_shipping_binary() {
     let result = run_gate_a(&GateRun::new(4242));
 
+    let observed = result
+        .observed_binary
+        .as_deref()
+        .expect("the launched process must report the binary it executed");
+
     assert!(
-        result.executed_binary.exists(),
-        "the executed path must be a real file: {}",
-        result.executed_binary.display()
+        observed.ends_with("luther-workflow"),
+        "the process that ran must be the product binary, observed as: {observed}"
     );
+
+    // The digest is computed by the child against the file it is about to
+    // exec, so it cannot be satisfied by harness configuration alone.
+    let digest = result
+        .observed_binary_digest
+        .as_deref()
+        .expect("the launched process must report its own digest");
+    let expected = {
+        use sha2::{Digest, Sha256};
+        let bytes = std::fs::read(observed).expect("observed binary is readable");
+        format!("{:x}", Sha256::digest(&bytes))
+    };
     assert_eq!(
-        result.executed_binary.file_name().and_then(|n| n.to_str()),
-        Some("luther-workflow"),
-        "the harness must start the product binary, not a test shim"
+        digest, expected,
+        "the digest reported by the child must match the binary on disk"
     );
+
     assert!(
         result.exit_code.is_some(),
         "the binary must run to completion and yield an exit status"
+    );
+}
+
+/// A change to the config the run loads must be observable.
+///
+/// The resolved config digest embeds per-run paths, so it cannot be pinned
+/// directly. This pins the resolved implementation profile instead. The
+/// expected value is a literal: deriving it from the same file the product
+/// reads would move both sides together and detect nothing.
+#[test]
+fn the_resolved_config_reflects_the_file_on_disk() {
+    let result = run_gate_a(&GateRun::new(4242));
+
+    assert!(
+        result
+            .agent_invocations
+            .iter()
+            .any(|step| step == "IMPLEMENTATION_COMPLETE"),
+        "the run must reach the implementation agent for this check to mean anything"
+    );
+    assert_eq!(
+        result.resolved_profile.as_deref(),
+        Some(EXPECTED_IMPLEMENTATION_PROFILE),
+        "the profile the child resolved changed. Update \
+         EXPECTED_IMPLEMENTATION_PROFILE in the PR that changes the configuration."
+    );
+}
+
+/// The agent must actually be spawned for the implementation step.
+///
+/// Without this, a no-change control is vacuous: a run that dies before the
+/// agent is reached produces no change for reasons that have nothing to do
+/// with the agent, and the control cannot tell the two cases apart.
+#[test]
+fn the_implementation_agent_is_actually_invoked() {
+    let result = run_gate_a(&GateRun::new(4242));
+
+    assert!(
+        result
+            .agent_invocations
+            .iter()
+            .any(|step| step == "IMPLEMENTATION_COMPLETE"),
+        "the implementation agent must be spawned; observed invocations: {:?}\nreport:\n{}",
+        result.agent_invocations,
+        serde_json::to_string_pretty(&result).unwrap()
     );
 }
 
@@ -107,7 +184,7 @@ fn the_harness_executes_the_shipping_binary() {
 #[test]
 fn a_run_that_changes_nothing_cannot_pass_the_gate() {
     let mut run = GateRun::new(4242);
-    run.agent_script = no_change_agent_script();
+    run.agent_makes_change = false;
 
     let result = run_gate_a(&run);
 
@@ -181,28 +258,32 @@ fn an_unrecognized_gh_invocation_fails_closed() {
     );
 }
 
-/// The recorded config digest must track the file actually loaded.
+/// Config identity must come from what the child recorded, not from a file the
+/// harness chose to hash.
 #[test]
-fn the_recorded_config_digest_tracks_the_loaded_config() {
+fn the_recorded_config_identity_comes_from_the_child() {
     let result = run_gate_a(&GateRun::new(4242));
 
-    assert_eq!(
-        result.config_digest.len(),
-        64,
-        "digest must be a full SHA-256"
-    );
-    assert!(
-        result.config_path.exists(),
-        "the digested config must be the shipping file"
-    );
+    let workflow_digest = result
+        .resolved_workflow_digest
+        .as_deref()
+        .expect("the child must persist a resolved workflow digest");
+    let config_digest = result
+        .resolved_config_digest
+        .as_deref()
+        .expect("the child must persist a resolved config digest");
 
-    let recomputed = {
-        use sha2::{Digest, Sha256};
-        let bytes = std::fs::read(&result.config_path).unwrap();
-        format!("{:x}", Sha256::digest(&bytes))
-    };
     assert_eq!(
-        result.config_digest, recomputed,
-        "the digest must be of the file on disk, not a constant"
+        workflow_digest, EXPECTED_RESOLVED_WORKFLOW_DIGEST,
+        "the resolved workflow changed. Update EXPECTED_RESOLVED_WORKFLOW_DIGEST \
+         in the PR that changes the workflow definition."
+    );
+    assert_eq!(config_digest.len(), 64, "config digest must be SHA-256");
+    assert!(
+        result
+            .canonical_config_root
+            .as_deref()
+            .is_some_and(|root| !root.is_empty()),
+        "the child must record the config root it resolved from"
     );
 }

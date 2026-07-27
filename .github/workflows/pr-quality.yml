@@ -119,8 +119,11 @@ jobs:
         with:
           workspaces: workflow -> target
 
+      # No --locked: Cargo.lock is intentionally untracked in this repository,
+      # so --locked fails before compiling anything.
       - name: Measure Gate A-R
-        run: cargo test --locked --test gate_a_reachability -- --nocapture
+        run: cargo test --test gate_a_reachability -- --nocapture
+        timeout-minutes: 20
 
   coverage:
     name: Coverage (llvm-cov gate)
