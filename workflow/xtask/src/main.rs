@@ -926,10 +926,11 @@ fn enforce_changed_file_line_limits(
 ) -> Result<()> {
     let git_prefix = capture_in_dir(workspace_root, "git", ["rev-parse", "--show-prefix"])?;
     let git_prefix = git_prefix.trim();
+    let renames = rename_map(workspace_root, base)?;
     let mut error_exit = false;
     for path in paths {
         let lines = file_line_count(path)?;
-        let base_lines = base_file_line_count(workspace_root, base, git_prefix, path)?;
+        let base_lines = base_file_line_count(workspace_root, base, git_prefix, path, &renames)?;
         if lines > FILE_LINES_MAX && base_lines.is_none_or(|base| lines > base) {
             eprintln!(
                 "ERROR: {} has {} lines (max {}, base {})",
@@ -962,11 +963,17 @@ fn base_file_line_count(
     base: &str,
     git_prefix: &str,
     path: &Path,
+    renames: &HashMap<String, String>,
 ) -> Result<Option<usize>> {
     let rel_path = path
         .strip_prefix(workspace_root)
         .with_context(|| format!("relativize {}", path.display()))?;
-    let blob_path = format!("{git_prefix}{}", rel_path.to_string_lossy());
+    let head_path = format!("{git_prefix}{}", rel_path.to_string_lossy());
+    // A moved file does not exist at its new path in the base commit. Without
+    // resolving the rename its base count is missing, which the caller reads
+    // as "grew past the limit" - so relocating an already-large file would
+    // fail the gate even though not a line was added.
+    let blob_path = renames.get(&head_path).cloned().unwrap_or(head_path);
     let output = command_in_dir(
         workspace_root,
         "git",
