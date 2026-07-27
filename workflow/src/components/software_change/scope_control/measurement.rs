@@ -32,7 +32,7 @@ use std::process::Command;
 
 use serde::{Deserialize, Serialize};
 
-use crate::engine::executors::scope_control::model::CanonicalTaskCharter;
+use crate::components::software_change::scope_control::model::CanonicalTaskCharter;
 use crate::workflow::schema::ScopeMeasurementConfig;
 
 #[path = "measurement_control_files.rs"]

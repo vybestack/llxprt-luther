@@ -18,11 +18,8 @@
 pub mod feedback_eval;
 pub mod feedback_eval_policy;
 pub mod feedback_eval_timeout;
-pub mod git_config_publish;
 pub mod github_feedback;
 pub mod github_pr;
-pub mod llxprt;
-mod llxprt_diff;
 pub mod merge_wait;
 pub mod parent_orchestration;
 pub mod pr_check_wait;
@@ -30,10 +27,7 @@ pub mod pr_followup_artifacts;
 pub mod pr_followup_types;
 mod pr_identity_params;
 pub mod pr_remediation;
-pub mod scope_control;
-pub mod verify;
 pub mod workflow_auth_preflight;
-pub mod workspace_ownership;
 
 // Re-export executor implementations for tests
 /// Interpreter for workflow-authored commands.
@@ -65,7 +59,19 @@ pub use crate::components::generic::command_manifest::{
 pub use crate::components::generic::noop::NoOpExecutor;
 pub use crate::components::generic::shell::ShellExecutor;
 pub use crate::components::generic::write_file::WriteFileExecutor;
-pub use git_config_publish::GitConfigPublishExecutor;
+pub use crate::components::software_change::git_config_publish::GitConfigPublishExecutor;
+pub use crate::components::software_change::llxprt::{LlxprtExecutor, LlxprtExecutorWithDetector};
+pub use crate::components::software_change::scope_control::{
+    normalize_charter, validate_draft_against_config, validate_scope_control, CanonicalBudget,
+    CanonicalReviewCaps, CanonicalTaskCharter, DraftBudget, DraftReviewCaps, DraftSubsystem,
+    MergeBaseError, MergeBaseProbe, PreLaunchReviewRequest, ReviewCheckOutcome, ScopeEvaluation,
+    ScopeMeasureExecutor, ScopePersistenceError, ScopeStatus, SystemMergeBaseProbe,
+    TaskCharterDraft, TaskCharterExecutor, Violation, ViolationCode, CHARTER_SCHEMA_VERSION,
+};
+pub use crate::components::software_change::verify::VerifyExecutor;
+pub use crate::components::software_change::workspace_ownership::{
+    WorkspaceOwnershipExecutor, WorkspaceOwnershipVerifyExecutor,
+};
 pub use github_feedback::{
     FeedbackMarkerParser, GithubCodeRabbitFeedbackExecutor,
     GithubCodeRabbitFeedbackExecutorWithRunner, GithubFeedbackMarkerExecutor,
@@ -76,7 +82,6 @@ pub use github_pr::{
     GithubPrChecksExecutorWithRunner, GithubPrCommandRunner, GithubPrIdentityExecutor,
     GithubPrIdentityExecutorWithRunner, SystemGithubPrCommandRunner,
 };
-pub use llxprt::{LlxprtExecutor, LlxprtExecutorWithDetector};
 pub use merge_wait::{MergeWaitExecutor, MergeWaitProbe, RemoteProbeMergeWaitAdapter};
 pub use parent_orchestration::model::{
     classify_child, next_actionable_child, order_subissues, ChildIssueState, ChildIssueStatus,
@@ -109,16 +114,7 @@ pub use pr_remediation::{
     PushRemediationCommandResult, PushRemediationCommandRunner, RunPostPrTestsExecutor,
     RunPostPrTestsExecutorWithRunner, SystemPrFollowupLlxprtCommandRunner,
 };
-pub use scope_control::{
-    normalize_charter, validate_draft_against_config, validate_scope_control, CanonicalBudget,
-    CanonicalReviewCaps, CanonicalTaskCharter, DraftBudget, DraftReviewCaps, DraftSubsystem,
-    MergeBaseError, MergeBaseProbe, PreLaunchReviewRequest, ReviewCheckOutcome, ScopeEvaluation,
-    ScopeMeasureExecutor, ScopePersistenceError, ScopeStatus, SystemMergeBaseProbe,
-    TaskCharterDraft, TaskCharterExecutor, Violation, ViolationCode, CHARTER_SCHEMA_VERSION,
-};
-pub use verify::VerifyExecutor;
 pub use workflow_auth_preflight::WorkflowAuthPreflightExecutor;
-pub use workspace_ownership::{WorkspaceOwnershipExecutor, WorkspaceOwnershipVerifyExecutor};
 
 /// Enforce the scope-decision barrier at a mutation entry point.
 ///
@@ -130,15 +126,7 @@ pub use workspace_ownership::{WorkspaceOwnershipExecutor, WorkspaceOwnershipVeri
 /// This is the shared compact barrier for broad mutation executors
 /// (`llxprt`, `pr_followup_remediation`) and the pre-push executor
 /// (`push_remediation_changes`).
-fn scope_control_barrier(
-    context: &mut crate::engine::executor::StepContext,
-) -> Option<crate::engine::transition::StepOutcome> {
-    scope_control_barrier_impl(context)
-}
-
-/// Public barrier entry point used by mutation executors that receive an
-/// immutable `&StepContext` (e.g. `pr_followup_remediation`).
-pub(crate) fn scope_control_barrier_pub(
+pub(crate) fn scope_control_barrier(
     context: &mut crate::engine::executor::StepContext,
 ) -> Option<crate::engine::transition::StepOutcome> {
     scope_control_barrier_impl(context)
@@ -147,7 +135,7 @@ pub(crate) fn scope_control_barrier_pub(
 fn scope_control_barrier_impl(
     context: &mut crate::engine::executor::StepContext,
 ) -> Option<crate::engine::transition::StepOutcome> {
-    use crate::engine::executors::scope_control::{
+    use crate::components::software_change::scope_control::{
         enforce_scope_barrier, ScopeBarrierResult, SystemGitPatchCollector,
     };
     let scope_control = match resolve_scope_control_policy(context) {

@@ -254,7 +254,7 @@ fn is_path_within_checks_prefix() {
 
 #[test]
 fn compute_changed_subsystems_matches_paths() {
-    use crate::engine::executors::scope_control::model::{
+    use crate::components::software_change::scope_control::model::{
         normalize_charter, DraftBudget, DraftReviewCaps, DraftSubsystem, TaskCharterDraft,
     };
     let draft = TaskCharterDraft {
@@ -511,7 +511,7 @@ fn initialized_measurement_repo() -> tempfile::TempDir {
 }
 
 fn owned_measurement_charter(head: String) -> CanonicalTaskCharter {
-    use crate::engine::executors::scope_control::model::{
+    use crate::components::software_change::scope_control::model::{
         normalize_charter, DraftBudget, DraftReviewCaps, DraftSubsystem, TaskCharterDraft,
     };
     normalize_charter(&TaskCharterDraft {
@@ -622,8 +622,8 @@ fn measurement_rejects_charter_for_different_active_run() {
 
 fn test_charter_for_run(
     run_id: &str,
-) -> crate::engine::executors::scope_control::model::CanonicalTaskCharter {
-    use crate::engine::executors::scope_control::model::{
+) -> crate::components::software_change::scope_control::model::CanonicalTaskCharter {
+    use crate::components::software_change::scope_control::model::{
         normalize_charter, DraftBudget, DraftReviewCaps, TaskCharterDraft,
     };
     normalize_charter(&TaskCharterDraft {

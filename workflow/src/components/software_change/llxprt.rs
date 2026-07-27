@@ -30,11 +30,11 @@ use std::time::{Duration, Instant};
 use crate::components::generic::change_detection::{
     ChangeDetectionMode, ChangedPathDetector, GitChangedPathDetector,
 };
-use crate::engine::error::EngineError;
-use crate::engine::executor::{interpolate_string, StepContext, StepExecutor};
-use crate::engine::executors::llxprt_diff::{
+use crate::components::software_change::llxprt_diff::{
     detect_initial_changed_paths, string_array_param, success_condition_met, DiffDetection,
 };
+use crate::engine::error::EngineError;
+use crate::engine::executor::{interpolate_string, StepContext, StepExecutor};
 use crate::engine::transition::StepOutcome;
 
 mod artifact_paths;
@@ -837,9 +837,9 @@ fn resolve_timeout_outcome(
     context.set("diagnostic", &diagnostic);
 
     let timeout_kind = if result.idle_timed_out {
-        crate::engine::executors::scope_control::timeout_recovery::TimeoutKind::IdleTimeout
+        crate::components::software_change::scope_control::timeout_recovery::TimeoutKind::IdleTimeout
     } else {
-        crate::engine::executors::scope_control::timeout_recovery::TimeoutKind::Timeout
+        crate::components::software_change::scope_control::timeout_recovery::TimeoutKind::Timeout
     };
     if let Some(outcome) = llxprt_timeout::recover_partial_timeout(
         context,

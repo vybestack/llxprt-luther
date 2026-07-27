@@ -14,10 +14,10 @@
 
 use serde_json::{json, Value};
 
-use crate::engine::executors::pr_followup_types::value_has_summary_marker_key;
-use crate::engine::executors::scope_control::finding_disposition::{
+use crate::components::software_change::scope_control::finding_disposition::{
     disposition_action, disposition_from_accepted_result, DispositionAction,
 };
+use crate::engine::executors::pr_followup_types::value_has_summary_marker_key;
 
 /// Routes a single accepted feedback-evaluation result into the appropriate
 /// plan list based on its two-axis disposition.
@@ -64,7 +64,7 @@ pub(super) fn route_accepted_result(
         }
         DispositionAction::DeferToFollowUp => {
             if disposition.correctness
-                == crate::engine::executors::scope_control::finding_disposition::FindingCorrectness::Invalid
+                == crate::components::software_change::scope_control::finding_disposition::FindingCorrectness::Invalid
                 && !is_summary
             {
                 mark_invalid.push(feedback_plan_item(

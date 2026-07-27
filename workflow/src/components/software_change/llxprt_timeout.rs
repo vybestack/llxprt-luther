@@ -40,10 +40,10 @@ pub(super) fn recover_partial_timeout(
     context: &mut StepContext,
     initial_changed_paths: &[String],
     detection: DiffDetection<'_>,
-    timeout_kind: crate::engine::executors::scope_control::timeout_recovery::TimeoutKind,
+    timeout_kind: crate::components::software_change::scope_control::timeout_recovery::TimeoutKind,
 ) -> Result<Option<StepOutcome>, EngineError> {
-    use crate::engine::executors::scope_control::timeout_recovery::ProcessEvidence;
-    use crate::engine::executors::scope_control::{
+    use crate::components::software_change::scope_control::timeout_recovery::ProcessEvidence;
+    use crate::components::software_change::scope_control::{
         charter_path, handle_timeout_recovery, read_json, scope_control_dir, CanonicalTaskCharter,
         SystemGitPatchCollector,
     };
@@ -67,7 +67,7 @@ pub(super) fn recover_partial_timeout(
         exit_code: Some(124),
         wall_clock_timeout: matches!(
             timeout_kind,
-            crate::engine::executors::scope_control::timeout_recovery::TimeoutKind::Timeout
+            crate::components::software_change::scope_control::timeout_recovery::TimeoutKind::Timeout
         ),
         process_killed: true,
     };
@@ -127,14 +127,19 @@ fn resolve_recovery_artifact_dir(context: &StepContext) -> std::path::PathBuf {
 /// for timeout recovery.
 fn compute_recovery_measurement<C>(
     context: &mut StepContext,
-    charter: &crate::engine::executors::scope_control::model::CanonicalTaskCharter,
+    charter: &crate::components::software_change::scope_control::model::CanonicalTaskCharter,
     policy: &crate::workflow::schema::ScopeControlConfig,
     collector: C,
-) -> Result<crate::engine::executors::scope_control::measurement::PatchMeasurement, EngineError>
+) -> Result<
+    crate::components::software_change::scope_control::measurement::PatchMeasurement,
+    EngineError,
+>
 where
-    C: crate::engine::executors::scope_control::GitPatchCollector,
+    C: crate::components::software_change::scope_control::GitPatchCollector,
 {
-    use crate::engine::executors::scope_control::{collect_dependency_diffs, compute_measurement};
+    use crate::components::software_change::scope_control::{
+        collect_dependency_diffs, compute_measurement,
+    };
 
     let git_data = collector
         .collect(context.work_dir(), &charter.merge_base, &policy.measurement)

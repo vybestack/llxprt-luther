@@ -131,7 +131,7 @@ fn push_remediation_changes(
     clock: &dyn ClockSleeper,
     runner: &dyn PushRemediationCommandRunner,
 ) -> Result<StepOutcome, EngineError> {
-    if let Some(outcome) = crate::engine::executors::scope_control_barrier_pub(context) {
+    if let Some(outcome) = crate::engine::executors::scope_control_barrier(context) {
         return Ok(outcome);
     }
     let setup = load_push_run_setup(context, params, clock)?;

@@ -7,8 +7,8 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::engine::executors::scope_control::measurement::PatchMeasurement;
-use crate::engine::executors::scope_control::model::CanonicalTaskCharter;
+use crate::components::software_change::scope_control::measurement::PatchMeasurement;
+use crate::components::software_change::scope_control::model::CanonicalTaskCharter;
 
 /// A single budget ceiling violation with a stable code.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -264,8 +264,10 @@ fn is_path_within(path: &str, prefix: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::executors::scope_control::measurement::{ChangeStatus, FileChange};
-    use crate::engine::executors::scope_control::model::{
+    use crate::components::software_change::scope_control::measurement::{
+        ChangeStatus, FileChange,
+    };
+    use crate::components::software_change::scope_control::model::{
         normalize_charter, DraftBudget, DraftReviewCaps, DraftSubsystem, TaskCharterDraft,
     };
 

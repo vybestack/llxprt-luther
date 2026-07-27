@@ -306,6 +306,68 @@ fn run_changed_lizard(
     }
 }
 
+/// Every rename between `base` and `HEAD`, keyed by the path at `HEAD`.
+///
+/// Built once rather than per file: the underlying diff covers the whole tree
+/// and is identical for every lookup, so asking per file would spawn N
+/// identical subprocesses to parse the same output N times.
+///
+/// Rename detection is git's own, so it applies the same similarity threshold
+/// used elsewhere and will not pair a file that was rewritten rather than
+/// moved.
+fn rename_map(workspace_root: &Path, base: &str) -> Result<HashMap<String, String>> {
+    let output = command_in_dir(
+        workspace_root,
+        "git",
+        [
+            "diff",
+            "--find-renames",
+            "--diff-filter=R",
+            "--name-status",
+            base,
+            "HEAD",
+        ],
+    )
+    .output()
+    .with_context(|| format!("spawn git diff for renames between {base} and HEAD"))?;
+    // Failing here is not something to carry on from: without the rename list
+    // every moved file silently loses its baseline and reports its existing
+    // warnings as new, which is the exact defect this resolves. Fail loudly
+    // rather than produce a plausible-looking wrong answer.
+    if !output.status.success() {
+        bail!(
+            "git diff for renames between {base} and HEAD failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // Format: `R<score>\t<old path>\t<new path>`.
+    //
+    // Deliberately not pathspec-limited. Restricting the diff to a single new
+    // path makes git report no rename at all: pairing one needs both sides in
+    // the diff, and such a pathspec excludes the old side.
+    let mut renames = HashMap::new();
+    for line in stdout.lines() {
+        let mut fields = line.split('\t');
+        let status = fields.next().unwrap_or_default();
+        if !status.starts_with('R') {
+            continue;
+        }
+        // A line git labelled `R` must carry both paths. If it does not, the
+        // output is not what this parser was written against, and silently
+        // dropping it would reproduce the defect this function exists to
+        // prevent - a rename going unnoticed - one level further down.
+        let (Some(old_path), Some(new_path)) = (fields.next(), fields.next()) else {
+            bail!("git reported a rename without both paths: {line:?}");
+        };
+        if old_path.is_empty() || new_path.is_empty() {
+            bail!("git reported a rename with an empty path: {line:?}");
+        }
+        renames.insert(new_path.to_string(), old_path.to_string());
+    }
+    Ok(renames)
+}
+
 fn materialize_base_sources(
     workspace_root: &Path,
     base_root: &Path,
@@ -314,6 +376,7 @@ fn materialize_base_sources(
 ) -> Result<Vec<PathBuf>> {
     let git_prefix = capture_in_dir(workspace_root, "git", ["rev-parse", "--show-prefix"])?;
     let git_prefix = git_prefix.trim();
+    let renames = rename_map(workspace_root, base)?;
     fs::create_dir_all(base_root).with_context(|| format!("create {}", base_root.display()))?;
     let mut base_paths = Vec::new();
     for path in paths {
@@ -321,16 +384,28 @@ fn materialize_base_sources(
             .strip_prefix(workspace_root)
             .with_context(|| format!("relativize {}", path.display()))?;
         let blob_path = format!("{git_prefix}{}", rel_path.to_string_lossy());
+        // A renamed file does not exist at its new path in the base commit, so
+        // `git show` fails and the file would have no baseline - every
+        // pre-existing warning in it would then read as newly introduced.
+        // Resolve the pre-rename path and read the baseline from there, so a
+        // pure move is measured against the code it actually came from.
+        let source_path = renames
+            .get(&blob_path)
+            .cloned()
+            .unwrap_or_else(|| blob_path.clone());
         let output = command_in_dir(
             workspace_root,
             "git",
-            ["show", format!("{base}:{blob_path}").as_str()],
+            ["show", format!("{base}:{source_path}").as_str()],
         )
         .output()
-        .with_context(|| format!("spawn git show {base}:{blob_path}"))?;
+        .with_context(|| format!("spawn git show {base}:{source_path}"))?;
         if !output.status.success() {
             continue;
         }
+        // Written at the HEAD path so the warning keys line up: the gate
+        // compares on (path, function), and the point is to compare a moved
+        // function against its own former self.
         let base_path = base_root.join(rel_path);
         if let Some(parent) = base_path.parent() {
             fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;

@@ -129,11 +129,11 @@ fn owned_daemon_implementation_context(
     workspace: &std::path::Path,
     artifacts: &std::path::Path,
 ) -> StepContext {
-    use crate::engine::continuation::write_workspace_owner_marker;
-    use crate::engine::executors::scope_control::{
+    use crate::components::software_change::scope_control::{
         normalize_charter, persist_charter_and_status, test_measurement_config, DraftBudget,
         DraftReviewCaps, DraftSubsystem, TaskCharterDraft,
     };
+    use crate::engine::continuation::write_workspace_owner_marker;
     use crate::workflow::schema::ScopeControlConfig;
 
     initialize_llxprt_test_repo(workspace);

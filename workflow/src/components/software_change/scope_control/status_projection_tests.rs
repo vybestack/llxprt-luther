@@ -1,16 +1,16 @@
 //! Tests for [`super::status_projection`].
 
 use super::*;
-use crate::engine::executors::scope_control::decision::{
+use crate::components::software_change::scope_control::decision::{
     ScopeExpansionDecision, ScopeExpansionRequest, ScopeExpansionResolution,
 };
-use crate::engine::executors::scope_control::evaluation::{
+use crate::components::software_change::scope_control::evaluation::{
     ScopeEvaluation, Violation, ViolationCode,
 };
-use crate::engine::executors::scope_control::measurement::PatchMeasurement;
-use crate::engine::executors::scope_control::model::CanonicalReviewCaps;
-use crate::engine::executors::scope_control::persistence::ScopeStatus;
-use crate::engine::executors::scope_control::review_state::{
+use crate::components::software_change::scope_control::measurement::PatchMeasurement;
+use crate::components::software_change::scope_control::model::CanonicalReviewCaps;
+use crate::components::software_change::scope_control::persistence::ScopeStatus;
+use crate::components::software_change::scope_control::review_state::{
     ReviewExhaustionRouting, ReviewExhaustionSummary, ReviewHistory, ReviewKind, ReviewScope,
 };
 use tempfile::TempDir;
@@ -442,7 +442,7 @@ fn timeout_recovery_present_in_projection() {
     std::fs::write(&status_p, serde_json::to_string_pretty(&status).unwrap()).unwrap();
 
     // Write a timeout snapshot via the public API.
-    use crate::engine::executors::scope_control::model::{
+    use crate::components::software_change::scope_control::model::{
         normalize_charter, DraftBudget, DraftReviewCaps, DraftSubsystem, TaskCharterDraft,
     };
     let draft = TaskCharterDraft {

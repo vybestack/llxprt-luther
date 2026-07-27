@@ -13,8 +13,8 @@ use std::path::Path;
 use std::process::Command;
 
 use luther_workflow::components::generic::shell::ShellExecutor;
+use luther_workflow::components::software_change::git_config_publish::GitConfigPublishExecutor;
 use luther_workflow::engine::executor::{StepContext, StepExecutor};
-use luther_workflow::engine::executors::git_config_publish::GitConfigPublishExecutor;
 use luther_workflow::engine::executors::WorkspaceOwnershipVerifyExecutor;
 use luther_workflow::engine::transition::StepOutcome;
 use luther_workflow::workflow::config_loader::{

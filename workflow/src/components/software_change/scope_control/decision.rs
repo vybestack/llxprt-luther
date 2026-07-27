@@ -411,7 +411,7 @@ pub fn enforce_scope_barrier(
     collector: &dyn GitPatchCollector,
     scope_control: &crate::workflow::schema::ScopeControlConfig,
 ) -> Result<ScopeBarrierResult, crate::engine::error::EngineError> {
-    use crate::engine::executors::scope_control::evaluation::evaluate;
+    use crate::components::software_change::scope_control::evaluation::evaluate;
 
     let artifact_dir = resolve_artifact_dir(context);
     let run_id = context.run_id();
@@ -490,9 +490,11 @@ fn barrier_error(message: String) -> crate::engine::error::EngineError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::executors::scope_control::evaluation::ViolationCode;
-    use crate::engine::executors::scope_control::measurement::{ChangeStatus, FileChange};
-    use crate::engine::executors::scope_control::model::{
+    use crate::components::software_change::scope_control::evaluation::ViolationCode;
+    use crate::components::software_change::scope_control::measurement::{
+        ChangeStatus, FileChange,
+    };
+    use crate::components::software_change::scope_control::model::{
         normalize_charter, DraftBudget, DraftReviewCaps, DraftSubsystem, TaskCharterDraft,
     };
     use tempfile::TempDir;

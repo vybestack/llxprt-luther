@@ -933,7 +933,7 @@ fn remediate_pr_followup(
     else {
         return Ok(StepOutcome::Success);
     };
-    if let Some(outcome) = crate::engine::executors::scope_control_barrier_pub(context) {
+    if let Some(outcome) = crate::engine::executors::scope_control_barrier(context) {
         return Ok(outcome);
     }
     let request = run.invocation_request(context, params);
