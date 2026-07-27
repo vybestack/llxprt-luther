@@ -493,8 +493,8 @@ fn spawn_llxprt(
 fn spawn_error(context: &mut StepContext, binary: &str, e: std::io::Error) -> EngineError {
     context.set("llxprt_failure_reason", "process_error");
     if e.kind() == std::io::ErrorKind::NotFound {
-        EngineError::LlxprtBinaryNotFound {
-            path: binary.to_string(),
+        EngineError::ToolUnavailable {
+            message: format!("llxprt binary not found at `{binary}`"),
         }
     } else {
         EngineError::StepExecutionError {

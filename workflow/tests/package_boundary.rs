@@ -344,3 +344,110 @@ fn core_manifest_names_no_workspace_member() {
         );
     }
 }
+
+// --- the executor contract's error type -----------------------------------
+//
+// `EngineError` is returned by `StepExecutor::execute`, which every component
+// implements. A variant naming a tool or a repository host makes it impossible
+// to relocate any component into a domain-free package: the package would have
+// to depend on a type that knows what LLxprt is. This is the check that stops
+// that coupling from being reintroduced once it has been removed.
+
+/// The error type in the executor signature names no specific tool or host.
+#[test]
+fn the_executor_error_type_names_no_domain_concept() {
+    let source = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/engine/runner.rs"),
+    )
+    .expect("the runner source is readable");
+
+    let body = source
+        .split_once("pub enum EngineError {")
+        .expect("EngineError must still be declared in runner.rs")
+        .1;
+
+    // Brace-matched, not first-`\n}`: a multi-line struct variant's inner
+    // closing brace would otherwise truncate the scan and leave later
+    // variants unexamined. The opening brace of the enum itself is consumed
+    // by the split above, so this counter starts at 1 and walks until it
+    // returns to 0 at the enum's true terminator.
+    let mut depth: i32 = 1;
+    let mut end = 0usize;
+    for (i, ch) in body.char_indices() {
+        match ch {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    end = i;
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    assert!(end > 0, "the EngineError declaration is not brace-balanced");
+    let body = &body[..end];
+
+    // Only variant names are examined. Doc comments and `#[error(...)]`
+    // strings legitimately mention tools: the message is written by whoever
+    // raises the error, and telling an operator which binary is missing is
+    // the point. It is the *type* that must stay domain-free.
+    //
+    // A variant line begins with an identifier whose first letter is
+    // uppercase and ends its name at `{`, `(`, or end-of-line. This excludes
+    // multi-line field lists (`step_id: String`) and stray closing braces,
+    // which a naive per-line scan admitted as spurious variants.
+    let variants: Vec<&str> = body
+        .lines()
+        .map(str::trim)
+        .filter(|line| {
+            if line.is_empty()
+                || line.starts_with("//")
+                || line.starts_with("#[")
+                || line.starts_with("///")
+            {
+                return false;
+            }
+            let first = line.chars().next().unwrap_or(' ');
+            first.is_ascii_uppercase()
+        })
+        .filter_map(|line| line.split(['{', '(']).next())
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .collect();
+
+    assert!(
+        !variants.is_empty(),
+        "no variants were parsed out of EngineError; the scan is looking at the wrong thing and \
+         would pass no matter what the type contained"
+    );
+
+    // Tool and host names are matched anywhere in the variant: there is no
+    // innocent use of "llxprt" or "github" inside an error name.
+    let forbidden = ["llxprt", "github", "coderabbit", "pullrequest"];
+    let offenders: Vec<&&str> = variants
+        .iter()
+        .filter(|name| {
+            let lowered = name.to_lowercase();
+            if forbidden.iter().any(|word| lowered.contains(word)) {
+                return true;
+            }
+            // "issue" is matched only as a leading noun. `IssueNotFound` and
+            // `IssueLeaseHeld` are the tracker's issue; `ConfigurationIssue`,
+            // `IoIssue`, and `InternalIssue` are ordinary English for "a
+            // problem", and flagging those would push future authors toward
+            // worse names to satisfy a test rather than toward a boundary.
+            // Position is what separates the two, so position is what is
+            // checked.
+            lowered.starts_with("issue")
+        })
+        .collect();
+
+    assert!(
+        offenders.is_empty(),
+        "EngineError variants name domain concepts: {offenders:?}. This type is returned by \
+         every component, so a variant naming a tool blocks relocating any component into a \
+         domain-free package. Carry the detail in a message formatted by the domain instead."
+    );
+}

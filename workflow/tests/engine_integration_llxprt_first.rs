@@ -1437,7 +1437,7 @@ fn test_llxprt_executor_honors_explicit_binary_path() {
 /// A resolved `binary_path` that does not exist yields a typed
 /// `LlxprtBinaryNotFound` error with the failure reason recorded.
 #[test]
-fn test_llxprt_executor_missing_binary_path_is_typed_error() {
+fn test_llxprt_executor_missing_binary_path_is_reported_in_error() {
     use luther_workflow::engine::executors::LlxprtExecutor;
 
     let temp_dir = tempfile::tempdir().expect("temp dir should be created");
@@ -1453,8 +1453,15 @@ fn test_llxprt_executor_missing_binary_path_is_typed_error() {
         .execute(&mut context, &params)
         .expect_err("missing binary should error");
     match err {
-        EngineError::LlxprtBinaryNotFound { path } => {
-            assert_eq!(path, missing.to_string_lossy());
+        // The generic variant carries a formatted message rather than a
+        // `path` field, so the path is asserted inside the message. That is
+        // the guarantee that actually matters here: the operator has to be
+        // told which binary was missing.
+        EngineError::ToolUnavailable { message } => {
+            assert!(
+                message.contains(missing.to_string_lossy().as_ref()),
+                "the missing binary's path must still reach the operator, got: {message}"
+            );
         }
         other => panic!("unexpected error: {other:?}"),
     }

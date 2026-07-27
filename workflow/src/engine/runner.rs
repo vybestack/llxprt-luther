@@ -88,14 +88,22 @@ pub enum EngineError {
     #[error("step not found: {0}")]
     StepNotFound(String),
 
-    #[error("llxprt binary not found at `{path}`")]
-    LlxprtBinaryNotFound { path: String },
-
-    #[error("llxprt binary at `{path}` failed version check: {message}")]
-    LlxprtVersionError { path: String, message: String },
-
-    #[error("llxprt profile `{profile}` could not be resolved: {message}")]
-    LlxprtProfileError { profile: String, message: String },
+    /// An external tool a step depends on is unusable.
+    ///
+    /// Replaces three variants that named LLxprt directly. This type is
+    /// returned by `StepExecutor::execute`, which every component implements,
+    /// so a variant naming one tool made it impossible to relocate any
+    /// component into a domain-free package — the package would have had to
+    /// depend on a type that knows what LLxprt is.
+    ///
+    /// The message is formatted by the domain that raised it and carried
+    /// through verbatim, so the text a user sees is unchanged and stays owned
+    /// by the code that understands the tool. The engine needs to know only
+    /// that a required tool failed, which is what it did with all three
+    /// variants anyway: they shared a single match arm that set a diagnostic
+    /// and returned `Fatal`.
+    #[error("{message}")]
+    ToolUnavailable { message: String },
 
     /// Workspace ownership verification failed while routing into a
     /// `failure_cleanup` step. This is a terminal ownership failure: the run
@@ -141,11 +149,22 @@ impl From<crate::adapters::llxprt::LlxprtError> for EngineError {
     fn from(err: crate::adapters::llxprt::LlxprtError) -> Self {
         use crate::adapters::llxprt::LlxprtError;
         match err {
-            LlxprtError::BinaryNotFound { path } => EngineError::LlxprtBinaryNotFound { path },
-            LlxprtError::VersionCheckFailed { path, message }
-            | LlxprtError::NotExecutable { path, message } => {
-                EngineError::LlxprtVersionError { path, message }
-            }
+            // The messages are formatted here, by the code that knows what
+            // LLxprt is, and match the text the removed variants produced
+            // exactly. Tests assert these strings, and a user-visible message
+            // is not something a boundary change should quietly reword.
+            LlxprtError::BinaryNotFound { path } => EngineError::ToolUnavailable {
+                message: format!("llxprt binary not found at `{path}`"),
+            },
+            // Forwarded verbatim from the adapter's own Display rather than
+            // reformatted here. The previous code funnelled NotExecutable
+            // through the version-check wording, so a permissions failure was
+            // reported as a failed version check. Delegating removes the
+            // second place a message could be written and lets the two
+            // variants keep their distinct text.
+            other => EngineError::ToolUnavailable {
+                message: other.to_string(),
+            },
         }
     }
 }
@@ -336,9 +355,7 @@ impl EngineRunner {
                     self.context.set("diagnostic", &error.to_string());
                     StepOutcome::Fatal
                 }
-                Err(error @ EngineError::LlxprtBinaryNotFound { .. })
-                | Err(error @ EngineError::LlxprtVersionError { .. })
-                | Err(error @ EngineError::LlxprtProfileError { .. }) => {
+                Err(error @ EngineError::ToolUnavailable { .. }) => {
                     self.context.set("diagnostic", &error.to_string());
                     StepOutcome::Fatal
                 }
@@ -831,5 +848,7 @@ impl EngineRunner {
     }
 }
 
+#[cfg(test)]
+mod failure_cleanup_lease_tests;
 #[cfg(test)]
 mod runner_tests;
