@@ -515,7 +515,10 @@ fn the_executor_contract_imports_nothing_from_persistence_or_the_runner() {
             if trimmed.starts_with("//") {
                 continue;
             }
-            if trimmed.starts_with("use ") {
+            // `pub use` counts too: a re-export is a dependency and it also
+            // hands the re-exported type to everyone downstream, so it couples
+            // harder than a plain import rather than less.
+            if trimmed.starts_with("use ") || trimmed.starts_with("pub use ") {
                 total_imports += 1;
             }
             if !trimmed.contains("crate::") {

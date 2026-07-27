@@ -225,7 +225,9 @@ pub fn run_preflight(
     Ok(validated)
 }
 
-// business.
+// The conversion into the engine error lives here, beside the type it
+// understands, rather than inside the engine. The engine only needs to learn
+// that a required tool is unusable; the wording is this module's business.
 use crate::engine::error::EngineError;
 
 impl From<LlxprtError> for EngineError {
