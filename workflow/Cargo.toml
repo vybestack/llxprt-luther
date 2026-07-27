@@ -1,5 +1,5 @@
 [workspace]
-members = ["xtask"]
+members = ["xtask", "crates/luther-engine-core"]
 resolver = "2"
 
 [package]
@@ -28,6 +28,7 @@ dirs = "5"
 libc = "0.2"
 rustix = { version = "1.1.4", features = ["fs", "process"] }
 sha2 = "0.10"
+luther-engine-core = { path = "crates/luther-engine-core" }
 
 [dev-dependencies]
 rstest = "0.25"

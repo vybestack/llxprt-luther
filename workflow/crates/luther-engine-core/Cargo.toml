@@ -1,0 +1,13 @@
+[package]
+name = "luther-engine-core"
+version = "0.1.0"
+edition = "2021"
+description = "Domain-free execution primitives for the Luther engine"
+license = "MIT"
+
+# Dependencies here are load-bearing, not incidental. Every entry added to this
+# list is a claim that the primitive needs it; a domain package must never
+# appear, and the boundary test in tests/package_boundary.rs enforces that
+# mechanically rather than by review.
+[dependencies]
+sha2 = "0.10"
