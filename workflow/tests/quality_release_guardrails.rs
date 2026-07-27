@@ -2660,7 +2660,9 @@ fn test_local_ocr_review_contract_is_documented_and_guarded() {
 fn test_ocr_pr_review_fails_closed_on_version_mismatch() {
     let content = ocr_pr_review_workflow_content();
     assert!(
-        content.contains(r#"grep -qE "(^|[[:space:]])v${OCR_VERSION//./\\.}([[:space:]]|$)" ocr-version.txt"#),
+        content.contains(
+            r#"grep -qE "(^|[[:space:]])v${OCR_VERSION//./\\.}([[:space:]]|$)" ocr-version.txt"#
+        ),
         "the workflow must compare the installed version against OCR_VERSION, anchored so that \
          a shorter version cannot satisfy a longer pin"
     );
