@@ -199,6 +199,9 @@ pub fn apply_child_overrides(
         issue: Some(request.issue_number.to_string()),
         work_dir: request.work_dir.clone(),
         artifact_dir: request.artifact_dir.clone(),
+        // A child inherits the transport already resolved in its config rather
+        // than receiving one from the parent request.
+        transport_url: None,
     };
     apply_target_profile_overrides(config, &overrides)
         .map_err(|err| format!("apply child target overrides: {err}"))?;

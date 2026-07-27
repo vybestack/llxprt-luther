@@ -10,6 +10,14 @@ pub struct TargetProfileOverrides {
     pub issue: Option<String>,
     pub work_dir: Option<PathBuf>,
     pub artifact_dir: Option<PathBuf>,
+    /// Git transport (clone/push target), distinct from `repo`.
+    ///
+    /// `repo` is logical identity -- `owner/name` -- and addresses the GitHub
+    /// API. This addresses Git itself, and the two are allowed to disagree so a
+    /// harness can push to a local bare repository while PR identity still
+    /// refers to the logical repository. Unset means "derive from `repo`",
+    /// which reproduces the production HTTPS URL exactly.
+    pub transport_url: Option<String>,
 }
 
 impl TargetProfileOverrides {
@@ -19,7 +27,79 @@ impl TargetProfileOverrides {
             && self.issue.is_none()
             && self.work_dir.is_none()
             && self.artifact_dir.is_none()
+            && self.transport_url.is_none()
     }
+}
+
+/// Variable holding the resolved Git transport URL.
+pub const GIT_TRANSPORT_URL_VAR: &str = "git_transport_url";
+
+/// Production transport for a logical repository.
+///
+/// The single definition of the default, so the derived value cannot drift from
+/// what shipped before the transport seam existed.
+#[must_use]
+pub fn default_transport_url(target_repo: &str) -> String {
+    format!("https://github.com/{target_repo}.git")
+}
+
+/// Resolve the Git transport URL, preferring an explicit value over the default
+/// derived from logical identity.
+///
+/// Precedence: an already-set `git_transport_url` variable (from an override or
+/// the config) wins; otherwise it is derived from `target_repo`. With no
+/// override the result is byte-identical to the previously hardcoded URL.
+fn resolve_transport_url(config: &mut WorkflowConfig) -> Result<()> {
+    if let Some(existing) = config.variables.get(GIT_TRANSPORT_URL_VAR) {
+        let existing = existing.clone();
+        validate_transport_url(&existing)?;
+        return Ok(());
+    }
+    let Some(target_repo) = config.variables.get("target_repo").cloned() else {
+        return Ok(());
+    };
+    let derived = default_transport_url(&target_repo);
+    validate_transport_url(&derived)?;
+    insert_var(config, GIT_TRANSPORT_URL_VAR, &derived);
+    Ok(())
+}
+
+/// Reject a transport URL that cannot be used safely.
+///
+/// Fails closed before any mutation: an unresolved template, embedded control
+/// bytes, or a leading dash (which Git would read as an option) is refused
+/// rather than passed to Git and discovered mid-run.
+fn validate_transport_url(url: &str) -> Result<()> {
+    let invalid = |detail: &str| {
+        Err(ConfigError {
+            message: format!("invalid git transport url {url:?}: {detail}"),
+            source_path: None,
+            kind: ConfigErrorKind::ValidationError,
+        })
+    };
+    if url.is_empty() {
+        return invalid("must not be empty");
+    }
+    if url.contains(['{', '}']) {
+        return invalid("contains an unresolved template placeholder");
+    }
+    if url.chars().any(|ch| ch.is_control() || ch == '\0') {
+        return invalid("contains control characters");
+    }
+    if url.starts_with('-') {
+        return invalid("must not begin with '-', which Git would read as an option");
+    }
+    // Local paths are permitted so a test can push to a bare repository on
+    // disk; that is the whole point of separating transport from identity.
+    let recognized = url.starts_with("https://")
+        || url.starts_with("ssh://")
+        || url.starts_with("git@")
+        || url.starts_with("file://")
+        || url.starts_with('/');
+    if !recognized {
+        return invalid("must be an https, ssh, file, or absolute-path transport");
+    }
+    Ok(())
 }
 
 #[must_use]
@@ -50,6 +130,7 @@ pub fn resolve_target_profile(config: &mut WorkflowConfig) -> Result<()> {
     merge_list_variables(config, &profile);
     merge_prompt_guidance(config, &profile);
     merge_bootstrap(config, &profile);
+    resolve_transport_url(config)?;
     Ok(())
 }
 
@@ -78,6 +159,15 @@ pub fn apply_target_profile_overrides(
         let artifact_dir_str = utf8_path_override("artifact_dir", artifact_dir)?;
         insert_var(config, "artifact_dir", artifact_dir_str);
     }
+
+    if let Some(transport_url) = overrides.transport_url.as_deref() {
+        validate_transport_url(transport_url)?;
+        insert_var(config, GIT_TRANSPORT_URL_VAR, transport_url);
+    }
+
+    // Always resolve, so a config that never carried the variable still gets
+    // the derived production default.
+    resolve_transport_url(config)?;
 
     Ok(())
 }

@@ -18,6 +18,7 @@ use crate::engine::executor::{interpolate_string, StepContext, StepExecutor};
 use crate::engine::runner::EngineError;
 use crate::engine::transition::StepOutcome;
 use crate::engine::workspace_ownership::{descriptor_matches_authorization, WorkspaceAnchor};
+use crate::workflow::target_profile::{default_transport_url, GIT_TRANSPORT_URL_VAR};
 
 const STEP_ID: &str = "git_config_publish";
 const MAX_CONFIG_BYTES: usize = 64 * 1024;
@@ -41,15 +42,15 @@ impl StepExecutor for GitConfigPublishExecutor {
         context: &mut StepContext,
         params: &serde_json::Value,
     ) -> Result<StepOutcome, EngineError> {
-        let authorization = context.workspace_authorization().ok_or_else(|| {
-            fatal("workspace authorization from workspace_ownership_verify is required")
-        })?;
         let origin_template = params
             .get("origin_url")
             .and_then(serde_json::Value::as_str)
             .ok_or_else(|| fatal("origin_url must be a string"))?;
-        let origin_url = interpolate_string(origin_template, context);
+        let origin_url = resolve_origin_url(origin_template, context)?;
         validate_origin_url(&origin_url)?;
+        let authorization = context.workspace_authorization().ok_or_else(|| {
+            fatal("workspace authorization from workspace_ownership_verify is required")
+        })?;
 
         let workspace = WorkspaceAnchor::open(context.work_dir())
             .map_err(|error| fatal(&format!("failed to anchor workspace: {error}")))?;
@@ -72,6 +73,26 @@ impl StepExecutor for GitConfigPublishExecutor {
         context.set("git_config_published", "true");
         Ok(StepOutcome::Success)
     }
+}
+
+/// Resolve the origin URL, filling in the derived transport when the context
+/// does not already carry one.
+///
+/// The transport variable is normally resolved at config load. A caller that
+/// builds a context directly still has logical identity, so the production
+/// default is derived from it here rather than failing on an unresolved
+/// template. There is one definition of that default, so the two paths cannot
+/// drift apart.
+fn resolve_origin_url(template: &str, context: &mut StepContext) -> Result<String, EngineError> {
+    if context.get(GIT_TRANSPORT_URL_VAR).is_none() {
+        let derived = context
+            .get("target_repo")
+            .map(|target_repo| default_transport_url(target_repo));
+        if let Some(derived) = derived {
+            context.set(GIT_TRANSPORT_URL_VAR, &derived);
+        }
+    }
+    Ok(interpolate_string(template, context))
 }
 
 fn validate_origin_url(origin_url: &str) -> Result<(), EngineError> {
@@ -238,11 +259,47 @@ mod tests {
     }
 
     fn params() -> serde_json::Value {
-        serde_json::json!({"origin_url": "https://github.com/{target_repo}.git"})
+        // Matches the shipping workflow, which now interpolates the resolved
+        // transport variable rather than hardcoding a GitHub URL.
+        serde_json::json!({"origin_url": "{git_transport_url}"})
     }
 
     fn execute(context: &mut StepContext) -> Result<StepOutcome, EngineError> {
         GitConfigPublishExecutor.execute(context, &params())
+    }
+
+    #[test]
+    fn derives_the_production_transport_when_context_lacks_one() {
+        // A context built directly (as tests and some callers do) carries
+        // logical identity but no resolved transport variable. The derived
+        // default must match production exactly rather than leaving the
+        // template unresolved.
+        let workspace = tempfile::tempdir().unwrap();
+        repository(workspace.path());
+        let mut context = context(workspace.path());
+
+        assert_eq!(execute(&mut context).unwrap(), StepOutcome::Success);
+        assert_eq!(
+            std::fs::read(workspace.path().join(".git/config")).unwrap(),
+            render_config("https://github.com/owner/repo.git")
+        );
+    }
+
+    #[test]
+    fn an_explicit_transport_overrides_the_derived_default() {
+        // Logical identity stays owner/repo while Git addresses a local bare
+        // repository -- the disagreement the transport seam exists to allow.
+        let workspace = tempfile::tempdir().unwrap();
+        repository(workspace.path());
+        let mut context = context(workspace.path());
+        context.set(GIT_TRANSPORT_URL_VAR, "/tmp/bare.git");
+
+        assert_eq!(execute(&mut context).unwrap(), StepOutcome::Success);
+        assert_eq!(
+            std::fs::read(workspace.path().join(".git/config")).unwrap(),
+            render_config("/tmp/bare.git")
+        );
+        assert_eq!(context.get("target_repo").unwrap(), "owner/repo");
     }
 
     #[test]

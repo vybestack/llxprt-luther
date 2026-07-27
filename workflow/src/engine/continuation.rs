@@ -106,6 +106,11 @@ pub fn continuation_overrides(md: &RunMetadata) -> TargetProfileOverrides {
         issue: md.issue_lease_number().map(|anchor| anchor.to_string()),
         work_dir: md.workspace_path.as_ref().map(PathBuf::from),
         artifact_dir: md.artifact_root.as_ref().map(PathBuf::from),
+        // Not carried in run metadata: transport is resolved from the reloaded
+        // config, which either carries an explicit value or derives the
+        // production default from the logical repository. A resumed run
+        // therefore reaches the same transport it started with.
+        transport_url: None,
     }
 }
 

@@ -66,6 +66,11 @@ pub struct RunArgs {
     /// Target repository in OWNER/NAME form
     #[arg(long, value_name = "OWNER/NAME")]
     pub repo: Option<String>,
+    /// Git transport URL for clone/push, when it must differ from the
+    /// repository's public GitHub URL (for example a local bare repository).
+    /// Defaults to the HTTPS URL derived from --repo.
+    #[arg(long, value_name = "URL")]
+    pub transport_url: Option<String>,
     /// Target issue number
     #[arg(long, value_name = "NUMBER")]
     pub issue: Option<String>,

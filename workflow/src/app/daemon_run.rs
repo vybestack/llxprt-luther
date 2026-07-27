@@ -50,6 +50,9 @@ pub fn launch_daemon_workflow(
         issue: Some(request.issue_number.to_string()),
         work_dir: request.work_dir.clone(),
         artifact_dir: request.artifact_dir.clone(),
+        // The daemon dispatches against real repositories, so transport is
+        // always the default derived from logical identity.
+        transport_url: None,
     };
     apply_target_profile_overrides(&mut config, &overrides)
         .map_err(|e| format!("apply overrides: {e}"))?;

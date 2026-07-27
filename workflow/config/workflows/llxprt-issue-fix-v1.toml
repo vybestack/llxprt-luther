@@ -140,7 +140,7 @@ step_type = "git_config_publish"
 description = "Publish repository-local Git configuration through authorized descriptors"
 
 [steps.parameters]
-origin_url = "https://github.com/{target_repo}.git"
+origin_url = "{git_transport_url}"
 
 [[steps]]
 step_id = "workspace_ownership"
