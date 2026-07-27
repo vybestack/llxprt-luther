@@ -218,63 +218,82 @@ test('a slug is a separator-free key', () => {
 
 // A symlinked workspace plus an empty store root, so a test can create exactly
 // one of the two slug directories and assert which one is chosen.
+// Creating a symlink on Windows needs elevated privileges or developer mode, so
+// these tests would fail there for a reason unrelated to what they check. CI is
+// ubuntu-only today, so this is a guard against a future runner rather than an
+// observed failure.
+const symlinksAvailable = process.platform !== 'win32';
+
 function makeSymlinkedWorkspace(suffix) {
+  // Registered for the global cleanup before the symlink is attempted: if that
+  // throws, the returned cleanup never runs and the directories would leak.
   const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'ocr-ws-'));
+  tempDirs.push(workspace);
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ocr-root-'));
+  tempDirs.push(root);
+
   const link = path.join(os.tmpdir(), `ocr-link-${Date.now()}-${suffix}`);
   fs.symlinkSync(workspace, link);
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ocr-root-'));
+  tempDirs.push(link);
+
   const slugOf = (value) => path.resolve(value).replace(/^\//, '').replace(/\//g, '-');
   return {
     link,
     root,
     logical: slugOf(link),
     physical: fs.realpathSync(link).replace(/^\//, '').replace(/\//g, '-'),
-    cleanup: () => {
-      fs.rmSync(root, { recursive: true, force: true });
-      fs.unlinkSync(link);
-      fs.rmSync(workspace, { recursive: true, force: true });
-    },
   };
 }
 
-test('a store written under the physical slug is found through a symlink', () => {
+test('a store written under the physical slug is found through a symlink', { skip: !symlinksAvailable }, () => {
   const ws = makeSymlinkedWorkspace('a');
-  try {
-    assert.notStrictEqual(ws.logical, ws.physical, 'the symlink must alias a different path');
-    // The workspace is reached through the symlink, but the tool wrote its store
-    // under the physical name. Deriving the logical slug alone misses it.
-    fs.mkdirSync(path.join(ws.root, ws.physical), { recursive: true });
-    assert.strictEqual(sessionSlugForWorkspace(ws.link, ws.root), ws.physical);
-  } finally {
-    ws.cleanup();
-  }
+  assert.notStrictEqual(ws.logical, ws.physical, 'the symlink must alias a different path');
+  // The workspace is reached through the symlink, but the tool wrote its store
+  // under the physical name. Deriving the logical slug alone misses it.
+  fs.mkdirSync(path.join(ws.root, ws.physical), { recursive: true });
+  assert.strictEqual(sessionSlugForWorkspace(ws.link, ws.root), ws.physical);
 });
 
-test('a store written under the logical slug is found when the path resolves elsewhere', () => {
+test('a store written under the logical slug is found when the path resolves elsewhere', { skip: !symlinksAvailable }, () => {
   const ws = makeSymlinkedWorkspace('b');
-  try {
-    // Only the logical form exists, which is what happens when the tool ran with
-    // a symlinked $PWD that aliased its cwd. Resolving symlinks misses it.
-    fs.mkdirSync(path.join(ws.root, ws.logical), { recursive: true });
-    assert.strictEqual(sessionSlugForWorkspace(ws.link, ws.root), ws.logical);
-  } finally {
-    ws.cleanup();
-  }
+  // Only the logical form exists, which is what happens when the tool ran with
+  // a symlinked $PWD that aliased its cwd. Resolving symlinks misses it.
+  fs.mkdirSync(path.join(ws.root, ws.logical), { recursive: true });
+  assert.strictEqual(sessionSlugForWorkspace(ws.link, ws.root), ws.logical);
 });
 
-test('both slug forms are offered as candidates for a symlinked workspace', () => {
-  const real = makeSessionDir();
-  const link = path.join(os.tmpdir(), `ocr-link-${Date.now()}-c`);
-  fs.symlinkSync(real, link);
-  try {
-    const candidates = sessionSlugCandidatesForWorkspace(link);
-    const logical = path.resolve(link).replace(/^\//, '').replace(/\//g, '-');
-    const physical = fs.realpathSync(link).replace(/^\//, '').replace(/\//g, '-');
-    assert.ok(candidates.includes(logical), 'the logical form must be a candidate');
-    assert.ok(candidates.includes(physical), 'the physical form must be a candidate');
-  } finally {
-    fs.unlinkSync(link);
-  }
+test('both slug forms are offered as candidates for a symlinked workspace', { skip: !symlinksAvailable }, () => {
+  const ws = makeSymlinkedWorkspace('c');
+  const candidates = sessionSlugCandidatesForWorkspace(ws.link);
+  assert.ok(candidates.includes(ws.logical), 'the logical form must be a candidate');
+  assert.ok(candidates.includes(ws.physical), 'the physical form must be a candidate');
+});
+
+test('a path with no symlink yields one deduplicated candidate', () => {
+  // The two derivations agree here, and a caller checking a list must not probe
+  // the same store directory twice or report two candidates where there is one.
+  const dir = makeSessionDir();
+  const candidates = sessionSlugCandidatesForWorkspace(fs.realpathSync(dir));
+  assert.strictEqual(candidates.length, 1, `expected a single candidate, got ${candidates}`);
+});
+
+test('a nonexistent path still yields its logical candidate', () => {
+  // realpathSync throws here. The logical form is still the store the tool would
+  // have keyed on, so returning nothing would report no evidence for a review
+  // that may have completed.
+  const candidates = sessionSlugCandidatesForWorkspace('/nonexistent/workspace/path');
+  assert.deepStrictEqual(candidates, ['nonexistent-workspace-path']);
+});
+
+test('a broken symlink yields its logical candidate without throwing', { skip: !symlinksAvailable }, () => {
+  const missing = path.join(os.tmpdir(), `ocr-missing-${Date.now()}`);
+  const link = path.join(os.tmpdir(), `ocr-broken-${Date.now()}`);
+  fs.symlinkSync(missing, link);
+  tempDirs.push(link);
+  const candidates = sessionSlugCandidatesForWorkspace(link);
+  assert.deepStrictEqual(candidates, [
+    path.resolve(link).replace(/^\//, '').replace(/\//g, '-'),
+  ]);
 });
 
 // --- failed review events -------------------------------------------------

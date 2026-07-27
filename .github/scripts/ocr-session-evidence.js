@@ -34,8 +34,13 @@ function slugForPath(absolutePath) {
 }
 
 /**
- * Every slug the OCR session store might have used for this workspace, most
- * likely first.
+ * Every slug the OCR session store might have used for this workspace.
+ *
+ * The order carries no likelihood claim. Callers should prefer whichever
+ * candidate's store exists rather than trusting the first, which is what
+ * `sessionSlugForWorkspace` does. Ranking would be guesswork: the logical form
+ * wins only when the tool's process inherited a symlinked `$PWD` aliasing its
+ * cwd, and that is a property of the spawning environment, not of the path.
  *
  * The tool derives its store directory from its own working directory via Go's
  * `os.Getwd`, which honours `$PWD` only when `$PWD` names the same directory as
