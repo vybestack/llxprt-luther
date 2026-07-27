@@ -394,12 +394,24 @@ fn the_executor_error_type_names_no_domain_concept() {
          would pass no matter what the type contained"
     );
 
-    let forbidden = ["llxprt", "github", "coderabbit", "pullrequest", "issue"];
+    // Tool and host names are matched anywhere in the variant: there is no
+    // innocent use of "llxprt" or "github" inside an error name.
+    let forbidden = ["llxprt", "github", "coderabbit", "pullrequest"];
     let offenders: Vec<&&str> = variants
         .iter()
         .filter(|name| {
             let lowered = name.to_lowercase();
-            forbidden.iter().any(|word| lowered.contains(word))
+            if forbidden.iter().any(|word| lowered.contains(word)) {
+                return true;
+            }
+            // "issue" is matched only as a leading noun. `IssueNotFound` and
+            // `IssueLeaseHeld` are the tracker's issue; `ConfigurationIssue`,
+            // `IoIssue`, and `InternalIssue` are ordinary English for "a
+            // problem", and flagging those would push future authors toward
+            // worse names to satisfy a test rather than toward a boundary.
+            // Position is what separates the two, so position is what is
+            // checked.
+            lowered.starts_with("issue")
         })
         .collect();
 
