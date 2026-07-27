@@ -384,13 +384,26 @@ fn launcher_script(binary: &Path, exec_log: &Path) -> String {
     )
 }
 
-fn install_script(path: &Path, body: &str) {
-    std::fs::write(path, body).unwrap();
+/// Writes an executable script and guarantees the handle is closed first.
+///
+/// Executing a file whose write handle is still open fails with `ETXTBSY`
+/// ("Text file busy") on Linux. The window is narrow enough that it never
+/// reproduced locally on macOS and only appeared under CI load, so the close
+/// is explicit and the permission bits are set through the open handle rather
+/// than by path.
+pub fn install_script(path: &Path, body: &str) {
+    use std::io::Write as _;
+
+    let mut file = std::fs::File::create(path).expect("create script");
+    file.write_all(body.as_bytes()).expect("write script");
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        file.set_permissions(std::fs::Permissions::from_mode(0o755))
+            .expect("mark script executable");
     }
+    file.sync_all().expect("flush script to disk");
+    drop(file);
 }
 
 fn prepended_path(dir: &Path) -> String {

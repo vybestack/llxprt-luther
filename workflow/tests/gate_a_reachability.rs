@@ -248,12 +248,7 @@ fn an_unrecognized_gh_invocation_fails_closed() {
     let log = root.path().join("gh.log");
     let script = gate_a_harness::fake_gh::FakeGitHub::new(1).script(&log);
     let path = root.path().join("gh");
-    std::fs::write(&path, &script).unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-    }
+    gate_a_harness::install_script(&path, &script);
 
     let output = std::process::Command::new(&path)
         .args(["release", "delete", "v1.0.0"])
