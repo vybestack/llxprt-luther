@@ -2,12 +2,12 @@
 
 use serde_json::{json, Value};
 
+use crate::engine::error::EngineError;
 use crate::engine::executors::pr_followup_artifacts::{
     ArtifactReplayKey, ArtifactWriteContext, ArtifactWriteRecord, ClockSleeper,
     JsonArtifactWriteRequest, PrFollowupArtifactStore,
 };
 use crate::engine::executors::pr_followup_types::PrFollowupBinding;
-use crate::engine::runner::EngineError;
 
 use super::retry_history::{load_matching_state_locked, state_sequence_locked};
 use super::retry_state::{

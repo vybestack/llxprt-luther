@@ -1,4 +1,5 @@
 use super::*;
+use crate::engine::error::EngineError;
 use crate::engine::executor::{interpolate_string, StepContext};
 use crate::engine::executors::pr_followup_artifacts::PrFollowupArtifactStore;
 use crate::engine::executors::pr_followup_types::NO_REMEDIATION_OUTPUT_HEAD;
@@ -6,7 +7,6 @@ use crate::engine::executors::pr_followup_types::{PrFollowupBinding, PR_FOLLOWUP
 use crate::engine::executors::pr_identity_params::{
     explicit_pr_number, string_identity_is_explicit,
 };
-use crate::engine::runner::EngineError;
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;

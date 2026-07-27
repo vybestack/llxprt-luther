@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use crate::engine::runner::EngineError;
+use crate::engine::error::EngineError;
 use crate::engine::transition::StepOutcome;
 
 // Re-export executors for convenience
@@ -78,12 +78,15 @@ impl StepContext {
         Self::build(work_dir, run_id, false)
     }
 
-    pub(crate) fn from_run_context(
-        work_dir: PathBuf,
-        run_id: String,
-        run_context: &crate::engine::runner::RunContext,
-    ) -> Self {
-        Self::build(work_dir, run_id, run_context.daemon_managed)
+    /// Build a context for a run whose daemon-managed status is already known.
+    ///
+    /// Takes the flag rather than the runner's `RunContext`: the only thing
+    /// ever read from it here was `daemon_managed`, and naming the type made
+    /// the executor contract depend on the runner. Every component implements
+    /// this contract, so that dependency would have been inherited by any
+    /// component package.
+    pub(crate) fn for_run(work_dir: PathBuf, run_id: String, daemon_managed: bool) -> Self {
+        Self::build(work_dir, run_id, daemon_managed)
     }
 
     fn build(work_dir: PathBuf, run_id: String, daemon_managed: bool) -> Self {

@@ -481,22 +481,17 @@ fn the_executor_error_type_names_no_domain_concept() {
 #[test]
 fn the_executor_contract_imports_nothing_from_persistence_or_the_runner() {
     let src_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-    let contract = src_root.join("engine/error.rs");
-    let source =
-        std::fs::read_to_string(&contract).expect("the executor contract error module is readable");
 
-    let imports: Vec<&str> = source
-        .lines()
-        .map(str::trim)
-        .filter(|line| line.starts_with("use "))
-        .collect();
-
-    assert!(
-        !imports.is_empty(),
-        "no imports were parsed from {}; the scan is looking at the wrong thing and would pass \
-         no matter what the module depended on",
-        contract.display()
-    );
+    // The contract a component actually implements: the trait and context, and
+    // the error it can fail with.
+    //
+    // `transition.rs` is deliberately excluded. It additionally holds
+    // `resolve_transition_schema`, a convenience over `workflow::schema` that
+    // the runner calls and no component implements. Including the file would
+    // fail this test for a dependency that is not on the contract surface;
+    // splitting it belongs to B6 rather than being smuggled in here. Recorded
+    // rather than silently scoped around.
+    let contract_files = ["engine/error.rs", "engine/executor.rs"];
 
     let forbidden = [
         "persistence",
@@ -505,15 +500,44 @@ fn the_executor_contract_imports_nothing_from_persistence_or_the_runner() {
         "workflow::",
         "instance",
     ];
-    let offenders: Vec<&&str> = imports
-        .iter()
-        .filter(|line| forbidden.iter().any(|word| line.contains(word)))
-        .collect();
+    let mut offenders: Vec<String> = Vec::new();
+    let mut total_imports = 0usize;
+
+    for relative in contract_files {
+        let path = src_root.join(relative);
+        let source = std::fs::read_to_string(&path).expect("a contract source file is readable");
+
+        // Both `use` lines and inline paths count. `crate::engine::runner::X`
+        // written inline in a signature couples exactly as hard as an import,
+        // and that is precisely how `StepContext` reached the runner.
+        for (number, line) in source.lines().enumerate() {
+            let trimmed = line.trim();
+            if trimmed.starts_with("//") {
+                continue;
+            }
+            if trimmed.starts_with("use ") {
+                total_imports += 1;
+            }
+            if !trimmed.contains("crate::") {
+                continue;
+            }
+            if forbidden.iter().any(|word| trimmed.contains(word)) {
+                offenders.push(format!("{relative}:{}: {trimmed}", number + 1));
+            }
+        }
+    }
+
+    assert!(
+        total_imports > 0,
+        "no imports were parsed from the contract files; the scan is looking at the wrong thing \
+         and would pass no matter what they depended on"
+    );
 
     assert!(
         offenders.is_empty(),
-        "the executor contract imports {offenders:?}. Every component implements this contract, \
-         so each of these becomes a dependency of every component package. Move the conversion \
-         to the side that owns the other type instead."
+        "the executor contract reaches into other layers:\n  {}\nEvery component implements this \
+         contract, so each of these becomes a dependency of every component package. Pass the \
+         value it needs instead of naming the type that holds it.",
+        offenders.join("\n  ")
     );
 }

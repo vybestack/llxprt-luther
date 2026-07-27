@@ -21,13 +21,13 @@ use super::{
     u64_param, write_pending_marker_actions_for_fixed_feedback, FixedFeedbackMarkerContext,
     RemediationResultValidation, RemediationResultValidationArtifact,
 };
+use crate::engine::error::EngineError;
 use crate::engine::executor::StepContext;
 use crate::engine::executors::pr_followup_artifacts::{
     ArtifactReplayKey, ArtifactWriteContext, ArtifactWriteRecord, ClockSleeper,
     JsonArtifactWriteRequest, PrFollowupArtifactStore, SystemPrFollowupFilesystem,
 };
 use crate::engine::executors::pr_followup_types::PrFollowupBinding;
-use crate::engine::runner::EngineError;
 use crate::engine::transition::StepOutcome;
 
 /// Projects authoritative engine retry counters from `state` onto `result`.

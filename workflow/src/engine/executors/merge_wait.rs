@@ -25,9 +25,9 @@
 //! @plan:PLAN-20260723-SELFHOST-RELIABILITY.P17
 //! @requirement:REQ-RP-010
 
+use crate::engine::error::EngineError;
 use crate::engine::executor::{StepContext, StepExecutor};
 use crate::engine::recovery::typed_merge::{MergeError, MergeRemoteProbe};
-use crate::engine::runner::EngineError;
 use crate::engine::transition::StepOutcome;
 
 /// A merge-wait probe: checks whether a PR is merged without computing

@@ -3,8 +3,8 @@
 /// `WriteFile` executor - writes content to files.
 use std::fs;
 
+use crate::engine::error::EngineError;
 use crate::engine::executor::{interpolate_string, StepContext, StepExecutor};
-use crate::engine::runner::EngineError;
 use crate::engine::transition::StepOutcome;
 
 /// `WriteFile` executor that writes content to files.

@@ -13,7 +13,7 @@ use rustix::fs::{
 };
 use rustix::io::Errno;
 
-use crate::engine::runner::EngineError;
+use crate::engine::error::EngineError;
 
 use super::artifact_error;
 

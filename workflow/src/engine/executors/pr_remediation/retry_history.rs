@@ -9,12 +9,12 @@ use std::path::PathBuf;
 
 use serde_json::Value;
 
+use crate::engine::error::EngineError;
 use crate::engine::executors::pr_followup_artifacts::{
     ArtifactWriter, PrFollowupArtifactStore, RecoverableCurrentArtifact,
     RecoverableHistoryCandidate,
 };
 use crate::engine::executors::pr_followup_types::PrFollowupBinding;
-use crate::engine::runner::EngineError;
 
 use super::retry_state::{
     LaunchPhase, RetryBudget, RetryCounters, RetryScopeKey, RetryState, RETRY_STATE_FAMILY,

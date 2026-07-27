@@ -4,8 +4,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
+use crate::engine::error::EngineError;
 use crate::engine::executor::StepContext;
-use crate::engine::runner::EngineError;
 
 pub(super) const STREAM_CAPTURE_LIMIT: usize = 64 * 1024;
 const EXCERPT_LIMIT: usize = (STREAM_CAPTURE_LIMIT - 160) / 2;

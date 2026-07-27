@@ -1,4 +1,5 @@
 use super::*;
+use crate::engine::error::EngineError;
 use crate::engine::executors::pr_followup_artifacts::{
     ArtifactWriteContext, ClockSleeper, JsonArtifactWriteRequest, PrFollowupArtifactStore,
     RawTextArtifactWriteRequest, ValidatedHistoryLedger,
@@ -7,7 +8,6 @@ use crate::engine::executors::pr_followup_types::{
     FixedActionEvidenceRef, PrFollowupBinding, NO_REMEDIATION_OUTPUT_HEAD,
     PR_FOLLOWUP_SCHEMA_VERSION,
 };
-use crate::engine::runner::EngineError;
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
 use std::path::PathBuf;

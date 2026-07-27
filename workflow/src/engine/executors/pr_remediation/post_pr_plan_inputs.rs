@@ -1,8 +1,8 @@
 use serde_json::{json, Value};
 
+use crate::engine::error::EngineError;
 use crate::engine::executors::pr_followup_artifacts::PrFollowupArtifactStore;
 use crate::engine::executors::pr_followup_types::PrFollowupBinding;
-use crate::engine::runner::EngineError;
 
 use super::{artifact_sequence, source_artifact, stable_source_id, string_field};
 

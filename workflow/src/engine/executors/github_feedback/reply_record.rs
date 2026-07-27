@@ -1,6 +1,6 @@
 use super::*;
+use crate::engine::error::EngineError;
 use crate::engine::executors::github_pr::GithubPrCommandRunner;
-use crate::engine::runner::EngineError;
 use serde_json::{json, Value};
 use std::path::Path;
 

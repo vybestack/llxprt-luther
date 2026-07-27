@@ -33,10 +33,10 @@ use serde_json::{Map, Value};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use crate::engine::error::EngineError;
 use crate::engine::executors::pr_followup_types::{
     ArtifactSequenceMetadata, CiFailures, PostPrFailureTerminal, PrCheckStatus, PrFollowupBinding,
 };
-use crate::engine::runner::EngineError;
 
 /// Clock/sleeper abstraction for deterministic post-PR polling and artifact timestamps.
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P05

@@ -177,8 +177,11 @@ fn owned_daemon_implementation_context(
         daemon_managed: true,
         ..crate::engine::runner::RunContext::default()
     };
-    let mut context =
-        StepContext::from_run_context(workspace.to_path_buf(), "run-owned".into(), &run_context);
+    let mut context = StepContext::for_run(
+        workspace.to_path_buf(),
+        "run-owned".into(),
+        run_context.daemon_managed,
+    );
     context.set_current_step_id("implement");
     context.set("artifact_dir", &artifacts.to_string_lossy());
     context.set(

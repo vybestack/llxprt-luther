@@ -1,5 +1,5 @@
 use super::{artifact_error, binding_from_value, path_safety};
-use crate::engine::runner::EngineError;
+use crate::engine::error::EngineError;
 use serde_json::Value;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};

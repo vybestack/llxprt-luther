@@ -7,6 +7,7 @@ use std::process::Command;
 
 use serde_json::{json, Value};
 
+use crate::engine::error::EngineError;
 use crate::engine::executor::{interpolate_string, StepContext, StepExecutor};
 use crate::engine::executors::pr_check_wait::{
     check_bucket as shared_check_bucket, classify_api_error, classify_pr_checks, config_from_value,
@@ -18,7 +19,6 @@ use crate::engine::executors::pr_followup_artifacts::{
 use crate::engine::executors::pr_followup_types::{
     OverallState, PrFollowupBinding, PR_FOLLOWUP_SCHEMA_VERSION,
 };
-use crate::engine::runner::EngineError;
 use crate::engine::transition::StepOutcome;
 
 mod ci_failures;

@@ -29,8 +29,8 @@
 //!
 //! @plan:PLAN-20260623-LUTHER-CONTINUATION
 
+use crate::engine::error::EngineError;
 use crate::engine::executor::{StepContext, StepExecutor};
-use crate::engine::runner::EngineError;
 use crate::engine::transition::StepOutcome;
 use crate::engine::workspace_ownership::{
     adjudicate_workspace_ownership, ensure_durable_workspace_ownership, verify_workspace_ownership,
@@ -230,10 +230,10 @@ mod tests {
             daemon_managed: daemon,
             ..RunContext::default()
         };
-        let mut context = StepContext::from_run_context(
+        let mut context = StepContext::for_run(
             PathBuf::from(workspace),
             run_id.to_string(),
-            &run_context,
+            run_context.daemon_managed,
         );
         context.set_current_step_id("workspace_ownership");
         context
@@ -430,10 +430,10 @@ mod tests {
             daemon_managed: daemon,
             ..RunContext::default()
         };
-        let mut context = StepContext::from_run_context(
+        let mut context = StepContext::for_run(
             PathBuf::from(workspace),
             run_id.to_string(),
-            &run_context,
+            run_context.daemon_managed,
         );
         context.set_current_step_id("workspace_ownership_verify");
         context

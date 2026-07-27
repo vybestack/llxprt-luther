@@ -1,9 +1,9 @@
 use super::*;
+use crate::engine::error::EngineError;
 use crate::engine::executor::StepContext;
 use crate::engine::executors::pr_followup_types::PR_FOLLOWUP_SCHEMA_VERSION;
 use crate::engine::executors::GithubPrCommandRunner;
 use crate::engine::executors::{PrFollowupArtifactStore, PrFollowupBinding, SystemClockSleeper};
-use crate::engine::runner::EngineError;
 use crate::engine::transition::StepOutcome;
 use serde_json::{json, Value};
 use std::collections::BTreeSet;

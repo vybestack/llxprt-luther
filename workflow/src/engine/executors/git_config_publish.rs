@@ -14,8 +14,8 @@ use std::path::Path;
 use rustix::fs::{fstat, fsync, openat, renameat, unlinkat, AtFlags, Mode, OFlags};
 use rustix::io::Errno;
 
+use crate::engine::error::EngineError;
 use crate::engine::executor::{interpolate_string, StepContext, StepExecutor};
-use crate::engine::runner::EngineError;
 use crate::engine::transition::StepOutcome;
 use crate::engine::workspace_ownership::{descriptor_matches_authorization, WorkspaceAnchor};
 use crate::workflow::target_profile::GIT_TRANSPORT_URL_VAR;
