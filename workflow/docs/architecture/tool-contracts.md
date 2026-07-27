@@ -130,7 +130,7 @@ never produced.
 
 `tests/tool_contract_mutation/mutate.py` applies each of these to a clean tree,
 runs the suite, restores, and verifies the restored tree is green before
-reporting. All 31 fail the suite; the table lists them by the assumption each
+reporting. All 34 fail the suite; the table lists them by the assumption each
 one falsifies:
 
 | Mutation | Detects |
@@ -166,6 +166,9 @@ one falsifies:
 | Drift the documented count from the battery | a coverage claim nothing checks |
 | Record one flag twice | a duplicate silently shadowing |
 | Name an unhonoured flag after a second subcommand | a flag checked against the wrong command |
+| Claim review keys on the working directory | #179 |
+| Shorten the preview's exclusion header | #174 |
+| Describe review's durable artifact as stdout | #195 |
 
 The fifth is the one that matters. Digesting a capture only catches a *stale*
 digest; a maintainer who fabricates output will refresh the digest, because the

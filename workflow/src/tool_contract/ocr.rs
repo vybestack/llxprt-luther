@@ -91,7 +91,7 @@ pub fn contract() -> ToolContract {
             "version.txt",
             "40fad1ebc6e301cf7569b6d8540ce17184fa8f97744d95462dff51a41d03b8bc",
         ),
-        subcommands: vec![session_list(), session_show()],
+        subcommands: vec![session_list(), session_show(), review()],
     }
 }
 
@@ -223,5 +223,53 @@ fn session_show() -> SubcommandContract {
                 "c3e5b0709108fb4e56e41e06bb3458013555f807762b7e9ca31ce3c29bcbd205",
             ),
         ],
+    }
+}
+
+/// Behaviour of `review`, the subcommand that writes the session store.
+///
+/// Recorded because the two read subcommands were modelled while the writer -
+/// the one that decides where the store goes - was not, so the contract
+/// described how to read a store without recording what created it.
+fn review() -> SubcommandContract {
+    SubcommandContract {
+        subcommand: "review".to_string(),
+        // Keys on the Git root, measured rather than assumed: invoked from
+        // /tmp/gr179/sub/deep the store appeared under the slug for
+        // /tmp/gr179. Control: the same binary outside a repository created
+        // no store and did not walk up past it.
+        //
+        // This is the disagreement behind issue 248. The readers above key on
+        // the working directory, so a review run from a subdirectory writes
+        // where a read from that same subdirectory does not look.
+        state_key: StateKey::GitRoot,
+        result_source: ResultSource::DurableArtifact {
+            description: "the session jsonl written under the Git root's store slug; \
+                          stdout carries progress, not the reviewable result"
+                .to_string(),
+        },
+        flags: flags(&[
+            // Honoured: lists which files would be reviewed and exits without
+            // contacting a model, which is what makes it usable for capturing
+            // behaviour without spending a review.
+            ("--preview", FlagBehaviour::Honoured),
+            ("--from", FlagBehaviour::Honoured),
+            ("--to", FlagBehaviour::Honoured),
+        ]),
+        // The preview's section header. Issue 174 was a parser expecting
+        // "Excluded (2):" against a tool printing "Excluded from review (2):",
+        // so the exact wording is the thing worth constraining, and the digest
+        // above makes it uneditable without detection.
+        required_fields: vec![RequiredField {
+            name: "Excluded from review".to_string(),
+            used_for: "the preview's exclusion header; issue 174 was a parser expecting \
+                       \"Excluded (2):\" against a tool printing \"Excluded from review (2):\", \
+                       so a parser must be checked against this exact wording"
+                .to_string(),
+        }],
+        captures: vec![Capture {
+            file: "review--preview-from-subdirectory.stdout".to_string(),
+            sha256: "0b7a7d3c1e86d73e976fc27c4963cf19e6321336c68f53c81e33eb2f2bed2216".to_string(),
+        }],
     }
 }
