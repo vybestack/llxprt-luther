@@ -32,7 +32,18 @@ use luther_workflow::workflow::TargetProfileOverrides;
 /// Test setup deliberately does NOT neutralize global configuration, so the
 /// hardening assertions below observe what production code does rather than
 /// what the harness did on its behalf.
+/// Serializes tests that depend on process-global Git environment.
+///
+/// The environment is shared by every test in this binary and they run in
+/// parallel, so a hostile `GIT_CONFIG_GLOBAL` set by one test is inherited by
+/// any Git another test happens to launch inside that window.
+fn git_env_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 fn git(dir: &Path, args: &[&str]) -> std::process::Output {
+    let _guard = git_env_lock();
     let output = Command::new("git")
         .args(args)
         .current_dir(dir)
@@ -187,17 +198,23 @@ fn the_shipping_publisher_and_push_step_deliver_a_commit_to_a_bare_repository() 
     git(&workspace, &["add", "file.txt"]);
     git(&workspace, &["commit", "-m", "add file"]);
 
-    // The SHIPPING push step performs the push.
+    // The SHIPPING push step performs the push, under the same lock the
+    // hostile-config test uses so neither sees the other's environment.
     context.set_current_step_id("push_changes");
+    let pushed = {
+        let _guard = git_env_lock();
+        ShellExecutor.execute(
+            &mut context,
+            &shipped_step_params(&workflow, "push_changes"),
+        )
+    };
     assert_eq!(
-        ShellExecutor
-            .execute(
-                &mut context,
-                &shipped_step_params(&workflow, "push_changes")
-            )
-            .unwrap(),
+        pushed.unwrap(),
         StepOutcome::Success,
-        "the shipping push step must succeed over the resolved transport"
+        "the shipping push step must succeed over the resolved transport; stderr: {}",
+        context
+            .get("stderr")
+            .map_or("<none captured>", String::as_str)
     );
 
     // Verified by reading the bare repository itself.
@@ -264,13 +281,31 @@ fn the_shipping_push_step_neutralizes_hostile_global_git_configuration() {
     context.set_current_step_id("push_changes");
 
     // The hostile configuration is live in the environment the step inherits.
-    std::env::set_var("GIT_CONFIG_GLOBAL", &hostile);
-    let outcome = ShellExecutor.execute(
-        &mut context,
-        &shipped_step_params(&workflow, "push_changes"),
+    // Process environment is global to the test binary, so this window is
+    // serialized against every other test here that shells out to Git --
+    // otherwise the rewrite leaks into their pushes and fails them.
+    let outcome = {
+        let _guard = git_env_lock();
+        let restore = std::env::var("GIT_CONFIG_GLOBAL").ok();
+        std::env::set_var("GIT_CONFIG_GLOBAL", &hostile);
+        let outcome = ShellExecutor.execute(
+            &mut context,
+            &shipped_step_params(&workflow, "push_changes"),
+        );
+        match restore {
+            Some(previous) => std::env::set_var("GIT_CONFIG_GLOBAL", previous),
+            None => std::env::remove_var("GIT_CONFIG_GLOBAL"),
+        }
+        outcome
+    };
+    assert_eq!(
+        outcome.unwrap(),
+        StepOutcome::Success,
+        "stderr: {}",
+        context
+            .get("stderr")
+            .map_or("<none captured>", String::as_str)
     );
-    std::env::remove_var("GIT_CONFIG_GLOBAL");
-    assert_eq!(outcome.unwrap(), StepOutcome::Success);
 
     // The real remote received it; the decoy did not.
     let local = stdout(&git(&workspace, &["rev-parse", "HEAD"]));
