@@ -210,11 +210,11 @@ fn repository_path_fields_parse_and_validate() {
         "workspace_root = \"/tmp/luther\"\nproject_subdir = \"workflow\"\nartifact_path_base = \".\"\ndiff_path_base = \"workflow\"\ndiff_path_normalization = \"base_relative\"",
     );
     let config = parse_workflow_config_toml(&toml).expect("path fields parse");
-    assert_eq!(config.repo.project_subdir.as_deref(), Some("workflow"));
-    assert_eq!(config.repo.artifact_path_base.as_deref(), Some("."));
-    assert_eq!(config.repo.diff_path_base.as_deref(), Some("workflow"));
+    assert_eq!(config.repo().project_subdir.as_deref(), Some("workflow"));
+    assert_eq!(config.repo().artifact_path_base.as_deref(), Some("."));
+    assert_eq!(config.repo().diff_path_base.as_deref(), Some("workflow"));
     assert_eq!(
-        config.repo.diff_path_normalization,
+        config.repo().diff_path_normalization,
         DiffPathNormalization::BaseRelative
     );
 

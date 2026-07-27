@@ -84,9 +84,9 @@ fn test_resolve_workflow_config_from_toml() {
     assert_eq!(config.runtime.log_level.as_deref(), Some("info"));
 
     // Verify repo config
-    assert_eq!(config.repo.workspace_strategy, "temp_clone");
-    assert_eq!(config.repo.branch_template, "luther-fix-{issue_number}");
-    assert_eq!(config.repo.base_branch.as_deref(), Some("main"));
+    assert_eq!(config.repo().workspace_strategy, "temp_clone");
+    assert_eq!(config.repo().branch_template, "luther-fix-{issue_number}");
+    assert_eq!(config.repo().base_branch.as_deref(), Some("main"));
 
     // Verify guard limits
     assert_eq!(config.guard_limits.max_iterations, Some(10));

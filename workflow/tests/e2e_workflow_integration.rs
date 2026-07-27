@@ -1057,7 +1057,7 @@ fn context_from_config(config: &WorkflowConfig) -> StepContext {
 }
 
 fn seed_target_path_context(config: &WorkflowConfig, context: &mut StepContext) {
-    let target_paths = TargetPathConfig::from_repo_config(&config.repo);
+    let target_paths = TargetPathConfig::from_repo_config(config.repo());
     let repo_root = context.work_dir().clone();
     context.set("repo_root", &repo_root.to_string_lossy());
     context.set(
@@ -2377,7 +2377,7 @@ fn reusable_issue_fix_run_tests_includes_profile_driven_ocr_review() {
         "llxprt-luther issue-fix profile should run the local OCR preview wrapper through argv"
     );
     assert_eq!(
-        config.repo.project_subdir.as_deref(),
+        config.repo().project_subdir.as_deref(),
         Some("workflow"),
         "Luther OCR review should inherit the profile default project cwd so the cargo xtask alias is available"
     );
@@ -2544,11 +2544,11 @@ fn dogfood_agents_do_not_escalate_self_authored_shell_syntax_errors() {
 #[test]
 fn luther_profile_uses_nested_project_paths_without_manifest_path_prefixes() {
     let config = workflow_config("llxprt-luther");
-    assert_eq!(config.repo.project_subdir.as_deref(), Some("workflow"));
-    assert_eq!(config.repo.artifact_path_base.as_deref(), Some("."));
-    assert_eq!(config.repo.diff_path_base.as_deref(), Some("workflow"));
+    assert_eq!(config.repo().project_subdir.as_deref(), Some("workflow"));
+    assert_eq!(config.repo().artifact_path_base.as_deref(), Some("."));
+    assert_eq!(config.repo().diff_path_base.as_deref(), Some("workflow"));
     assert_eq!(
-        config.repo.diff_path_normalization,
+        config.repo().diff_path_normalization,
         DiffPathNormalization::RepoRelative
     );
 

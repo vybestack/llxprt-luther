@@ -288,7 +288,7 @@ mod tests {
                 parallel_steps: None,
                 log_level: None,
             },
-            repo: crate::workflow::schema::RepoConfig {
+            repo: Some(crate::workflow::schema::RepoConfig {
                 workspace_strategy: "temp_clone".into(),
                 branch_template: "issue{n}".into(),
                 base_branch: Some("main".into()),
@@ -298,7 +298,7 @@ mod tests {
                 diff_path_base: None,
                 diff_path_normalization:
                     crate::workflow::schema::DiffPathNormalization::RepoRelative,
-            },
+            }),
             guard_limits: crate::workflow::schema::GuardLimits {
                 max_iterations: Some(1),
                 max_file_changes: None,

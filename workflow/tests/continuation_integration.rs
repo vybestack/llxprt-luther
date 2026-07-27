@@ -123,7 +123,7 @@ fn followup_config() -> WorkflowConfig {
             parallel_steps: None,
             log_level: None,
         },
-        repo: RepoConfig {
+        repo: Some(RepoConfig {
             workspace_strategy: "temp".to_string(),
             branch_template: "test-{run_id}".to_string(),
             base_branch: Some("main".to_string()),
@@ -133,7 +133,7 @@ fn followup_config() -> WorkflowConfig {
             diff_path_base: None,
             diff_path_normalization:
                 luther_workflow::workflow::schema::DiffPathNormalization::RepoRelative,
-        },
+        }),
         guard_limits: GuardLimits {
             max_iterations: Some(5),
             max_file_changes: Some(50),

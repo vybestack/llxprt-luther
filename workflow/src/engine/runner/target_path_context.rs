@@ -3,7 +3,15 @@ use crate::engine::instance::WorkflowInstance;
 use crate::workflow::target_paths::TargetPathConfig;
 
 pub(super) fn seed_target_paths(context: &mut StepContext, instance: &WorkflowInstance) {
-    let target_paths = TargetPathConfig::from_repo_config(&instance.config.repo);
+    // A config with no repository section seeds no repository-derived paths,
+    // rather than seeding paths derived from an invented repository. Returning
+    // early leaves the variables absent, so a step that needs them fails
+    // naming the missing variable instead of silently resolving against a
+    // fabricated tree.
+    let Some(repo_config) = instance.config.repo.as_ref() else {
+        return;
+    };
+    let target_paths = TargetPathConfig::from_repo_config(repo_config);
     let repo_root = context.work_dir().clone();
     let project_dir = target_paths.project_dir(&repo_root);
     let artifact_base_dir = target_paths.artifact_base_dir(&repo_root);

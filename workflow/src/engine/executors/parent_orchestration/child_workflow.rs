@@ -150,7 +150,7 @@ fn launch_child_workflow(
     // execution/effects.
     // @plan:PLAN-20260723-SELFHOST-RELIABILITY.P08B
     let base_ref = config
-        .repo
+        .repo()
         .base_branch
         .clone()
         .unwrap_or_else(|| "main".to_string());

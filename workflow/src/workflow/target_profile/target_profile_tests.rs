@@ -11,7 +11,7 @@ fn test_config() -> WorkflowConfig {
             parallel_steps: None,
             log_level: None,
         },
-        repo: RepoConfig {
+        repo: Some(RepoConfig {
             workspace_strategy: "temp_clone".to_string(),
             branch_template: "issue{issue_number}".to_string(),
             base_branch: Some("main".to_string()),
@@ -20,7 +20,7 @@ fn test_config() -> WorkflowConfig {
             artifact_path_base: None,
             diff_path_base: None,
             diff_path_normalization: crate::workflow::schema::DiffPathNormalization::RepoRelative,
-        },
+        }),
         guard_limits: GuardLimits {
             max_iterations: None,
             max_file_changes: None,
@@ -250,7 +250,7 @@ fn profile_resolution_derives_legacy_variables_and_repo_fields() {
         config.variables.get("base_branch").map(String::as_str),
         Some("develop")
     );
-    assert_eq!(config.repo.project_subdir.as_deref(), Some("workflow"));
+    assert_eq!(config.repo().project_subdir.as_deref(), Some("workflow"));
     assert_eq!(
         config
             .variables

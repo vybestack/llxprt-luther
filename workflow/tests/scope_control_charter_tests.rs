@@ -85,7 +85,7 @@ fn workflow_config(scope_control: ScopeControlConfig) -> WorkflowConfig {
             parallel_steps: None,
             log_level: None,
         },
-        repo: RepoConfig {
+        repo: Some(RepoConfig {
             workspace_strategy: "temp_clone".into(),
             branch_template: "issue{n}".into(),
             base_branch: Some("main".into()),
@@ -94,7 +94,7 @@ fn workflow_config(scope_control: ScopeControlConfig) -> WorkflowConfig {
             artifact_path_base: None,
             diff_path_base: None,
             diff_path_normalization: DiffPathNormalization::RepoRelative,
-        },
+        }),
         guard_limits: GuardLimits {
             max_iterations: Some(1),
             max_file_changes: None,

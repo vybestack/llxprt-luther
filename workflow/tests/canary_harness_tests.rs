@@ -402,7 +402,7 @@ fn config_with_merge(
             parallel_steps: None,
             log_level: None,
         },
-        repo: RepoConfig {
+        repo: Some(RepoConfig {
             workspace_strategy: "temp_clone".to_string(),
             branch_template: "wf-{run_id}".to_string(),
             base_branch: Some(base_branch.to_string()),
@@ -411,7 +411,7 @@ fn config_with_merge(
             artifact_path_base: None,
             diff_path_base: None,
             diff_path_normalization: DiffPathNormalization::RepoRelative,
-        },
+        }),
         guard_limits: GuardLimits {
             max_iterations: Some(5),
             max_file_changes: Some(100),

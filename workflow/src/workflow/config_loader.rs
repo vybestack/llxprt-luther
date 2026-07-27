@@ -403,23 +403,30 @@ pub fn validate_workflow_config(config: &WorkflowConfig) -> Result<()> {
         });
     }
 
-    // Validate repo fields
-    if config.repo.workspace_strategy.is_empty() {
-        return Err(ConfigError {
-            message: "repo.workspace_strategy cannot be empty".to_string(),
-            source_path: None,
-            kind: ConfigErrorKind::ValidationError,
-        });
+    // Repository rules apply only to configs that declare a repository.
+    //
+    // Running them unconditionally is what kept the section mandatory in
+    // practice even after the type allowed its absence: an empty-string check
+    // against a section that does not exist has no meaningful answer. A config
+    // that declares the section is held to exactly the same rules as before,
+    // so no existing config changes meaning.
+    if config.repo.is_some() {
+        if config.repo().workspace_strategy.is_empty() {
+            return Err(ConfigError {
+                message: "repo.workspace_strategy cannot be empty".to_string(),
+                source_path: None,
+                kind: ConfigErrorKind::ValidationError,
+            });
+        }
+        if config.repo().branch_template.is_empty() {
+            return Err(ConfigError {
+                message: "repo.branch_template cannot be empty".to_string(),
+                source_path: None,
+                kind: ConfigErrorKind::ValidationError,
+            });
+        }
+        validate_repository_paths(config)?;
     }
-    if config.repo.branch_template.is_empty() {
-        return Err(ConfigError {
-            message: "repo.branch_template cannot be empty".to_string(),
-            source_path: None,
-            kind: ConfigErrorKind::ValidationError,
-        });
-    }
-
-    validate_repository_paths(config)?;
     validate_discovery_config(config)?;
     if let Some(manifest) = &config.command_manifest {
         validate_command_manifest(manifest)?;
@@ -433,15 +440,15 @@ fn validate_repository_paths(config: &WorkflowConfig) -> Result<()> {
     for (field, path) in [
         (
             "repository.project_subdir",
-            config.repo.project_subdir.as_deref(),
+            config.repo().project_subdir.as_deref(),
         ),
         (
             "repository.artifact_path_base",
-            config.repo.artifact_path_base.as_deref(),
+            config.repo().artifact_path_base.as_deref(),
         ),
         (
             "repository.diff_path_base",
-            config.repo.diff_path_base.as_deref(),
+            config.repo().diff_path_base.as_deref(),
         ),
     ]
     .into_iter()
@@ -449,8 +456,8 @@ fn validate_repository_paths(config: &WorkflowConfig) -> Result<()> {
     {
         validate_repo_relative_path(field, path)?;
     }
-    if config.repo.diff_path_normalization == DiffPathNormalization::BaseRelative
-        && config.repo.diff_path_base.is_none()
+    if config.repo().diff_path_normalization == DiffPathNormalization::BaseRelative
+        && config.repo().diff_path_base.is_none()
     {
         return Err(ConfigError {
             message: "repository.diff_path_base is required when repository.diff_path_normalization is base_relative".to_string(),
