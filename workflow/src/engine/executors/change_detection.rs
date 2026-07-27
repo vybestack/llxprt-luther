@@ -21,7 +21,7 @@ use std::io::ErrorKind;
 use std::path::Path;
 use std::process::Command;
 
-use crate::engine::runner::EngineError;
+use crate::engine::error::EngineError;
 
 /// Which changes a [`ChangedPathDetector`] should report.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

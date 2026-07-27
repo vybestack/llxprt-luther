@@ -33,13 +33,13 @@ use super::retry_state::{
     RetryBudget, RetryScopeKey, RetryState, RETRY_STATE_FAMILY,
 };
 use super::{artifact_root, binding_for_context, current_step_id, u64_param};
+use crate::engine::error::EngineError;
 use crate::engine::executor::{StepContext, StepExecutor};
 use crate::engine::executors::pr_followup_artifacts::{
     ArtifactPublicationHook, ArtifactWriter, ClockSleeper, PrFollowupArtifactStore,
     SystemClockSleeper, SystemPrFollowupFilesystem, TerminalArtifactPublication,
 };
 use crate::engine::executors::pr_followup_types::PrFollowupBinding;
-use crate::engine::runner::EngineError;
 use crate::engine::transition::StepOutcome;
 use serde_json::{json, Value};
 

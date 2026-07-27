@@ -356,14 +356,33 @@ fn core_manifest_names_no_workspace_member() {
 /// The error type in the executor signature names no specific tool or host.
 #[test]
 fn the_executor_error_type_names_no_domain_concept() {
-    let source = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/engine/runner.rs"),
-    )
-    .expect("the runner source is readable");
+    // The declaration is located by searching, not by a hardcoded path.
+    // `EngineError` moved from `runner.rs` to `error.rs` as part of extracting
+    // the executor contract, and a hardcoded path turned that move into a
+    // panic about a missing file rather than a boundary result. Review flagged
+    // this before the move happened; it was declined as premature and the move
+    // proved otherwise within the same series.
+    let mut source = String::new();
+    let mut found_in = String::new();
+    let src_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    for entry in rust_sources_under(&src_root) {
+        let text = std::fs::read_to_string(&entry).expect("a source file under src is readable");
+        if text.contains("pub enum EngineError {") {
+            source = text;
+            found_in = entry.display().to_string();
+            break;
+        }
+    }
+    assert!(
+        !source.is_empty(),
+        "no file under src/ declares `pub enum EngineError {{`. Either the executor contract's \
+         error type was renamed, or this scan can no longer find it - both leave the boundary \
+         unchecked, so this fails rather than passing on an empty search."
+    );
 
     let body = source
         .split_once("pub enum EngineError {")
-        .expect("EngineError must still be declared in runner.rs")
+        .unwrap_or_else(|| panic!("EngineError declaration vanished from {found_in}"))
         .1;
 
     // Brace-matched, not first-`\n}`: a multi-line struct variant's inner
@@ -449,5 +468,127 @@ fn the_executor_error_type_names_no_domain_concept() {
         "EngineError variants name domain concepts: {offenders:?}. This type is returned by \
          every component, so a variant naming a tool blocks relocating any component into a \
          domain-free package. Carry the detail in a message formatted by the domain instead."
+    );
+}
+
+/// The executor contract must not reach into persistence, the runner, or a domain.
+///
+/// Every component implements `StepExecutor`, whose signature names
+/// `EngineError`, so anything the error module imports becomes a dependency of
+/// every future component package. Asserting the import set rather than only
+/// that it compiles is the point: a transitive reach into persistence compiles
+/// perfectly well today and would only fail once something real was moved out.
+#[test]
+fn the_executor_contract_imports_nothing_from_persistence_or_the_runner() {
+    let src_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+
+    // The contract a component actually implements: the trait and context, and
+    // the error it can fail with.
+    //
+    // `transition.rs` is deliberately excluded. It additionally holds
+    // `resolve_transition_schema`, a convenience over `workflow::schema` that
+    // the runner calls and no component implements. Including the file would
+    // fail this test for a dependency that is not on the contract surface;
+    // splitting it belongs to B6 rather than being smuggled in here. Recorded
+    // rather than silently scoped around.
+    let contract_files = ["engine/error.rs", "engine/executor.rs"];
+
+    // Bare module names, matched against a line that already contains
+    // `crate::`. `workflow::` previously carried a separator the others did
+    // not, so a bare `crate::workflow` would have slipped past while
+    // `crate::persistence` was caught - an asymmetry with no reason behind it.
+    let forbidden = ["persistence", "runner", "adapters", "workflow", "instance"];
+    let mut offenders: Vec<String> = Vec::new();
+    let mut total_imports = 0usize;
+
+    for relative in contract_files {
+        let path = src_root.join(relative);
+        let source = std::fs::read_to_string(&path).expect("a contract source file is readable");
+
+        // Both `use` lines and inline paths count. `crate::engine::runner::X`
+        // written inline in a signature couples exactly as hard as an import,
+        // and that is precisely how `StepContext` reached the runner.
+        for (number, line) in source.lines().enumerate() {
+            let trimmed = line.trim();
+            if trimmed.starts_with("//") {
+                continue;
+            }
+            // `pub use` counts too: a re-export is a dependency and it also
+            // hands the re-exported type to everyone downstream, so it couples
+            // harder than a plain import rather than less.
+            if trimmed.starts_with("use ") || trimmed.starts_with("pub use ") {
+                total_imports += 1;
+            }
+            if !trimmed.contains("crate::") {
+                continue;
+            }
+            if forbidden.iter().any(|word| trimmed.contains(word)) {
+                offenders.push(format!("{relative}:{}: {trimmed}", number + 1));
+            }
+        }
+    }
+
+    assert!(
+        total_imports > 0,
+        "no imports were parsed from the contract files; the scan is looking at the wrong thing \
+         and would pass no matter what they depended on"
+    );
+
+    assert!(
+        offenders.is_empty(),
+        "the executor contract reaches into other layers:\n  {}\nEvery component implements this \
+         contract, so each of these becomes a dependency of every component package. Pass the \
+         value it needs instead of naming the type that holds it.",
+        offenders.join("\n  ")
+    );
+}
+
+/// Nothing names `EngineError` through the runner re-export.
+///
+/// The alias exists so B7 can retire it as a deliberate decision. If call
+/// sites drift back onto it, that removal stops being a one-line change and
+/// starts breaking compilation somewhere unrelated - which is exactly what
+/// review predicted when 37 occurrences across six files were still routing
+/// through it after the first pass claimed they had all been migrated.
+#[test]
+fn no_call_site_reaches_engine_error_through_the_runner_alias() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut offenders: Vec<String> = Vec::new();
+    let mut scanned = 0usize;
+
+    for directory in ["src", "tests"] {
+        for path in rust_sources_under(&root.join(directory)) {
+            let source = std::fs::read_to_string(&path).expect("a source file is readable");
+            scanned += 1;
+            let relative = path
+                .strip_prefix(root)
+                .unwrap_or(&path)
+                .display()
+                .to_string();
+            // runner.rs declares the re-export itself; it is the one file
+            // allowed to name both sides.
+            if relative.ends_with("engine/runner.rs") {
+                continue;
+            }
+            // Assembled rather than written literally so this file does not
+            // match its own search string.
+            let alias = concat!("runner", "::EngineError");
+            for (number, line) in source.lines().enumerate() {
+                if line.contains(alias) {
+                    offenders.push(format!("{relative}:{}", number + 1));
+                }
+            }
+        }
+    }
+
+    assert!(
+        scanned > 0,
+        "no sources were scanned; the walk found nothing and would pass regardless"
+    );
+    assert!(
+        offenders.is_empty(),
+        "these name EngineError through the runner alias instead of `engine::error`:\n  {}\n\
+         B7 retires the alias; every one of these would break when it does.",
+        offenders.join("\n  ")
     );
 }

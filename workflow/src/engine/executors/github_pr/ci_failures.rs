@@ -8,6 +8,7 @@ use std::path::PathBuf;
 
 use serde_json::{json, Value};
 
+use crate::engine::error::EngineError;
 use crate::engine::executor::StepContext;
 use crate::engine::executors::pr_followup_artifacts::{
     ArtifactWriteContext, ClockSleeper, JsonArtifactWriteRequest, PrFollowupArtifactStore,
@@ -15,7 +16,6 @@ use crate::engine::executors::pr_followup_artifacts::{
 use crate::engine::executors::pr_followup_types::{
     CollectionState, OverallState, PrCheckStatus, PrFollowupBinding,
 };
-use crate::engine::runner::EngineError;
 use crate::engine::transition::StepOutcome;
 
 use super::{

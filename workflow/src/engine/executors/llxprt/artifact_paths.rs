@@ -2,8 +2,8 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::engine::error::EngineError;
 use crate::engine::executor::{interpolate_string, StepContext};
-use crate::engine::runner::EngineError;
 
 pub(super) fn diagnostic_root(context: &StepContext) -> Result<PathBuf, EngineError> {
     let configured = context

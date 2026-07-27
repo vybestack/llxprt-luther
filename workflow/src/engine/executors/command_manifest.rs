@@ -12,8 +12,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use regex::Regex;
 use serde_json::{json, Value};
 
+use crate::engine::error::EngineError;
 use crate::engine::executor::{interpolate_string, StepContext, StepExecutor};
-use crate::engine::runner::EngineError;
 use crate::engine::transition::StepOutcome;
 use crate::workflow::command_manifest::{
     ArtifactExpectation, ArtifactKind, CommandEntry, CommandManifest, FailureOutcome,

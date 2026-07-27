@@ -124,7 +124,7 @@ fn run_context_from_metadata_uses_explicit_log_path() {
 #[test]
 fn write_continuation_result_writes_named_artifact() {
     let temp = tempfile::tempdir().expect("tempdir");
-    let outcome: Result<RunOutcome, luther_workflow::engine::runner::EngineError> =
+    let outcome: Result<RunOutcome, luther_workflow::engine::error::EngineError> =
         Ok(RunOutcome::Success);
     write_continuation_result(
         temp.path(),
@@ -144,7 +144,7 @@ fn write_continuation_result_writes_named_artifact() {
 #[test]
 fn write_continuation_result_maps_waiting_external_status() {
     let temp = tempfile::tempdir().expect("tempdir");
-    let outcome: Result<RunOutcome, luther_workflow::engine::runner::EngineError> =
+    let outcome: Result<RunOutcome, luther_workflow::engine::error::EngineError> =
         Ok(RunOutcome::WaitingExternal {
             step_id: "watch".to_string(),
             reason: "pending".to_string(),
@@ -274,7 +274,7 @@ fn finalize_lease_succeeds_when_runner_already_protected_cleanup_abandoned() {
     )
     .expect("protect lease");
 
-    let outcome: Result<RunOutcome, luther_workflow::engine::runner::EngineError> =
+    let outcome: Result<RunOutcome, luther_workflow::engine::error::EngineError> =
         Ok(RunOutcome::Abandoned {
             step_id: "abandon_and_log".to_string(),
             reason: "cleanup complete".to_string(),
@@ -301,7 +301,7 @@ fn finalize_lease_succeeds_when_still_running_for_cleanup_abandonment() {
     md.failure_cleanup = Some(complete_failure_cleanup());
     persist_run_with_conn(store.conn(), &md).expect("persist abandoned run");
 
-    let outcome: Result<RunOutcome, luther_workflow::engine::runner::EngineError> =
+    let outcome: Result<RunOutcome, luther_workflow::engine::error::EngineError> =
         Ok(RunOutcome::Abandoned {
             step_id: "abandon_and_log".to_string(),
             reason: "cleanup complete".to_string(),
@@ -339,7 +339,7 @@ fn finalize_lease_fails_when_owner_mismatched_even_if_status_matches() {
     )
     .expect("supersede owner");
 
-    let outcome: Result<RunOutcome, luther_workflow::engine::runner::EngineError> =
+    let outcome: Result<RunOutcome, luther_workflow::engine::error::EngineError> =
         Ok(RunOutcome::Abandoned {
             step_id: "abandon_and_log".to_string(),
             reason: "cleanup complete".to_string(),
@@ -385,7 +385,7 @@ fn finalize_lease_fails_when_status_drifted_from_expected() {
     )
     .expect("drift status");
 
-    let outcome: Result<RunOutcome, luther_workflow::engine::runner::EngineError> =
+    let outcome: Result<RunOutcome, luther_workflow::engine::error::EngineError> =
         Ok(RunOutcome::Abandoned {
             step_id: "abandon_and_log".to_string(),
             reason: "cleanup complete".to_string(),
@@ -410,7 +410,7 @@ fn finalize_lease_skips_when_no_issue_identity() {
     // A run without repository/issue identity has no lease to finalize.
     let store = lease_store();
     let md = RunMetadata::new("no-issue-run", "wf", "cfg");
-    let outcome: Result<RunOutcome, luther_workflow::engine::runner::EngineError> =
+    let outcome: Result<RunOutcome, luther_workflow::engine::error::EngineError> =
         Ok(RunOutcome::Success);
     finalize_continuation_lease(&store, &md, "no-issue-run", &outcome).expect("no-op finalization");
 }
@@ -420,7 +420,7 @@ fn finalize_lease_rejects_lease_owned_by_other_run() {
     let store = lease_store();
     let lease = seed_running_lease(&store, "run-original", 204);
     let md = issue_metadata("run-continuation", 204);
-    let outcome: Result<RunOutcome, luther_workflow::engine::runner::EngineError> =
+    let outcome: Result<RunOutcome, luther_workflow::engine::error::EngineError> =
         Ok(RunOutcome::Success);
     let error = finalize_continuation_lease(&store, &md, "run-continuation", &outcome)
         .expect_err("ownership mismatch must fail closed");
@@ -440,7 +440,7 @@ fn finalize_lease_completes_on_success_outcome() {
     let md = issue_metadata(run_id, 205);
     persist_run_with_conn(store.conn(), &md).expect("persist run");
 
-    let outcome: Result<RunOutcome, luther_workflow::engine::runner::EngineError> =
+    let outcome: Result<RunOutcome, luther_workflow::engine::error::EngineError> =
         Ok(RunOutcome::Success);
     finalize_continuation_lease(&store, &md, run_id, &outcome).expect("success finalization");
 
@@ -481,7 +481,7 @@ fn finalize_lease_fails_when_lease_vanishes_after_conditional_update() {
     md.failure_cleanup = Some(complete_failure_cleanup());
     persist_run_with_conn(store.conn(), &md).expect("persist run");
 
-    let outcome: Result<RunOutcome, luther_workflow::engine::runner::EngineError> =
+    let outcome: Result<RunOutcome, luther_workflow::engine::error::EngineError> =
         Ok(RunOutcome::Abandoned {
             step_id: "abandon_and_log".to_string(),
             reason: "cleanup complete".to_string(),
@@ -527,7 +527,7 @@ fn finalize_lease_maps_interrupted_to_ready_to_resume() {
     let md = issue_metadata(run_id, 210);
     persist_run_with_conn(store.conn(), &md).expect("persist run");
 
-    let outcome: Result<RunOutcome, luther_workflow::engine::runner::EngineError> =
+    let outcome: Result<RunOutcome, luther_workflow::engine::error::EngineError> =
         Ok(RunOutcome::Interrupted {
             step_id: "remediate".to_string(),
         });
@@ -560,7 +560,7 @@ fn finalize_lease_maps_interrupted_idempotent_when_already_ready_to_resume() {
     )
     .expect("pre-advance to ReadyToResume");
 
-    let outcome: Result<RunOutcome, luther_workflow::engine::runner::EngineError> =
+    let outcome: Result<RunOutcome, luther_workflow::engine::error::EngineError> =
         Ok(RunOutcome::Interrupted {
             step_id: "remediate".to_string(),
         });
@@ -589,7 +589,7 @@ fn finalize_lease_maps_failure_with_incomplete_cleanup_to_cleanup_abandoned() {
     md.failure_cleanup = Some(incomplete_failure_cleanup());
     persist_run_with_conn(store.conn(), &md).expect("persist failed run");
 
-    let outcome: Result<RunOutcome, luther_workflow::engine::runner::EngineError> =
+    let outcome: Result<RunOutcome, luther_workflow::engine::error::EngineError> =
         Ok(RunOutcome::Failure {
             step_id: "remediate".to_string(),
             reason: "agent timed out".to_string(),
@@ -617,7 +617,7 @@ fn finalize_lease_maps_failure_without_cleanup_provenance_to_failed() {
     md.status = RunStatus::Failed;
     persist_run_with_conn(store.conn(), &md).expect("persist failed run");
 
-    let outcome: Result<RunOutcome, luther_workflow::engine::runner::EngineError> =
+    let outcome: Result<RunOutcome, luther_workflow::engine::error::EngineError> =
         Ok(RunOutcome::Failure {
             step_id: "remediate".to_string(),
             reason: "agent timed out".to_string(),
@@ -644,7 +644,7 @@ fn finalize_lease_maps_waiting_external_to_waiting_external_status() {
     let md = issue_metadata(run_id, 214);
     persist_run_with_conn(store.conn(), &md).expect("persist run");
 
-    let outcome: Result<RunOutcome, luther_workflow::engine::runner::EngineError> =
+    let outcome: Result<RunOutcome, luther_workflow::engine::error::EngineError> =
         Ok(RunOutcome::WaitingExternal {
             step_id: "wait_for_pr_checks".to_string(),
             reason: "checks still pending".to_string(),
@@ -672,8 +672,8 @@ fn finalize_lease_maps_runner_error_to_failed() {
     md.status = RunStatus::Failed;
     persist_run_with_conn(store.conn(), &md).expect("persist run");
 
-    let outcome: Result<RunOutcome, luther_workflow::engine::runner::EngineError> = Err(
-        luther_workflow::engine::runner::EngineError::StepExecutionError {
+    let outcome: Result<RunOutcome, luther_workflow::engine::error::EngineError> = Err(
+        luther_workflow::engine::error::EngineError::StepExecutionError {
             step_id: "remediate".to_string(),
             message: "runner crashed".to_string(),
         },
@@ -711,7 +711,7 @@ fn finalize_lease_failure_idempotent_when_already_failed() {
     )
     .expect("pre-advance to Failed");
 
-    let outcome: Result<RunOutcome, luther_workflow::engine::runner::EngineError> =
+    let outcome: Result<RunOutcome, luther_workflow::engine::error::EngineError> =
         Ok(RunOutcome::Failure {
             step_id: "remediate".to_string(),
             reason: "agent timed out".to_string(),
@@ -741,8 +741,8 @@ fn break_runs_table(store: &SqliteStore) {
 }
 
 /// A runner engine error used to drive `persist_continuation_failure`.
-fn sample_engine_error() -> luther_workflow::engine::runner::EngineError {
-    luther_workflow::engine::runner::EngineError::StepExecutionError {
+fn sample_engine_error() -> luther_workflow::engine::error::EngineError {
+    luther_workflow::engine::error::EngineError::StepExecutionError {
         step_id: "remediate".to_string(),
         message: "agent crashed".to_string(),
     }
@@ -823,7 +823,7 @@ fn post_run_persistence_failure_does_not_block_lease_finalization() {
     // Simulate the runner erroring and the durable store rejecting the write.
     break_runs_table(&store);
 
-    let outcome: Result<RunOutcome, luther_workflow::engine::runner::EngineError> =
+    let outcome: Result<RunOutcome, luther_workflow::engine::error::EngineError> =
         Err(sample_engine_error());
 
     // Mirror the independent-action ordering introduced in commit_and_execute.
@@ -889,7 +889,7 @@ fn post_run_aggregates_multiple_maintenance_failures() {
     )
     .expect("drift lease status");
 
-    let outcome: Result<RunOutcome, luther_workflow::engine::runner::EngineError> =
+    let outcome: Result<RunOutcome, luther_workflow::engine::error::EngineError> =
         Err(sample_engine_error());
 
     let mut maintenance_errors: Vec<String> = Vec::new();
@@ -937,7 +937,7 @@ fn report_aggregated_maintenance_errors_handles_empty_and_populated() {
 
 #[test]
 fn continuation_outcome_exit_code_is_zero_for_success() {
-    let outcome: Result<RunOutcome, luther_workflow::engine::runner::EngineError> =
+    let outcome: Result<RunOutcome, luther_workflow::engine::error::EngineError> =
         Ok(RunOutcome::Success);
     let code = continuation_outcome_exit_code("ok-run", "step", &outcome);
     assert_eq!(code, 0);
@@ -945,7 +945,7 @@ fn continuation_outcome_exit_code_is_zero_for_success() {
 
 #[test]
 fn continuation_outcome_exit_code_is_one_for_runner_error() {
-    let outcome: Result<RunOutcome, luther_workflow::engine::runner::EngineError> =
+    let outcome: Result<RunOutcome, luther_workflow::engine::error::EngineError> =
         Err(sample_engine_error());
     let code = continuation_outcome_exit_code("err-run", "step", &outcome);
     assert_eq!(code, 1);

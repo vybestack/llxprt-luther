@@ -6,9 +6,9 @@
 //! @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P15
 //! @requirement:REQ-PRFU-015,REQ-PRFU-016
 use super::*;
+use crate::engine::error::EngineError;
 use crate::engine::executors::github_pr::GithubPrCommandRunner;
 use crate::engine::executors::pr_followup_types::PrFollowupBinding;
-use crate::engine::runner::EngineError;
 use serde_json::{json, Value};
 use std::path::Path;
 

@@ -83,9 +83,11 @@ pub(super) fn build_step_context(
     // shell step cannot redirect workspace-mutating cleanup verification.
     let work_dir = resolve_final_work_dir(instance, run_context);
     let mut context = match run_context {
-        Some(run_context) => {
-            StepContext::from_run_context(work_dir, instance.run_id.clone(), run_context)
-        }
+        Some(run_context) => StepContext::for_run(
+            work_dir,
+            instance.run_id.clone(),
+            run_context.daemon_managed,
+        ),
         None => StepContext::new(work_dir, instance.run_id.clone()),
     };
     // Issue 158 slice 6: reconstruct the ephemeral WorkspaceAuthorization from

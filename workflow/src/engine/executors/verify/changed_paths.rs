@@ -5,7 +5,7 @@
 //! as the work was committed. Both the working tree and the committed range
 //! are therefore consulted and merged.
 use super::diff_gate_error;
-use crate::engine::runner::EngineError;
+use crate::engine::error::EngineError;
 use std::collections::HashSet;
 use std::process::Command;
 

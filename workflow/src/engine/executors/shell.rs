@@ -15,8 +15,8 @@ use std::process::{Command, Output, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use crate::engine::error::EngineError;
 use crate::engine::executor::{interpolate_string, StepContext, StepExecutor};
-use crate::engine::runner::EngineError;
 use crate::engine::transition::StepOutcome;
 
 /// Shell executor that runs shell commands.

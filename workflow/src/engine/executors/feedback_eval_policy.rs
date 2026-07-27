@@ -3,7 +3,7 @@ use serde_json::{json, Value};
 use super::feedback_eval::{
     required_value_string, FeedbackEvaluationRequest, FeedbackEvaluationResponse, RejectReason,
 };
-use crate::engine::runner::EngineError;
+use crate::engine::error::EngineError;
 
 /// LLM invocation adapter seam for feedback evaluation behavior.
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P03

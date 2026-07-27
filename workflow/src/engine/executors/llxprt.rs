@@ -27,6 +27,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
+use crate::engine::error::EngineError;
 use crate::engine::executor::{interpolate_string, StepContext, StepExecutor};
 use crate::engine::executors::change_detection::{
     ChangeDetectionMode, ChangedPathDetector, GitChangedPathDetector,
@@ -34,7 +35,6 @@ use crate::engine::executors::change_detection::{
 use crate::engine::executors::llxprt_diff::{
     detect_initial_changed_paths, string_array_param, success_condition_met, DiffDetection,
 };
-use crate::engine::runner::EngineError;
 use crate::engine::transition::StepOutcome;
 
 mod artifact_paths;

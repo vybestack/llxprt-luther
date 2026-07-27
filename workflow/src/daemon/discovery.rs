@@ -14,7 +14,7 @@ use tracing::error;
 
 use crate::adapters::github::GithubError;
 use crate::adapters::github_issues::{GithubIssue, GithubIssueQuery};
-use crate::engine::runner::EngineError;
+use crate::engine::error::EngineError;
 use crate::persistence::leases::get_lease_for_issue;
 use crate::workflow::schema::DiscoveryConfig;
 

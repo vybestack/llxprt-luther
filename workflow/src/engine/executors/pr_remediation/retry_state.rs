@@ -30,12 +30,12 @@ pub(super) use persistence::{fnv64, persist};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::engine::error::EngineError;
 use crate::engine::executors::pr_followup_artifacts::{
     ArtifactWriteContext, ClockSleeper, JsonArtifactWriteRequest, PrFollowupArtifactStore,
     TerminalArtifactPublication,
 };
 use crate::engine::executors::pr_followup_types::PrFollowupBinding;
-use crate::engine::runner::EngineError;
 
 pub(super) use super::retry_history::load_current_state;
 use super::retry_history::{load_matching_state_locked, state_sequence_locked};

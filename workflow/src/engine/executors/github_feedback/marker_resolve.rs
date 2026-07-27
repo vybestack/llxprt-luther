@@ -1,11 +1,11 @@
 use super::*;
+use crate::engine::error::EngineError;
 use crate::engine::executors::github_pr::GithubPrCommandRunner;
 use crate::engine::executors::pr_followup_artifacts::{ClockSleeper, PrFollowupArtifactStore};
 use crate::engine::executors::pr_followup_types::{
     is_summary_marker_key, value_has_summary_marker_key, PrFollowupBinding,
     NO_REMEDIATION_OUTPUT_HEAD,
 };
-use crate::engine::runner::EngineError;
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
 

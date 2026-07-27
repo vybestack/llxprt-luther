@@ -200,6 +200,17 @@ fn initialize_table(
     })
 }
 
+// The conversion into the engine error lives here, beside the error being
+// converted, rather than inside the executor contract. Keeping it there would
+// have made the contract - and therefore every component that implements it -
+// depend on persistence, which is precisely the dependency the extraction
+// exists to remove.
+impl From<PersistenceError> for crate::engine::error::EngineError {
+    fn from(err: PersistenceError) -> Self {
+        crate::engine::error::EngineError::PersistenceError(err.to_string())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -16,7 +16,7 @@ use crate::engine::executor::{interpolate_string, StepContext, StepExecutor};
 use crate::engine::instance::WorkflowInstance;
 static ARTIFACT_WRITE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-use crate::engine::runner::EngineError;
+use crate::engine::error::EngineError;
 use crate::engine::transition::StepOutcome;
 use crate::engine::{EngineRunner, RunContext, RunOutcome};
 #[cfg(test)]

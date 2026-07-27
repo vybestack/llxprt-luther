@@ -3,7 +3,7 @@
 use serde_json::{json, Value};
 
 use super::{RemediationRetryScope, StaleScopeClassification};
-use crate::engine::runner::EngineError;
+use crate::engine::error::EngineError;
 
 pub(super) fn classify_stale_remediation_scope(
     result: &Value,

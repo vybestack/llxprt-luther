@@ -261,7 +261,7 @@ fn apply_poll_decision_at(
 fn annotate_artifact_error(
     run_id: &str,
     observed_state: &mut Value,
-    err: &crate::engine::runner::EngineError,
+    err: &crate::engine::error::EngineError,
 ) {
     match observed_state {
         Value::Object(map) => {
@@ -495,7 +495,7 @@ fn persist_poll_artifacts(
 fn write_committed_pr_check_snapshot(
     record: &WaitStateRecord,
     observed_state: &Value,
-) -> Result<(), crate::engine::runner::EngineError> {
+) -> Result<(), crate::engine::error::EngineError> {
     if record.wait_kind != WaitKind::PrChecks {
         return Ok(());
     }

@@ -14,6 +14,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
+use crate::engine::error::EngineError;
 use crate::engine::executor::{interpolate_string, StepContext, StepExecutor};
 use crate::engine::executors::feedback_eval_policy::{
     apply_low_confidence_accepted_policy, apply_low_confidence_needs_judgment_policy,
@@ -27,7 +28,6 @@ use crate::engine::executors::pr_followup_artifacts::{
 use crate::engine::executors::pr_followup_types::{
     EvaluationState, PrFollowupBinding, PR_FOLLOWUP_SCHEMA_VERSION, SUMMARY_MARKER_KEY_PREFIX,
 };
-use crate::engine::runner::EngineError;
 use crate::engine::transition::StepOutcome;
 
 mod artifacts;

@@ -20,6 +20,7 @@ use std::path::Path;
 
 use serde_json::Value;
 
+use crate::engine::error::EngineError;
 use crate::engine::executor::{StepContext, StepExecutor};
 use crate::engine::executors::scope_control::config_validation::active_scope_control;
 use crate::engine::executors::scope_control::decision::{
@@ -33,7 +34,6 @@ use crate::engine::executors::scope_control::model::CanonicalTaskCharter;
 use crate::engine::executors::scope_control::persistence::{
     charter_path, read_json, scope_control_dir, update_status_measurement,
 };
-use crate::engine::runner::EngineError;
 use crate::engine::transition::StepOutcome;
 use crate::workflow::schema::{ScopeControlConfig, TargetProfileConfig};
 

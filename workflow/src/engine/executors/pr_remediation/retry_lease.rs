@@ -1,7 +1,7 @@
 //! Retry launch lease duration and expiry policy.
 
+use crate::engine::error::EngineError;
 use crate::engine::executors::pr_followup_artifacts::ClockSleeper;
-use crate::engine::runner::EngineError;
 
 use super::retry_state::{LaunchPhase, RetryState};
 

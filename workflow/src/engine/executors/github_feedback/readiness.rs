@@ -1,4 +1,5 @@
 use super::*;
+use crate::engine::error::EngineError;
 use crate::engine::executor::StepContext;
 use crate::engine::executors::github_pr::GithubPrCommandRunner;
 use crate::engine::executors::pr_followup_artifacts::{
@@ -7,7 +8,6 @@ use crate::engine::executors::pr_followup_artifacts::{
 use crate::engine::executors::pr_followup_types::{
     is_summary_marker_key, PrFollowupBinding, PR_FOLLOWUP_SCHEMA_VERSION,
 };
-use crate::engine::runner::EngineError;
 use crate::engine::transition::StepOutcome;
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};

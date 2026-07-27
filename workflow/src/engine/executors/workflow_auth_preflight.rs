@@ -10,8 +10,8 @@ use crate::adapters::workflow_auth_preflight::{
     extract_workflow_paths_from_text, parse_porcelain_paths, DetectedWorkflowPath,
     WorkflowAuthOutcome, WorkflowAuthPreflightConfig,
 };
+use crate::engine::error::EngineError;
 use crate::engine::executor::{interpolate_string, StepContext, StepExecutor};
-use crate::engine::runner::EngineError;
 use crate::engine::transition::StepOutcome;
 
 #[derive(Debug, Clone, Copy)]
