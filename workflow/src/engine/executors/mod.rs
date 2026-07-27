@@ -41,6 +41,19 @@ pub mod workspace_ownership;
 pub mod write_file;
 
 // Re-export executor implementations for tests
+/// Interpreter for workflow-authored commands.
+///
+/// Workflow commands are written in bash dialect -- `set -o pipefail`, `[[`,
+/// arrays -- so the interpreter has to be bash. Running them under `sh` is
+/// silently correct on macOS, where `/bin/sh` is bash in POSIX mode, and
+/// silently broken on Debian and Ubuntu, where `/bin/sh` is dash and rejects
+/// `set -o pipefail` on the first line. That divergence hid the defect from
+/// every local run and every dogfood run.
+///
+/// Naming the interpreter rather than the path lets `PATH` resolve it, since
+/// bash is `/bin/bash` on Linux and may be `/opt/homebrew/bin/bash` on macOS.
+pub const WORKFLOW_SHELL: &str = "bash";
+
 pub use feedback_eval::{
     default_feedback_evaluator_argv, CommandFeedbackEvaluationAdapter, FeedbackEvaluationRequest,
     FeedbackEvaluationResponse, FeedbackEvaluatorCommandRunner, FeedbackEvaluatorExecutor,

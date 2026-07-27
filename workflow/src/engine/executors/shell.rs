@@ -162,7 +162,7 @@ fn spawn_and_capture(
     }
 
     let work_dir = context.work_dir().to_path_buf();
-    let mut cmd = Command::new("sh");
+    let mut cmd = Command::new(crate::engine::executors::WORKFLOW_SHELL);
     cmd.arg("-c")
         .arg(interpolated_command)
         .arg("luther-shell")

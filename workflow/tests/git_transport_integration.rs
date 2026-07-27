@@ -566,3 +566,76 @@ fn re_resolving_a_profile_does_not_freeze_a_derived_transport() {
         "re-resolution must not promote a derived transport to explicit"
     );
 }
+
+/// The interpreter must support the dialect the shipping workflows are written in.
+///
+/// Regression for a defect that CI caught and every local run missed: the
+/// executors ran `sh`, which is bash on macOS but dash on Ubuntu, and dash
+/// rejects `set -o pipefail` at line 1. Fifteen shipping steps -- including
+/// commit_changes, push_changes, and create_pr -- aborted before their first
+/// real command on Linux.
+///
+/// This asserts the behaviour rather than the interpreter's name, so it fails
+/// on any platform where the configured interpreter cannot run the dialect.
+#[test]
+fn the_workflow_interpreter_supports_the_dialect_shipping_steps_use() {
+    let probe = Command::new(luther_workflow::engine::executors::WORKFLOW_SHELL)
+        .arg("-c")
+        .arg("set -euo pipefail; printf ok")
+        .output()
+        .expect("the workflow interpreter must be available on PATH");
+
+    assert!(
+        probe.status.success(),
+        "the workflow interpreter must accept `set -euo pipefail`: {}",
+        String::from_utf8_lossy(&probe.stderr)
+    );
+    assert_eq!(stdout(&probe), "ok");
+}
+
+/// Every shipping command that opts into `pipefail` must be run by an
+/// interpreter that supports it. Guards against a future step being added with
+/// the dialect while the interpreter is downgraded back to `sh`.
+#[test]
+fn shipping_workflows_that_use_pipefail_are_run_by_a_capable_interpreter() {
+    let workflow = shipped_workflow();
+    let uses_pipefail: Vec<&str> = workflow
+        .steps
+        .iter()
+        .filter(|step| {
+            step.parameters
+                .as_ref()
+                .and_then(|p| p.get("command"))
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|command| command.contains("pipefail"))
+        })
+        .map(|step| step.step_id.as_str())
+        .collect();
+
+    assert!(
+        !uses_pipefail.is_empty(),
+        "expected the shipping workflow to exercise the dialect"
+    );
+
+    for step_id in uses_pipefail {
+        let command = workflow
+            .steps
+            .iter()
+            .find(|step| step.step_id == step_id)
+            .and_then(|step| step.parameters.as_ref())
+            .and_then(|p| p.get("command"))
+            .and_then(serde_json::Value::as_str)
+            .expect("command present");
+        let first_line = command.lines().next().unwrap_or_default();
+        let probe = Command::new(luther_workflow::engine::executors::WORKFLOW_SHELL)
+            .arg("-c")
+            .arg(first_line)
+            .output()
+            .expect("interpreter available");
+        assert!(
+            probe.status.success(),
+            "step {step_id} cannot start under the configured interpreter: {}",
+            String::from_utf8_lossy(&probe.stderr)
+        );
+    }
+}
