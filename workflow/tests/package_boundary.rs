@@ -592,3 +592,64 @@ fn no_call_site_reaches_engine_error_through_the_runner_alias() {
         offenders.join("\n  ")
     );
 }
+
+/// Every step type ID registered by the defaults, pinned as literals.
+///
+/// B5 relocates components between modules. A step type ID is the name a
+/// workflow YAML uses to ask for a component, so renaming one silently breaks
+/// every existing workflow and every persisted run that references it - a
+/// failure that would surface as "unknown step type" at execution, long after
+/// the move looked successful.
+///
+/// The expected set is written out rather than derived from the registry,
+/// because a derived expectation would move along with the code and assert
+/// nothing. Captured from the registry before any relocation.
+#[test]
+fn the_registered_step_type_ids_are_unchanged_by_relocation() {
+    let expected: std::collections::BTreeSet<String> = [
+        "command_manifest_group",
+        "failure_cleanup",
+        "feedback_evaluator",
+        "git_config_publish",
+        "github_check_failures",
+        "github_coderabbit_feedback",
+        "github_feedback_marker",
+        "github_pr_checks",
+        "github_pr_identity",
+        "llxprt",
+        "noop",
+        "parent_orchestration",
+        "post_pr_failure_terminal",
+        "post_pr_iteration_guard",
+        "pr_followup_remediation",
+        "pr_remediation_plan",
+        "pr_remediation_result",
+        "push_remediation_changes",
+        "run_post_pr_tests",
+        "scope_measure",
+        "shell",
+        "task_charter",
+        "verify",
+        "workflow_auth_preflight",
+        "workspace_ownership",
+        "workspace_ownership_verify",
+        "write_file",
+    ]
+    .iter()
+    .map(|s| (*s).to_string())
+    .collect();
+
+    let actual = luther_workflow::engine::executor::ExecutorRegistry::with_defaults()
+        .registered_step_types();
+
+    let missing: Vec<&String> = expected.difference(&actual).collect();
+    let added: Vec<&String> = actual.difference(&expected).collect();
+
+    assert!(
+        missing.is_empty() && added.is_empty(),
+        "the registered step types changed.\n  no longer registered: {missing:?}\n  \
+         newly registered: {added:?}\nA relocation must not alter this set: these are the \
+         names workflow YAML and persisted runs use to request a component. If a name is \
+         genuinely being added or retired, update this list in the same commit and say why."
+    );
+}
