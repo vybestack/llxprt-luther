@@ -2,8 +2,34 @@
 
 `@plan:PLAN-20260723-SELFHOST-RELIABILITY.P19`
 
-Date: 2026-07-24
-Result: **QUALIFIED** within the bounded scope of the plan.
+Date: 2026-07-24 (corrected 2026-07-26)
+Result: **COMPONENT-QUALIFIED** for the SQLite persistence, recovery state
+machine, idempotency, capsule, and typed merge-proof properties listed below.
+Those behaviors genuinely executed. External execution and all Git/GitHub
+observations were injected.
+
+> **Correction (2026-07-26, issue #198).** This report originally read
+> "QUALIFIED within the bounded scope of the plan", which was widely read as
+> evidence that Luther could self-host. It is not. The canary harness
+> (`tests/canary_harness_tests.rs`) never invokes `EngineRunner`. It constructs
+> synthetic `WorkflowConfig` values in memory (`:395-396`) but never executes a
+> workflow through the engine, and never loads the production config from disk.
+> It supplies the postcondition of every hard stage:
+> stage 2 creates the change by writing a file directly (`:635-653`), stage 6
+> supplies already-successful head and remote SHAs (`:748-765`, `:805-822`),
+> stage 7 persists fabricated PR identity into SQLite (`:842-870`), and the
+> merge probe returns an injected observation (`observe_merge` at `:208-211`,
+> constructed as merged at `:875-895` and `:900-918`).
+>
+> A gate that injects its own postcondition proves safety **conditional on that
+> postcondition**. It cannot prove **reachability** of it. Over the same period,
+> 28 fresh autonomous runs produced zero PRs and no log contains
+> `Executing step: create_pr`. Both results are consistent.
+>
+> The metrics below remain valid for what they measure: component behavior under
+> deterministic injected observations. Product reachability is defined and
+> measured by Gate A-R, Gate A-D, and Gate B in
+> `docs/architecture/product-gates.md`.
 
 ## Qualification Metrics
 
@@ -36,8 +62,14 @@ All canaries ran sequentially and completed before the next began:
 Each used atomic launch/capsule persistence, deliberate post-delta interruption,
 `RecoveryProtocolV1`, exact workspace authorization, allowlisted effect intents,
 PR/final-head binding, and typed merge completion. No network, sleeps, direct SQL,
-manual Git/GitHub mutation, duplicate effect, historical binary, or test-only
-production bypass was used by the harness.
+manual Git/GitHub mutation, duplicate effect, or historical binary was used by the
+harness, and **no test-only backdoor was added to production code**.
+
+The harness does, however, substitute test doubles for production orchestration
+and all external effects: `CanaryExecutor` replaces real step execution
+(`canary_harness_tests.rs:657-669`) and `DeterministicRemoteProbe` replaces real
+Git and GitHub observation (`:875-910`). The original wording — "no test-only
+production bypass" — obscured that, and is corrected here (issue #198).
 
 ## Verification Transcript
 
@@ -63,7 +95,7 @@ the complete library and binary suites now pass.
 Pre-existing engine modules outside the new recovery surface still host legacy
 persistence interactions. They were not introduced by this plan and are not an
 escape used by the qualified `RecoveryProtocolV1`/canary flow. The qualification
-gate covers the bounded self-hosting flow represented by the plan: the
+gate covers the bounded recovery/merge component surface represented by the plan: the
 recovery protocol, capsule, typed-merge, failpoint, and canary surfaces. It does
 not cover unrelated engine modules, the legacy continuation path, or
 out-of-plan surfaces. Arbitrary legacy exact recovery, distributed persistence,
@@ -71,5 +103,22 @@ async redesign, and broader llxprt roadmap work remain explicitly deferred.
 
 ## Verdict
 
-All P19 metrics meet their targets. Luther is **QUALIFIED** for the bounded
-self-hosting flow represented by this plan.
+All P19 metrics meet their targets. `RecoveryProtocolV1` and typed merge are
+**COMPONENT-QUALIFIED** under deterministic injected observations.
+
+**What this verdict does not establish.** It does not establish that Luther can
+take an approved issue and produce a pull request, nor that any workflow reaches
+`create_pr`, nor that the recovery and merge machinery is reachable in
+production. Those are the questions Gate A-R, Gate A-D, and Gate B answer, and
+all three were unmeasured when this report was written.
+
+The canary harness that produced this evidence does not execute Luther's engine.
+It calls eight stage helpers in sequence (stages 3 and 4 are combined), records
+nine stage labels, and asserts the recorded label vector — having supplied the
+result of each hard stage itself. That makes it a valid **component** test and an
+invalid **product** test.
+
+What genuinely ran: real SQLite persistence, `RecoveryProtocolV1` state
+transitions, epoch CAS and idempotency behavior, capsule integrity, the failpoint
+matrix, and typed strategy-specific merge-proof validation. What did not run:
+anything that reaches an external system.
