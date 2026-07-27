@@ -229,11 +229,18 @@ fn dependencies_in_metadata(json: &str, package: &str) -> Vec<String> {
         .collect()
 }
 
-/// `cargo tree` for core must show no edge to any workspace domain package.
+/// Core must declare no dependency on any workspace domain package.
 ///
-/// Asserted against the resolved graph rather than against the manifest: a
-/// manifest says what was written, the graph says what Cargo actually links,
-/// and a transitive edge would appear only in the latter.
+/// This reads the *declared* dependencies (`cargo metadata --no-deps`), not
+/// the resolved graph. Direct edges are what this boundary is about: a
+/// transitive path from core to a domain package can only exist by way of a
+/// direct edge from core, so forbidding the direct edge forbids the path.
+///
+/// Reading metadata rather than parsing `Cargo.toml` still matters — it is
+/// Cargo's own view, so it covers dev- and build-dependencies (which appear
+/// in the same array tagged by kind) and reports a renamed dependency under
+/// its real package name rather than its local alias. Both verified by
+/// control: adding either form of edge to core fails this test.
 #[test]
 fn core_has_no_dependency_on_any_domain_package() {
     let deps = declared_dependencies_of("luther-engine-core");
