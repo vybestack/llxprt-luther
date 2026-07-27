@@ -443,7 +443,3 @@ mod tests {
         }
     }
 }
-
-// The conversion into the engine error lives here, beside the type it
-// understands, rather than inside the engine. The engine only needs to
-// learn that a required tool is unusable; the wording is this module's

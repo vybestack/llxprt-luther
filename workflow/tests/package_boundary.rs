@@ -493,13 +493,11 @@ fn the_executor_contract_imports_nothing_from_persistence_or_the_runner() {
     // rather than silently scoped around.
     let contract_files = ["engine/error.rs", "engine/executor.rs"];
 
-    let forbidden = [
-        "persistence",
-        "runner",
-        "adapters",
-        "workflow::",
-        "instance",
-    ];
+    // Bare module names, matched against a line that already contains
+    // `crate::`. `workflow::` previously carried a separator the others did
+    // not, so a bare `crate::workflow` would have slipped past while
+    // `crate::persistence` was caught - an asymmetry with no reason behind it.
+    let forbidden = ["persistence", "runner", "adapters", "workflow", "instance"];
     let mut offenders: Vec<String> = Vec::new();
     let mut total_imports = 0usize;
 
