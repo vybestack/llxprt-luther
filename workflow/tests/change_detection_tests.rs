@@ -10,11 +10,11 @@
 use std::path::Path;
 use std::process::Command;
 
-use luther_workflow::engine::error::EngineError;
-use luther_workflow::engine::executor::{StepContext, StepExecutor};
-use luther_workflow::engine::executors::change_detection::{
+use luther_workflow::components::generic::change_detection::{
     ChangeDetectionMode, ChangedPathDetector, GitChangedPathDetector,
 };
+use luther_workflow::engine::error::EngineError;
+use luther_workflow::engine::executor::{StepContext, StepExecutor};
 use luther_workflow::engine::executors::LlxprtExecutorWithDetector;
 use luther_workflow::engine::transition::StepOutcome;
 use serde_json::json;

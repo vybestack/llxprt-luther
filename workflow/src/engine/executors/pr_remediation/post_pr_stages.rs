@@ -6,7 +6,7 @@ use super::post_pr_test_process::{
     run_manifest_post_pr_test_process, run_post_pr_test_process, validated_command_manifest,
 };
 use super::*;
-use crate::engine::executors::command_manifest::{
+use crate::components::generic::command_manifest::{
     manifest_default_working_directory, resolve_manifest_group_id,
 };
 use crate::workflow::command_manifest::CommandEntry;

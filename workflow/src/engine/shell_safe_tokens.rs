@@ -4,7 +4,7 @@
 //! ## Actual boundary: positional binding
 //!
 //! The shell executor's primary injection defense is positional parameter
-//! binding ([`bind_shell_template`](crate::engine::executors::shell)): dynamic
+//! binding ([`bind_shell_template`](crate::components::generic::shell)): dynamic
 //! values are never interpolated into the shell command string. Instead they
 //! are passed as `$1`, `$2`, ... positional parameters, so shell parsing only
 //! sees the static template. Metacharacters in GitHub or config values are

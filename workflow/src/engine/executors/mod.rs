@@ -15,8 +15,6 @@
 //! @requirement:REQ-PRFU-020
 //! @pseudocode lines 1-53
 //! Executors module - concrete step executor implementations.
-pub mod change_detection;
-pub mod command_manifest;
 pub mod feedback_eval;
 pub mod feedback_eval_policy;
 pub mod feedback_eval_timeout;
@@ -26,7 +24,6 @@ pub mod github_pr;
 pub mod llxprt;
 mod llxprt_diff;
 pub mod merge_wait;
-pub mod noop;
 pub mod parent_orchestration;
 pub mod pr_check_wait;
 pub mod pr_followup_artifacts;
@@ -34,11 +31,9 @@ pub mod pr_followup_types;
 mod pr_identity_params;
 pub mod pr_remediation;
 pub mod scope_control;
-pub mod shell;
 pub mod verify;
 pub mod workflow_auth_preflight;
 pub mod workspace_ownership;
-pub mod write_file;
 
 // Re-export executor implementations for tests
 /// Interpreter for workflow-authored commands.
@@ -61,10 +56,15 @@ pub use feedback_eval::{
 };
 pub use feedback_eval_policy::FeedbackEvaluationAdapter;
 
-pub use change_detection::{ChangeDetectionMode, ChangedPathDetector, GitChangedPathDetector};
-pub use command_manifest::{
+pub use crate::components::generic::change_detection::{
+    ChangeDetectionMode, ChangedPathDetector, GitChangedPathDetector,
+};
+pub use crate::components::generic::command_manifest::{
     request_from_entry, run_manifest_command, ManifestCommandRequest, ManifestCommandResult,
 };
+pub use crate::components::generic::noop::NoOpExecutor;
+pub use crate::components::generic::shell::ShellExecutor;
+pub use crate::components::generic::write_file::WriteFileExecutor;
 pub use git_config_publish::GitConfigPublishExecutor;
 pub use github_feedback::{
     FeedbackMarkerParser, GithubCodeRabbitFeedbackExecutor,
@@ -78,7 +78,6 @@ pub use github_pr::{
 };
 pub use llxprt::{LlxprtExecutor, LlxprtExecutorWithDetector};
 pub use merge_wait::{MergeWaitExecutor, MergeWaitProbe, RemoteProbeMergeWaitAdapter};
-pub use noop::NoOpExecutor;
 pub use parent_orchestration::model::{
     classify_child, next_actionable_child, order_subissues, ChildIssueState, ChildIssueStatus,
     ParentIssueOrchestrationState,
@@ -117,11 +116,9 @@ pub use scope_control::{
     ScopeMeasureExecutor, ScopePersistenceError, ScopeStatus, SystemMergeBaseProbe,
     TaskCharterDraft, TaskCharterExecutor, Violation, ViolationCode, CHARTER_SCHEMA_VERSION,
 };
-pub use shell::ShellExecutor;
 pub use verify::VerifyExecutor;
 pub use workflow_auth_preflight::WorkflowAuthPreflightExecutor;
 pub use workspace_ownership::{WorkspaceOwnershipExecutor, WorkspaceOwnershipVerifyExecutor};
-pub use write_file::WriteFileExecutor;
 
 /// Enforce the scope-decision barrier at a mutation entry point.
 ///

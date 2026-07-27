@@ -6,8 +6,8 @@
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 
+use luther_workflow::components::generic::noop::NoOpExecutor;
 use luther_workflow::engine::executor::{ExecutorRegistry, StepContext, StepExecutor};
-use luther_workflow::engine::executors::noop::NoOpExecutor;
 use luther_workflow::engine::instance::WorkflowInstance;
 use luther_workflow::engine::runner::{EngineError, EngineRunner, RunOutcome};
 use luther_workflow::engine::transition::StepOutcome;

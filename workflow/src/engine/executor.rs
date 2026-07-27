@@ -14,7 +14,7 @@ use crate::engine::error::EngineError;
 use crate::engine::transition::StepOutcome;
 
 // Re-export executors for convenience
-pub use crate::engine::executors::noop::NoOpExecutor;
+pub use crate::components::generic::noop::NoOpExecutor;
 
 /// Context for step execution.
 /// Stores key-value pairs for variable interpolation across steps.
@@ -539,7 +539,7 @@ impl ExecutorRegistry {
         self.register("verify", Box::new(crate::engine::executors::VerifyExecutor));
         self.register(
             "command_manifest_group",
-            Box::new(crate::engine::executors::command_manifest::CommandManifestGroupExecutor),
+            Box::new(crate::components::generic::command_manifest::CommandManifestGroupExecutor),
         );
         self.register("noop", Box::new(crate::engine::executors::NoOpExecutor));
     }

@@ -1,6 +1,6 @@
 use super::post_pr_stages::{PostPrTestCommandRequest, PostPrTestCommandResult};
 use super::*;
-use crate::engine::executors::command_manifest::{
+use crate::components::generic::command_manifest::{
     run_manifest_entry, ManifestCommandResult, ManifestEntryExecution, ManifestPathContext,
 };
 use crate::workflow::command_manifest::CommandManifest;
