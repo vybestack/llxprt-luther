@@ -527,7 +527,7 @@ fn run_command_with_timeout(
     work_dir: &std::path::Path,
     timeout: Option<Duration>,
 ) -> Result<WaitResult, WaitError> {
-    let mut cmd = Command::new("sh");
+    let mut cmd = Command::new(crate::engine::executors::WORKFLOW_SHELL);
     cmd.arg("-c")
         .arg(command)
         .current_dir(work_dir)

@@ -76,6 +76,7 @@ fn interrupted_child_workflow_uses_step_wait_kind() {
         issue_number: unique_child_issue_number(),
         work_dir: None,
         artifact_dir: None,
+        transport_url: None,
         config_root: PathBuf::from("config"),
     };
     let config = workflow_config(&request);

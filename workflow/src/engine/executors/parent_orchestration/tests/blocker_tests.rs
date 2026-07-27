@@ -734,6 +734,7 @@ fn completion_request(
         issue_number: child,
         work_dir: None,
         artifact_dir: None,
+        transport_url: None,
         config_root: PathBuf::from("/config"),
     }
 }
@@ -902,4 +903,33 @@ fn finish_child_launch_rejected_cas_with_cleanup_abandoned_yields_fixable() {
         StepOutcome::Fixable,
         "durable CleanupAbandoned lease must yield Fixable (re-evaluate), not Success"
     );
+}
+
+#[test]
+fn orchestration_state_captures_only_an_explicit_transport() {
+    // A derived transport belongs to the parent's identity; a child with a
+    // different identity must derive its own. An explicit one was an operator
+    // instruction and has to be inherited.
+    use crate::workflow::target_profile::{
+        GIT_TRANSPORT_SOURCE_VAR, GIT_TRANSPORT_URL_VAR, TRANSPORT_EXPLICIT,
+    };
+
+    let temp = tempfile::tempdir().unwrap();
+
+    let mut explicit = context(temp.path());
+    explicit.set("current_step_id", "launch_or_resume_child_workflow");
+    explicit.set(GIT_TRANSPORT_URL_VAR, "/tmp/bare.git");
+    explicit.set(GIT_TRANSPORT_SOURCE_VAR, TRANSPORT_EXPLICIT);
+    let state = OrchestrationState::from_context(&explicit, &json!({})).unwrap();
+    assert_eq!(state.transport_url.as_deref(), Some("/tmp/bare.git"));
+
+    let mut derived = context(temp.path());
+    derived.set("current_step_id", "launch_or_resume_child_workflow");
+    derived.set(GIT_TRANSPORT_URL_VAR, "https://github.com/owner/repo.git");
+    derived.set(
+        GIT_TRANSPORT_SOURCE_VAR,
+        crate::workflow::target_profile::transport::TRANSPORT_DERIVED,
+    );
+    let state = OrchestrationState::from_context(&derived, &json!({})).unwrap();
+    assert_eq!(state.transport_url, None);
 }

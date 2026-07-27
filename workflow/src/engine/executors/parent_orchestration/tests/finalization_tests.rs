@@ -53,6 +53,7 @@ fn child_request(
         issue_number: child,
         work_dir: None,
         artifact_dir: None,
+        transport_url: None,
         config_root: PathBuf::from("/config"),
     }
 }

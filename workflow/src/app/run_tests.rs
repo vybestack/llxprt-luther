@@ -12,6 +12,7 @@ fn run_args() -> RunArgs {
         config_dir: None,
         run_id: None,
         repo: None,
+        transport_url: None,
         issue: None,
         work_dir: None,
         artifact_dir: None,

@@ -10,6 +10,14 @@ pub struct TargetProfileOverrides {
     pub issue: Option<String>,
     pub work_dir: Option<PathBuf>,
     pub artifact_dir: Option<PathBuf>,
+    /// Git transport (clone/push target), distinct from `repo`.
+    ///
+    /// `repo` is logical identity -- `owner/name` -- and addresses the GitHub
+    /// API. This addresses Git itself, and the two are allowed to disagree so a
+    /// harness can push to a local bare repository while PR identity still
+    /// refers to the logical repository. Unset means "derive from `repo`",
+    /// which reproduces the production HTTPS URL exactly.
+    pub transport_url: Option<String>,
 }
 
 impl TargetProfileOverrides {
@@ -19,6 +27,7 @@ impl TargetProfileOverrides {
             && self.issue.is_none()
             && self.work_dir.is_none()
             && self.artifact_dir.is_none()
+            && self.transport_url.is_none()
     }
 }
 
@@ -50,10 +59,36 @@ pub fn resolve_target_profile(config: &mut WorkflowConfig) -> Result<()> {
     merge_list_variables(config, &profile);
     merge_prompt_guidance(config, &profile);
     merge_bootstrap(config, &profile);
+    // A transport authored directly in the config is an explicit choice and
+    // must survive a later repository override. A previously *derived* value
+    // carries its provenance, so re-resolving a resolved config does not
+    // promote it -- which would freeze it against later overrides.
+    if config.variables.contains_key(GIT_TRANSPORT_URL_VAR)
+        && !config.variables.contains_key(GIT_TRANSPORT_SOURCE_VAR)
+    {
+        insert_var(config, GIT_TRANSPORT_SOURCE_VAR, TRANSPORT_EXPLICIT);
+    }
+    resolve_transport_url(config)?;
     Ok(())
 }
 
+/// Apply overrides atomically: either every field lands, or none does.
+///
+/// Overrides are applied to a clone and swapped in only after all validation
+/// passes. Without this, a request pairing a valid repository with an invalid
+/// transport would return an error having already changed the repository and
+/// issue, leaving a partially overridden config behind.
 pub fn apply_target_profile_overrides(
+    config: &mut WorkflowConfig,
+    overrides: &TargetProfileOverrides,
+) -> Result<()> {
+    let mut candidate = config.clone();
+    apply_overrides_unchecked(&mut candidate, overrides)?;
+    *config = candidate;
+    Ok(())
+}
+
+fn apply_overrides_unchecked(
     config: &mut WorkflowConfig,
     overrides: &TargetProfileOverrides,
 ) -> Result<()> {
@@ -78,6 +113,16 @@ pub fn apply_target_profile_overrides(
         let artifact_dir_str = utf8_path_override("artifact_dir", artifact_dir)?;
         insert_var(config, "artifact_dir", artifact_dir_str);
     }
+
+    if let Some(transport_url) = overrides.transport_url.as_deref() {
+        validate_transport_url(transport_url)?;
+        insert_var(config, GIT_TRANSPORT_URL_VAR, transport_url);
+        insert_var(config, GIT_TRANSPORT_SOURCE_VAR, TRANSPORT_EXPLICIT);
+    }
+
+    // Always resolve, so a config that never carried the variable still gets
+    // the derived production default.
+    resolve_transport_url(config)?;
 
     Ok(())
 }
@@ -871,6 +916,12 @@ fn push_optional<'a>(
         values.push((field, value));
     }
 }
+
+pub(crate) mod transport;
+pub use transport::{
+    default_transport_url, GIT_TRANSPORT_SOURCE_VAR, GIT_TRANSPORT_URL_VAR, TRANSPORT_EXPLICIT,
+};
+use transport::{resolve_transport_url, validate_transport_url};
 
 #[cfg(test)]
 mod target_profile_tests;

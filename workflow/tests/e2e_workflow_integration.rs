@@ -3767,6 +3767,13 @@ fn dogfood_setup_initializes_marker_owned_workspace_in_place() {
     context.set("target_repo", "owner/repo");
     context.set("issue_number", "150");
     context.set("base_branch", "main");
+    // Supplied the way config resolution supplies it in production, through the
+    // single derivation function rather than a literal, so this test cannot
+    // drift from the shipping default.
+    context.set(
+        "git_transport_url",
+        &luther_workflow::workflow::target_profile::default_transport_url("owner/repo"),
+    );
 
     execute_shipped_setup_chain(&workflow, &mut context, &fake_bin);
     assert!(workspace.join(".git").is_dir());

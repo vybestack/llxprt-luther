@@ -59,6 +59,7 @@ pub fn child_request_with_run_id(
         config_id: state.child_config_id.clone(),
         run_id,
         repo: state.repo.clone(),
+        transport_url: state.transport_url.clone(),
         issue_number: child,
         work_dir,
         artifact_dir,
@@ -400,3 +401,42 @@ pub(super) fn verify_child_resume_provenance(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod transport_forwarding_tests {
+    use super::*;
+
+    fn state_with_transport(transport_url: Option<&str>) -> OrchestrationState {
+        OrchestrationState {
+            current_step: "step".to_string(),
+            artifact_root: std::path::PathBuf::from("/tmp/artifacts"),
+            repo: "owner/repo".to_string(),
+            parent_issue_number: 100,
+            luther_label: "Luther working".to_string(),
+            child_workflow_type_id: "wf".to_string(),
+            child_config_id: "cfg".to_string(),
+            merge_poll_interval_seconds: 300,
+            max_child_merge_wait_seconds: None,
+            auto_merge_children: false,
+            wait_for_human_merge: true,
+            work_dir: None,
+            artifact_dir: None,
+            transport_url: transport_url.map(str::to_string),
+            config_root: std::path::PathBuf::from("/tmp"),
+        }
+    }
+
+    #[test]
+    fn a_launch_request_carries_the_parent_transport() {
+        // The parent's explicit transport has to reach the request, or the
+        // child derives the production URL and pushes to the wrong place.
+        let request = child_launch_request(&state_with_transport(Some("/tmp/bare.git")), 7);
+        assert_eq!(request.transport_url.as_deref(), Some("/tmp/bare.git"));
+    }
+
+    #[test]
+    fn a_launch_request_omits_a_transport_the_parent_never_had() {
+        let request = child_launch_request(&state_with_transport(None), 7);
+        assert_eq!(request.transport_url, None);
+    }
+}

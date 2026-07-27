@@ -39,7 +39,7 @@
       "step_type": "git_config_publish",
       "description": "Publish repository-local Git configuration through authorized descriptors",
       "parameters": {
-        "origin_url": "https://github.com/{target_repo}.git"
+        "origin_url": "{git_transport_url}"
       }
     },
     {
@@ -253,7 +253,7 @@
       "step_type": "shell",
       "description": "Stage, commit, and push changes",
       "parameters": {
-        "command": "set -euo pipefail\n# .luther contains Luther runtime state and is never staged from target workspaces.\nif [ \"{target_has_commit_restore_paths}\" = \"1\" ]; then\n  git restore --worktree -- {target_commit_restore_paths} 2>/dev/null || true\nfi\ngit add -A -- ':!.luther' ':!.luther/**' {target_commit_exclude_pathspecs}\nif git diff --cached --quiet --exit-code; then\n  if [ \"{setup_workspace.existing_pr_number}\" != \"0\" ]; then\n    echo \"No new repository changes; existing PR #{setup_workspace.existing_pr_number} already carries issue branch changes.\"\n    exit 0\n  fi\n  echo \"No repository changes to commit\" >&2\n  exit 1\nfi\ngit commit -m \"Fix #{issue_number}: {issue_title}\"\ngit push --force-with-lease -u origin issue{issue_number}\n",
+        "command": "set -euo pipefail\nunset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_INDEX_FILE GIT_CONFIG_COUNT GIT_CONFIG_PARAMETERS GIT_PROXY_COMMAND GIT_SSH GIT_SSH_COMMAND\nexport GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_NOSYSTEM=1\n# .luther contains Luther runtime state and is never staged from target workspaces.\nif [ \"{target_has_commit_restore_paths}\" = \"1\" ]; then\n  git restore --worktree -- {target_commit_restore_paths} 2>/dev/null || true\nfi\ngit add -A -- ':!.luther' ':!.luther/**' {target_commit_exclude_pathspecs}\nif git diff --cached --quiet --exit-code; then\n  if [ \"{setup_workspace.existing_pr_number}\" != \"0\" ]; then\n    echo \"No new repository changes; existing PR #{setup_workspace.existing_pr_number} already carries issue branch changes.\"\n    exit 0\n  fi\n  echo \"No repository changes to commit\" >&2\n  exit 1\nfi\ngit commit -m \"Fix #{issue_number}: {issue_title}\"\ngit push --force-with-lease -u origin issue{issue_number}\n",
         "exit_code_map": {
           "1": "fatal",
           "128": "fatal"

@@ -309,6 +309,7 @@ pub fn apply_run_target_overrides(
         issue: args.issue.clone(),
         work_dir: args.work_dir.clone(),
         artifact_dir: args.artifact_dir.clone(),
+        transport_url: args.transport_url.clone(),
     };
     if let Err(e) = apply_target_profile_overrides(config, &overrides) {
         eprintln!("Error: {e}");

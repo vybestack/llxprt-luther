@@ -442,6 +442,7 @@ pub(super) fn rollup_state(
         wait_for_human_merge: true,
         work_dir: None,
         artifact_dir,
+        transport_url: None,
         config_root: PathBuf::from("/config"),
     }
 }
