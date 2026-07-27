@@ -306,16 +306,16 @@ fn run_changed_lizard(
     }
 }
 
-/// The path `blob_path` had in `base`, if it was renamed since.
+/// Every rename between `base` and `HEAD`, keyed by the path at `HEAD`.
 ///
-/// Returns `None` when the file was not renamed, which includes the ordinary
-/// case of a modified file. Rename detection is git's own, so it applies the
-/// same similarity threshold used elsewhere.
-fn rename_source_path(
-    workspace_root: &Path,
-    base: &str,
-    blob_path: &str,
-) -> Result<Option<String>> {
+/// Built once rather than per file: the underlying diff covers the whole tree
+/// and is identical for every lookup, so asking per file would spawn N
+/// identical subprocesses to parse the same output N times.
+///
+/// Rename detection is git's own, so it applies the same similarity threshold
+/// used elsewhere and will not pair a file that was rewritten rather than
+/// moved.
+fn rename_map(workspace_root: &Path, base: &str) -> Result<HashMap<String, String>> {
     let output = command_in_dir(
         workspace_root,
         "git",
@@ -329,16 +329,24 @@ fn rename_source_path(
         ],
     )
     .output()
-    .with_context(|| format!("spawn git diff for rename of {blob_path}"))?;
+    .with_context(|| format!("spawn git diff for renames between {base} and HEAD"))?;
+    // Failing here is not something to carry on from: without the rename list
+    // every moved file silently loses its baseline and reports its existing
+    // warnings as new, which is the exact defect this resolves. Fail loudly
+    // rather than produce a plausible-looking wrong answer.
     if !output.status.success() {
-        return Ok(None);
+        anyhow::bail!(
+            "git diff for renames between {base} and HEAD failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
     }
     let stdout = String::from_utf8_lossy(&output.stdout);
     // Format: `R<score>\t<old path>\t<new path>`.
     //
-    // Deliberately not pathspec-limited. Restricting the diff to the new path
-    // makes git report nothing at all: pairing a rename needs both sides of it
-    // to be in the diff, and the old path is excluded by that very pathspec.
+    // Deliberately not pathspec-limited. Restricting the diff to a single new
+    // path makes git report no rename at all: pairing one needs both sides in
+    // the diff, and such a pathspec excludes the old side.
+    let mut renames = HashMap::new();
     for line in stdout.lines() {
         let mut fields = line.split('\t');
         let status = fields.next().unwrap_or_default();
@@ -347,11 +355,11 @@ fn rename_source_path(
         }
         let old_path = fields.next().unwrap_or_default();
         let new_path = fields.next().unwrap_or_default();
-        if new_path == blob_path {
-            return Ok(Some(old_path.to_string()));
+        if !old_path.is_empty() && !new_path.is_empty() {
+            renames.insert(new_path.to_string(), old_path.to_string());
         }
     }
-    Ok(None)
+    Ok(renames)
 }
 
 fn materialize_base_sources(
@@ -362,6 +370,7 @@ fn materialize_base_sources(
 ) -> Result<Vec<PathBuf>> {
     let git_prefix = capture_in_dir(workspace_root, "git", ["rev-parse", "--show-prefix"])?;
     let git_prefix = git_prefix.trim();
+    let renames = rename_map(workspace_root, base)?;
     fs::create_dir_all(base_root).with_context(|| format!("create {}", base_root.display()))?;
     let mut base_paths = Vec::new();
     for path in paths {
@@ -374,7 +383,9 @@ fn materialize_base_sources(
         // pre-existing warning in it would then read as newly introduced.
         // Resolve the pre-rename path and read the baseline from there, so a
         // pure move is measured against the code it actually came from.
-        let source_path = rename_source_path(workspace_root, base, &blob_path)?
+        let source_path = renames
+            .get(&blob_path)
+            .cloned()
             .unwrap_or_else(|| blob_path.clone());
         let output = command_in_dir(
             workspace_root,
