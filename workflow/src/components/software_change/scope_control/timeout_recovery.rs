@@ -233,8 +233,10 @@ pub fn handle_timeout_recovery(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::executors::scope_control::measurement::{ChangeStatus, FileChange};
-    use crate::engine::executors::scope_control::model::{
+    use crate::components::software_change::scope_control::measurement::{
+        ChangeStatus, FileChange,
+    };
+    use crate::components::software_change::scope_control::model::{
         normalize_charter, DraftBudget, DraftReviewCaps, DraftSubsystem, TaskCharterDraft,
     };
     use tempfile::TempDir;

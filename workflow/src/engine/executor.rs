@@ -563,13 +563,13 @@ impl ExecutorRegistry {
         self.register(
             "task_charter",
             Box::new(
-                crate::engine::executors::scope_control::TaskCharterExecutor::with_system_probe(),
+                crate::components::software_change::scope_control::TaskCharterExecutor::with_system_probe(),
             ),
         );
         self.register(
             "scope_measure",
             Box::new(
-                crate::engine::executors::scope_control::ScopeMeasureExecutor::with_system_collector(),
+                crate::components::software_change::scope_control::ScopeMeasureExecutor::with_system_collector(),
             ),
         );
         self.register(

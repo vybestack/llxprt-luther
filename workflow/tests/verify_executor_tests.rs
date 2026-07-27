@@ -1,12 +1,12 @@
+use luther_workflow::components::software_change::verify::{
+    profile_default_command, resolve_check_command, ErrorRecord, VerifyExecutor, VerifyReport,
+};
 use luther_workflow::engine::error::EngineError;
 /// @plan:PLAN-20260408-LLXPRT-FIRST.P07
 /// `VerifyExecutor` TDD tests - all tests expect contract failures for the Phase 08 implementation contract.
 /// These tests verify the `VerifyExecutor` behavior for configurable check sequences,
 /// result parsing, report generation, and context variable setting.
 use luther_workflow::engine::executor::{StepContext, StepExecutor};
-use luther_workflow::engine::executors::verify::{
-    profile_default_command, resolve_check_command, ErrorRecord, VerifyExecutor, VerifyReport,
-};
 use luther_workflow::engine::transition::StepOutcome;
 use serde_json::json;
 use std::fs;

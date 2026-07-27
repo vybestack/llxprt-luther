@@ -783,11 +783,11 @@ fn poll_scope_decision(record: &WaitStateRecord) -> PollDecision {
             }),
         );
     };
-    let request = crate::engine::executors::scope_control::read_expansion_request(
+    let request = crate::components::software_change::scope_control::read_expansion_request(
         &artifact_dir,
         &record.run_id,
     );
-    let resolution = crate::engine::executors::scope_control::read_expansion_resolution(
+    let resolution = crate::components::software_change::scope_control::read_expansion_resolution(
         &artifact_dir,
         &record.run_id,
     );

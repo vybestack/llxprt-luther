@@ -251,12 +251,15 @@ pub fn next_step_label(md: &luther_workflow::persistence::RunMetadata) -> String
 /// Convert a run record into a JSON object for `--json` status output.
 /// @plan:PLAN-20260404-INITIAL-RUNTIME.P05
 pub fn run_metadata_to_json(md: &luther_workflow::persistence::RunMetadata) -> serde_json::Value {
-    let scope_status = luther_workflow::engine::executors::scope_control::project_scope_status(
-        md.artifact_root.as_deref(),
-        &md.run_id,
-    );
+    let scope_status =
+        luther_workflow::components::software_change::scope_control::project_scope_status(
+            md.artifact_root.as_deref(),
+            &md.run_id,
+        );
     let scope_json =
-        luther_workflow::engine::executors::scope_control::scope_status_to_json(&scope_status);
+        luther_workflow::components::software_change::scope_control::scope_status_to_json(
+            &scope_status,
+        );
     serde_json::json!({
         "run_id": md.run_id,
         "config_id": md.config_id,
@@ -292,11 +295,12 @@ pub fn run_metadata_to_json(md: &luther_workflow::persistence::RunMetadata) -> s
 /// runs (no scope-control artifacts) print a single "unavailable" line; corrupt
 /// artifacts surface an explicit error line.
 fn print_scope_control_status(md: &luther_workflow::persistence::RunMetadata) {
-    let status = luther_workflow::engine::executors::scope_control::project_scope_status(
+    let status = luther_workflow::components::software_change::scope_control::project_scope_status(
         md.artifact_root.as_deref(),
         &md.run_id,
     );
-    let human = luther_workflow::engine::executors::scope_control::scope_status_to_human(&status);
+    let human =
+        luther_workflow::components::software_change::scope_control::scope_status_to_human(&status);
     for line in human.lines() {
         println!("    {line}");
     }

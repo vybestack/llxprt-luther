@@ -20,20 +20,20 @@ use std::path::Path;
 
 use serde_json::Value;
 
-use crate::engine::error::EngineError;
-use crate::engine::executor::{StepContext, StepExecutor};
-use crate::engine::executors::scope_control::config_validation::active_scope_control;
-use crate::engine::executors::scope_control::decision::{
+use crate::components::software_change::scope_control::config_validation::active_scope_control;
+use crate::components::software_change::scope_control::decision::{
     build_expansion_request, check_scope_gate, write_expansion_request, ScopeGateOutcome,
 };
-use crate::engine::executors::scope_control::evaluation::evaluate;
-use crate::engine::executors::scope_control::measurement::{
+use crate::components::software_change::scope_control::evaluation::evaluate;
+use crate::components::software_change::scope_control::measurement::{
     collect_dependency_diffs, compute_measurement, GitPatchCollector, SystemGitPatchCollector,
 };
-use crate::engine::executors::scope_control::model::CanonicalTaskCharter;
-use crate::engine::executors::scope_control::persistence::{
+use crate::components::software_change::scope_control::model::CanonicalTaskCharter;
+use crate::components::software_change::scope_control::persistence::{
     charter_path, read_json, scope_control_dir, update_status_measurement,
 };
+use crate::engine::error::EngineError;
+use crate::engine::executor::{StepContext, StepExecutor};
 use crate::engine::transition::StepOutcome;
 use crate::workflow::schema::{ScopeControlConfig, TargetProfileConfig};
 
@@ -140,8 +140,8 @@ fn enforce_gate(
     artifact_dir: &Path,
     run_id: &str,
     charter: &CanonicalTaskCharter,
-    measurement: &crate::engine::executors::scope_control::measurement::PatchMeasurement,
-    evaluation: &crate::engine::executors::scope_control::evaluation::ScopeEvaluation,
+    measurement: &crate::components::software_change::scope_control::measurement::PatchMeasurement,
+    evaluation: &crate::components::software_change::scope_control::evaluation::ScopeEvaluation,
 ) -> Result<Option<StepOutcome>, EngineError> {
     if evaluation.within_budget && evaluation.violations.is_empty() {
         return Ok(None);
@@ -179,8 +179,8 @@ fn gate_outcome_label(gate: ScopeGateOutcome) -> &'static str {
 /// steps.
 fn expose_measurement_outputs(
     context: &mut StepContext,
-    measurement: &crate::engine::executors::scope_control::measurement::PatchMeasurement,
-    evaluation: &crate::engine::executors::scope_control::evaluation::ScopeEvaluation,
+    measurement: &crate::components::software_change::scope_control::measurement::PatchMeasurement,
+    evaluation: &crate::components::software_change::scope_control::evaluation::ScopeEvaluation,
 ) {
     context.set("scope_measure_head_sha", &measurement.head_sha);
     context.set("scope_measure_merge_base", &measurement.merge_base);
@@ -284,8 +284,8 @@ fn load_charter(artifact_dir: &Path, run_id: &str) -> Result<CanonicalTaskCharte
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::executors::scope_control::measurement::GitPatchData;
-    use crate::engine::executors::scope_control::MeasurementError;
+    use crate::components::software_change::scope_control::measurement::GitPatchData;
+    use crate::components::software_change::scope_control::MeasurementError;
     use crate::workflow::schema::{
         ScopeBudgetConfig, ScopeControlConfig, ScopeReviewCapsConfig, ScopeSubsystemConfig,
         TargetProfileConfig,
@@ -339,10 +339,10 @@ mod tests {
     }
 
     fn make_context_with_charter(tmp: &TempDir) -> StepContext {
-        use crate::engine::executors::scope_control::model::{
+        use crate::components::software_change::scope_control::model::{
             normalize_charter, DraftBudget, DraftReviewCaps, DraftSubsystem, TaskCharterDraft,
         };
-        use crate::engine::executors::scope_control::persistence::persist_charter_and_status;
+        use crate::components::software_change::scope_control::persistence::persist_charter_and_status;
 
         let work_dir = tmp.path().join("work");
         let artifact_dir = tmp.path().join("artifacts");
@@ -499,7 +499,7 @@ mod tests {
             .join("scope-control")
             .join("run-test")
             .join("status.json");
-        let status: crate::engine::executors::scope_control::persistence::ScopeStatus =
+        let status: crate::components::software_change::scope_control::persistence::ScopeStatus =
             read_json(&status_p).expect("read status");
         assert!(status.measurement.is_some());
         assert!(status.evaluation.is_some());

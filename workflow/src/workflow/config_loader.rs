@@ -432,7 +432,7 @@ pub fn validate_workflow_config(config: &WorkflowConfig) -> Result<()> {
         validate_command_manifest(manifest)?;
     }
     validate_command_variable_shadowing(config)?;
-    crate::engine::executors::scope_control::validate_scope_control(config)?;
+    crate::components::software_change::scope_control::validate_scope_control(config)?;
 
     Ok(())
 }

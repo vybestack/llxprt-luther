@@ -9,14 +9,14 @@ use std::path::Path;
 
 use serde_json::Value;
 
-use crate::engine::error::EngineError;
-use crate::engine::executor::{StepContext, StepExecutor};
-use crate::engine::executors::scope_control::config_validation::active_scope_control;
-use crate::engine::executors::scope_control::model::{
+use crate::components::software_change::scope_control::config_validation::active_scope_control;
+use crate::components::software_change::scope_control::model::{
     normalize_charter, validate_draft_against_config, DraftBudget, DraftReviewCaps, DraftSubsystem,
     TaskCharterDraft,
 };
-use crate::engine::executors::scope_control::persistence::persist_charter_and_status;
+use crate::components::software_change::scope_control::persistence::persist_charter_and_status;
+use crate::engine::error::EngineError;
+use crate::engine::executor::{StepContext, StepExecutor};
 use crate::engine::transition::StepOutcome;
 use crate::workflow::schema::{ScopeControlConfig, TargetProfileConfig};
 

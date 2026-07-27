@@ -403,7 +403,7 @@ pub fn update_status_measurement(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::executors::scope_control::model::{
+    use crate::components::software_change::scope_control::model::{
         DraftBudget, DraftReviewCaps, DraftSubsystem, TaskCharterDraft, CHARTER_SCHEMA_VERSION,
     };
     use tempfile::TempDir;
@@ -590,10 +590,10 @@ mod tests {
 
     // --- Issue 142: prior-snapshot promotion and growth observability ---
 
-    use crate::engine::executors::scope_control::evaluation::{
+    use crate::components::software_change::scope_control::evaluation::{
         ScopeEvaluation, Violation, ViolationCode,
     };
-    use crate::engine::executors::scope_control::measurement::PatchMeasurement;
+    use crate::components::software_change::scope_control::measurement::PatchMeasurement;
 
     fn within_budget_eval() -> ScopeEvaluation {
         ScopeEvaluation {

@@ -374,11 +374,12 @@ pub fn print_runs_show_human(
 /// Render the scope-control section of `runs show` (issue #142).
 fn print_runs_show_scope_control(md: &RunMetadata) {
     println!();
-    let status = luther_workflow::engine::executors::scope_control::project_scope_status(
+    let status = luther_workflow::components::software_change::scope_control::project_scope_status(
         md.artifact_root.as_deref(),
         &md.run_id,
     );
-    let human = luther_workflow::engine::executors::scope_control::scope_status_to_human(&status);
+    let human =
+        luther_workflow::components::software_change::scope_control::scope_status_to_human(&status);
     for line in human.lines() {
         println!("{line}");
     }

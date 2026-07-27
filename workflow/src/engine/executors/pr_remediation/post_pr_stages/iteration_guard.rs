@@ -99,7 +99,7 @@ fn scope_review_gate(
     context: &mut StepContext,
     binding: &PrFollowupBinding,
 ) -> Result<bool, EngineError> {
-    use crate::engine::executors::scope_control::{
+    use crate::components::software_change::scope_control::{
         charter_path, filter_changed_tests, pre_launch_review_gate, read_json, scope_control_dir,
         CanonicalTaskCharter, PreLaunchReviewRequest,
     };

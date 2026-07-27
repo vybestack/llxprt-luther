@@ -991,9 +991,11 @@ fn diff_gate_sees_committed_work() {
     fs::create_dir_all(root.join("workflow/src")).expect("dirs");
     fs::write(root.join("workflow/src/a.rs"), "fn a() {}").expect("write");
 
-    let uncommitted =
-        luther_workflow::engine::executors::verify::changed_paths_for_test(root, Some("base"))
-            .expect("uncommitted");
+    let uncommitted = luther_workflow::components::software_change::verify::changed_paths_for_test(
+        root,
+        Some("base"),
+    )
+    .expect("uncommitted");
     assert!(
         uncommitted.iter().any(|p| p.contains("workflow/src/a.rs")),
         "uncommitted work must be visible"
@@ -1002,9 +1004,11 @@ fn diff_gate_sees_committed_work() {
     git(&["add", "-A"]);
     git(&["commit", "-qm", "work"]);
 
-    let committed =
-        luther_workflow::engine::executors::verify::changed_paths_for_test(root, Some("base"))
-            .expect("committed");
+    let committed = luther_workflow::components::software_change::verify::changed_paths_for_test(
+        root,
+        Some("base"),
+    )
+    .expect("committed");
     assert!(
         committed.iter().any(|p| p.contains("workflow/src/a.rs")),
         "committed work must remain visible to the diff gate, got: {committed:?}"
@@ -1036,7 +1040,7 @@ fn diff_gate_treats_an_unresolvable_base_ref_as_no_committed_range() {
     git(&["add", "-A"]);
     git(&["commit", "-qm", "work"]);
 
-    let paths = luther_workflow::engine::executors::verify::changed_paths_for_test(
+    let paths = luther_workflow::components::software_change::verify::changed_paths_for_test(
         root,
         Some("origin/does-not-exist"),
     )
@@ -1070,8 +1074,9 @@ fn diff_gate_without_a_base_ref_uses_the_worktree_only() {
     git(&["commit", "-qm", "work"]);
     fs::write(root.join("workflow/src/dirty.rs"), "fn b() {}\n").expect("write");
 
-    let paths = luther_workflow::engine::executors::verify::changed_paths_for_test(root, None)
-        .expect("an omitted base_ref must not be an error");
+    let paths =
+        luther_workflow::components::software_change::verify::changed_paths_for_test(root, None)
+            .expect("an omitted base_ref must not be an error");
 
     assert!(
         paths.iter().any(|p| p.contains("workflow/src/dirty.rs")),
@@ -1117,12 +1122,17 @@ fn diff_gate_rejects_an_option_like_base_ref() {
     git(&["commit", "-qm", "work"]);
     // Control: a resolvable ref succeeds in this same repository, so the
     // rejections below are attributable to validation and nothing else.
-    luther_workflow::engine::executors::verify::changed_paths_for_test(root, Some("HEAD"))
-        .expect("a valid ref must be accepted");
+    luther_workflow::components::software_change::verify::changed_paths_for_test(
+        root,
+        Some("HEAD"),
+    )
+    .expect("a valid ref must be accepted");
 
     for hostile in ["--output=/tmp/pwned", "-x", "origin/main HEAD", ""] {
-        let result =
-            luther_workflow::engine::executors::verify::changed_paths_for_test(root, Some(hostile));
+        let result = luther_workflow::components::software_change::verify::changed_paths_for_test(
+            root,
+            Some(hostile),
+        );
         let message = match result {
             Err(error) => error.to_string(),
             Ok(paths) => panic!("base_ref {hostile:?} must be rejected, got: {paths:?}"),

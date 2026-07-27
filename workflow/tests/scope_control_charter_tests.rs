@@ -12,12 +12,12 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use luther_workflow::engine::executor::{ExecutorRegistry, StepContext, StepExecutor};
-use luther_workflow::engine::executors::scope_control::{
+use luther_workflow::components::software_change::scope_control::{
     normalize_charter, validate_draft_against_config, DraftBudget, DraftReviewCaps, DraftSubsystem,
     MergeBaseError, MergeBaseProbe, ScopePersistenceError, ScopeStatus, TaskCharterDraft,
     TaskCharterExecutor,
 };
+use luther_workflow::engine::executor::{ExecutorRegistry, StepContext, StepExecutor};
 use luther_workflow::engine::transition::StepOutcome;
 use luther_workflow::workflow::config_loader::validate_workflow_config;
 use luther_workflow::workflow::schema::{
@@ -374,7 +374,7 @@ fn persist_writes_immutably_and_refuses_overwrite() {
     let charter_path = dir.join("task-charter.json");
     let status_path = dir.join("status.json");
 
-    luther_workflow::engine::executors::scope_control::persistence::write_immutable_json(
+    luther_workflow::components::software_change::scope_control::persistence::write_immutable_json(
         &charter_path,
         &canonical,
     )
@@ -393,7 +393,7 @@ fn persist_writes_immutably_and_refuses_overwrite() {
         prior_measurement_digest: None,
         prior_measured_at: None,
     };
-    luther_workflow::engine::executors::scope_control::persistence::write_immutable_json(
+    luther_workflow::components::software_change::scope_control::persistence::write_immutable_json(
         &status_path,
         &status,
     )
@@ -401,7 +401,7 @@ fn persist_writes_immutably_and_refuses_overwrite() {
 
     // Second write must be refused (immutable).
     let result =
-        luther_workflow::engine::executors::scope_control::persistence::write_immutable_json(
+        luther_workflow::components::software_change::scope_control::persistence::write_immutable_json(
             &charter_path,
             &canonical,
         );
