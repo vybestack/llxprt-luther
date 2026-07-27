@@ -335,7 +335,7 @@ fn rename_map(workspace_root: &Path, base: &str) -> Result<HashMap<String, Strin
     // warnings as new, which is the exact defect this resolves. Fail loudly
     // rather than produce a plausible-looking wrong answer.
     if !output.status.success() {
-        anyhow::bail!(
+        bail!(
             "git diff for renames between {base} and HEAD failed: {}",
             String::from_utf8_lossy(&output.stderr).trim()
         );
@@ -353,11 +353,17 @@ fn rename_map(workspace_root: &Path, base: &str) -> Result<HashMap<String, Strin
         if !status.starts_with('R') {
             continue;
         }
-        let old_path = fields.next().unwrap_or_default();
-        let new_path = fields.next().unwrap_or_default();
-        if !old_path.is_empty() && !new_path.is_empty() {
-            renames.insert(new_path.to_string(), old_path.to_string());
+        // A line git labelled `R` must carry both paths. If it does not, the
+        // output is not what this parser was written against, and silently
+        // dropping it would reproduce the defect this function exists to
+        // prevent - a rename going unnoticed - one level further down.
+        let (Some(old_path), Some(new_path)) = (fields.next(), fields.next()) else {
+            bail!("git reported a rename without both paths: {line:?}");
+        };
+        if old_path.is_empty() || new_path.is_empty() {
+            bail!("git reported a rename with an empty path: {line:?}");
         }
+        renames.insert(new_path.to_string(), old_path.to_string());
     }
     Ok(renames)
 }
