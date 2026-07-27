@@ -83,15 +83,29 @@ The corpus supports this directly:
 | Case | What was assumed | What was true |
 |---|---|---|
 | #174 | prints `Excluded (2):` | prints `Excluded from review (2):` |
-| #176 | keys on the passed path | keys on the canonical realpath |
+| #176 | keys on the passed path | keys on the working directory, logical only when `$PWD` aliases it [^176] |
 | #179 | keys on the build workspace root | keys on the git root |
-| #182 | honors `--repo` | ignores it; uses process cwd |
+| #182 | honors `--repo` | depends on the subcommand: `session show` ignores it, `session list` and `review` honor it [^182] |
 | #183, #186 | honors `--json` | accepts it, prints a human table |
 | #195 | one session per run | auxiliary invocations create empty sessions |
 
 Six of ten failures are the same defect wearing different clothes. None is a
 routing failure. In every one, the review **succeeded** and the gate reported
 failure because it could not retrieve or interpret the result.
+
+[^176]: The original row said "canonical realpath". Measured against 1.7.16,
+    the tool follows Go's `os.Getwd`: it honors `$PWD` only when `$PWD` names
+    the same directory as the physical cwd, and otherwise falls back to the
+    physical path. So the form depends on how the process was spawned, not on
+    the path. Corrected here because the wrong word was load-bearing — a
+    reader who canonicalises on the strength of it reintroduces the defect,
+    which is what `.github/scripts/ocr-session-evidence.js` did.
+
+[^182]: The original row generalised one subcommand's behavior to the tool.
+    Measured against 1.7.16: `session show` accepts `--repo` and ignores it,
+    while `session list` and `review` honor it. Recording this per tool rather
+    than per subcommand is what made the original claim wrong, and it is why
+    `ToolContract` keys behavior on the subcommand.
 
 #186 is the sharpest instance. That exact `--json` behavior was already known
 and written down — **as a prompt rule** — and did not survive a rewrite. The

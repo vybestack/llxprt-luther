@@ -957,3 +957,40 @@ fn the_pinned_version_matches_the_version_ci_installs() {
          fixtures against the version CI runs"
     );
 }
+
+/// The `--repo` behaviour recorded for each subcommand must actually differ.
+///
+/// The retrospective originally generalised one subcommand's handling of
+/// `--repo` to the whole tool, and that generalisation was the defect. If a
+/// future edit made every subcommand agree, the per-subcommand structure would
+/// still compile and its justification would quietly become false, so the
+/// disagreement is asserted rather than merely described in prose.
+#[test]
+fn the_repo_flag_is_recorded_as_behaving_differently_per_subcommand() {
+    let contract = ocr_contract();
+    let show = contract
+        .subcommand("session show")
+        .expect("session show is recorded")
+        .flag("--repo")
+        .expect("session show records --repo");
+    let list = contract
+        .subcommand("session list")
+        .expect("session list is recorded")
+        .flag("--repo")
+        .expect("session list records --repo");
+
+    assert!(
+        matches!(show, FlagBehaviour::AcceptedAndIgnored { .. }),
+        "session show accepts --repo and ignores it, measured against the real binary"
+    );
+    assert_eq!(
+        list,
+        &FlagBehaviour::Honoured,
+        "session list honours --repo, measured against the real binary"
+    );
+    assert_ne!(
+        show, list,
+        "the two subcommands must disagree: a contract keyed on the tool rather than on the \
+         subcommand would have to pick one of these and be wrong about the other"
+    );
+}
