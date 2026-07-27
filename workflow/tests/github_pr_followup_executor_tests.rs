@@ -902,11 +902,14 @@ fn execute_step<E: StepExecutor>(executor: E) -> StepOutcome {
 #[test]
 fn production_executor_modules_do_not_expose_fixture_selection_seams() {
     let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let github_pr = std::fs::read_to_string(workspace.join("src/engine/executors/github_pr.rs"))
+    // These paths are literal so that a component moving without this test
+    // being updated is a loud failure rather than a silent skip. B6 moved
+    // these out of `engine/executors/`, and that move surfaced here first.
+    let github_pr = std::fs::read_to_string(workspace.join("src/components/github/github_pr.rs"))
         .expect("read github_pr executor source");
     // `feedback_eval` is a directory module; concatenate its source files so
     // the fixture-seam assertions cover the whole production module.
-    let feedback_eval_dir = workspace.join("src/engine/executors/feedback_eval");
+    let feedback_eval_dir = workspace.join("src/components/github/feedback_eval");
     let feedback_eval = std::fs::read_dir(&feedback_eval_dir)
         .expect("read feedback_eval module directory")
         .filter_map(Result::ok)
@@ -919,7 +922,7 @@ fn production_executor_modules_do_not_expose_fixture_selection_seams() {
         .collect::<Vec<_>>()
         .join("\n");
     let pr_remediation =
-        std::fs::read_to_string(workspace.join("src/engine/executors/pr_remediation.rs"))
+        std::fs::read_to_string(workspace.join("src/components/github/pr_remediation.rs"))
             .expect("read pr_remediation executor source");
     let exports = std::fs::read_to_string(workspace.join("src/engine/executors/mod.rs"))
         .expect("read executor exports");
