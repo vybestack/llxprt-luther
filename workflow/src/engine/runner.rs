@@ -849,4 +849,6 @@ impl EngineRunner {
 }
 
 #[cfg(test)]
+mod failure_cleanup_lease_tests;
+#[cfg(test)]
 mod runner_tests;
