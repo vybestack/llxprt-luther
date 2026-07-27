@@ -20,7 +20,7 @@ pub(super) fn read_fixture(name: &str) -> String {
 }
 
 /// Capture holding the tool's own help text for a subcommand.
-pub(super) fn help_capture_name(subcommand: &str) -> String {
+fn help_capture_name(subcommand: &str) -> String {
     format!("{}--help.txt", subcommand.replace(' ', "-"))
 }
 

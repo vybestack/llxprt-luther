@@ -5,9 +5,7 @@
 //! that must hold for every subcommand, while these tests record what one
 //! specific subcommand was measured to do.
 
-use super::tool_contract_tests::{
-    capture_named, help_capture_name, ocr_contract, read_fixture, subcommand,
-};
+use super::tool_contract_tests::{capture_named, ocr_contract, read_fixture, subcommand};
 use super::*;
 
 /// `session list` honours `--repo`; the working directory is its default, not
