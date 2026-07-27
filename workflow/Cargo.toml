@@ -2,6 +2,17 @@
 members = ["xtask", "crates/luther-engine-core"]
 resolver = "2"
 
+# Shared by the root package and the core package. Declared once so the two
+# cannot drift apart: they persist to the same database file, and a version
+# skew between them would be a disagreement about SQLite behaviour that no
+# test asserts against. Resolution is already unified today - the lockfile
+# holds exactly one rusqlite and one chrono - so this preserves the current
+# state rather than changing it, and removes the way it could silently stop
+# being true.
+[workspace.dependencies]
+chrono = { version = "0.4", features = ["serde"] }
+rusqlite = { version = "0.34", features = ["bundled", "chrono", "uuid"] }
+
 [package]
 name = "luther-workflow"
 version = "0.1.0"
@@ -11,7 +22,7 @@ license = "MIT"
 
 [dependencies]
 anyhow = "1"
-chrono = { version = "0.4", features = ["serde"] }
+chrono = { workspace = true }
 regex = "1.11"
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
@@ -22,7 +33,7 @@ toml = "0.8"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 uuid = { version = "1.0", features = ["v4", "serde"] }
-rusqlite = { version = "0.34", features = ["bundled", "chrono", "uuid"] }
+rusqlite = { workspace = true }
 directories = "5"
 dirs = "5"
 libc = "0.2"

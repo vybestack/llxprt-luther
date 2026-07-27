@@ -11,3 +11,11 @@ license = "MIT"
 # mechanically rather than by review.
 [dependencies]
 sha2 = "0.10"
+
+# Durable fencing needs a database and a clock. These are the primitives'
+# genuine requirements, not conveniences: epoch advancement is a
+# compare-and-swap inside a SQL transaction, and an epoch row records when it
+# was claimed. Versions match the workspace so the two packages cannot resolve
+# to different rusqlite builds and disagree about SQLite behaviour.
+chrono = { workspace = true }
+rusqlite = { workspace = true }

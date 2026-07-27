@@ -70,9 +70,14 @@ boundary, and a test that cannot tell the difference is decoration.
 
 ## Current contents of core
 
-`sha256_hex` only. It qualifies on the evidence rather than on intent: zero
-domain references, no dependency on any other module in the crate, and five
-existing callers spread across persistence, recovery, and the tool contract.
+`sha256_hex` and `recovery_epoch`. Each qualifies on evidence rather than on
+intent: zero domain references in code, and no dependency on any other module
+in the domain crate.
+
+`sha256_hex` arrived with B1 and has five callers across persistence,
+recovery, and the tool contract. `recovery_epoch` arrived with B4 and brought
+`rusqlite` and `chrono` with it — see the B4 section below, which records why
+that is a change of character worth stating rather than a detail.
 
 The bulk of the executors, the schema split, and registry composition are
 explicitly out of scope here and are handled by B2 through B6. This change
@@ -86,3 +91,37 @@ that will eventually sit behind it.
 deliberately left alone: correcting it requires the output-port design from B8
 and would turn a move-only change into a semantic one. `StepOutcome` has not
 moved into core, so the forbidden-vocabulary test does not yet apply to it.
+
+## Persistence: what moved, and what could not (B4)
+
+`recovery_epoch` is in core. Durable epoch fencing has no domain content: it
+is a counter, a compare-and-swap, and a timestamp.
+
+Moving it made core depend on `rusqlite` and `chrono`. That is a real change
+of character — B1 left core depending on nothing but `sha2` — and it is
+recorded rather than absorbed silently. Core is now a package that owns
+durable state, not only a hash function. The versions are pinned to match the
+workspace so the two packages cannot resolve different `rusqlite` builds and
+disagree about SQLite behaviour.
+
+### Files that stayed behind
+
+Five persistence modules carry domain state and could not move:
+
+| Module | Why it stayed |
+| --- | --- |
+| `leases` | `IssueLease` has `issue_number INTEGER NOT NULL` in its SQL schema, and `UNIQUE(issue_repo, issue_number)` is its concurrency guarantee |
+| `wait_state` | Encodes waiting on pull requests and review feedback |
+| `run_metadata` | Carries issue and PR identity through run status |
+| `claim_metadata` | Claims are claims on issues |
+| `checkpoint` | References the issue-fixing step vocabulary |
+
+These are not naming problems that a rename would fix. `leases` in particular
+would need generalising to an opaque claim key — a semantic change, which
+issue #205 explicitly places out of scope, and which is tracked separately so it can
+be reviewed as a behaviour change rather than smuggled inside a move.
+
+The remaining domain-free modules (`attempts`, `effect_intents`,
+`capsule_store`, `artifacts`, `legacy_migration_state`,
+`recovery_operations`) are movable on the same terms and are deferred only to
+keep this change reviewable as a move.
