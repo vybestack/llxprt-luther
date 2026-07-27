@@ -135,6 +135,11 @@ pub struct ChildWorkflowLaunchRequest {
     pub issue_number: u64,
     pub work_dir: Option<PathBuf>,
     pub artifact_dir: Option<PathBuf>,
+    /// Operator-supplied Git transport, carried so a child pushes where the
+    /// parent was told to push. Without this a child reloads its own config and
+    /// derives the production URL, silently sending pushes to GitHub while the
+    /// parent targets a local repository.
+    pub transport_url: Option<String>,
     pub config_root: PathBuf,
 }
 
@@ -214,7 +219,25 @@ struct OrchestrationState {
     wait_for_human_merge: bool,
     work_dir: Option<PathBuf>,
     artifact_dir: Option<PathBuf>,
+    /// Explicit transport inherited from the parent run, if any.
+    transport_url: Option<String>,
     config_root: PathBuf,
+}
+
+/// The transport to hand a child, but only when the operator chose it.
+///
+/// A derived transport belongs to the parent's logical identity; a child with a
+/// different identity must derive its own. An explicit one was an instruction
+/// and has to be honoured.
+fn explicit_transport_url(context: &StepContext) -> Option<String> {
+    if context.get(crate::workflow::target_profile::GIT_TRANSPORT_SOURCE_VAR)?
+        != crate::workflow::target_profile::TRANSPORT_EXPLICIT
+    {
+        return None;
+    }
+    context
+        .get(crate::workflow::target_profile::GIT_TRANSPORT_URL_VAR)
+        .map(ToString::to_string)
 }
 
 impl OrchestrationState {
@@ -225,6 +248,9 @@ impl OrchestrationState {
             current_step: required_context(context, "current_step_id")?,
             artifact_root,
             repo: required_context(context, "target_repo")?,
+            // Only an explicit transport is inherited. A derived one must be
+            // recomputed by the child from its own logical identity.
+            transport_url: explicit_transport_url(context),
             parent_issue_number: parent_issue_number(context)?,
             luther_label: context_value_with_warned_default(
                 context,

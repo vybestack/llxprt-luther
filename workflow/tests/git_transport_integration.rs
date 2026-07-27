@@ -409,3 +409,125 @@ fn an_unusable_local_transport_is_rejected_before_any_mutation() {
         assert_eq!(config.variables, before, "{bad:?} must not mutate config");
     }
 }
+
+/// A workflow whose single shell step records the repository a GitHub call
+/// would address and the transport Git would use.
+///
+/// Both values come from the runner's own context, so this observes what the
+/// production runner propagates rather than what a test inserted by hand.
+fn probe_workflow_toml(marker: &Path) -> String {
+    format!(
+        r#"
+workflow_type_id = "llxprt-issue-fix-v1"
+name = "transport probe"
+initial_step = "probe"
+
+[[steps]]
+step_id = "probe"
+step_type = "shell"
+description = "record the repo and transport the runner supplied"
+
+[steps.parameters]
+command = """
+printf 'repo=%s\ntransport=%s\n' '{{target_repo}}' '{{git_transport_url}}' > {}
+"""
+
+[[transitions]]
+from = "probe"
+to = "COMPLETE"
+"#,
+        marker.display()
+    )
+}
+
+#[test]
+fn the_runner_propagates_transport_and_keeps_api_identity_logical() {
+    // Enters through the production path: resolved config -> WorkflowInstance
+    // -> EngineRunner -> StepContext. Nothing sets git_transport_url by hand,
+    // so this fails if the runner stops propagating it.
+    let root = tempfile::tempdir().unwrap();
+    git(root.path(), &["init", "--bare", "-b", "main", "remote.git"]);
+    let bare = root.path().join("remote.git");
+    let marker = root.path().join("probe.txt");
+
+    let mut config = config_for("vybestack/llxprt-luther");
+    apply_target_profile_overrides(
+        &mut config,
+        &TargetProfileOverrides {
+            transport_url: Some(bare.to_string_lossy().into_owned()),
+            ..TargetProfileOverrides::default()
+        },
+    )
+    .expect("transport override applies");
+
+    let workflow = parse_workflow_type_toml(&probe_workflow_toml(&marker)).expect("probe parses");
+    let instance = luther_workflow::engine::instance::WorkflowInstance::create(workflow, config);
+    let registry = luther_workflow::engine::executor::ExecutorRegistry::with_defaults();
+    let mut runner = luther_workflow::engine::runner::EngineRunner::new(instance, registry)
+        .expect("runner builds");
+    runner.execute_step("probe").expect("probe step runs");
+
+    let recorded = std::fs::read_to_string(&marker).expect("probe wrote its observations");
+    assert!(
+        recorded.contains("repo=vybestack/llxprt-luther"),
+        "GitHub identity must stay logical: {recorded}"
+    );
+    assert!(
+        recorded.contains(&format!("transport={}", bare.display())),
+        "the runner must propagate the resolved transport: {recorded}"
+    );
+}
+
+#[test]
+fn a_repeatedly_resolved_config_still_tracks_a_repository_override() {
+    // Resolution must be idempotent: re-resolving an already-resolved config
+    // must not promote its derived transport to an explicit one, which would
+    // freeze it against a later override.
+    let mut config = config_for("vybestack/llxprt-luther");
+    apply_target_profile_overrides(&mut config, &TargetProfileOverrides::default()).unwrap();
+    apply_target_profile_overrides(&mut config, &TargetProfileOverrides::default()).unwrap();
+    apply_target_profile_overrides(
+        &mut config,
+        &TargetProfileOverrides {
+            repo: Some("example/other".to_string()),
+            ..TargetProfileOverrides::default()
+        },
+    )
+    .unwrap();
+
+    assert_eq!(
+        config.variables[GIT_TRANSPORT_URL_VAR], "https://github.com/example/other.git",
+        "a derived transport must follow identity however often it was resolved"
+    );
+}
+
+#[test]
+fn re_resolving_a_profile_does_not_freeze_a_derived_transport() {
+    // resolve_target_profile runs whenever a config is loaded. Running it over
+    // an already-resolved config must not reclassify its derived transport as
+    // an operator choice, which would pin it against a later override.
+    let mut config = config_for("vybestack/llxprt-luther");
+    // A profile section is required for resolution to do anything at all.
+    config.target_profile = Some(luther_workflow::workflow::schema::TargetProfileConfig {
+        identity: luther_workflow::workflow::schema::TargetIdentityConfig {
+            repo: Some("vybestack/llxprt-luther".to_string()),
+            ..Default::default()
+        },
+        ..Default::default()
+    });
+    luther_workflow::workflow::target_profile::resolve_target_profile(&mut config).unwrap();
+    luther_workflow::workflow::target_profile::resolve_target_profile(&mut config).unwrap();
+    apply_target_profile_overrides(
+        &mut config,
+        &TargetProfileOverrides {
+            repo: Some("example/other".to_string()),
+            ..TargetProfileOverrides::default()
+        },
+    )
+    .unwrap();
+
+    assert_eq!(
+        config.variables[GIT_TRANSPORT_URL_VAR], "https://github.com/example/other.git",
+        "re-resolution must not promote a derived transport to explicit"
+    );
+}

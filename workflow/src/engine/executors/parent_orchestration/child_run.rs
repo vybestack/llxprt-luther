@@ -199,9 +199,10 @@ pub fn apply_child_overrides(
         issue: Some(request.issue_number.to_string()),
         work_dir: request.work_dir.clone(),
         artifact_dir: request.artifact_dir.clone(),
-        // A child inherits the transport already resolved in its config rather
-        // than receiving one from the parent request.
-        transport_url: None,
+        // An explicit parent transport is an operator instruction and must
+        // reach the child, which otherwise reloads its own config and derives
+        // the production URL. None means "derive from logical identity".
+        transport_url: request.transport_url.clone(),
     };
     apply_target_profile_overrides(config, &overrides)
         .map_err(|err| format!("apply child target overrides: {err}"))?;
@@ -300,5 +301,79 @@ pub fn child_result_from_run_outcome(
             );
             Ok(ChildWorkflowRunResult::CompletedFailure)
         }
+    }
+}
+
+#[cfg(test)]
+mod transport_inheritance_tests {
+    use super::*;
+    use crate::workflow::target_profile::GIT_TRANSPORT_URL_VAR;
+
+    fn child_config() -> WorkflowConfig {
+        let toml = r#"
+config_id = "child"
+workflow_type_id = "llxprt-issue-fix-v1"
+
+[runtime]
+timeout_seconds = 60
+max_retries = 1
+
+[repo]
+workspace_strategy = "temp_clone"
+branch_template = "issue{issue_number}"
+base_branch = "main"
+
+[guard_limits]
+
+[variables]
+target_repo = "owner/repo"
+primary_issue_number = "1"
+work_dir = "/tmp/luther-child/workspace"
+artifact_dir = "/tmp/luther-child/artifacts"
+target_ecosystem_name = "rust"
+"#;
+        crate::workflow::config_loader::parse_workflow_config_toml(toml).expect("config parses")
+    }
+
+    fn request(transport_url: Option<&str>) -> ChildWorkflowLaunchRequest {
+        ChildWorkflowLaunchRequest {
+            workflow_type_id: "llxprt-issue-fix-v1".to_string(),
+            config_id: "child".to_string(),
+            run_id: "run-child".to_string(),
+            repo: "owner/repo".to_string(),
+            issue_number: 7,
+            work_dir: None,
+            artifact_dir: None,
+            transport_url: transport_url.map(str::to_string),
+            config_root: std::path::PathBuf::from("/tmp"),
+        }
+    }
+
+    #[test]
+    fn a_child_inherits_an_explicit_parent_transport() {
+        // Without this a child reloads its own config and derives the
+        // production URL, pushing to GitHub while the parent targets a local
+        // repository the operator specified.
+        let bare = tempfile::tempdir().unwrap();
+        let path = bare.path().join("remote.git");
+        std::fs::create_dir_all(path.join("objects")).unwrap();
+        std::fs::write(path.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        let transport = path.to_string_lossy().into_owned();
+
+        let mut config = child_config();
+        apply_child_overrides(&mut config, &request(Some(&transport))).expect("overrides apply");
+
+        assert_eq!(config.variables[GIT_TRANSPORT_URL_VAR], transport);
+    }
+
+    #[test]
+    fn a_child_without_an_inherited_transport_derives_its_own() {
+        let mut config = child_config();
+        apply_child_overrides(&mut config, &request(None)).expect("overrides apply");
+
+        assert_eq!(
+            config.variables[GIT_TRANSPORT_URL_VAR],
+            "https://github.com/owner/repo.git"
+        );
     }
 }

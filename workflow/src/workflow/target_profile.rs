@@ -34,14 +34,20 @@ impl TargetProfileOverrides {
 /// Variable holding the resolved Git transport URL.
 pub const GIT_TRANSPORT_URL_VAR: &str = "git_transport_url";
 
-/// Records that the transport was supplied explicitly rather than derived.
+/// Records how the transport was obtained: `explicit` or `derived`.
 ///
 /// Provenance has to be stored, not inferred. Once a derived URL is written
 /// into the variable map it is textually indistinguishable from an explicit
 /// one, so a later repository override could not tell whether it was allowed to
 /// recompute -- and would leave Git pointing at the previous repository while
 /// the GitHub API addressed the new one.
-const GIT_TRANSPORT_EXPLICIT_VAR: &str = "git_transport_url_explicit";
+///
+/// Recording the value (rather than only its presence) keeps resolution
+/// idempotent: resolving an already-resolved config must not promote a derived
+/// URL to an explicit one, which would freeze it against later overrides.
+pub const GIT_TRANSPORT_SOURCE_VAR: &str = "git_transport_url_source";
+pub const TRANSPORT_EXPLICIT: &str = "explicit";
+const TRANSPORT_DERIVED: &str = "derived";
 
 /// Production transport for a logical repository.
 ///
@@ -60,7 +66,12 @@ pub fn default_transport_url(target_repo: &str) -> String {
 /// override the result is byte-identical to the previously hardcoded URL.
 fn resolve_transport_url(config: &mut WorkflowConfig) -> Result<()> {
     // An explicit transport is authoritative and is never recomputed.
-    if config.variables.contains_key(GIT_TRANSPORT_EXPLICIT_VAR) {
+    if config
+        .variables
+        .get(GIT_TRANSPORT_SOURCE_VAR)
+        .map(String::as_str)
+        == Some(TRANSPORT_EXPLICIT)
+    {
         let existing = config
             .variables
             .get(GIT_TRANSPORT_URL_VAR)
@@ -77,6 +88,7 @@ fn resolve_transport_url(config: &mut WorkflowConfig) -> Result<()> {
     let derived = default_transport_url(&target_repo);
     validate_transport_url(&derived)?;
     insert_var(config, GIT_TRANSPORT_URL_VAR, &derived);
+    insert_var(config, GIT_TRANSPORT_SOURCE_VAR, TRANSPORT_DERIVED);
     Ok(())
 }
 
@@ -206,9 +218,13 @@ pub fn resolve_target_profile(config: &mut WorkflowConfig) -> Result<()> {
     merge_prompt_guidance(config, &profile);
     merge_bootstrap(config, &profile);
     // A transport authored directly in the config is an explicit choice and
-    // must survive a later repository override.
-    if config.variables.contains_key(GIT_TRANSPORT_URL_VAR) {
-        insert_var(config, GIT_TRANSPORT_EXPLICIT_VAR, "true");
+    // must survive a later repository override. A previously *derived* value
+    // carries its provenance, so re-resolving a resolved config does not
+    // promote it -- which would freeze it against later overrides.
+    if config.variables.contains_key(GIT_TRANSPORT_URL_VAR)
+        && !config.variables.contains_key(GIT_TRANSPORT_SOURCE_VAR)
+    {
+        insert_var(config, GIT_TRANSPORT_SOURCE_VAR, TRANSPORT_EXPLICIT);
     }
     resolve_transport_url(config)?;
     Ok(())
@@ -259,7 +275,7 @@ fn apply_overrides_unchecked(
     if let Some(transport_url) = overrides.transport_url.as_deref() {
         validate_transport_url(transport_url)?;
         insert_var(config, GIT_TRANSPORT_URL_VAR, transport_url);
-        insert_var(config, GIT_TRANSPORT_EXPLICIT_VAR, "true");
+        insert_var(config, GIT_TRANSPORT_SOURCE_VAR, TRANSPORT_EXPLICIT);
     }
 
     // Always resolve, so a config that never carried the variable still gets

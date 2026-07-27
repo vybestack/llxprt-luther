@@ -15,6 +15,7 @@ fn test_request(run_id: &str) -> ChildWorkflowLaunchRequest {
         issue_number: 42,
         work_dir: None,
         artifact_dir: None,
+        transport_url: None,
         config_root: PathBuf::from("/config"),
     }
 }
@@ -489,6 +490,7 @@ fn resume_child_workflow_fails_closed_without_workspace_marker() {
         issue_number: 42,
         work_dir: Some(workspace.clone()),
         artifact_dir: None,
+        transport_url: None,
         config_root: config_root.to_path_buf(),
     };
 
@@ -536,6 +538,7 @@ fn resume_child_workflow_dispatches_through_recovery_protocol() {
         issue_number: 42,
         work_dir: Some(workspace.clone()),
         artifact_dir: None,
+        transport_url: None,
         config_root: config_root.to_path_buf(),
     };
 
@@ -588,6 +591,7 @@ fn resume_child_workflow_preserves_lease_ordering_prepare_before_mutate() {
         issue_number: 42,
         work_dir: Some(workspace.clone()),
         artifact_dir: None,
+        transport_url: None,
         config_root: config_root.to_path_buf(),
     };
 
@@ -638,6 +642,7 @@ fn resume_child_workflow_missing_work_dir_fails_closed() {
         issue_number: 42,
         work_dir: None,
         artifact_dir: None,
+        transport_url: None,
         config_root: config_root.to_path_buf(),
     };
 
