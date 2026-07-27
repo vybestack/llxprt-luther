@@ -11,6 +11,7 @@
 //! D=tests/fixtures/tool-contracts/ocr
 //! ocr version                                      > $D/version.txt
 //! ocr session list --json                          > $D/session-list--json.stdout
+//! ocr session list --json --limit 1                > $D/session-list--json--limit-1.stdout
 //! ocr session show ID --json                       > $D/session-show--json.stdout
 //! (cd /tmp && ocr session list --json)             > $D/session-list--json--foreign-cwd.stdout
 //! (cd /tmp && ocr session list --json --repo $REPO) > $D/session-list--json--foreign-cwd-with-repo.stdout
@@ -47,11 +48,23 @@ fn capture(file: &str, sha256: &str) -> Capture {
     }
 }
 
+/// Builds the flag map, rejecting a duplicate rather than discarding it.
+///
+/// `SubcommandContract::flags` is a map so a duplicated flag cannot silently
+/// shadow, but a plain `collect` would drop the earlier entry and honour the
+/// later one without complaint - defeating the guarantee at the one site meant
+/// to enforce it. A duplicate here means two different behaviours were recorded
+/// for one flag, and there is no safe way to choose between them.
 fn flags(entries: &[(&str, FlagBehaviour)]) -> BTreeMap<String, FlagBehaviour> {
-    entries
-        .iter()
-        .map(|(name, behaviour)| ((*name).to_string(), behaviour.clone()))
-        .collect()
+    let mut map = BTreeMap::new();
+    for (name, behaviour) in entries {
+        assert!(
+            map.insert((*name).to_string(), behaviour.clone()).is_none(),
+            "{name} is recorded twice; a flag has one observed behaviour, so remove the \
+             duplicate rather than letting the later entry win silently"
+        );
+    }
+    map
 }
 
 fn field(name: &str, used_for: &str) -> RequiredField {
@@ -102,14 +115,14 @@ fn session_list() -> SubcommandContract {
             // for a session in a store with more than twenty entries
             // gets exit zero and an incomplete answer, which is the
             // shape this contract exists to name.
-            (
-                "--limit",
-                FlagBehaviour::AcceptedAndIgnored {
-                    use_instead: "an explicit limit of 0, which the tool documents as \
-                                      unlimited; the default of 20 truncates silently"
-                        .to_string(),
-                },
-            ),
+            // Honoured, and evidenced: --limit 1 returns one entry where the
+            // same command without it returns three. Previously recorded as
+            // ignored, which was an assertion with no capture behind it - the
+            // failure this module exists to prevent. The hazard is the default
+            // of 20 truncating silently, which is a caller concern rather than
+            // an unhonoured flag, and is recorded on the subcommand's
+            // truncation note instead.
+            ("--limit", FlagBehaviour::Honoured),
         ]),
         required_fields: vec![
             field(
@@ -148,6 +161,12 @@ fn session_list() -> SubcommandContract {
             capture(
                 "session-list--json--foreign-cwd-with-repo.stdout",
                 "30425b13ead2873a956c0cc8f340f0fbfe3b912630d246a3752a304e870d391e",
+            ),
+            // The discriminating capture for --limit: one entry where the
+            // unrestricted capture above holds three.
+            capture(
+                "session-list--json--limit-1.stdout",
+                "d895311d94ee221633b56982081abb4ae3d9866e51037797755c7239a968e675",
             ),
         ],
     }

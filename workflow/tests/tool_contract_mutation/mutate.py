@@ -19,6 +19,7 @@ OCR = WF / "src/tool_contract/ocr.rs"
 TC = WF / "src/tool_contract.rs"
 TESTS = WF / "src/tool_contract_tests.rs"
 YML = ROOT / ".github/workflows/ocr-pr-review.yml"
+DOC = ROOT / "workflow/docs/architecture/tool-contracts.md"
 
 INVENTED_LIST = """[
   {
@@ -190,6 +191,14 @@ fn fabricated() -> SubcommandContract {
     ("M23 version check accepts empty input",
      edit(TC, "pub fn verify_version(&self, observed: &str) -> Result<(), ContractViolation> {",
           "pub fn verify_version(&self, observed: &str) -> Result<(), ContractViolation> {\n        if observed.is_empty() {\n            return Ok(());\n        }")),
+    ("M28 claim --limit is ignored despite the capture",
+     edit(OCR, '("--limit", FlagBehaviour::Honoured)',
+          '("--limit", FlagBehaviour::AcceptedAndIgnored { use_instead: "nothing".to_string() })')),
+    ("M29 documented mutation count drifts from the battery",
+     edit(DOC, "All 30 fail the suite", "All 99 fail the suite")),
+    ("M30 duplicate flag recorded twice",
+     edit(OCR, '("--limit", FlagBehaviour::Honoured)',
+          '("--limit", FlagBehaviour::Honoured), ("--limit", FlagBehaviour::Rejected)')),
     ("M27 capture rewritten with CRLF line endings",
      lambda: crlf("version.txt")),
     ("M25 flag recorded that only prefixes a real one",
@@ -226,14 +235,14 @@ def snapshot():
     # nothing to restore from. That happened, and a mutated contract survived
     # into a later run.
     backup = pathlib.Path(tempfile.mkdtemp(prefix="luther-mutation-backup-"))
-    for path in [OCR, TC, TESTS, YML]:
+    for path in [OCR, TC, TESTS, YML, DOC]:
         shutil.copy2(path, backup / path.name)
     shutil.copytree(FIX, backup / "fixtures")
     return backup
 
 
 def restore(backup):
-    for path in [OCR, TC, TESTS, YML]:
+    for path in [OCR, TC, TESTS, YML, DOC]:
         shutil.copy2(backup / path.name, path)
     # Copy over the fixtures rather than removing the directory first: an
     # interruption mid-restore then leaves stale content rather than no

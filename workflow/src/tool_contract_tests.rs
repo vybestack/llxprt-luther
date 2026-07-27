@@ -660,6 +660,85 @@ fn the_contract_names_the_tool_its_captures_came_from() {
     );
 }
 
+/// `--limit` is honoured, and the captures show it rather than assert it.
+///
+/// Recorded as ignored until the tool was actually run with it. The comparison
+/// is between two captures of the same command, which is the only form of
+/// evidence that distinguishes a flag being honoured from a flag being
+/// accepted and discarded.
+#[test]
+fn the_limit_flag_restricts_the_listing() {
+    let unrestricted = read_fixture("session-list--json.stdout");
+    let restricted = read_fixture("session-list--json--limit-1.stdout");
+
+    let count = |text: &str| {
+        serde_json::from_str::<serde_json::Value>(text)
+            .expect("the listing captures are JSON")
+            .as_array()
+            .expect("the listing is an array")
+            .len()
+    };
+
+    let (all, one) = (count(&unrestricted), count(&restricted));
+    assert!(
+        all > one && one == 1,
+        "--limit 1 should restrict the listing; captured {all} unrestricted and {one} restricted"
+    );
+
+    ocr_contract()
+        .subcommand("session list")
+        .expect("recorded")
+        .require_honoured("--limit")
+        .expect("--limit is honoured, as the captures show");
+}
+
+/// The architecture doc's mutation count must match the battery.
+///
+/// Two revisions of that document have now claimed a count that was wrong in
+/// both directions, and the doc itself warns against exactly that. A stated
+/// count nothing checks is a claim, so this reads both files and compares.
+#[test]
+fn the_documented_mutation_count_matches_the_battery() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let battery = std::fs::read_to_string(root.join("tests/tool_contract_mutation/mutate.py"))
+        .expect("read the mutation battery");
+    let doc = std::fs::read_to_string(root.join("docs/architecture/tool-contracts.md"))
+        .expect("read the architecture doc");
+
+    let defined = battery
+        .lines()
+        .filter(|line| line.trim_start().starts_with("(\"M"))
+        .count();
+    let claimed = doc
+        .lines()
+        .find_map(|line| {
+            line.split_whitespace()
+                .zip(line.split_whitespace().skip(1))
+                .find(|(_, next)| *next == "fail")
+                .and_then(|(count, _)| count.parse::<usize>().ok())
+        })
+        .expect("the doc should state how many mutations fail the suite");
+
+    assert_eq!(
+        claimed, defined,
+        "the doc claims {claimed} mutations fail the suite but the battery defines {defined}"
+    );
+
+    // Scoped to the mutation table specifically: the document contains other
+    // tables, and counting all of them would compare unrelated rows.
+    let rows = doc
+        .lines()
+        .skip_while(|line| !line.starts_with("| Mutation"))
+        .skip(2)
+        .take_while(|line| line.starts_with("| "))
+        .count();
+    assert_eq!(
+        rows, defined,
+        "the mutation table has {rows} rows for {defined} mutations; every mutation should be \
+         listed so the table cannot drift from the battery"
+    );
+}
+
 /// An empty remediation is reported as an incomplete contract entry, not as an
 /// uncaptured flag.
 ///

@@ -130,7 +130,8 @@ never produced.
 
 `tests/tool_contract_mutation/mutate.py` applies each of these to a clean tree,
 runs the suite, restores, and verifies the restored tree is green before
-reporting. All eleven fail the suite:
+reporting. All 30 fail the suite; the table lists them by the assumption each
+one falsifies:
 
 | Mutation | Detects |
 |---|---|
@@ -155,6 +156,15 @@ reporting. All eleven fail the suite:
 | Change a recorded state key | #176, #182 |
 | Claim an ignored flag is honoured | #183, #186 |
 | Drop a required field | a contract weakened silently |
+| Record a flag that only prefixes a real one | a check passing by substring |
+| Point a remediation at an uncaptured flag | a remedy with no evidence |
+| Rewrite a capture with CRLF endings | line endings breaking the digest |
+| Emptied remediation string | a vacuous alternative |
+| Factually false remediation | a remedy contradicting the tool |
+| Version check accepts empty input | failing open on an empty probe |
+| Claim `--limit` is ignored despite its capture | a behaviour contradicted by evidence |
+| Drift the documented count from the battery | a coverage claim nothing checks |
+| Record one flag twice | a duplicate silently shadowing |
 
 The fifth is the one that matters. Digesting a capture only catches a *stale*
 digest; a maintainer who fabricates output will refresh the digest, because the
