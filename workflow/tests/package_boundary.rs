@@ -653,3 +653,52 @@ fn the_registered_step_type_ids_are_unchanged_by_relocation() {
          genuinely being added or retired, update this list in the same commit and say why."
     );
 }
+
+/// A domain can name its own checkpointable keys.
+///
+/// The engine ships GitHub's keys because that is what exists today. A
+/// workflow whose values are not issue- or PR-shaped had no way to carry them
+/// across a checkpoint, and no way to stop the engine deciding for it.
+#[test]
+fn a_supplied_key_set_replaces_the_engine_default() {
+    use luther_workflow::engine::executor::StepContext;
+
+    let mut context = StepContext::new(std::path::PathBuf::from("/tmp"), "run-1".to_string())
+        .with_checkpointable_keys(["ticket_id"]);
+    context.set("ticket_id", "T-42");
+    // A default key, to prove the supplied set REPLACES rather than extends.
+    context.set("pr_number", "7");
+
+    let values = context.checkpoint_values();
+    assert_eq!(
+        values.get("ticket_id").and_then(|v| v.as_str()),
+        Some("T-42"),
+        "a supplied key must be carried across the checkpoint"
+    );
+    assert!(
+        !values.contains_key("pr_number"),
+        "supplying a set must replace the engine's defaults, not add to them; \
+         otherwise a domain cannot stop the engine persisting GitHub values"
+    );
+}
+
+/// Supplying a set does not turn checkpointing into a way to persist anything.
+///
+/// The allowlist direction is the safety property: an unvetted key is dropped
+/// rather than written. A domain choosing its own keys must not be able to
+/// weaken that into a denylist.
+#[test]
+fn an_unnamed_key_is_still_dropped_when_a_set_is_supplied() {
+    use luther_workflow::engine::executor::StepContext;
+
+    let mut context = StepContext::new(std::path::PathBuf::from("/tmp"), "run-1".to_string())
+        .with_checkpointable_keys(["ticket_id"]);
+    context.set("api_token", "secret-value");
+
+    let values = context.checkpoint_values();
+    assert!(
+        !values.contains_key("api_token"),
+        "a key outside the supplied set must be dropped; checkpointing stays \
+         an allowlist whoever supplies the list"
+    );
+}

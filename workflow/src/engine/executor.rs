@@ -46,29 +46,68 @@ pub struct StepContext {
     pub namespaced_vars: HashMap<String, HashMap<String, String>>,
     /// Control-only interruption signal; never interpolated or checkpointed.
     interrupted: Arc<AtomicBool>,
+    /// Context keys this run may carry across a checkpoint.
+    ///
+    /// Held per context rather than read from a global so the set travels with
+    /// the run it governs. Defaults to
+    /// [`DEFAULT_CHECKPOINTABLE_CONTEXT_KEYS`], which is why installing this
+    /// field changes nothing on its own.
+    checkpointable_keys: Arc<Vec<String>>,
 }
 
-fn is_checkpointable_context_key(key: &str) -> bool {
-    matches!(
-        key,
-        "issue_number"
-            | "primary_issue_number"
-            | "issue_title"
-            | "pr_number"
-            | "owner"
-            | "repo"
-            | "repository"
-            | "current_branch"
-            | "base_branch"
-            | "existing_pr_number"
-            | "head_ref"
-            | "head_sha"
-            | "base_ref"
-            | "base_sha"
-    )
-}
+/// The context keys a run may carry across a checkpoint, by default.
+///
+/// This is an allowlist and the direction is the safety property: a key nobody
+/// vetted is dropped rather than persisted, so a step that puts a token in the
+/// context cannot leak it into a checkpoint by accident.
+///
+/// Every entry names a GitHub concept. That is the coupling - the engine
+/// currently decides which of a domain's values are safe to persist, a
+/// judgement it cannot make for a domain it does not know about.
+///
+/// Exposed as data rather than a `matches!` arm so a domain can supply its
+/// own set. It remains an allowlist whoever supplies it.
+pub const DEFAULT_CHECKPOINTABLE_CONTEXT_KEYS: &[&str] = &[
+    "issue_number",
+    "primary_issue_number",
+    "issue_title",
+    "pr_number",
+    "owner",
+    "repo",
+    "repository",
+    "current_branch",
+    "base_branch",
+    "existing_pr_number",
+    "head_ref",
+    "head_sha",
+    "base_ref",
+    "base_sha",
+];
 
 impl StepContext {
+    /// Whether `key` may cross a checkpoint for this run.
+    fn is_checkpointable_context_key(&self, key: &str) -> bool {
+        self.checkpointable_keys.iter().any(|k| k == key)
+    }
+
+    /// Replace the set of keys this run may checkpoint.
+    ///
+    /// The engine ships GitHub's keys as the default because that is what
+    /// exists today; a domain that persists different values supplies them
+    /// here rather than editing a list inside the engine.
+    ///
+    /// Still an allowlist: whatever is not named is dropped, so supplying a
+    /// set cannot turn checkpointing into a way to persist arbitrary context.
+    #[must_use]
+    pub fn with_checkpointable_keys<I, S>(mut self, keys: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.checkpointable_keys = Arc::new(keys.into_iter().map(Into::into).collect());
+        self
+    }
+
     /// Create a new `StepContext` with the given `work_dir` and `run_id`.
     /// Stores work_dir and run_id in variables for bare key access (REQ-LF-CTX-004).
     /// @plan:PLAN-20260408-LLXPRT-FIRST.P09
@@ -108,6 +147,12 @@ impl StepContext {
             step_order: Vec::new(),
             namespaced_vars: HashMap::new(),
             interrupted: Arc::new(AtomicBool::new(false)),
+            checkpointable_keys: Arc::new(
+                DEFAULT_CHECKPOINTABLE_CONTEXT_KEYS
+                    .iter()
+                    .map(|key| (*key).to_string())
+                    .collect(),
+            ),
         }
     }
 
@@ -124,7 +169,7 @@ impl StepContext {
     pub fn checkpoint_values(&self) -> HashMap<String, serde_json::Value> {
         let mut values = HashMap::new();
         for (key, value) in &self.variables {
-            if is_checkpointable_context_key(key) {
+            if self.is_checkpointable_context_key(key) {
                 values.insert(key.clone(), serde_json::Value::String(value.clone()));
             }
         }
@@ -134,7 +179,7 @@ impl StepContext {
             .map(|(step, variables)| {
                 let variables: HashMap<String, String> = variables
                     .iter()
-                    .filter(|(key, _)| is_checkpointable_context_key(key))
+                    .filter(|(key, _)| self.is_checkpointable_context_key(key))
                     .map(|(key, value)| (key.clone(), value.clone()))
                     .collect();
                 (step.clone(), variables)
@@ -176,7 +221,7 @@ impl StepContext {
                 .map(|(step, variables)| {
                     let variables = variables
                         .into_iter()
-                        .filter(|(key, _)| is_checkpointable_context_key(key))
+                        .filter(|(key, _)| self.is_checkpointable_context_key(key))
                         .collect();
                     (step, variables)
                 })
@@ -186,7 +231,7 @@ impl StepContext {
             self.step_order = serde_json::from_value(value)?;
         }
         for (key, value) in values {
-            if is_checkpointable_context_key(&key) {
+            if self.is_checkpointable_context_key(&key) {
                 let restored = value.as_str().ok_or_else(|| {
                     serde::de::Error::custom(format!(
                         "checkpoint value for allowlisted key '{key}' is not a string"
