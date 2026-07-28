@@ -78,7 +78,7 @@ I traced every read of the `events.outcome` column.
 - `FromStr for StepOutcome` exists (`transition.rs:64-78`) but its **only**
   caller in the repository is its own unit test (`transition.rs:248`).
 - No SQL anywhere filters or joins on the `outcome` column value (`WHERE
-  outcome`, `outcome = `, `outcome IN` return no hits against the events table).
+  outcome`, `outcome =`, `outcome IN` return no hits against the events table).
 - `RunMetadata.previous_outcome` is likewise `Option<String>` read only for
   display (`monitor/snapshot.rs:303`, `app/status.rs:272,335`,
   `app/runs/inspect.rs:260`).
@@ -566,10 +566,97 @@ the arity — not a judgement that six felt like too many.
 | --- | --- | --- |
 | `Success` | **Port** (`"success"`), disposition `Proceed` | Its *routing* role is a label like any other. Its apparent universality is an artifact of one line: `transition.rs:148,179` treats a `None` condition as `success`. That default is a property of the **config format**, not of orchestration, and it moves to the domain's `Edge::label()` impl (§1.3). Core comparing a label to the literal `"success"` would be a branch on a port name and would fail criterion 4. |
 | `Fatal` | **Port** (`"fatal"`), disposition `Proceed` when an edge exists, else `Halt` | 215 TOML edges route on `fatal`, mostly into `post_pr_failure_terminal`. It is used as a *routing label*, and the engine's own behaviour when it cannot route is already covered by `Halt`. Keeping a distinct core `Fatal` would give core two ways to say "stop". |
-| `Fixable` | **Port** (`"fixable"`), owned by software-change | The originally identified violation. Documented as "the issue is fixable by remediation" (`transition.rs:25-29`); `"remediation"` and `"issue"` are both in `FORBIDDEN_IN_CORE`. **Also emitted by the generic shell component as the default for any non-zero exit** (`shell.rs:355-366`), so PR 4 must relocate that too, not just the software-change uses. |
+| `Fixable` | **Port** (`"fixable"`), owned by software-change | The originally identified violation. Documented as "the issue is fixable by remediation" (`transition.rs:25-29`); `"remediation"` and `"issue"` are both in `FORBIDDEN_IN_CORE`. **Also emitted by the generic shell component as the default for any non-zero exit** (`shell.rs:355-366`), so PR 4 must relocate that too, not just the software-change uses. **Shell must keep `fixable` as a declared port — see the edge inventory below; it cannot be defaulted to `fatal`.** |
 | `Retryable` | **Port** (`"retryable"`) — *not* a core disposition. I argue against the brief's suspicion. | The brief suspects `Retryable` may be universal. **The code says it is not, on stronger grounds than domain-ladenness: it is not a disposition at all, because the engine does not retry.** `max_retries` is `#[allow(dead_code)]` at `runner.rs:112-116`; `EngineError::RetryLimitExceeded` is never constructed. `Retryable` is used exactly like `fatal`: 4 TOML edges route on it, and with no edge it becomes `RunOutcome::Failure` (`failure_cleanup.rs:655-662`). A core disposition must correspond to orchestrator behaviour; this one corresponds to a doc comment. *If* a retry loop is later built, `Retryable` still would not become a core disposition — a retry is "re-run this step", which is a fourth disposition (`Repeat`) that any component could request, and the *policy* of how many times is config. That is a separate issue, not this one. |
 | `Abandon` | **Removed as a routing port; folded into the `Halt` disposition.** The brief's suspicion is correct. | Domain-laden as documented ("Used when loop limits are reached"), but the decisive fact is that **no shipped workflow file routes on `abandon`: 0 occurrences of `condition = "abandon"` in `config/` or `tests/fixtures/*.toml|json`.** Its only production role is engine-internal: `runner.rs:274,299` uses it to mean "do not resolve a transition, stop" — exactly `Halt`. The actual loop-limit enforcement at `runner.rs:505-515` does **not** produce `StepOutcome::Abandon`; it produces `RunOutcome::Abandoned` directly. So the variant's documented reason for existing is not how it is used. `validation.rs:301-307` explicitly *forbids* post-PR routes with `condition = "abandon"`. **Caveat, verified:** `tests/engine_execution_integration.rs:388-415` constructs an in-test `condition: Some("abandon")` transition and asserts `resolve_transition` routes on it. That test encodes the *hypothesis* the code never adopted (its own comment reads "At loop limit, Fixable should convert to Abandon outcome **OR** the transition table should route to abandon"). PR 4 must rewrite it against `Halt`, and that rewrite is a substantive review item, not a mechanical edit. Full inventory of affected tests in §5.2 PR 4. |
 | `Wait` | **Core disposition `Suspend`** (with port `"wait"` for telemetry) | The one variant whose meaning is purely about run lifecycle: pause with a resumable checkpoint rather than terminate (`failure_cleanup.rs:652`, `pause_for_external_wait`). Its doc mentions "PR checks" as an *example*, which is prose to fix, not semantics to move. Like `abandon`, it has 0 `condition = "wait"` edges in config — consistent with it being a disposition rather than a routing label. |
+
+#### Declared ports are unenforced at runtime
+
+A1 validates workflow *edge labels* against `declared_ports()`, which catches a
+graph routing on a port no executor declares. It does not catch the converse: a
+component constructing any valid `PortName` and emitting a port it never
+declared. Nothing checks the emitted value against the declaration, so
+`declared_ports()` is documentation the runtime does not consult.
+
+That gap makes the whole ports model advisory. **Required:** the runner or
+registry must reject an undeclared emitted port before routing, as an error
+rather than a fallback — consistent with the fail-fast choice made for unknown
+outcome names, where the fix was to make the bad value unrepresentable at the
+boundary rather than to pick a default.
+
+#### Durable-state and failure paths are absent from the rollout gate
+
+The verification plan covers routing and parsing and stops there. `Suspend`
+changes run lifecycle, so the gate must also cover: an interrupted checkpoint
+write during suspend; the resume boundary; stale ownership on resume; malformed
+or truncated persisted records; and concurrent runners against one run.
+
+This is the same weakness as the `abandon` decode gap — the plan reasoned about
+config and in-memory routing and treated persisted state as though it followed
+automatically. It does not, and B8 changes lifecycle semantics, which is
+precisely where durable state breaks.
+
+#### The renaming property must rename *effective* labels, not written ones
+
+An omitted `condition` is not an absent label: `validation.rs:78` resolves it
+with `condition.unwrap_or("success")`, so a transition with no condition
+carries the effective label `"success"`.
+
+The rename-invariance test as sketched above renames the labels *written in the
+graph*. Applied to a workflow with implicit edges it would rename the explicit
+`"success"` labels and leave the implicit ones resolving to the original
+string, so routing would legitimately change and the test would fail on a
+correct implementation — a false positive that would most likely be "fixed" by
+weakening the test.
+
+**Required:** the property must rename the *effective* label of every edge
+(resolving `None` first), or the fixture must use explicit conditions
+throughout. The former is the real property; the latter is a narrower test that
+does not exercise the implicit path at all.
+
+#### Persisted `abandon` must still decode
+
+`append_event` writes `outcome.to_string()` into the events database, and the
+replay parser at `tests/smoke_replay_tests.rs:43-51` has an explicit
+`"abandon" => Ok(StepOutcome::Abandon)` arm. Removing the variant without
+replacing that arm makes every persisted trace containing `abandon`
+undecodable, which contradicts this document's "no data migration" claim.
+
+The claim is defensible only for *config*: 0 shipped workflows route on
+`abandon`, so no TOML changes. It is **not** defensible for *persisted state*,
+which is a separate surface this document previously conflated with config.
+
+**Required:** decode legacy `"abandon"` to the `Halt` disposition rather than
+erroring, and add a test that a trace recorded before the migration still
+replays. This is a decode-compatibility shim, not a schema migration, and it
+cannot be dropped until the retention window for old traces has passed.
+
+#### Edge inventory: `fixable` on generic shell steps
+
+The claim that shell could default to `fatal` without routing impact is
+**false**, and the counterexamples are in a shipped workflow. Inventorying
+every `condition = "fixable"` edge against the `step_type` of its `from` step:
+
+| Workflow | From step | `step_type` |
+| --- | --- | --- |
+| `llxprt-luther-dogfood-v1.toml` | `route_pr_path` | **`shell`** |
+| `llxprt-luther-dogfood-v1.toml` | `plan_gate` | **`shell`** |
+| `llxprt-issue-fix-v1.toml` | 12 edges | `llxprt`, `verify`, `github_pr_checks`, `pr_remediation_*`, `command_manifest_group` |
+| `llxprt-luther-dogfood-v1.toml` | 11 further edges | as above |
+| `parent-issue-orchestrator-v1.toml` | 4 edges | `parent_orchestration` |
+
+Two live edges route `fixable` **from generic shell steps**. Defaulting shell's
+non-zero exit to `fatal` would silently reroute both — `route_pr_path` and
+`plan_gate` are decision points, so the change would not surface as an error,
+it would take a different branch.
+
+**Consequence for the design:** `fixable` must remain a port declared by the
+generic shell component, not one relocated wholly into software-change. This
+weakens the "clean ownership" story — `fixable` is declared by two components —
+and that is the honest outcome: the port is genuinely shared, and pretending
+otherwise would change shipped behaviour. Any future attempt to remove it from
+shell must first migrate these two edges.
 
 **Summary of the reduction:** 6 flat variants → 3 core dispositions + 4 ports
 owned by components (`success`, `fatal`, `fixable`, `retryable`), with `abandon`
@@ -778,7 +865,7 @@ Risk is front-loaded: every contested decision (arity, opacity enforcement,
 Every PR leaves `main` green under the full local gate, which per the project's
 own CI note is all three of:
 
-```
+```bash
 CLIPPY_CONF_DIR=.github/clippy cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo xtask guard
 cargo xtask complexity --changed origin/main HEAD
