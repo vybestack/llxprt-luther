@@ -900,14 +900,14 @@ mod tests {
             assert_eq!(
                 mapped_nonzero_outcome(&by_exit, Some(3)),
                 expected,
-                "'{name}' must resolve through exit_code_map"
+                "{name} must resolve through exit_code_map"
             );
 
             let by_stdout = serde_json::json!({"outcome_on_stdout": {"MARKER": name}});
             assert_eq!(
                 match_outcome_on_stdout(&by_stdout, "a line with MARKER in it"),
                 Some(expected),
-                "'{name}' must resolve through outcome_on_stdout"
+                "{name} must resolve through outcome_on_stdout"
             );
         }
     }
