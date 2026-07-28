@@ -521,6 +521,22 @@ fn validate_failure_cleanup_steps(workflow: &WorkflowType, errors: &mut Vec<Grap
 
 /// Reject `post_pr_iteration_guard` steps without a positive remediation cap.
 ///
+/// A short, identifiable rendering of a config value for an error message.
+///
+/// The full value would be correct but unhelpful: these details are joined
+/// with `; ` into a single line, so one deeply nested object could bury every
+/// other error in the same load. Scalars print in full because they are short
+/// and the exact value is the useful part; containers print their type and
+/// size, which is enough to locate them in the file without reproducing them.
+fn describe_value(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::Object(map) => format!("a table with {} entries", map.len()),
+        serde_json::Value::Array(items) => format!("an array of {} items", items.len()),
+        // Null, bool, and number are all short; showing them beats naming them.
+        other => other.to_string(),
+    }
+}
+
 /// Every outcome name a step configures must name a real outcome.
 ///
 /// Executors read these names at runtime and previously each supplied their own
@@ -542,8 +558,10 @@ fn validate_configured_outcome_names(
     // ANY NEW STEP PARAMETER WHOSE VALUES ARE OUTCOME NAMES MUST BE ADDED HERE.
     // A parameter that is missing from this list is not validated, and the
     // executor reading it will fall back to whatever its own default is - which
-    // is the divergence this function exists to remove. `outcome_names_in`
-    // below is the single place that knows how these parameters are shaped.
+    // is the divergence this function exists to remove. The loop below is the
+    // only place that knows how these parameters are shaped: keyed by
+    // condition, valued by outcome name. Which names are valid is decided by
+    // `StepOutcome::parse_condition_str` in `engine/transition.rs`, not here.
     const OUTCOME_VALUED_PARAMS: [&str; 2] = ["exit_code_map", "outcome_on_stdout"];
 
     for step in &workflow.steps {
@@ -563,10 +581,11 @@ fn validate_configured_outcome_names(
                     errors.push(GraphValidationError {
                         step_id: Some(step.step_id.clone()),
                         detail: format!(
-                            "step '{}' maps {param}['{key}'] to {value}, which is not a string; \
+                            "step '{}' maps {param}['{key}'] to {}, which is not a string; \
                              outcome names must be one of success, retryable, fatal, fixable, \
                              abandon, wait",
-                            step.step_id
+                            step.step_id,
+                            describe_value(value)
                         ),
                         category: GraphErrorCategory::UnknownOutcomeName,
                     });

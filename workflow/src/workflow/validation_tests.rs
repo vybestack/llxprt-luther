@@ -655,3 +655,35 @@ fn post_pr_steps_matches_the_shipped_workflow() {
          tests/e2e_workflow_integration.rs."
     );
 }
+
+/// A rejected container value is described, not reproduced.
+///
+/// Details are joined with `; ` into one line, so a deeply nested object
+/// printed in full would bury every other error from the same load.
+#[test]
+fn a_rejected_container_value_is_summarised_not_dumped() {
+    let wf = workflow(
+        vec![step_with_params(
+            "build",
+            serde_json::json!({"exit_code_map": {"2": {"deeply": {"nested": ["a", "b", "c"]}}}}),
+        )],
+        Vec::new(),
+    );
+    let errors = validate_workflow_graph(&wf).expect_err("a table value must be rejected");
+    let detail = &errors
+        .iter()
+        .find(|e| e.category == GraphErrorCategory::UnknownOutcomeName)
+        .expect("an unknown-name error")
+        .detail;
+
+    assert!(
+        detail.contains("a table with 1 entries"),
+        "the value should be described by shape: {detail}"
+    );
+    assert!(
+        !detail.contains("nested"),
+        "the value's contents must not be reproduced into the message: {detail}"
+    );
+    // The step and key still have to be there, or the author cannot find it.
+    assert!(detail.contains("build") && detail.contains("exit_code_map"));
+}
