@@ -56,7 +56,13 @@ const REQUIRED_COLLECTORS: [&str; 2] = ["collect_ci_failures", "collect_coderabb
 /// Classification of graph-structural validation errors.
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P16
 /// @requirement:REQ-PRFU-018,REQ-PRFU-020
+///
+/// Marked `#[non_exhaustive]` because this PR adds a variant and more are
+/// planned: callers outside the crate must carry a wildcard arm, so a new
+/// classification cannot break them. Doing it now rather than at publication
+/// costs nothing while the crate has no external consumers.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum GraphErrorCategory {
     /// A transition references a step ID that does not exist.
     DanglingTransition,

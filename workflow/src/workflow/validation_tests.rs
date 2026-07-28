@@ -643,10 +643,25 @@ fn post_pr_steps_matches_the_shipped_workflow() {
     // useful in the meantime instead of deleting it.
     const KNOWN_UNCONTRACTED: [&str; 1] = ["log_completion"];
 
-    let unlisted: Vec<&str> = reachable
+    let missing: Vec<&str> = reachable
         .iter()
         .map(String::as_str)
         .filter(|id| !POST_PR_STEPS.contains(id))
+        .collect();
+
+    // The exception must not outlive the defect. If a step named here is no
+    // longer missing, #280 has been fixed and leaving the entry in place would
+    // silently excuse a future regression of the same kind.
+    for excused in KNOWN_UNCONTRACTED {
+        assert!(
+            missing.contains(&excused),
+            "'{excused}' is now covered by POST_PR_STEPS, so the #280 exception is obsolete; \
+             remove it from KNOWN_UNCONTRACTED or it will excuse the next step that goes missing"
+        );
+    }
+
+    let unlisted: Vec<&str> = missing
+        .into_iter()
         .filter(|id| !KNOWN_UNCONTRACTED.contains(id))
         .collect();
     assert!(

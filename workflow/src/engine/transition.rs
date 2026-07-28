@@ -58,7 +58,14 @@ impl StepOutcome {
     /// Returning `Option` rather than a default is the point: there is no
     /// defensible outcome for a name the author did not mean to write, so the
     /// decision belongs to config validation, which can name the file and key.
-    /// Every name `parse_condition_str` accepts.
+    /// Every name `parse_condition_str` accepts, and the only spellings it
+    /// accepts: matching is exact and lowercase-only.
+    ///
+    /// An earlier executor-local parser lowercased its input, so `Fatal` and
+    /// `FATAL` were accepted. That is deliberately no longer true - one
+    /// spelling per outcome is the point of routing every caller through this
+    /// function - and a miscased name is rejected at load with a message
+    /// naming the canonical form.
     ///
     /// Callers building an error message must use this rather than writing the
     /// names out, so the advice cannot drift from what the parser accepts.
