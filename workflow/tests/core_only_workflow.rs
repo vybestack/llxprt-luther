@@ -128,3 +128,60 @@ fn the_core_only_registry_contains_no_domain_step_types() {
         );
     }
 }
+
+/// The core crate has no dependency edge back to the workspace crate.
+///
+/// The tests above reason about module paths and registries inside one crate.
+/// This asserts the claim at the package level, where cargo enforces it: if
+/// `luther-engine-core` ever gained a dependency on `luther-workflow`, the two
+/// would be mutually dependent and the layering would be a fiction regardless
+/// of how the modules are arranged.
+///
+/// Reads the resolved dependency graph rather than parsing Cargo.toml text, so
+/// a dependency introduced through a feature or a target-specific table is
+/// still seen.
+///
+/// Note on what this test is worth, since overstating it would be worse than
+/// not having it. Both mutations that would make it fail were tried, and
+/// neither reached the test: cargo rejects them at resolution with "cyclic
+/// package dependency", because `luther-workflow` already depends on core, so
+/// any path back - direct or through another workspace member - closes a
+/// cycle. Inside this workspace the property is enforced by cargo, not here.
+///
+/// What remains is the case cargo cannot see: core taking a dependency on a
+/// crate outside this workspace that itself depends on a published
+/// `luther-workflow`. That resolves to a real acyclic graph. Reading the full
+/// resolved tree rather than the direct dependency list is what would catch
+/// it. That is a narrow guarantee, and it is the honest one.
+#[test]
+fn the_core_crate_does_not_depend_on_the_workspace_crate() {
+    let output = std::process::Command::new(env!("CARGO"))
+        .args([
+            "tree",
+            "--package",
+            "luther-engine-core",
+            "--prefix",
+            "none",
+        ])
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .expect("cargo tree runs");
+
+    assert!(
+        output.status.success(),
+        "cargo tree failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let tree = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        tree.contains("luther-engine-core"),
+        "the tree must name the package it was asked about, or the assertion \
+         below would pass against empty output"
+    );
+    assert!(
+        !tree.contains("luther-workflow"),
+        "luther-engine-core depends on luther-workflow, which makes the \
+         layering circular:\n{tree}"
+    );
+}
