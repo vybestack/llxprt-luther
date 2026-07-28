@@ -29,7 +29,9 @@ impl OutcomeScanner {
     /// Build a scanner from `outcome_on_stdout` parameters. Returns `None`
     /// when no markers are configured (detection stays disabled).
     pub(super) fn from_params(params: &serde_json::Value) -> Option<Self> {
-        let pattern_map = params.get("outcome_on_stdout")?.as_object()?;
+        let pattern_map = params
+            .get(crate::workflow::validation::PARAM_OUTCOME_ON_STDOUT)?
+            .as_object()?;
         let patterns = pattern_map
             .iter()
             .filter_map(|(pattern, outcome_value)| {

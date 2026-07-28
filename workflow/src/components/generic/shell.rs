@@ -355,7 +355,7 @@ fn resolve_shell_outcome(
 fn mapped_nonzero_outcome(params: &serde_json::Value, exit_code: Option<i32>) -> StepOutcome {
     if let Some(outcome_name) = exit_code.and_then(|c| {
         params
-            .get("exit_code_map")
+            .get(crate::workflow::validation::PARAM_EXIT_CODE_MAP)
             .and_then(|m| m.as_object())
             .and_then(|map| map.get(&c.to_string()))
             .and_then(|v| v.as_str())
@@ -380,7 +380,7 @@ fn mapped_nonzero_outcome(params: &serde_json::Value, exit_code: Option<i32>) ->
 /// (REQ-LF-SHELL-005).
 fn match_outcome_on_stdout(params: &serde_json::Value, stdout_str: &str) -> Option<StepOutcome> {
     params
-        .get("outcome_on_stdout")
+        .get(crate::workflow::validation::PARAM_OUTCOME_ON_STDOUT)
         .and_then(|m| m.as_object())?
         .iter()
         // No fallback for an unparseable name: validation rejects unknown

@@ -930,7 +930,7 @@ fn match_exit_code_outcome(
 ) -> Option<StepOutcome> {
     let code = exit_code?.to_string();
     let outcome_name = params
-        .get("exit_code_map")?
+        .get(crate::workflow::validation::PARAM_EXIT_CODE_MAP)?
         .as_object()?
         .get(&code)?
         .as_str()?;
@@ -938,7 +938,9 @@ fn match_exit_code_outcome(
 }
 
 fn match_static_stdout_outcome(params: &serde_json::Value, stdout: &str) -> Option<StepOutcome> {
-    let pattern_map = params.get("outcome_on_stdout")?.as_object()?;
+    let pattern_map = params
+        .get(crate::workflow::validation::PARAM_OUTCOME_ON_STDOUT)?
+        .as_object()?;
     for (pattern, outcome_value) in pattern_map {
         if contains_outcome_marker_line(stdout, pattern) {
             return outcome_value
@@ -955,7 +957,9 @@ fn match_stdout_outcome(
     stdout_buffer: &artifacts::SharedCapture,
 ) -> Option<StepOutcome> {
     let stdout = artifacts::capture_text(stdout_buffer);
-    let pattern_map = params.get("outcome_on_stdout")?.as_object()?;
+    let pattern_map = params
+        .get(crate::workflow::validation::PARAM_OUTCOME_ON_STDOUT)?
+        .as_object()?;
     for (pattern, outcome_value) in pattern_map {
         if contains_outcome_marker_line(&stdout, pattern) {
             return outcome_value

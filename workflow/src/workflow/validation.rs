@@ -580,7 +580,19 @@ fn describe_value(value: &serde_json::Value) -> String {
 /// workflows for unvalidated outcome parameters can assert against this exact
 /// list. A second hand-written copy could drift from it, which is the failure
 /// class this validation exists to remove.
-pub(crate) const OUTCOME_VALUED_PARAMS: [&str; 2] = ["exit_code_map", "outcome_on_stdout"];
+/// The parameter name whose values map exit codes to outcome names.
+pub(crate) const PARAM_EXIT_CODE_MAP: &str = "exit_code_map";
+/// The parameter name whose values map stdout patterns to outcome names.
+pub(crate) const PARAM_OUTCOME_ON_STDOUT: &str = "outcome_on_stdout";
+
+/// Parameters whose values are outcome names, and so must be validated.
+///
+/// The entries are the same constants the executors look these parameters up
+/// by, so a reader cannot consult a parameter for outcome names under a
+/// spelling this list does not contain. Adding a third such parameter is still
+/// a manual step, but it cannot silently disagree with the executors about the
+/// two that exist.
+pub(crate) const OUTCOME_VALUED_PARAMS: [&str; 2] = [PARAM_EXIT_CODE_MAP, PARAM_OUTCOME_ON_STDOUT];
 
 /// Every outcome name a step configures must name a real outcome.
 ///
