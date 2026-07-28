@@ -22,15 +22,48 @@ const HARD_LIMIT: usize = 1000;
 ///
 /// Nothing may be added here without shrinking the list elsewhere: an
 /// allowlist that only grows is not a gate.
-const ACCEPTED_BREACHES: [&str; 1] = ["src/components/github/pr_remediation.rs"];
+const ACCEPTED_BREACHES: [&str; 13] = [
+    "src/components/github/pr_remediation.rs",
+    // The `tests/` tree. `cargo xtask complexity` does enforce the limit here
+    // on a full scan, but CI only ever runs `--changed`, and that path fails a
+    // file only when it GREW - so every one of these is grandfathered and has
+    // never been enforced. Recording them is what makes that visible.
+    "tests/github_pr_followup_executor_tests.rs",
+    "tests/e2e_workflow_integration.rs",
+    "tests/recovery_protocol_integration_tests.rs",
+    "tests/quality_release_guardrails.rs",
+    "tests/pr_followup_replay_e2e_tests.rs",
+    "tests/typed_merge_integration_tests.rs",
+    "tests/engine_integration_llxprt_first.rs",
+    "tests/recovery_failpoint_matrix_tests.rs",
+    "tests/canary_harness_tests.rs",
+    "tests/verify_executor_tests.rs",
+    "tests/command_manifest_executor_tests.rs",
+    "tests/capsule_wiring_integration_tests.rs",
+];
 
+/// Collect `.rs` files under `dir`.
+///
+/// Fails closed: an unreadable directory or entry panics rather than being
+/// skipped, because silently omitting a subtree would let this gate pass while
+/// covering less than it claims - the same failure mode it exists to catch.
+///
+/// Uses `symlink_metadata`, so a symlinked directory is not descended into.
+/// `is_dir()` follows links, which would both double-count files reachable by
+/// two paths and hang on a link loop.
 fn rust_sources(dir: &Path, found: &mut Vec<PathBuf>) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
+    let entries =
+        std::fs::read_dir(dir).unwrap_or_else(|e| panic!("cannot read {}: {e}", dir.display()));
+    for entry in entries {
+        let entry =
+            entry.unwrap_or_else(|e| panic!("cannot read an entry in {}: {e}", dir.display()));
         let path = entry.path();
-        if path.is_dir() {
+        let meta = std::fs::symlink_metadata(&path)
+            .unwrap_or_else(|e| panic!("cannot stat {}: {e}", path.display()));
+        if meta.file_type().is_symlink() {
+            continue;
+        }
+        if meta.is_dir() {
             rust_sources(&path, found);
         } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
             found.push(path);
@@ -44,6 +77,8 @@ fn no_source_file_exceeds_the_hard_line_limit() {
     let mut files = Vec::new();
     rust_sources(&root.join("src"), &mut files);
     rust_sources(&root.join("crates"), &mut files);
+    // Including tests/ means this file is subject to its own gate.
+    rust_sources(&root.join("tests"), &mut files);
 
     assert!(
         !files.is_empty(),

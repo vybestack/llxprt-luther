@@ -131,6 +131,10 @@ fn load_recent_events_bounds_and_orders_chronologically() {
     assert!(none.is_empty());
 }
 
+/// Monotonic seed counter, so seeded checkpoints order deterministically
+/// regardless of clock resolution or how fast the writes happen.
+static SEEDED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
 /// Persist a checkpoint with an explicit step and status for resume tests.
 /// @plan:PLAN-20260623-LUTHER-CONTINUATION
 fn seed_checkpoint(conn: &Connection, run_id: &str, step_id: &str, status: &str) {
@@ -138,10 +142,17 @@ fn seed_checkpoint(conn: &Connection, run_id: &str, step_id: &str, status: &str)
         status: status.to_string(),
         ..Default::default()
     };
-    let checkpoint = Checkpoint::with_snapshot(run_id, step_id, snapshot);
+    let mut checkpoint = Checkpoint::with_snapshot(run_id, step_id, snapshot);
+    // Order explicitly rather than by sleeping between writes. The previous
+    // approach slept 2ms so that wall-clock timestamps would differ, which ties
+    // ordering to clock resolution and scheduler latency - it can only ever be
+    // probabilistic, and under CI load the margin is not guaranteed.
+    //
+    // A monotonic counter makes the ordering the test depends on an explicit
+    // property of the data rather than an emergent property of timing.
+    let nth = SEEDED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    checkpoint.timestamp = DateTime::<Utc>::UNIX_EPOCH + chrono::Duration::seconds(nth as i64);
     save_checkpoint_with_conn(conn, &checkpoint).expect("seed checkpoint");
-    // Ensure later checkpoints sort after earlier ones despite fast clocks.
-    std::thread::sleep(std::time::Duration::from_millis(2));
 }
 
 #[test]
