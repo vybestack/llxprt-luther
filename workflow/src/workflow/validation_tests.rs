@@ -737,3 +737,53 @@ fn a_single_entry_is_described_in_the_singular() {
         "a count of one must not read as a plural: {detail}"
     );
 }
+
+/// The e2e copy of `POST_PR_STEPS` matches this one.
+///
+/// The two lists drive different suites - this file checks them against the
+/// shipped workflow, e2e checks contract properties - so if they drift, each
+/// suite keeps passing against a different set and a post-PR gap goes
+/// unnoticed. The doc comment above asks a reader to keep them in step, which
+/// is not enforcement.
+///
+/// Parsed from source rather than shared through a module because the two live
+/// in different compilation units: `tests/` cannot import from a `#[cfg(test)]`
+/// module inside the library.
+#[test]
+fn the_e2e_copy_of_post_pr_steps_has_not_drifted() {
+    let e2e = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/e2e_workflow_integration.rs"
+    ))
+    .expect("the e2e test file is readable");
+
+    // Anchored through the `:` so this cannot match a longer identifier such
+    // as POST_PR_STEPS_RENAMED. A prefix match would silently follow the
+    // renamed constant and keep passing, which is what happened when the
+    // control for this test was first run.
+    let start = e2e
+        .find("const POST_PR_STEPS:")
+        .expect("the e2e file declares POST_PR_STEPS");
+    let body = &e2e[start..];
+    let end = body.find("];").expect("the declaration is terminated");
+    let names: Vec<&str> = body[..end]
+        .match_indices('"')
+        .step_by(2)
+        .map(|(i, _)| {
+            let rest = &body[i + 1..];
+            &rest[..rest.find('"').expect("a closed string literal")]
+        })
+        .collect();
+
+    assert!(
+        !names.is_empty(),
+        "parsed no step names from the e2e file; the parse broke and this \
+         check would pass regardless"
+    );
+    assert_eq!(
+        names,
+        POST_PR_STEPS.to_vec(),
+        "the two POST_PR_STEPS lists have drifted; each suite would then \
+         validate a different set of steps while both keep passing"
+    );
+}
