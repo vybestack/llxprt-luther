@@ -702,3 +702,69 @@ fn an_unnamed_key_is_still_dropped_when_a_set_is_supplied() {
          an allowlist whoever supplies the list"
     );
 }
+
+/// The default allowlist is exactly the keys it has always carried.
+///
+/// This is the checkpoint's blast radius when nobody supplies a set, which is
+/// every caller today. Written as a literal rather than derived from the
+/// constant: deriving it would assert only that the constant equals itself,
+/// and would keep passing while a key was quietly added.
+///
+/// Adding a key here means deciding that value is safe to persist to disk.
+/// This test exists to make that a deliberate edit rather than a side effect.
+#[test]
+fn the_default_checkpointable_keys_are_the_fourteen_github_identifiers() {
+    use luther_workflow::engine::executor::DEFAULT_CHECKPOINTABLE_CONTEXT_KEYS;
+
+    let mut actual: Vec<&str> = DEFAULT_CHECKPOINTABLE_CONTEXT_KEYS.to_vec();
+    actual.sort_unstable();
+
+    let mut expected = vec![
+        "base_branch",
+        "base_ref",
+        "base_sha",
+        "current_branch",
+        "existing_pr_number",
+        "head_ref",
+        "head_sha",
+        "issue_number",
+        "issue_title",
+        "owner",
+        "pr_number",
+        "primary_issue_number",
+        "repo",
+        "repository",
+    ];
+    expected.sort_unstable();
+
+    assert_eq!(
+        actual, expected,
+        "the default checkpointable set changed; every entry here is persisted \
+         to disk for every run that does not supply its own set, so adding one \
+         is a decision about what may be written, not a list edit"
+    );
+}
+
+/// A key outside the default set is dropped when no set is supplied.
+///
+/// The companion test covers this for a supplied set. This covers the path
+/// every current caller actually takes, where the engine default applies.
+#[test]
+fn an_unlisted_key_is_dropped_under_the_default_allowlist() {
+    use luther_workflow::engine::executor::StepContext;
+
+    let mut context = StepContext::new(std::path::PathBuf::from("/tmp"), "run-1".to_string());
+    context.set("api_token", "secret-value");
+    context.set("pr_number", "7");
+
+    let values = context.checkpoint_values();
+    assert!(
+        !values.contains_key("api_token"),
+        "an unlisted key must not reach the checkpoint under the default set"
+    );
+    assert_eq!(
+        values.get("pr_number").and_then(|v| v.as_str()),
+        Some("7"),
+        "a listed key must still be carried, or the test above proves nothing"
+    );
+}
