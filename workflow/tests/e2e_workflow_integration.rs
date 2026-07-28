@@ -987,21 +987,7 @@ use luther_workflow::workflow::validation::validate_workflow_graph;
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P16
 /// @requirement:REQ-PRFU-018,REQ-PRFU-020
 /// @pseudocode lines 1-53
-const POST_PR_STEPS: [&str; 13] = [
-    "capture_pr_identity",
-    "post_pr_iteration_guard",
-    "watch_pr_checks",
-    "collect_ci_failures",
-    "collect_coderabbit_feedback",
-    "evaluate_coderabbit_feedback",
-    "build_remediation_plan",
-    "remediate_pr_followup",
-    "validate_remediation_result",
-    "run_post_pr_tests",
-    "push_remediation_changes",
-    "mark_coderabbit_feedback",
-    "post_pr_failure_terminal",
-];
+use luther_workflow::workflow::validation::{POST_PR_ENTRY, POST_PR_STEPS};
 
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P16
 /// @requirement:REQ-PRFU-018,REQ-PRFU-020
@@ -1304,7 +1290,7 @@ fn assert_single_target(workflow_type: &WorkflowType, from: &str, condition: &st
 /// @requirement:REQ-PRFU-018,REQ-PRFU-020
 /// @pseudocode lines 1-53
 fn post_pr_duplicate_transition_errors(workflow_type: &WorkflowType) -> Vec<String> {
-    let mut reachable = reachable_steps(workflow_type, "capture_pr_identity");
+    let mut reachable = reachable_steps(workflow_type, POST_PR_ENTRY);
     reachable.insert("create_pr".to_string());
     for step_id in POST_PR_STEPS {
         reachable.insert(step_id.to_string());
@@ -1334,7 +1320,7 @@ fn post_pr_duplicate_transition_errors(workflow_type: &WorkflowType) -> Vec<Stri
 /// @requirement:REQ-PRFU-018,REQ-PRFU-020
 /// @pseudocode lines 1-53
 fn post_pr_forbidden_route_errors(workflow_type: &WorkflowType) -> Vec<String> {
-    let reachable = reachable_steps(workflow_type, "capture_pr_identity");
+    let reachable = reachable_steps(workflow_type, POST_PR_ENTRY);
     let mut errors = Vec::new();
     for transition in workflow_type
         .transitions

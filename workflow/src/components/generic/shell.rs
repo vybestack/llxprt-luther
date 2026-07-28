@@ -353,32 +353,76 @@ fn resolve_shell_outcome(
 /// Map a non-zero exit code via `exit_code_map`, defaulting to `Fixable`
 /// (REQ-LF-SHELL-007/010).
 fn mapped_nonzero_outcome(params: &serde_json::Value, exit_code: Option<i32>) -> StepOutcome {
-    if let Some(outcome_name) = exit_code.and_then(|c| {
-        params
-            .get("exit_code_map")
-            .and_then(|m| m.as_object())
-            .and_then(|map| map.get(&c.to_string()))
-            .and_then(|v| v.as_str())
-    }) {
-        return parse_outcome_name(outcome_name);
+    // A PRESENT key whose value is not a string is an invariant violation, not
+    // an absent mapping. Letting as_str() discard it would return Fixable,
+    // indistinguishable from an unmapped code - the same silent substitution
+    // this change removes from the stdout path.
+    let Some(code) = exit_code else {
+        return StepOutcome::Fixable;
+    };
+    let key = code.to_string();
+    if let Some(value) = params
+        .get(crate::workflow::validation::PARAM_EXIT_CODE_MAP)
+        .and_then(|m| m.as_object())
+        .and_then(|map| map.get(&key))
+    {
+        let name = value.as_str().unwrap_or_else(|| {
+            panic!(
+                "{}['{key}'] is {value:?}, which is not a string; load-time validation should \
+                 have rejected this workflow",
+                crate::workflow::validation::PARAM_EXIT_CODE_MAP
+            )
+        });
+        return outcome_or_panic(name, crate::workflow::validation::PARAM_EXIT_CODE_MAP, &key);
     }
     StepOutcome::Fixable
+}
+
+/// Parse an outcome name that load-time validation has already accepted.
+///
+/// Both parameter paths route through here so they cannot disagree about what
+/// an invalid name means. Panicking is deliberate: reaching this point proves
+/// an unvalidated workflow is executing, and substituting any outcome - even by
+/// returning `None` for a caller to interpret - is how the divergence this
+/// change removes stayed hidden. `key` names the map entry so the message
+/// identifies the offending line without a debugger.
+fn outcome_or_panic(name: &str, param: &str, key: &str) -> StepOutcome {
+    StepOutcome::parse_condition_str(name).unwrap_or_else(|| {
+        panic!(
+            "{param}['{key}'] is '{name}', which is not a valid outcome name; expected one of \
+             {}; load-time validation should have rejected this workflow",
+            StepOutcome::CONDITION_NAMES.join(", ")
+        )
+    })
 }
 
 /// First `outcome_on_stdout` pattern contained in `stdout` wins
 /// (REQ-LF-SHELL-005).
 fn match_outcome_on_stdout(params: &serde_json::Value, stdout_str: &str) -> Option<StepOutcome> {
     params
-        .get("outcome_on_stdout")
+        .get(crate::workflow::validation::PARAM_OUTCOME_ON_STDOUT)
         .and_then(|m| m.as_object())?
         .iter()
         .find_map(|(pattern, outcome_value)| {
-            stdout_str.contains(pattern).then(|| {
-                outcome_value
-                    .as_str()
-                    .map(parse_outcome_name)
-                    .unwrap_or(StepOutcome::Success)
-            })
+            if !stdout_str.contains(pattern) {
+                return None;
+            }
+            // A matched pattern whose value is unusable is an invariant
+            // violation, not a non-match. Returning None here would let the
+            // search continue to later patterns and, failing those, fall
+            // through to Success - silently promoting a misconfigured step.
+            let name = outcome_value.as_str().unwrap_or_else(|| {
+                panic!(
+                    "{}['{pattern}'] is {outcome_value:?}, which is not a string; load-time \
+                     validation should have rejected this workflow",
+                    crate::workflow::validation::PARAM_OUTCOME_ON_STDOUT
+                )
+            });
+            Some(outcome_or_panic(
+                name,
+                crate::workflow::validation::PARAM_OUTCOME_ON_STDOUT,
+                pattern,
+            ))
         })
 }
 
@@ -549,22 +593,6 @@ fn json_value_to_string(value: &serde_json::Value) -> String {
             serde_json::to_string(value).unwrap_or_default()
         }
         serde_json::Value::Null => String::new(),
-    }
-}
-
-/// Parse an outcome name string into a StepOutcome variant.
-/// Pseudocode lines 109-118
-/// @plan:PLAN-20260408-LLXPRT-FIRST.P03
-/// @plan:PLAN-20260408-LLXPRT-FIRST.P05
-/// @requirement:REQ-LF-SHELL-005,REQ-LF-SHELL-010
-fn parse_outcome_name(name: &str) -> StepOutcome {
-    match name.to_lowercase().as_str() {
-        "success" => StepOutcome::Success,
-        "fixable" => StepOutcome::Fixable,
-        "fatal" => StepOutcome::Fatal,
-        "retryable" => StepOutcome::Retryable,
-        "abandon" => StepOutcome::Abandon,
-        _ => StepOutcome::Success, // unknown name defaults to success
     }
 }
 
@@ -796,6 +824,124 @@ mod tests {
         assert!(
             elapsed < std::time::Duration::from_secs(15),
             "timeout must not hang; elapsed {elapsed:?}"
+        );
+    }
+
+    /// A mapped exit code yields its configured outcome, and an unmapped
+    /// non-zero exit still defaults to `Fixable`.
+    ///
+    /// The default is the documented behavior for an unmapped code and must
+    /// survive the removal of the parse fallback - the fallback previously sat
+    /// between these two paths and could have absorbed either.
+    #[test]
+    fn a_mapped_exit_code_wins_and_an_unmapped_one_stays_fixable() {
+        let params = serde_json::json!({"exit_code_map": {"2": "fatal"}});
+
+        assert_eq!(
+            mapped_nonzero_outcome(&params, Some(2)),
+            StepOutcome::Fatal,
+            "a mapped code must yield its configured outcome"
+        );
+        assert_eq!(
+            mapped_nonzero_outcome(&params, Some(3)),
+            StepOutcome::Fixable,
+            "an unmapped non-zero exit keeps the documented default"
+        );
+        assert_eq!(
+            mapped_nonzero_outcome(&serde_json::json!({}), Some(2)),
+            StepOutcome::Fixable,
+            "no exit_code_map at all keeps the documented default"
+        );
+    }
+
+    /// An invalid name in `exit_code_map` panics rather than substituting.
+    #[test]
+    #[should_panic(expected = "is not a valid outcome name")]
+    fn an_invalid_exit_code_outcome_panics() {
+        let params = serde_json::json!({"exit_code_map": {"2": "explode"}});
+        mapped_nonzero_outcome(&params, Some(2));
+    }
+
+    /// An invalid name on a MATCHED stdout pattern panics rather than being
+    /// treated as a non-match.
+    ///
+    /// Skipping it would continue to later patterns and, failing those, fall
+    /// through to Success - promoting a misconfigured step to a pass. The
+    /// second pattern is valid and also matches, so a skip would return
+    /// Retryable and look entirely reasonable.
+    #[test]
+    #[should_panic(expected = "is not a valid outcome name")]
+    fn an_invalid_matched_stdout_outcome_panics_instead_of_skipping() {
+        let params = serde_json::json!({
+            "outcome_on_stdout": {"BOOM": "explode", "ZZZ_ALSO": "retryable"}
+        });
+        match_outcome_on_stdout(&params, "BOOM and ZZZ_ALSO both appear");
+    }
+
+    /// A non-string value on a matched pattern is equally a violation.
+    #[test]
+    #[should_panic(expected = "is not a string")]
+    fn a_non_string_matched_stdout_outcome_panics() {
+        let params = serde_json::json!({"outcome_on_stdout": {"BOOM": 7}});
+        match_outcome_on_stdout(&params, "BOOM");
+    }
+
+    /// An unmatched pattern is not consulted, however invalid its value.
+    ///
+    /// This is what keeps the panics above from firing on workflows whose
+    /// irrelevant entries happen to be malformed.
+    #[test]
+    fn an_unmatched_pattern_with_an_invalid_outcome_is_ignored() {
+        let params = serde_json::json!({"outcome_on_stdout": {"ABSENT": "explode"}});
+        assert_eq!(match_outcome_on_stdout(&params, "nothing here"), None);
+    }
+
+    /// Every outcome name round-trips through both parameter paths.
+    ///
+    /// Iterating CONDITION_NAMES rather than listing a few means a new variant
+    /// is covered by both paths the moment it is added to the enum.
+    #[test]
+    fn every_outcome_name_resolves_through_both_paths() {
+        for name in StepOutcome::CONDITION_NAMES {
+            let expected = StepOutcome::parse_condition_str(name).expect("listed name must parse");
+
+            let by_exit = serde_json::json!({"exit_code_map": {"3": name}});
+            assert_eq!(
+                mapped_nonzero_outcome(&by_exit, Some(3)),
+                expected,
+                "{name} must resolve through exit_code_map"
+            );
+
+            let by_stdout = serde_json::json!({"outcome_on_stdout": {"MARKER": name}});
+            assert_eq!(
+                match_outcome_on_stdout(&by_stdout, "a line with MARKER in it"),
+                Some(expected),
+                "{name} must resolve through outcome_on_stdout"
+            );
+        }
+    }
+
+    /// A present-but-non-string exit mapping panics rather than reading as
+    /// unmapped.
+    ///
+    /// Symmetric with the stdout path: discarding the value would return
+    /// Fixable, which is exactly what an absent key returns, so a typed
+    /// mistake would be invisible.
+    #[test]
+    #[should_panic(expected = "is not a string")]
+    fn a_non_string_exit_code_outcome_panics() {
+        let params = serde_json::json!({"exit_code_map": {"2": 7}});
+        mapped_nonzero_outcome(&params, Some(2));
+    }
+
+    /// An ABSENT key still yields Fixable - the panic above must not swallow
+    /// the documented default for an unmapped exit code.
+    #[test]
+    fn an_absent_exit_code_key_still_defaults_to_fixable() {
+        let params = serde_json::json!({"exit_code_map": {"9": "fatal"}});
+        assert_eq!(
+            mapped_nonzero_outcome(&params, Some(2)),
+            StepOutcome::Fixable
         );
     }
 }

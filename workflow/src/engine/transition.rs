@@ -47,6 +47,50 @@ impl std::fmt::Display for StepOutcome {
 }
 
 impl StepOutcome {
+    /// Parse a configured outcome name, or `None` if it names no outcome.
+    ///
+    /// Executors previously each carried their own copy of this mapping, and
+    /// the copies disagreed: an unrecognised name became `Success` in one and
+    /// `Fatal` in another, and one lowercased its input while the other did
+    /// not. A typo therefore passed a run under one executor and failed it
+    /// under another, silently, because both answers were plausible.
+    ///
+    /// Returning `Option` rather than a default is the point: there is no
+    /// defensible outcome for a name the author did not mean to write, so the
+    /// decision belongs to config validation, which can name the file and key.
+    /// Every name `parse_condition_str` accepts, and the only spellings it
+    /// accepts: matching is exact and lowercase-only.
+    ///
+    /// An earlier executor-local parser lowercased its input, so `Fatal` and
+    /// `FATAL` were accepted. That is deliberately no longer true - one
+    /// spelling per outcome is the point of routing every caller through this
+    /// function - and a miscased name is rejected at load with a message
+    /// naming the canonical form.
+    ///
+    /// Callers building an error message must use this rather than writing the
+    /// names out, so the advice cannot drift from what the parser accepts.
+    /// `all_variants_are_listed_and_parse` keeps this in step with the enum.
+    pub const CONDITION_NAMES: [&str; 6] = [
+        "success",
+        "retryable",
+        "fatal",
+        "fixable",
+        "abandon",
+        "wait",
+    ];
+
+    pub fn parse_condition_str(name: &str) -> Option<Self> {
+        match name {
+            "success" => Some(StepOutcome::Success),
+            "retryable" => Some(StepOutcome::Retryable),
+            "fatal" => Some(StepOutcome::Fatal),
+            "fixable" => Some(StepOutcome::Fixable),
+            "abandon" => Some(StepOutcome::Abandon),
+            "wait" => Some(StepOutcome::Wait),
+            _ => None,
+        }
+    }
+
     /// The canonical condition string used to match transitions.
     /// @plan:PLAN-20260623-LUTHER-CONTINUATION
     pub fn as_condition_str(&self) -> &'static str {
@@ -273,5 +317,46 @@ mod tests {
         }];
         let next = resolve_transition("watch", &StepOutcome::Wait, &transitions);
         assert_eq!(next, None);
+    }
+
+    /// `CONDITION_NAMES` and the parser accept exactly the same set.
+    ///
+    /// A constant listing names can drift from the match arms that accept
+    /// them, which would make error messages advise names the parser rejects.
+    /// Round-tripping through `as_condition_str` ties both to the enum: a new
+    /// variant is unreachable from the list until it is added, and a name
+    /// removed from the parser stops round-tripping.
+    #[test]
+    fn all_variants_are_listed_and_parse() {
+        for name in StepOutcome::CONDITION_NAMES {
+            let parsed = StepOutcome::parse_condition_str(name).unwrap_or_else(|| {
+                panic!("CONDITION_NAMES lists '{name}' but the parser rejects it")
+            });
+            assert_eq!(
+                parsed.as_condition_str(),
+                name,
+                "'{name}' must round-trip back to itself"
+            );
+        }
+
+        let every_variant = [
+            StepOutcome::Success,
+            StepOutcome::Retryable,
+            StepOutcome::Fatal,
+            StepOutcome::Fixable,
+            StepOutcome::Abandon,
+            StepOutcome::Wait,
+        ];
+        for variant in every_variant {
+            assert!(
+                StepOutcome::CONDITION_NAMES.contains(&variant.as_condition_str()),
+                "{variant:?} is missing from CONDITION_NAMES, so error messages would omit it"
+            );
+        }
+        assert_eq!(
+            StepOutcome::CONDITION_NAMES.len(),
+            every_variant.len(),
+            "CONDITION_NAMES must name each variant exactly once"
+        );
     }
 }

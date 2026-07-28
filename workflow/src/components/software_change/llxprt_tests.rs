@@ -5,30 +5,32 @@ use serde_json::json;
 use std::path::PathBuf;
 
 #[test]
-fn parse_outcome_name_maps_known_names() {
-    assert!(matches!(
-        parse_outcome_name("success"),
-        StepOutcome::Success
-    ));
-    assert!(matches!(
-        parse_outcome_name("fixable"),
-        StepOutcome::Fixable
-    ));
-    assert!(matches!(parse_outcome_name("fatal"), StepOutcome::Fatal));
-    assert!(matches!(
-        parse_outcome_name("retryable"),
-        StepOutcome::Retryable
-    ));
-    assert!(matches!(
-        parse_outcome_name("abandon"),
-        StepOutcome::Abandon
-    ));
+fn known_outcome_names_parse() {
+    for (name, expected) in [
+        ("success", StepOutcome::Success),
+        ("fixable", StepOutcome::Fixable),
+        ("fatal", StepOutcome::Fatal),
+        ("retryable", StepOutcome::Retryable),
+        ("abandon", StepOutcome::Abandon),
+        ("wait", StepOutcome::Wait),
+    ] {
+        assert_eq!(StepOutcome::parse_condition_str(name), Some(expected));
+    }
 }
 
+/// An unknown name yields no outcome rather than a default.
+///
+/// This replaces two tests that pinned opposite defaults: the llxprt executor
+/// returned Fatal for an unrecognised name and the shell executor returned
+/// Success, so a typo failed a run under one and passed it under the other.
+/// Neither default was defensible, so there is now no default - config
+/// validation rejects the name before a run starts.
 #[test]
-fn parse_outcome_name_unknown_defaults_to_fatal() {
-    assert!(matches!(parse_outcome_name("nonsense"), StepOutcome::Fatal));
-    assert!(matches!(parse_outcome_name(""), StepOutcome::Fatal));
+fn an_unknown_outcome_name_does_not_parse() {
+    assert_eq!(StepOutcome::parse_condition_str("nonsense"), None);
+    assert_eq!(StepOutcome::parse_condition_str(""), None);
+    // Case matters: "Fixable" previously parsed in shell and not in llxprt.
+    assert_eq!(StepOutcome::parse_condition_str("Fixable"), None);
 }
 
 #[test]
