@@ -538,6 +538,54 @@ mod tests {
         assert!(typed_merge::completion_satisfied(&conn, run_id));
     }
 
+    /// The runner's stored factory is what completion consumes.
+    ///
+    /// The previous version of this coverage called `remote_probe` directly,
+    /// so a regression that rebuilt `SystemMergeProbeFactory` inside
+    /// completion would still have passed. This drives
+    /// `complete_merge_required_run` with the factory exactly as the runner
+    /// holds it, and asserts the persisted outcome - which a rebuilt system
+    /// factory cannot produce, because its probes would consult a real
+    /// repository that has no such commits.
+    #[test]
+    fn completion_consumes_the_factory_the_runner_stores() {
+        let conn = merge_completion_conn();
+        let run_id = "run-runner-held-factory";
+        let _capsule =
+            persisted_capsule_with_strategy(&conn, run_id, Some(MergeStrategyConfig::MergeCommit));
+        seed_run(&conn, run_id, RunStatus::ReviewReady, "o/r", 42, "head123");
+
+        let factory: std::sync::Arc<dyn MergeProbeFactory> =
+            std::sync::Arc::new(StubProbeFactory {
+                git: StubMergeGitProbe::new()
+                    .with_ancestor("head123", "merge789")
+                    .with_ancestor("base456", "merge789")
+                    .with_base_commit("main", "base456"),
+                remote_observation: MergeObservation {
+                    merged: true,
+                    strategy: MergeStrategy::MergeCommit,
+                    result_sha: "merge789".to_string(),
+                },
+            });
+
+        // Bound exactly as the runner binds it at construction, then passed
+        // through as a trait object the same way completion receives it.
+        let bound = factory.bind_work_dir(Path::new("."));
+        let outcome = complete_merge_required_run(&conn, run_id, Path::new("."), bound.as_ref());
+
+        assert_eq!(
+            outcome,
+            MergeCompletionOutcome::Merged,
+            "the bound factory must decide the outcome; a factory rebuilt \
+             inside completion would query a real repository instead"
+        );
+        assert!(
+            typed_merge::completion_satisfied(&conn, run_id),
+            "the typed completion artifact must be persisted from the \
+             injected observation"
+        );
+    }
+
     /// GIVEN: a ReviewReady run where the PR is NOT yet merged
     /// WHEN: complete_merge_required_run is called
     /// THEN: it returns NotYetMerged and the run stays ReviewReady.

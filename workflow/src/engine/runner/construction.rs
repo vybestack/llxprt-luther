@@ -31,9 +31,11 @@ impl crate::engine::runner::EngineRunner {
     /// Without this the field is injectable in name only: every constructor
     /// installs the system factory and nothing can replace it, so completion
     /// would still be reachable only by spawning git.
+    /// Bound to the runner's work dir on the way in, so completion cannot use
+    /// an unbound factory even if a future call site forgets to bind one.
     #[must_use]
     pub fn with_merge_probe_factory(mut self, factory: Arc<dyn MergeProbeFactory>) -> Self {
-        self.merge_probe_factory = factory;
+        self.merge_probe_factory = factory.bind_work_dir(self.context.work_dir());
         self
     }
 }
@@ -93,6 +95,10 @@ impl EngineRunner {
             EngineError::PersistenceError(format!("Failed to initialize checkpoint schema: {e}"))
         })?;
 
+        // Bound once, here, so no completion path can use an unbound
+        // factory: an unbound remote probe runs `git rev-list` in
+        // whichever repository the process happens to sit in.
+        let merge_probe_factory = default_merge_probe_factory().bind_work_dir(context.work_dir());
         Ok(Self {
             instance,
             retry_count: 0,
@@ -107,7 +113,7 @@ impl EngineRunner {
             persist_registry: false,
             pending_failure_cleanup: None,
             terminal_ownership_failure: false,
-            merge_probe_factory: default_merge_probe_factory(),
+            merge_probe_factory,
         })
     }
 
@@ -146,6 +152,10 @@ impl EngineRunner {
         let mut context = build_step_context(&instance, Some(&run_context))?;
         context.bind_interrupt(interrupted.clone());
 
+        // Bound once, here, so no completion path can use an unbound
+        // factory: an unbound remote probe runs `git rev-list` in
+        // whichever repository the process happens to sit in.
+        let merge_probe_factory = default_merge_probe_factory().bind_work_dir(context.work_dir());
         let mut runner = Self {
             instance,
             retry_count,
@@ -160,7 +170,7 @@ impl EngineRunner {
             persist_registry: true,
             pending_failure_cleanup: None,
             terminal_ownership_failure: false,
-            merge_probe_factory: default_merge_probe_factory(),
+            merge_probe_factory,
         };
 
         // Persist an initial run record so in-flight runs are visible before
@@ -211,6 +221,10 @@ impl EngineRunner {
         let mut context = build_step_context(&instance, Some(&run_context))?;
         context.bind_interrupt(interrupted.clone());
 
+        // Bound once, here, so no completion path can use an unbound
+        // factory: an unbound remote probe runs `git rev-list` in
+        // whichever repository the process happens to sit in.
+        let merge_probe_factory = default_merge_probe_factory().bind_work_dir(context.work_dir());
         let mut runner = Self {
             instance,
             retry_count,
@@ -225,7 +239,7 @@ impl EngineRunner {
             persist_registry: true,
             pending_failure_cleanup: None,
             terminal_ownership_failure: false,
-            merge_probe_factory: default_merge_probe_factory(),
+            merge_probe_factory,
         };
 
         // Atomically insert the initial Starting row AND the immutable
