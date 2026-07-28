@@ -2,7 +2,7 @@
 /// @plan:PLAN-20260408-LLXPRT-FIRST.P09
 /// @requirement:REQ-LF-CTX-001,REQ-LF-CTX-002,REQ-LF-CTX-003,REQ-LF-CTX-004
 /// Executor module - step execution trait, registry, and context.
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 /// @plan:PLAN-20260429-CODERABBIT-PR-FOLLOWUP.P09
 /// @requirement:REQ-PRFU-011,REQ-PRFU-012
 /// @pseudocode lines 1-23
@@ -52,7 +52,10 @@ pub struct StepContext {
     /// the run it governs. Defaults to
     /// [`DEFAULT_CHECKPOINTABLE_CONTEXT_KEYS`], which is why installing this
     /// field changes nothing on its own.
-    checkpointable_keys: Arc<Vec<String>>,
+    ///
+    /// A set rather than a list: the membership test runs once per variable on
+    /// every checkpoint and restore, so it should not walk the whole allowlist.
+    checkpointable_keys: Arc<HashSet<String>>,
 }
 
 /// The context keys a run may carry across a checkpoint, by default.
@@ -87,7 +90,7 @@ pub const DEFAULT_CHECKPOINTABLE_CONTEXT_KEYS: &[&str] = &[
 impl StepContext {
     /// Whether `key` may cross a checkpoint for this run.
     fn is_checkpointable_context_key(&self, key: &str) -> bool {
-        self.checkpointable_keys.iter().any(|k| k == key)
+        self.checkpointable_keys.contains(key)
     }
 
     /// Replace the set of keys this run may checkpoint.
