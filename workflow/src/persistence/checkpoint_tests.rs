@@ -42,9 +42,54 @@ fn checkpoint_mark_interrupted() {
 #[test]
 fn persistence_error_variants_exist() {
     // @plan:PLAN-20260404-INITIAL-RUNTIME.P08
-    let _db = PersistenceError::Database("test".to_string());
-    let _ser = PersistenceError::Serialization("test".to_string());
-    let _nf = PersistenceError::NotFound("test".to_string());
+    // Construction alone asserted nothing: it verified that the variants
+    // compile, which the rest of the module already proves by using them.
+    // What callers actually depend on is that a failure says which kind it was
+    // and carries its context, since these cross the boundary into EngineError
+    // as text.
+    let cases = [
+        (
+            PersistenceError::Database("disk full".to_string()),
+            "disk full",
+        ),
+        (
+            PersistenceError::Serialization("bad field".to_string()),
+            "bad field",
+        ),
+        (PersistenceError::NotFound("run-7".to_string()), "run-7"),
+    ];
+
+    let mut rendered = Vec::new();
+    for (error, context) in &cases {
+        let text = error.to_string();
+        assert!(
+            text.contains(context),
+            "a {error:?} must carry its context, got: {text}"
+        );
+        rendered.push(text);
+    }
+
+    // Distinct kinds must not read identically, or a caller reading the message
+    // cannot tell a missing record from a disk failure.
+    //
+    // Compared with the SAME payload in every variant. Using the payloads above
+    // would make this vacuous: the messages would differ because the contexts
+    // differ, whatever the variants' prefixes said. Verified - with distinct
+    // payloads, giving two variants an identical prefix still passed.
+    let same = "identical".to_string();
+    let uniform = [
+        PersistenceError::Database(same.clone()).to_string(),
+        PersistenceError::Serialization(same.clone()).to_string(),
+        PersistenceError::NotFound(same).to_string(),
+    ];
+    for (i, a) in uniform.iter().enumerate() {
+        for b in uniform.iter().skip(i + 1) {
+            assert_ne!(
+                a, b,
+                "two variants are indistinguishable when their context matches"
+            );
+        }
+    }
 }
 
 #[test]

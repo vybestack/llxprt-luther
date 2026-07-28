@@ -119,19 +119,29 @@ fn no_source_file_exceeds_the_hard_line_limit() {
 #[test]
 fn accepted_breaches_are_still_over_the_limit() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    // The allowlist may shrink but never grow. Without this, a file that
-    // crossed the limit could be waved through by appending a line here, which
-    // is exactly the bypass this gate exists to prevent - and the length in the
-    // type above would be edited in the same motion, silently.
+    // The allowlist may shrink but never grow.
     //
-    // Lowering this number as files are split is the intended direction, and
-    // the assertion below then forces the stale entry out.
-    const MAX_ACCEPTED_BREACHES: usize = 13;
+    // The ceiling lives in its own committed file rather than beside the array.
+    // A local constant does not ratchet: adding an entry already requires
+    // editing the length in the array's type, so bumping a second number in the
+    // same edit is the same motion and reads as equally routine. Raising the
+    // ceiling here is a separate file in the diff, which is the point - it
+    // cannot ride along unnoticed with an allowlist addition.
+    //
+    // Lowering it as files are split is the intended direction; the assertion
+    // below then forces the stale entry out.
+    let ceiling_path = root.join("tests/fixtures/accepted-breaches-ceiling.txt");
+    let ceiling: usize = std::fs::read_to_string(&ceiling_path)
+        .expect("the ceiling file exists")
+        .trim()
+        .parse()
+        .expect("the ceiling file holds a number");
     assert!(
-        ACCEPTED_BREACHES.len() <= MAX_ACCEPTED_BREACHES,
-        "ACCEPTED_BREACHES grew to {}; the limit is {MAX_ACCEPTED_BREACHES}. \
+        ACCEPTED_BREACHES.len() <= ceiling,
+        "ACCEPTED_BREACHES grew to {}; the ceiling in {} is {ceiling}. \
          Split the file instead of allowlisting it.",
-        ACCEPTED_BREACHES.len()
+        ACCEPTED_BREACHES.len(),
+        ceiling_path.display()
     );
 
     for relative in ACCEPTED_BREACHES {
