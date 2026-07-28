@@ -11,9 +11,10 @@
 //! execute without a domain package, this fails, and no amount of import
 //! hygiene elsewhere will hide it.
 
-use luther_workflow::engine::executor::{ExecutorRegistry, StepContext};
-use luther_workflow::engine::StepOutcome;
-use std::path::PathBuf;
+use luther_workflow::engine::executor::ExecutorRegistry;
+use luther_workflow::engine::instance::WorkflowInstance;
+use luther_workflow::engine::runner::{EngineRunner, RunOutcome};
+use luther_workflow::workflow::config_loader::{resolve_workflow_config, resolve_workflow_type};
 
 /// Registers the generic executors this proof uses, and nothing else.
 ///
@@ -34,59 +35,54 @@ fn core_and_generic_only() -> ExecutorRegistry {
     registry
 }
 
-/// A workflow executes end to end and leaves its artifact behind.
+/// A workflow executes end to end through the runner and leaves its artifact.
 ///
-/// The assertion is on the file's contents, not on the step outcome. A step
-/// can report success without having done anything; the artifact can only
-/// exist if the executor actually ran and the context actually interpolated.
+/// Driven through `EngineRunner::run`, not by calling `dispatch` directly.
+/// Direct dispatch would only prove the registry resolves two step types; it
+/// would say nothing about workflow parsing, sequencing, or transitions, so a
+/// domain dependency introduced in the runner would not disturb it.
+///
+/// The assertion is on the artifact on disk rather than the run outcome, since
+/// a run can report success without a step having done anything.
 #[test]
-fn a_workflow_runs_and_writes_its_artifact_with_no_domain_package() {
+fn a_workflow_runs_end_to_end_with_no_domain_package() {
+    let fixture_root = std::path::PathBuf::from("tests/fixtures");
+    let workflow_type = resolve_workflow_type("core-only-v1", &fixture_root)
+        .expect("the core-only workflow type loads");
+    let mut config =
+        resolve_workflow_config("core-only", &fixture_root).expect("the core-only config loads");
+
     let workspace = tempfile::tempdir().expect("a temp dir is available");
-    let work_dir: PathBuf = workspace.path().to_path_buf();
+    config.variables.insert(
+        "work_dir".to_string(),
+        workspace.path().display().to_string(),
+    );
 
     let registry = core_and_generic_only();
-    let mut context = StepContext::new(work_dir.clone(), "core-only-run".to_string());
-    context.set("greeting", "produced without a domain package");
+    let instance = WorkflowInstance::create(workflow_type, config);
+    let mut runner = EngineRunner::new(instance, registry).expect("the runner constructs");
 
-    // A no-op step first, to prove dispatch works for more than one step type
-    // and that the run is a sequence rather than a single call.
-    let noop_outcome = registry
-        .dispatch("noop", &mut context, &serde_json::json!({}))
-        .expect("the noop step dispatches");
-    assert_eq!(
-        noop_outcome,
-        StepOutcome::Success,
-        "a core-only run must be able to execute a step that does nothing"
+    let outcome = runner
+        .run()
+        .expect("the run completes without an engine error");
+    assert!(
+        matches!(outcome, RunOutcome::Success),
+        "a workflow of generic steps must complete with only core and generic \
+         components registered, got {outcome:?}"
     );
 
-    let write_outcome = registry
-        .dispatch(
-            "write_file",
-            &mut context,
-            &serde_json::json!({
-                "path": "artifact.txt",
-                "content": "{greeting}",
-            }),
-        )
-        .expect("the write_file step dispatches");
-    assert_eq!(
-        write_outcome,
-        StepOutcome::Success,
-        "the write_file step must succeed with only generic components registered"
-    );
-
-    let artifact = work_dir.join("artifact.txt");
+    let artifact = workspace.path().join("artifact.txt");
     let contents = std::fs::read_to_string(&artifact).unwrap_or_else(|error| {
         panic!(
-            "the workflow must leave its artifact at {}: {error}",
+            "the run must leave its artifact at {}: {error}",
             artifact.display()
         )
     });
     assert_eq!(
         contents, "produced without a domain package",
-        "the artifact must carry the interpolated context value, which proves \
-         the executor ran and the context resolved - not merely that dispatch \
-         returned Success"
+        "the artifact must carry the interpolated config variable, which proves \
+         the step ran and the context resolved rather than the run merely \
+         reporting Success"
     );
 }
 
@@ -100,33 +96,20 @@ fn the_core_only_registry_contains_no_domain_step_types() {
     let registry = core_and_generic_only();
     let registered = registry.registered_step_types();
 
-    assert!(
-        !registered.is_empty(),
-        "an empty registry would satisfy every assertion below without proving \
-         anything; the proof requires that something is actually registered"
+    // Exact set, not a substring scan. Substrings are not an enforced naming
+    // contract: a domain executor registered as "sync_upstream" carries none
+    // of the words a blocklist would anticipate, and would pass. Naming the
+    // set means any addition to this registry has to be stated here.
+    let expected: std::collections::BTreeSet<String> = ["noop", "write_file"]
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect();
+    assert_eq!(
+        registered, expected,
+        "the core-only registry must hold exactly the generic executors this \
+         proof registers; anything else means the run above was not proved \
+         against core and generic components alone"
     );
-
-    // Substrings rather than exact names: a domain step type added later will
-    // not be one this list anticipated, but it will carry one of these words.
-    for forbidden in [
-        "pr_",
-        "issue",
-        "github",
-        "merge",
-        "review",
-        "remediation",
-        "llxprt",
-    ] {
-        let offenders: Vec<&String> = registered
-            .iter()
-            .filter(|step_type| step_type.contains(forbidden))
-            .collect();
-        assert!(
-            offenders.is_empty(),
-            "the core-only registry contains domain step types matching \
-             '{forbidden}': {offenders:?}"
-        );
-    }
 }
 
 /// The core crate has no dependency edge back to the workspace crate.

@@ -1,0 +1,26 @@
+# A workflow whose steps are satisfied entirely by generic components.
+#
+# Exists so the boundary claim can be proved positively: this runs end to end
+# through EngineRunner with no software-change or GitHub package registered. If
+# the engine ever needs a domain component to complete a run, this fixture
+# stops working, which no negative import assertion would reveal.
+
+workflow_type_id = "core-only-v1"
+
+[[steps]]
+step_id = "start"
+step_type = "noop"
+description = "A step that does nothing, so the run has more than one step"
+
+[[steps]]
+step_id = "emit"
+step_type = "write_file"
+description = "Produce an artifact, so completion is observable on disk"
+
+[steps.parameters]
+path = "artifact.txt"
+content = "{greeting}"
+
+[[transitions]]
+from = "start"
+to = "emit"
