@@ -357,27 +357,23 @@ fn mapped_nonzero_outcome(params: &serde_json::Value, exit_code: Option<i32>) ->
     // an absent mapping. Letting as_str() discard it would return Fixable,
     // indistinguishable from an unmapped code - the same silent substitution
     // this change removes from the stdout path.
-    if let Some(outcome_name) = exit_code.and_then(|c| {
-        let key = c.to_string();
-        params
-            .get(crate::workflow::validation::PARAM_EXIT_CODE_MAP)
-            .and_then(|m| m.as_object())
-            .and_then(|map| map.get(&key))
-            .map(|value| {
-                value.as_str().unwrap_or_else(|| {
-                    panic!(
-                        "{}['{key}'] is {value}, which is not a string; load-time validation \
-                         should have rejected this workflow",
-                        crate::workflow::validation::PARAM_EXIT_CODE_MAP
-                    )
-                })
-            })
-    }) {
-        return outcome_or_panic(
-            outcome_name,
-            crate::workflow::validation::PARAM_EXIT_CODE_MAP,
-            &exit_code.map_or_else(|| "(none)".to_string(), |c| c.to_string()),
-        );
+    let Some(code) = exit_code else {
+        return StepOutcome::Fixable;
+    };
+    let key = code.to_string();
+    if let Some(value) = params
+        .get(crate::workflow::validation::PARAM_EXIT_CODE_MAP)
+        .and_then(|m| m.as_object())
+        .and_then(|map| map.get(&key))
+    {
+        let name = value.as_str().unwrap_or_else(|| {
+            panic!(
+                "{}['{key}'] is {value:?}, which is not a string; load-time validation should \
+                 have rejected this workflow",
+                crate::workflow::validation::PARAM_EXIT_CODE_MAP
+            )
+        });
+        return outcome_or_panic(name, crate::workflow::validation::PARAM_EXIT_CODE_MAP, &key);
     }
     StepOutcome::Fixable
 }
@@ -417,7 +413,7 @@ fn match_outcome_on_stdout(params: &serde_json::Value, stdout_str: &str) -> Opti
             // through to Success - silently promoting a misconfigured step.
             let name = outcome_value.as_str().unwrap_or_else(|| {
                 panic!(
-                    "{}['{pattern}'] is {outcome_value}, which is not a string; load-time \
+                    "{}['{pattern}'] is {outcome_value:?}, which is not a string; load-time \
                      validation should have rejected this workflow",
                     crate::workflow::validation::PARAM_OUTCOME_ON_STDOUT
                 )

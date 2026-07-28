@@ -32,13 +32,29 @@ impl OutcomeScanner {
         let pattern_map = params
             .get(crate::workflow::validation::PARAM_OUTCOME_ON_STDOUT)?
             .as_object()?;
+        // Every configured marker must resolve. Dropping an unparseable one
+        // would disable exactly the detection the workflow asked for, and the
+        // scanner would look correctly configured while watching for less than
+        // it was told to - the same silent narrowing the shell executor
+        // rejects.
         let patterns = pattern_map
             .iter()
-            .filter_map(|(pattern, outcome_value)| {
-                outcome_value
-                    .as_str()
-                    .and_then(StepOutcome::parse_condition_str)
-                    .map(|outcome| (pattern.clone(), outcome))
+            .map(|(pattern, outcome_value)| {
+                let name = outcome_value.as_str().unwrap_or_else(|| {
+                    panic!(
+                        "{}['{pattern}'] is {outcome_value:?}, which is not a string; load-time \
+                         validation should have rejected this workflow",
+                        crate::workflow::validation::PARAM_OUTCOME_ON_STDOUT
+                    )
+                });
+                let outcome = StepOutcome::parse_condition_str(name).unwrap_or_else(|| {
+                    panic!(
+                        "{}['{pattern}'] is '{name}', which is not a valid outcome name; \
+                         load-time validation should have rejected this workflow",
+                        crate::workflow::validation::PARAM_OUTCOME_ON_STDOUT
+                    )
+                });
+                (pattern.clone(), outcome)
             })
             .collect::<Vec<_>>();
         if patterns.is_empty() {
@@ -181,5 +197,25 @@ mod tests {
         scanner.append(b"working\nstill working\n");
         scanner.finish();
         assert_eq!(scanner.detected(), None);
+    }
+
+    /// A typo in one marker must not quietly disable that detection.
+    ///
+    /// Dropping it leaves a scanner that looks configured while watching for
+    /// fewer markers than the workflow asked for - the failure is invisible
+    /// precisely because the other markers still work.
+    #[test]
+    #[should_panic(expected = "is not a valid outcome name")]
+    fn an_unparseable_marker_panics_instead_of_being_dropped() {
+        OutcomeScanner::from_params(&serde_json::json!({
+            "outcome_on_stdout": {"BOOM": "explode", "OK": "success"}
+        }));
+    }
+
+    /// A non-string marker value is equally a violation.
+    #[test]
+    #[should_panic(expected = "is not a string")]
+    fn a_non_string_marker_panics() {
+        OutcomeScanner::from_params(&serde_json::json!({"outcome_on_stdout": {"BOOM": 7}}));
     }
 }
