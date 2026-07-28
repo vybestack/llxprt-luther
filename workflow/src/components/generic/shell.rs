@@ -360,11 +360,17 @@ fn mapped_nonzero_outcome(params: &serde_json::Value, exit_code: Option<i32>) ->
             .and_then(|map| map.get(&c.to_string()))
             .and_then(|v| v.as_str())
     }) {
-        // Validation rejects unknown names at load, so this is the configured
-        // outcome or the exit code was not mapped at all.
-        if let Some(outcome) = StepOutcome::parse_condition_str(outcome_name) {
-            return outcome;
-        }
+        // Validation rejects unknown names at load, so a name reaching here is
+        // always parseable. Panicking rather than falling through to Fixable is
+        // deliberate: a silent fallback would mean an unvalidated workflow had
+        // reached execution, and quietly substituting an outcome is how the
+        // divergence this change removes went unnoticed for so long.
+        return StepOutcome::parse_condition_str(outcome_name).unwrap_or_else(|| {
+            panic!(
+                "exit_code_map names '{outcome_name}', which is not an outcome; \
+                 load-time validation should have rejected this workflow"
+            )
+        });
     }
     StepOutcome::Fixable
 }
@@ -788,6 +794,33 @@ mod tests {
         assert!(
             elapsed < std::time::Duration::from_secs(15),
             "timeout must not hang; elapsed {elapsed:?}"
+        );
+    }
+
+    /// A mapped exit code yields its configured outcome, and an unmapped
+    /// non-zero exit still defaults to `Fixable`.
+    ///
+    /// The default is the documented behaviour for an unmapped code and must
+    /// survive the removal of the parse fallback - the fallback previously sat
+    /// between these two paths and could have absorbed either.
+    #[test]
+    fn a_mapped_exit_code_wins_and_an_unmapped_one_stays_fixable() {
+        let params = serde_json::json!({"exit_code_map": {"2": "fatal"}});
+
+        assert_eq!(
+            mapped_nonzero_outcome(&params, Some(2)),
+            StepOutcome::Fatal,
+            "a mapped code must yield its configured outcome"
+        );
+        assert_eq!(
+            mapped_nonzero_outcome(&params, Some(3)),
+            StepOutcome::Fixable,
+            "an unmapped non-zero exit keeps the documented default"
+        );
+        assert_eq!(
+            mapped_nonzero_outcome(&serde_json::json!({}), Some(2)),
+            StepOutcome::Fixable,
+            "no exit_code_map at all keeps the documented default"
         );
     }
 }
