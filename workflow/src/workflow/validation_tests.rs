@@ -548,3 +548,67 @@ fn no_shipped_parameter_carries_outcome_names_unvalidated() {
         unknown.join("\n  ")
     );
 }
+
+/// A non-string value in an outcome map is rejected, not ignored.
+///
+/// Skipping it would let `"2" = 3` reach the executor, which is the silent
+/// path this validation exists to close.
+#[test]
+fn a_non_string_outcome_value_is_rejected() {
+    for bad in [
+        serde_json::json!({"exit_code_map": {"2": 3}}),
+        serde_json::json!({"exit_code_map": {"2": {"nested": "fixable"}}}),
+        serde_json::json!({"outcome_on_stdout": {"READY": true}}),
+    ] {
+        let wf = workflow(vec![step_with_params("build", bad.clone())], Vec::new());
+        let errors =
+            validate_workflow_graph(&wf).expect_err("a non-string outcome value must be rejected");
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.category == GraphErrorCategory::UnknownOutcomeName),
+            "expected an unknown-name error for {bad}"
+        );
+    }
+}
+
+/// `POST_PR_STEPS` matches the post-PR steps the shipped workflow declares.
+///
+/// The list is duplicated here and in `tests/e2e_workflow_integration.rs`, so a
+/// post-PR step added to the workflow but not to the list would leave both
+/// copies asserting against a graph that no longer exists - passing while
+/// covering nothing. Anchoring to the shipped file makes that divergence fail
+/// here instead of going unnoticed.
+#[test]
+fn post_pr_steps_matches_the_shipped_workflow() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("config/workflows/llxprt-issue-fix-v1.toml");
+    let parsed: toml::Value =
+        toml::from_str(&std::fs::read_to_string(&path).expect("the shipped workflow is readable"))
+            .expect("the shipped workflow parses");
+
+    let declared: std::collections::BTreeSet<String> = parsed
+        .get("steps")
+        .and_then(|s| s.as_array())
+        .expect("the workflow declares steps")
+        .iter()
+        .filter_map(|s| s.get("step_id").and_then(|v| v.as_str()))
+        .map(str::to_string)
+        .collect();
+
+    assert!(
+        !declared.is_empty(),
+        "no steps parsed; this would pass vacuously"
+    );
+
+    let missing: Vec<&str> = POST_PR_STEPS
+        .iter()
+        .copied()
+        .filter(|id| !declared.contains(*id))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "POST_PR_STEPS names steps the shipped workflow no longer declares: {missing:?}\n\
+         Update both this list and the copy in tests/e2e_workflow_integration.rs."
+    );
+}

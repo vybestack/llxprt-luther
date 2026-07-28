@@ -376,13 +376,17 @@ fn match_outcome_on_stdout(params: &serde_json::Value, stdout_str: &str) -> Opti
         .get("outcome_on_stdout")
         .and_then(|m| m.as_object())?
         .iter()
+        // No fallback for an unparseable name: validation rejects unknown
+        // names at load, and defaulting here would reinstate the divergence
+        // this change removes. The function already returns Option, so a name
+        // that does not parse simply matches nothing.
         .find_map(|(pattern, outcome_value)| {
-            stdout_str.contains(pattern).then(|| {
-                outcome_value
-                    .as_str()
-                    .and_then(StepOutcome::parse_condition_str)
-                    .unwrap_or(StepOutcome::Success)
-            })
+            if !stdout_str.contains(pattern) {
+                return None;
+            }
+            outcome_value
+                .as_str()
+                .and_then(StepOutcome::parse_condition_str)
         })
 }
 

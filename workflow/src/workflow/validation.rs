@@ -555,7 +555,21 @@ fn validate_configured_outcome_names(
                 continue;
             };
             for (key, value) in map {
+                // A non-string value is rejected rather than skipped. Skipping
+                // it would let `"2" = 3` or a nested table through load-time
+                // validation and into the executor, which is the silent path
+                // this function exists to close.
                 let Some(name) = value.as_str() else {
+                    errors.push(GraphValidationError {
+                        step_id: Some(step.step_id.clone()),
+                        detail: format!(
+                            "step '{}' maps {param}['{key}'] to {value}, which is not a string; \
+                             outcome names must be one of success, retryable, fatal, fixable, \
+                             abandon, wait",
+                            step.step_id
+                        ),
+                        category: GraphErrorCategory::UnknownOutcomeName,
+                    });
                     continue;
                 };
                 if StepOutcome::parse_condition_str(name).is_some() {
