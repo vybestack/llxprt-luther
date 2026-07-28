@@ -119,6 +119,21 @@ fn no_source_file_exceeds_the_hard_line_limit() {
 #[test]
 fn accepted_breaches_are_still_over_the_limit() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    // The allowlist may shrink but never grow. Without this, a file that
+    // crossed the limit could be waved through by appending a line here, which
+    // is exactly the bypass this gate exists to prevent - and the length in the
+    // type above would be edited in the same motion, silently.
+    //
+    // Lowering this number as files are split is the intended direction, and
+    // the assertion below then forces the stale entry out.
+    const MAX_ACCEPTED_BREACHES: usize = 13;
+    assert!(
+        ACCEPTED_BREACHES.len() <= MAX_ACCEPTED_BREACHES,
+        "ACCEPTED_BREACHES grew to {}; the limit is {MAX_ACCEPTED_BREACHES}. \
+         Split the file instead of allowlisting it.",
+        ACCEPTED_BREACHES.len()
+    );
+
     for relative in ACCEPTED_BREACHES {
         let lines = std::fs::read_to_string(root.join(relative))
             .expect("an accepted breach names a file that exists")
