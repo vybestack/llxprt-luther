@@ -162,9 +162,18 @@ fn the_core_crate_does_not_depend_on_the_workspace_crate() {
         "the tree must name the package it was asked about, or the assertion \
          below would pass against empty output"
     );
+    // Match the package name token rather than a substring of the whole
+    // output. `--prefix none` prints one `name version` per line, so the name
+    // is the first field; a substring check would also fire on a future
+    // `luther-workflow-utils`, failing for a package that is not this one.
+    let offenders: Vec<&str> = tree
+        .lines()
+        .filter(|line| line.split_whitespace().next() == Some("luther-workflow"))
+        .collect();
     assert!(
-        !tree.contains("luther-workflow"),
+        offenders.is_empty(),
         "luther-engine-core depends on luther-workflow, which makes the \
-         layering circular:\n{tree}"
+         layering circular:\n  {}",
+        offenders.join("\n  ")
     );
 }
