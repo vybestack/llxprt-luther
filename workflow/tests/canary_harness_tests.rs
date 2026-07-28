@@ -213,6 +213,7 @@ impl MergeRemoteProbe for DeterministicRemoteProbe {
 
 /// A probe factory that wraps the deterministic probes for the production
 /// `complete_merge_required_run` path.
+#[derive(Clone)]
 struct DeterministicProbeFactory {
     git: DeterministicGitProbe,
     remote_observation: MergeObservation,
@@ -221,6 +222,12 @@ struct DeterministicProbeFactory {
 impl MergeProbeFactory for DeterministicProbeFactory {
     fn git_probe(&self) -> Box<dyn MergeGitProbe> {
         Box::new(self.git.clone())
+    }
+
+    fn bind_work_dir(&self, _work_dir: &std::path::Path) -> std::sync::Arc<dyn MergeProbeFactory> {
+        // Deterministic probes answer from canned observations and never
+        // consult a repository, so the working directory changes nothing.
+        std::sync::Arc::new(self.clone())
     }
 
     fn remote_probe(&self, expected_strategy: MergeStrategy) -> Box<dyn MergeRemoteProbe> {

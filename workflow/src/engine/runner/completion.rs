@@ -52,15 +52,18 @@ impl EngineRunner {
             })?;
             if status == RunStatus::ReviewReady {
                 use crate::engine::recovery::merge_completion::{
-                    complete_merge_required_run, MergeCompletionOutcome, SystemMergeProbeFactory,
+                    complete_merge_required_run, MergeCompletionOutcome,
                 };
-                let factory = SystemMergeProbeFactory::new()
-                    .with_work_dir(self.context.work_dir().to_path_buf());
+                // Already bound to the work dir at construction, so there is
+                // no binding step to forget here. An unbound probe resolves
+                // commit SHAs with `git rev-list` in whichever repository the
+                // process happens to sit in.
+                let factory = &self.merge_probe_factory;
                 match complete_merge_required_run(
                     &conn,
                     &self.instance.run_id,
                     self.context.work_dir(),
-                    &factory,
+                    factory.as_ref(),
                 ) {
                     MergeCompletionOutcome::Merged => status = RunStatus::Merged,
                     MergeCompletionOutcome::NotYetMerged => return Ok(()),
