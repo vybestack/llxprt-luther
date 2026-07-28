@@ -353,12 +353,25 @@ fn resolve_shell_outcome(
 /// Map a non-zero exit code via `exit_code_map`, defaulting to `Fixable`
 /// (REQ-LF-SHELL-007/010).
 fn mapped_nonzero_outcome(params: &serde_json::Value, exit_code: Option<i32>) -> StepOutcome {
+    // A PRESENT key whose value is not a string is an invariant violation, not
+    // an absent mapping. Letting as_str() discard it would return Fixable,
+    // indistinguishable from an unmapped code - the same silent substitution
+    // this change removes from the stdout path.
     if let Some(outcome_name) = exit_code.and_then(|c| {
+        let key = c.to_string();
         params
             .get(crate::workflow::validation::PARAM_EXIT_CODE_MAP)
             .and_then(|m| m.as_object())
-            .and_then(|map| map.get(&c.to_string()))
-            .and_then(|v| v.as_str())
+            .and_then(|map| map.get(&key))
+            .map(|value| {
+                value.as_str().unwrap_or_else(|| {
+                    panic!(
+                        "{}['{key}'] is {value}, which is not a string; load-time validation \
+                         should have rejected this workflow",
+                        crate::workflow::validation::PARAM_EXIT_CODE_MAP
+                    )
+                })
+            })
     }) {
         return outcome_or_panic(
             outcome_name,
@@ -910,5 +923,29 @@ mod tests {
                 "{name} must resolve through outcome_on_stdout"
             );
         }
+    }
+
+    /// A present-but-non-string exit mapping panics rather than reading as
+    /// unmapped.
+    ///
+    /// Symmetric with the stdout path: discarding the value would return
+    /// Fixable, which is exactly what an absent key returns, so a typed
+    /// mistake would be invisible.
+    #[test]
+    #[should_panic(expected = "is not a string")]
+    fn a_non_string_exit_code_outcome_panics() {
+        let params = serde_json::json!({"exit_code_map": {"2": 7}});
+        mapped_nonzero_outcome(&params, Some(2));
+    }
+
+    /// An ABSENT key still yields Fixable - the panic above must not swallow
+    /// the documented default for an unmapped exit code.
+    #[test]
+    fn an_absent_exit_code_key_still_defaults_to_fixable() {
+        let params = serde_json::json!({"exit_code_map": {"9": "fatal"}});
+        assert_eq!(
+            mapped_nonzero_outcome(&params, Some(2)),
+            StepOutcome::Fixable
+        );
     }
 }

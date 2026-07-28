@@ -522,11 +522,16 @@ fn no_shipped_parameter_carries_outcome_names_unvalidated() {
                 if table.is_empty() {
                     continue;
                 }
-                let all_outcomes = table.values().all(|v| {
+                // ANY outcome-valued entry makes the parameter suspect, not
+                // every entry. Requiring all of them let a mixed table - one
+                // outcome name beside an unrelated string - slip past the
+                // check entirely, which is the shape a real parameter is most
+                // likely to have.
+                let carries_outcomes = table.values().any(|v| {
                     v.as_str()
                         .is_some_and(|s| StepOutcome::parse_condition_str(s).is_some())
                 });
-                if all_outcomes {
+                if carries_outcomes {
                     unknown.push(format!("{}: {name}", path.display()));
                 }
             }
@@ -731,5 +736,43 @@ fn a_single_entry_is_described_in_the_singular() {
     assert!(
         detail.contains("1 entry") && !detail.contains("1 entries"),
         "a count of one must not read as a plural: {detail}"
+    );
+}
+
+/// A name that differs only in case names its canonical spelling.
+///
+/// Outcome names matched case-insensitively before this change, so "Fatal"
+/// loaded and ran. Rejecting it is correct, but the message must say why or it
+/// reads as an unrecognised name rather than a capitalised one.
+#[test]
+fn a_miscased_outcome_name_is_told_the_canonical_spelling() {
+    let mut wf = workflow(vec![step("a")], vec![]);
+    wf.steps[0].parameters = Some(serde_json::json!({"exit_code_map": {"2": "Fatal"}}));
+    let errors = validate_workflow_graph(&wf).unwrap_err();
+    let detail = errors
+        .iter()
+        .find(|e| e.category == GraphErrorCategory::UnknownOutcomeName)
+        .map(|e| e.detail.clone())
+        .expect("a miscased name must be rejected");
+    assert!(
+        detail.contains("outcome names are lowercase: write fatal"),
+        "message must name the canonical spelling, got: {detail}"
+    );
+}
+
+/// A genuinely unknown name gets no case hint, which would be misleading.
+#[test]
+fn an_unknown_outcome_name_gets_no_case_hint() {
+    let mut wf = workflow(vec![step("a")], vec![]);
+    wf.steps[0].parameters = Some(serde_json::json!({"exit_code_map": {"2": "explode"}}));
+    let errors = validate_workflow_graph(&wf).unwrap_err();
+    let detail = errors
+        .iter()
+        .find(|e| e.category == GraphErrorCategory::UnknownOutcomeName)
+        .map(|e| e.detail.clone())
+        .expect("an unknown name must be rejected");
+    assert!(
+        !detail.contains("lowercase"),
+        "no case hint for a name that is not a miscased outcome, got: {detail}"
     );
 }

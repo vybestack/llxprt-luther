@@ -592,6 +592,24 @@ pub(crate) const PARAM_OUTCOME_ON_STDOUT: &str = "outcome_on_stdout";
 /// spelling this list does not contain. Adding a third such parameter is still
 /// a manual step, but it cannot silently disagree with the executors about the
 /// two that exist.
+/// Names the canonical spelling when only case differs.
+///
+/// Outcome names were matched case-insensitively before this change, so a
+/// workflow written with "Fatal" or "FATAL" loaded and ran. It is now rejected,
+/// which is correct - one spelling per outcome - but a bare "not an outcome"
+/// reads as though the name is unrecognised when it is merely capitalised.
+/// Saying so at load time is the difference between an obvious edit and a hunt.
+fn case_hint(name: &str) -> String {
+    let lowered = name.to_lowercase();
+    match StepOutcome::CONDITION_NAMES
+        .iter()
+        .find(|candidate| **candidate == lowered)
+    {
+        Some(canonical) => format!(" (outcome names are lowercase: write {canonical})"),
+        None => String::new(),
+    }
+}
+
 pub(crate) const OUTCOME_VALUED_PARAMS: [&str; 2] = [PARAM_EXIT_CODE_MAP, PARAM_OUTCOME_ON_STDOUT];
 
 /// Every outcome name a step configures must name a real outcome.
@@ -672,9 +690,10 @@ fn validate_configured_outcome_names(
                     step_id: Some(step.step_id.clone()),
                     detail: format!(
                         "step '{}' maps {param}['{key}'] to '{name}', which is not an outcome; \
-                         expected one of {}",
+                         expected one of {}{}",
                         step.step_id,
-                        StepOutcome::CONDITION_NAMES.join(", ")
+                        StepOutcome::CONDITION_NAMES.join(", "),
+                        case_hint(name)
                     ),
                     category: GraphErrorCategory::UnknownOutcomeName,
                 });
