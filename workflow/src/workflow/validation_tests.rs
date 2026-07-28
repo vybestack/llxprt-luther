@@ -766,7 +766,28 @@ fn the_e2e_copy_of_post_pr_steps_has_not_drifted() {
         .expect("the e2e file declares POST_PR_STEPS");
     let body = &e2e[start..];
     let end = body.find("];").expect("the declaration is terminated");
-    let names: Vec<&str> = body[..end]
+    let declaration = &body[..end];
+
+    // This reads Rust source with quote counting, not a parser, so it is only
+    // correct for a plain list of simple literals. Rather than assume that
+    // shape holds forever, reject the constructs that would break it: an
+    // escaped quote would desynchronise the pairing, and a comment could
+    // contribute a stray quote or a false entry.
+    //
+    // Adding `syn` for a single test is not worth a dependency; failing loudly
+    // when the assumption stops holding costs nothing and cannot mislead.
+    assert!(
+        !declaration.contains('\\'),
+        "the e2e POST_PR_STEPS declaration contains an escape; this check pairs \
+         quotes positionally and cannot read it. Parse it properly or simplify \
+         the declaration."
+    );
+    assert!(
+        !declaration.contains("//"),
+        "the e2e POST_PR_STEPS declaration contains a comment; a quote inside \
+         one would be read as a step name. Move the comment above the constant."
+    );
+    let names: Vec<&str> = declaration
         .match_indices('"')
         .step_by(2)
         .map(|(i, _)| {
