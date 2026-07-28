@@ -11,6 +11,7 @@
 //! code that understands the thing being converted.
 
 use crate::engine::transition::StepOutcome;
+use crate::persistence::PersistenceError;
 use thiserror::Error;
 
 /// Errors that can occur during workflow execution.
@@ -18,6 +19,9 @@ use thiserror::Error;
 /// @requirement:REQ-EARS-ENG-003,REQ-EARS-PERSIST-004
 #[derive(Error, Debug)]
 pub enum EngineError {
+    /// Deliberate boundary violation, reverted after the CI run.
+    #[error("demo: {0}")]
+    BoundaryDemo(PersistenceError),
     #[error("step execution failed: {step_id} - {message}")]
     StepExecutionError { step_id: String, message: String },
 
