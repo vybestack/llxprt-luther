@@ -1,7 +1,7 @@
 //! Graph validation tests.
 //!
 //! Split from `validation.rs`, which reached the 1000-line hard limit when
-//! outcome-name validation was added. Behaviour is unchanged; this is a
+//! outcome-name validation was added. Behavior is unchanged; this is a
 //! move.
 
 use super::*;
@@ -55,7 +55,10 @@ fn dangling_from_is_flagged() {
     assert!(errors
         .iter()
         .any(|e| e.category == GraphErrorCategory::DanglingTransition
-            && e.detail.contains("dangling transition source")));
+            && e.detail.contains("dangling transition source")
+            // Naming the offending step is the point of the message: without
+            // it an operator knows only that some source is dangling.
+            && e.detail.contains("ghost")));
 }
 
 #[test]
@@ -95,7 +98,13 @@ fn duplicate_fatal_outcome_is_flagged() {
     );
     let errors = validate_workflow_graph(&wf).unwrap_err();
     assert!(errors.iter().any(|e| {
-        e.category == GraphErrorCategory::DuplicateOutcome && e.detail.contains("outcome fatal")
+        e.category == GraphErrorCategory::DuplicateOutcome
+            && e.detail.contains("outcome fatal")
+            // The duplicate is only actionable if the message says which
+            // targets collide, as the sibling success-outcome test asserts.
+            // Matching "b and c" rather than the bare letters: single-char
+            // needles occur in almost any message and would assert nothing.
+            && e.detail.contains("b and c")
     }));
 }
 
@@ -559,7 +568,7 @@ fn a_non_string_outcome_value_is_rejected() {
     }
 }
 
-/// `POST_PR_STEPS` matches the post-PR steps the shipped workflow declares.
+/// `POST_PR_STEPS` match the post-PR steps the shipped workflow declares.
 ///
 /// The list is duplicated here and in `tests/e2e_workflow_integration.rs`, so a
 /// post-PR step added to the workflow but not to the list would leave both
@@ -648,7 +657,7 @@ fn post_pr_steps_matches_the_shipped_workflow() {
 /// Details are joined with `; ` into one line, so a deeply nested object
 /// printed in full would bury every other error from the same load.
 #[test]
-fn a_rejected_container_value_is_summarised_not_dumped() {
+fn a_rejected_container_value_is_summarized_not_dumped() {
     let wf = workflow(
         vec![step_with_params(
             "build",
@@ -682,7 +691,7 @@ fn a_rejected_container_value_is_summarised_not_dumped() {
 /// A parameter of the wrong shape is rejected, not skipped.
 ///
 /// The executor calls `.as_object()` too, so a string or array here reaches
-/// runtime and silently maps nothing - the same fail-open behaviour that
+/// runtime and silently maps nothing - the same fail-open behavior that
 /// unknown outcome names used to have.
 #[test]
 fn an_outcome_parameter_that_is_not_a_table_is_rejected() {

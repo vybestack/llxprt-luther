@@ -629,7 +629,7 @@ fn validate_configured_outcome_names(
                 continue;
             };
             // An absent parameter is fine; a present one of the wrong shape is
-            // not. Skipping it here would repeat the fail-open behaviour this
+            // not. Skipping it here would repeat the fail-open behavior this
             // function removes one level down: the executor calls `.as_object()`
             // too, so a string or array reaches runtime and silently maps
             // nothing.
