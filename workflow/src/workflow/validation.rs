@@ -529,9 +529,23 @@ fn validate_failure_cleanup_steps(workflow: &WorkflowType, errors: &mut Vec<Grap
 /// and the exact value is the useful part; containers print their type and
 /// size, which is enough to locate them in the file without reproducing them.
 fn describe_value(value: &serde_json::Value) -> String {
+    // Both forms are passed explicitly rather than derived by appending an
+    // "s", which would produce "entrys".
+    fn counted(n: usize, singular: &str, plural: &str) -> String {
+        if n == 1 {
+            format!("1 {singular}")
+        } else {
+            format!("{n} {plural}")
+        }
+    }
+
     match value {
-        serde_json::Value::Object(map) => format!("a table with {} entries", map.len()),
-        serde_json::Value::Array(items) => format!("an array of {} items", items.len()),
+        serde_json::Value::Object(map) => {
+            format!("a table with {}", counted(map.len(), "entry", "entries"))
+        }
+        serde_json::Value::Array(items) => {
+            format!("an array of {}", counted(items.len(), "item", "items"))
+        }
         // Null, bool, and number are all short; showing them beats naming them.
         other => other.to_string(),
     }
@@ -569,7 +583,25 @@ fn validate_configured_outcome_names(
             continue;
         };
         for param in OUTCOME_VALUED_PARAMS {
-            let Some(map) = parameters.get(param).and_then(serde_json::Value::as_object) else {
+            let Some(configured) = parameters.get(param) else {
+                continue;
+            };
+            // An absent parameter is fine; a present one of the wrong shape is
+            // not. Skipping it here would repeat the fail-open behaviour this
+            // function removes one level down: the executor calls `.as_object()`
+            // too, so a string or array reaches runtime and silently maps
+            // nothing.
+            let Some(map) = configured.as_object() else {
+                errors.push(GraphValidationError {
+                    step_id: Some(step.step_id.clone()),
+                    detail: format!(
+                        "step '{}' sets {param} to {}, but it must be a table mapping each \
+                         condition to an outcome name",
+                        step.step_id,
+                        describe_value(configured)
+                    ),
+                    category: GraphErrorCategory::UnknownOutcomeName,
+                });
                 continue;
             };
             for (key, value) in map {

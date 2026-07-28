@@ -676,14 +676,64 @@ fn a_rejected_container_value_is_summarised_not_dumped() {
         .expect("an unknown-name error")
         .detail;
 
+    // Assert the contract - the contents are not reproduced - rather than the
+    // exact wording, which describe_value is free to improve.
+    // `[` cannot be used as a proxy for "contains JSON": the message itself
+    // renders the key as exit_code_map['2'].
     assert!(
-        detail.contains("a table with 1 entries"),
-        "the value should be described by shape: {detail}"
+        !detail.contains("nested") && !detail.contains("deeply"),
+        "the value's contents must not be reproduced into the message: {detail}"
     );
     assert!(
-        !detail.contains("nested"),
-        "the value's contents must not be reproduced into the message: {detail}"
+        detail.contains("table"),
+        "the value should still be identified by shape: {detail}"
     );
     // The step and key still have to be there, or the author cannot find it.
     assert!(detail.contains("build") && detail.contains("exit_code_map"));
+}
+
+/// A parameter of the wrong shape is rejected, not skipped.
+///
+/// The executor calls `.as_object()` too, so a string or array here reaches
+/// runtime and silently maps nothing - the same fail-open behaviour that
+/// unknown outcome names used to have.
+#[test]
+fn an_outcome_parameter_that_is_not_a_table_is_rejected() {
+    for bad in [
+        serde_json::json!({"exit_code_map": "fixable"}),
+        serde_json::json!({"outcome_on_stdout": ["fixable"]}),
+    ] {
+        let wf = workflow(vec![step_with_params("build", bad.clone())], Vec::new());
+        let errors = validate_workflow_graph(&wf)
+            .expect_err(&format!("{bad} must be rejected at validation time"));
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.category == GraphErrorCategory::UnknownOutcomeName
+                    && e.detail.contains("must be a table")),
+            "{bad} should be rejected for its shape, got: {errors:?}"
+        );
+    }
+}
+
+/// Singular counts read correctly.
+#[test]
+fn a_single_entry_is_described_in_the_singular() {
+    let wf = workflow(
+        vec![step_with_params(
+            "build",
+            serde_json::json!({"exit_code_map": {"2": {"a": 1}}}),
+        )],
+        Vec::new(),
+    );
+    let errors = validate_workflow_graph(&wf).expect_err("a table value must be rejected");
+    let detail = &errors
+        .iter()
+        .find(|e| e.category == GraphErrorCategory::UnknownOutcomeName)
+        .expect("an unknown-name error")
+        .detail;
+    assert!(
+        detail.contains("1 entry") && !detail.contains("1 entries"),
+        "a count of one must not read as a plural: {detail}"
+    );
 }
