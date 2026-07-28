@@ -144,10 +144,26 @@ fn failure_cleanup_without_incoming_failure_route_is_rejected() {
 }
 
 #[test]
-fn isolated_terminal_step_is_not_flagged() {
-    // `term` has no edges at all and must not be flagged as unreachable.
+fn an_isolated_step_is_not_flagged_as_unreachable() {
+    // `isolated` has no edges at all and must not be flagged. Note this step is
+    // NOT declared terminal - it is a plain step with no edges, which is the
+    // case the unreachability logic has to tolerate. The declared-terminal
+    // contract is covered separately below.
     let wf = workflow(
-        vec![step("a"), step("b"), step("term")],
+        vec![step("a"), step("b"), step("isolated")],
+        vec![transition("a", "b", None)],
+    );
+    assert!(validate_workflow_graph(&wf).is_ok());
+}
+
+/// The same shape, but with the isolated step explicitly declared terminal.
+///
+/// The test above was previously named as though it covered this, so the
+/// declared-terminal case had no coverage at all despite appearing to.
+#[test]
+fn an_isolated_declared_terminal_step_is_not_flagged() {
+    let wf = workflow(
+        vec![step("a"), step("b"), terminal_step("term")],
         vec![transition("a", "b", None)],
     );
     assert!(validate_workflow_graph(&wf).is_ok());
@@ -466,4 +482,69 @@ fn correctly_spelled_outcome_names_pass() {
         .filter(|e| e.category == GraphErrorCategory::UnknownOutcomeName)
         .count();
     assert_eq!(unknown, 0, "valid names must not be flagged");
+}
+
+/// Every shipped workflow parameter whose values are outcome names is covered
+/// by `OUTCOME_VALUED_PARAMS`.
+///
+/// The list is hand-maintained, so a new outcome-bearing parameter would
+/// silently bypass validation and reach an executor's runtime default. This
+/// scans the shipped workflows for any parameter whose values look like
+/// outcome names and asserts the list already knows about it.
+#[test]
+fn no_shipped_parameter_carries_outcome_names_unvalidated() {
+    let known = ["exit_code_map", "outcome_on_stdout"];
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("config/workflows");
+    let mut unknown: Vec<String> = Vec::new();
+    let mut scanned = 0usize;
+
+    for entry in std::fs::read_dir(&root).expect("the shipped workflow directory exists") {
+        let path = entry.expect("a readable dir entry").path();
+        if path.extension().and_then(|e| e.to_str()) != Some("toml") {
+            continue;
+        }
+        let text = std::fs::read_to_string(&path).expect("a readable workflow");
+        let parsed: toml::Value = toml::from_str(&text).expect("a parseable workflow");
+        scanned += 1;
+
+        let Some(steps) = parsed.get("steps").and_then(|s| s.as_array()) else {
+            continue;
+        };
+        for step in steps {
+            let Some(params) = step.get("parameters").and_then(|p| p.as_table()) else {
+                continue;
+            };
+            for (name, value) in params {
+                if known.contains(&name.as_str()) {
+                    continue;
+                }
+                // A parameter carries outcome names if it is a table whose
+                // values are all strings that parse as outcomes.
+                let Some(table) = value.as_table() else {
+                    continue;
+                };
+                if table.is_empty() {
+                    continue;
+                }
+                let all_outcomes = table.values().all(|v| {
+                    v.as_str()
+                        .is_some_and(|s| StepOutcome::parse_condition_str(s).is_some())
+                });
+                if all_outcomes {
+                    unknown.push(format!("{}: {name}", path.display()));
+                }
+            }
+        }
+    }
+
+    assert!(
+        scanned > 0,
+        "no workflows scanned; this would pass vacuously"
+    );
+    assert!(
+        unknown.is_empty(),
+        "these parameters carry outcome names but are not in OUTCOME_VALUED_PARAMS, \
+         so their values bypass validation and reach executor defaults:\n  {}",
+        unknown.join("\n  ")
+    );
 }

@@ -538,6 +538,12 @@ fn validate_configured_outcome_names(
     // Both keys map a condition to an outcome name; `exit_code_map` is keyed by
     // exit code and `outcome_on_stdout` by a stdout pattern, so only the values
     // are outcome names in each.
+    //
+    // ANY NEW STEP PARAMETER WHOSE VALUES ARE OUTCOME NAMES MUST BE ADDED HERE.
+    // A parameter that is missing from this list is not validated, and the
+    // executor reading it will fall back to whatever its own default is - which
+    // is the divergence this function exists to remove. `outcome_names_in`
+    // below is the single place that knows how these parameters are shaped.
     const OUTCOME_VALUED_PARAMS: [&str; 2] = ["exit_code_map", "outcome_on_stdout"];
 
     for step in &workflow.steps {
