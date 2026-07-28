@@ -1,0 +1,15 @@
+{
+  "config_id": "core-only",
+  "workflow_type_id": "core-only-v1",
+  "runtime": {
+    "timeout_seconds": 60,
+    "max_retries": 1
+  },
+  "guards": {
+    "max_iterations": 4,
+    "max_file_changes": 4
+  },
+  "variables": {
+    "greeting": "produced without a domain package"
+  }
+}
