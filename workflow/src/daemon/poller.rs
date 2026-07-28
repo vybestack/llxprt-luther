@@ -5,14 +5,14 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::adapters::github::{GithubCommandRunner, GithubError, SystemGithubCommandRunner};
-use crate::engine::executors::pr_check_wait::{
+use crate::components::github::pr_check_wait::{
     check_bucket as shared_check_bucket, classify_api_error, classify_pr_checks,
     counters_from_value, status_payload, PrCheckObservation, PrCheckWaitConfig,
 };
-use crate::engine::executors::pr_followup_artifacts::{
+use crate::components::github::pr_followup_artifacts::{
     ArtifactWriteContext, ClockSleeper, JsonArtifactWriteRequest, PrFollowupArtifactStore,
 };
-use crate::engine::executors::pr_followup_types::{PrFollowupBinding, PR_FOLLOWUP_SCHEMA_VERSION};
+use crate::components::github::pr_followup_types::{PrFollowupBinding, PR_FOLLOWUP_SCHEMA_VERSION};
 use crate::persistence::run_metadata::RunStatus;
 use crate::persistence::sqlite::get_run_with_conn;
 use crate::persistence::wait_state::{WaitKind, WaitStateRecord};
@@ -373,7 +373,7 @@ fn pr_check_observed_state(
     record: &WaitStateRecord,
     head_sha: &str,
     config: &PrCheckWaitConfig,
-    classification: &crate::engine::executors::pr_check_wait::PrCheckWaitClassification,
+    classification: &crate::components::github::pr_check_wait::PrCheckWaitClassification,
 ) -> Value {
     let mut state = status_payload(classification, config, head_sha, &Utc::now().to_rfc3339());
     state["classification"] = json!(classification.overall_state.as_str());

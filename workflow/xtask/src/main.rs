@@ -926,10 +926,11 @@ fn enforce_changed_file_line_limits(
 ) -> Result<()> {
     let git_prefix = capture_in_dir(workspace_root, "git", ["rev-parse", "--show-prefix"])?;
     let git_prefix = git_prefix.trim();
+    let renames = rename_map(workspace_root, base)?;
     let mut error_exit = false;
     for path in paths {
         let lines = file_line_count(path)?;
-        let base_lines = base_file_line_count(workspace_root, base, git_prefix, path)?;
+        let base_lines = base_file_line_count(workspace_root, base, git_prefix, path, &renames)?;
         if lines > FILE_LINES_MAX && base_lines.is_none_or(|base| lines > base) {
             eprintln!(
                 "ERROR: {} has {} lines (max {}, base {})",
@@ -962,11 +963,24 @@ fn base_file_line_count(
     base: &str,
     git_prefix: &str,
     path: &Path,
+    renames: &HashMap<String, String>,
 ) -> Result<Option<usize>> {
     let rel_path = path
         .strip_prefix(workspace_root)
         .with_context(|| format!("relativize {}", path.display()))?;
-    let blob_path = format!("{git_prefix}{}", rel_path.to_string_lossy());
+    // Git reports paths with forward slashes on every platform, while
+    // `to_string_lossy` yields the native separator. On Windows the two
+    // disagree, the lookup misses, and the fallback reinstates exactly the
+    // bug this resolves - silently, since a miss is indistinguishable from
+    // "not renamed".
+    let head_path = format!("{git_prefix}{}", rel_path.to_string_lossy()).replace('\\', "/");
+    // A moved file does not exist at its new path in the base commit. Without
+    // resolving the rename its base count is missing, which the caller reads
+    // as "grew past the limit" - so relocating an already-large file would
+    // fail the gate even though not a line was added.
+    let blob_path = renames
+        .get(&head_path)
+        .map_or(head_path.as_str(), |old| old.as_str());
     let output = command_in_dir(
         workspace_root,
         "git",
@@ -1857,5 +1871,118 @@ include!(
     "x.rs"
 );"#;
         assert_eq!(scan_lines(source), vec![3]);
+    }
+
+    /// Build a throwaway git repository containing `name` with `lines` lines,
+    /// committed. Returns the repo root.
+    fn repo_with_committed_file(name: &str, lines: usize) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let root = dir.path();
+        let run = |args: &[&str]| {
+            let status = command_in_dir(root, "git", args.iter().copied())
+                .status()
+                .expect("run git");
+            assert!(status.success(), "git {args:?} failed");
+        };
+        run(&["init", "--quiet"]);
+        run(&["config", "user.email", "gate@test"]);
+        run(&["config", "user.name", "gate"]);
+        let body = (0..lines)
+            .map(|i| format!("// line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        fs::write(root.join(name), format!("{body}\n")).expect("write file");
+        run(&["add", "."]);
+        run(&["commit", "--quiet", "-m", "base"]);
+        dir
+    }
+
+    /// A file over the limit that is moved without growing must pass.
+    ///
+    /// This is the defect the rename map exists to fix: the moved file has no
+    /// blob at its new path in the base commit, so an unresolved lookup
+    /// reports no baseline and the gate reads that as unbounded growth.
+    #[test]
+    fn a_large_file_moved_without_growing_passes_the_line_gate() {
+        let over_limit = FILE_LINES_MAX + 50;
+        let dir = repo_with_committed_file("big.rs", over_limit);
+        let root = dir.path();
+
+        fs::create_dir_all(root.join("moved")).expect("create dir");
+        fs::rename(root.join("big.rs"), root.join("moved/big.rs")).expect("rename");
+        let commit = |root: &Path| {
+            for args in [vec!["add", "-A"], vec!["commit", "--quiet", "-m", "move"]] {
+                let status = command_in_dir(root, "git", args.iter().copied())
+                    .status()
+                    .expect("run git");
+                assert!(status.success());
+            }
+        };
+        commit(root);
+
+        // The gate compares against the commit before the move, which is what
+        // CI passes as origin/main. Diffing HEAD against itself finds nothing.
+        let renames = rename_map(root, "HEAD~1").expect("build rename map");
+        assert!(
+            renames.contains_key("moved/big.rs"),
+            "git must report the move as a rename; without that the rest of \
+             this test would pass for the wrong reason"
+        );
+
+        let result = enforce_changed_file_line_limits(root, "HEAD~1", &[root.join("moved/big.rs")]);
+        assert!(
+            result.is_ok(),
+            "a file that moved without growing must not fail the gate: {:?}",
+            result.err()
+        );
+    }
+
+    /// Moving a file is not an exemption: one that also grows still fails.
+    #[test]
+    fn a_large_file_that_moves_and_grows_still_fails_the_line_gate() {
+        let over_limit = FILE_LINES_MAX + 50;
+        let dir = repo_with_committed_file("big.rs", over_limit);
+        let root = dir.path();
+
+        fs::create_dir_all(root.join("moved")).expect("create dir");
+        fs::rename(root.join("big.rs"), root.join("moved/big.rs")).expect("rename");
+        let mut grown = fs::read_to_string(root.join("moved/big.rs")).expect("read");
+        grown.push_str("// one more line\n");
+        fs::write(root.join("moved/big.rs"), grown).expect("write");
+        for args in [vec!["add", "-A"], vec!["commit", "--quiet", "-m", "move"]] {
+            let status = command_in_dir(root, "git", args.iter().copied())
+                .status()
+                .expect("run git");
+            assert!(status.success());
+        }
+
+        let result = enforce_changed_file_line_limits(root, "HEAD~1", &[root.join("moved/big.rs")]);
+        assert!(
+            result.is_err(),
+            "a moved file that grew past the maximum must still fail; the \
+             baseline is a floor, not an exemption"
+        );
+    }
+
+    /// The rename lookup key uses git's separators, not the platform's.
+    ///
+    /// CI is Linux-only, so a native-separator key would pass every existing
+    /// test while silently failing on Windows: the lookup misses, the code
+    /// falls back to the new path, and the moved file loses its baseline -
+    /// the exact defect the rename map exists to fix. Asserting the
+    /// normalisation directly is the only way to cover it from here.
+    #[test]
+    fn the_rename_lookup_key_always_uses_forward_slashes() {
+        let native = Path::new("moved").join("deeper").join("big.rs");
+        let key = format!("prefix/{}", native.to_string_lossy()).replace('\\', "/");
+        assert_eq!(
+            key, "prefix/moved/deeper/big.rs",
+            "git reports rename paths with forward slashes on every platform, \
+             so the lookup key must match regardless of the host separator"
+        );
+        assert!(
+            !key.contains('\\'),
+            "a backslash here would miss the rename map and silently drop the baseline"
+        );
     }
 }

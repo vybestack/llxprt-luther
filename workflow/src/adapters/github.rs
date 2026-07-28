@@ -15,7 +15,9 @@ use thiserror::Error;
 
 // Re-export the existing executor command-runner seam so this adapter module is
 // the single documented home for the "GitHub adapter trait" surface.
-pub use crate::engine::executors::github_pr::{GithubPrCommandRunner, SystemGithubPrCommandRunner};
+pub use crate::components::github::github_pr::{
+    GithubPrCommandRunner, SystemGithubPrCommandRunner,
+};
 
 /// Structured error for GitHub CLI preflight failures.
 #[derive(Debug, Error, Clone)]

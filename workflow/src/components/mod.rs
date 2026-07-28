@@ -10,4 +10,5 @@
 //! any dependency they acquired became an engine dependency.
 
 pub mod generic;
+pub mod github;
 pub mod software_change;

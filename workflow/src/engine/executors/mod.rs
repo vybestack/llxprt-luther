@@ -15,19 +15,7 @@
 //! @requirement:REQ-PRFU-020
 //! @pseudocode lines 1-53
 //! Executors module - concrete step executor implementations.
-pub mod feedback_eval;
-pub mod feedback_eval_policy;
-pub mod feedback_eval_timeout;
-pub mod github_feedback;
-pub mod github_pr;
 pub mod merge_wait;
-pub mod parent_orchestration;
-pub mod pr_check_wait;
-pub mod pr_followup_artifacts;
-pub mod pr_followup_types;
-mod pr_identity_params;
-pub mod pr_remediation;
-pub mod workflow_auth_preflight;
 
 // Re-export executor implementations for tests
 /// Interpreter for workflow-authored commands.
@@ -43,12 +31,12 @@ pub mod workflow_auth_preflight;
 /// bash is `/bin/bash` on Linux and may be `/opt/homebrew/bin/bash` on macOS.
 pub const WORKFLOW_SHELL: &str = "bash";
 
-pub use feedback_eval::{
+pub use crate::components::github::feedback_eval::{
     default_feedback_evaluator_argv, CommandFeedbackEvaluationAdapter, FeedbackEvaluationRequest,
     FeedbackEvaluationResponse, FeedbackEvaluatorCommandRunner, FeedbackEvaluatorExecutor,
     ProcessFeedbackEvaluatorCommandRunner,
 };
-pub use feedback_eval_policy::FeedbackEvaluationAdapter;
+pub use crate::components::github::feedback_eval_policy::FeedbackEvaluationAdapter;
 
 pub use crate::components::generic::change_detection::{
     ChangeDetectionMode, ChangedPathDetector, GitChangedPathDetector,
@@ -59,6 +47,48 @@ pub use crate::components::generic::command_manifest::{
 pub use crate::components::generic::noop::NoOpExecutor;
 pub use crate::components::generic::shell::ShellExecutor;
 pub use crate::components::generic::write_file::WriteFileExecutor;
+pub use crate::components::github::github_feedback::{
+    FeedbackMarkerParser, GithubCodeRabbitFeedbackExecutor,
+    GithubCodeRabbitFeedbackExecutorWithRunner, GithubFeedbackMarkerExecutor,
+    GithubFeedbackMarkerExecutorWithRunner, RemoteFeedbackMarker, SystemFeedbackClock,
+};
+pub use crate::components::github::github_pr::{
+    GithubCheckFailuresExecutor, GithubCheckFailuresExecutorWithRunner, GithubPrChecksExecutor,
+    GithubPrChecksExecutorWithRunner, GithubPrCommandRunner, GithubPrIdentityExecutor,
+    GithubPrIdentityExecutorWithRunner, SystemGithubPrCommandRunner,
+};
+pub use crate::components::github::parent_orchestration::model::{
+    classify_child, next_actionable_child, order_subissues, ChildIssueState, ChildIssueStatus,
+    ParentIssueOrchestrationState,
+};
+pub use crate::components::github::parent_orchestration::{
+    missing_ordered_child_states, ParentOrchestrationExecutor, ParentOrchestrationExecutorWithQuery,
+};
+pub use crate::components::github::pr_followup_artifacts::{
+    ArtifactPublicationHook, ArtifactPublicationStage, ArtifactReplayKey, ArtifactWriteContext,
+    ArtifactWriter, ClockSleeper, JsonArtifactWriteRequest, PrFollowupArtifactStore,
+    PrFollowupFilesystem, RawTextArtifactWriteRequest, SystemClockSleeper,
+    SystemPrFollowupFilesystem, MAX_ARTIFACT_FILE_BYTES, MAX_ARTIFACT_READ_BYTES,
+};
+pub use crate::components::github::pr_followup_types::{
+    ArtifactSequenceMetadata, CiFailures, CodeRabbitFeedback, CollectionState, EvaluationState,
+    FeedbackEvaluations, FeedbackMarkerReport, FeedbackState, FixedActionEvidenceRef, OverallState,
+    PlanState, PostPrFailureTerminal, PostPrFailureTerminalHistory, PostPrFailureTerminalSource,
+    PostPrIterationGuard, PostPrTestResult, PrCheckStatus, PrFollowupBinding, PrIdentity,
+    PrRemediationPlan, PrRemediationResult, PushRemediationResult, ValidationState,
+    PR_FOLLOWUP_SCHEMA_VERSION,
+};
+pub use crate::components::github::pr_remediation::{
+    LlxprtInvocationRequest, LlxprtInvocationResult, PostPrFailureTerminalExecutor,
+    PostPrFailureTerminalExecutorWithClock, PostPrIterationGuardExecutor, PostPrTestCommandRequest,
+    PostPrTestCommandResult, PostPrTestCommandRunner, PrFollowupLlxprtCommandRunner,
+    PrFollowupRemediationExecutor, PrFollowupRemediationExecutorWithRunner,
+    PrRemediationPlanExecutor, PrRemediationResultExecutor, PushRemediationChangesExecutor,
+    PushRemediationChangesExecutorWithRunner, PushRemediationCommandRequest,
+    PushRemediationCommandResult, PushRemediationCommandRunner, RunPostPrTestsExecutor,
+    RunPostPrTestsExecutorWithRunner, SystemPrFollowupLlxprtCommandRunner,
+};
+pub use crate::components::github::workflow_auth_preflight::WorkflowAuthPreflightExecutor;
 pub use crate::components::software_change::git_config_publish::GitConfigPublishExecutor;
 pub use crate::components::software_change::llxprt::{LlxprtExecutor, LlxprtExecutorWithDetector};
 pub use crate::components::software_change::scope_control::{
@@ -72,49 +102,7 @@ pub use crate::components::software_change::verify::VerifyExecutor;
 pub use crate::components::software_change::workspace_ownership::{
     WorkspaceOwnershipExecutor, WorkspaceOwnershipVerifyExecutor,
 };
-pub use github_feedback::{
-    FeedbackMarkerParser, GithubCodeRabbitFeedbackExecutor,
-    GithubCodeRabbitFeedbackExecutorWithRunner, GithubFeedbackMarkerExecutor,
-    GithubFeedbackMarkerExecutorWithRunner, RemoteFeedbackMarker, SystemFeedbackClock,
-};
-pub use github_pr::{
-    GithubCheckFailuresExecutor, GithubCheckFailuresExecutorWithRunner, GithubPrChecksExecutor,
-    GithubPrChecksExecutorWithRunner, GithubPrCommandRunner, GithubPrIdentityExecutor,
-    GithubPrIdentityExecutorWithRunner, SystemGithubPrCommandRunner,
-};
 pub use merge_wait::{MergeWaitExecutor, MergeWaitProbe, RemoteProbeMergeWaitAdapter};
-pub use parent_orchestration::model::{
-    classify_child, next_actionable_child, order_subissues, ChildIssueState, ChildIssueStatus,
-    ParentIssueOrchestrationState,
-};
-pub use parent_orchestration::{
-    missing_ordered_child_states, ParentOrchestrationExecutor, ParentOrchestrationExecutorWithQuery,
-};
-pub use pr_followup_artifacts::{
-    ArtifactPublicationHook, ArtifactPublicationStage, ArtifactReplayKey, ArtifactWriteContext,
-    ArtifactWriter, ClockSleeper, JsonArtifactWriteRequest, PrFollowupArtifactStore,
-    PrFollowupFilesystem, RawTextArtifactWriteRequest, SystemClockSleeper,
-    SystemPrFollowupFilesystem, MAX_ARTIFACT_FILE_BYTES, MAX_ARTIFACT_READ_BYTES,
-};
-pub use pr_followup_types::{
-    ArtifactSequenceMetadata, CiFailures, CodeRabbitFeedback, CollectionState, EvaluationState,
-    FeedbackEvaluations, FeedbackMarkerReport, FeedbackState, FixedActionEvidenceRef, OverallState,
-    PlanState, PostPrFailureTerminal, PostPrFailureTerminalHistory, PostPrFailureTerminalSource,
-    PostPrIterationGuard, PostPrTestResult, PrCheckStatus, PrFollowupBinding, PrIdentity,
-    PrRemediationPlan, PrRemediationResult, PushRemediationResult, ValidationState,
-    PR_FOLLOWUP_SCHEMA_VERSION,
-};
-pub use pr_remediation::{
-    LlxprtInvocationRequest, LlxprtInvocationResult, PostPrFailureTerminalExecutor,
-    PostPrFailureTerminalExecutorWithClock, PostPrIterationGuardExecutor, PostPrTestCommandRequest,
-    PostPrTestCommandResult, PostPrTestCommandRunner, PrFollowupLlxprtCommandRunner,
-    PrFollowupRemediationExecutor, PrFollowupRemediationExecutorWithRunner,
-    PrRemediationPlanExecutor, PrRemediationResultExecutor, PushRemediationChangesExecutor,
-    PushRemediationChangesExecutorWithRunner, PushRemediationCommandRequest,
-    PushRemediationCommandResult, PushRemediationCommandRunner, RunPostPrTestsExecutor,
-    RunPostPrTestsExecutorWithRunner, SystemPrFollowupLlxprtCommandRunner,
-};
-pub use workflow_auth_preflight::WorkflowAuthPreflightExecutor;
 
 /// Enforce the scope-decision barrier at a mutation entry point.
 ///
