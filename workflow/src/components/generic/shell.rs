@@ -367,8 +367,8 @@ fn mapped_nonzero_outcome(params: &serde_json::Value, exit_code: Option<i32>) ->
         // divergence this change removes went unnoticed for so long.
         return StepOutcome::parse_condition_str(outcome_name).unwrap_or_else(|| {
             panic!(
-                "exit_code_map names '{outcome_name}', which is not an outcome; \
-                 load-time validation should have rejected this workflow"
+                "exit_code_map contains '{outcome_name}', which is not a valid \
+                 outcome name; load-time validation should have rejected this workflow"
             )
         });
     }

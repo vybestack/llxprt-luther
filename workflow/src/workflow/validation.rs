@@ -551,6 +551,14 @@ fn describe_value(value: &serde_json::Value) -> String {
     }
 }
 
+/// The step parameters whose values are outcome names.
+///
+/// Module scope rather than function-local so the test that scans shipped
+/// workflows for unvalidated outcome parameters can assert against this exact
+/// list. A second hand-written copy could drift from it, which is the failure
+/// class this validation exists to remove.
+pub(crate) const OUTCOME_VALUED_PARAMS: [&str; 2] = ["exit_code_map", "outcome_on_stdout"];
+
 /// Every outcome name a step configures must name a real outcome.
 ///
 /// Executors read these names at runtime and previously each supplied their own
@@ -576,7 +584,6 @@ fn validate_configured_outcome_names(
     // only place that knows how these parameters are shaped: keyed by
     // condition, valued by outcome name. Which names are valid is decided by
     // `StepOutcome::parse_condition_str` in `engine/transition.rs`, not here.
-    const OUTCOME_VALUED_PARAMS: [&str; 2] = ["exit_code_map", "outcome_on_stdout"];
 
     for step in &workflow.steps {
         let Some(parameters) = step.parameters.as_ref() else {

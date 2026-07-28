@@ -493,7 +493,10 @@ fn correctly_spelled_outcome_names_pass() {
 /// outcome names and asserts the list already knows about it.
 #[test]
 fn no_shipped_parameter_carries_outcome_names_unvalidated() {
-    let known = ["exit_code_map", "outcome_on_stdout"];
+    // The validator's own list, not a copy of it. A second copy could be
+    // updated to silence this test while leaving the validator unchanged,
+    // which is the drift this test exists to catch.
+    let known = super::OUTCOME_VALUED_PARAMS;
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("config/workflows");
     let mut unknown: Vec<String> = Vec::new();
     let mut scanned = 0usize;
