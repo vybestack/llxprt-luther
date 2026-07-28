@@ -611,4 +611,47 @@ fn post_pr_steps_matches_the_shipped_workflow() {
         "POST_PR_STEPS names steps the shipped workflow no longer declares: {missing:?}\n\
          Update both this list and the copy in tests/e2e_workflow_integration.rs."
     );
+
+    // The reverse direction, which is the dangerous one. A post-PR step added
+    // to the workflow but not to this list is not merely uncovered: the post-PR
+    // validators (unsafe-route rejection, collector reachability, iteration cap)
+    // would not treat it as post-PR at all, so those checks would silently skip
+    // it while this test still passed.
+    //
+    // "Post-PR" is defined by reachability from POST_PR_ENTRY, not by a name
+    // convention, so the set is computed the same way validation computes it
+    // rather than guessed at here.
+    let workflow: WorkflowType =
+        toml::from_str(&std::fs::read_to_string(&path).expect("the shipped workflow is readable"))
+            .expect("the shipped workflow deserialises");
+    let reachable = compute_reachable_steps(&workflow, "capture_pr_identity");
+    assert!(
+        !reachable.is_empty(),
+        "no post-PR steps reachable; this half would pass vacuously"
+    );
+
+    // `log_completion` is reachable from the post-PR entry but is deliberately
+    // not in POST_PR_STEPS, because it does not satisfy the post-PR step
+    // contract: it declares no `artifact_root`, has no outgoing transitions,
+    // and is not marked terminal. Adding it makes two e2e contract tests fail
+    // for real reasons rather than spuriously.
+    //
+    // That is a defect in the shipped workflow, not in this list, and fixing
+    // the workflow is a routing change that does not belong in a parser
+    // change. Tracked as #280; this exception keeps the reverse check
+    // useful in the meantime instead of deleting it.
+    const KNOWN_UNCONTRACTED: [&str; 1] = ["log_completion"];
+
+    let unlisted: Vec<&str> = reachable
+        .iter()
+        .map(String::as_str)
+        .filter(|id| !POST_PR_STEPS.contains(id))
+        .filter(|id| !KNOWN_UNCONTRACTED.contains(id))
+        .collect();
+    assert!(
+        unlisted.is_empty(),
+        "the shipped workflow has post-PR steps missing from POST_PR_STEPS: {unlisted:?}\n\
+         Post-PR validation would skip these entirely. Add them here and to the copy in \
+         tests/e2e_workflow_integration.rs."
+    );
 }
