@@ -47,6 +47,29 @@ impl std::fmt::Display for StepOutcome {
 }
 
 impl StepOutcome {
+    /// Parse a configured outcome name, or `None` if it names no outcome.
+    ///
+    /// Executors previously each carried their own copy of this mapping, and
+    /// the copies disagreed: an unrecognised name became `Success` in one and
+    /// `Fatal` in another, and one lowercased its input while the other did
+    /// not. A typo therefore passed a run under one executor and failed it
+    /// under another, silently, because both answers were plausible.
+    ///
+    /// Returning `Option` rather than a default is the point: there is no
+    /// defensible outcome for a name the author did not mean to write, so the
+    /// decision belongs to config validation, which can name the file and key.
+    pub fn parse_condition_str(name: &str) -> Option<Self> {
+        match name {
+            "success" => Some(StepOutcome::Success),
+            "retryable" => Some(StepOutcome::Retryable),
+            "fatal" => Some(StepOutcome::Fatal),
+            "fixable" => Some(StepOutcome::Fixable),
+            "abandon" => Some(StepOutcome::Abandon),
+            "wait" => Some(StepOutcome::Wait),
+            _ => None,
+        }
+    }
+
     /// The canonical condition string used to match transitions.
     /// @plan:PLAN-20260623-LUTHER-CONTINUATION
     pub fn as_condition_str(&self) -> &'static str {

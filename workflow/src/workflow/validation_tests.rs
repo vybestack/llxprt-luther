@@ -1,0 +1,469 @@
+//! Graph validation tests.
+//!
+//! Split from `validation.rs`, which reached the 1000-line hard limit when
+//! outcome-name validation was added. Behaviour is unchanged; this is a
+//! move.
+
+use super::*;
+
+use crate::workflow::schema::{StepDef, TransitionDef, WorkflowType};
+
+/// The canonical set of post-PR (PR follow-up) step IDs. Kept in sync with
+/// the `POST_PR_STEPS` constant in `tests/e2e_workflow_integration.rs`.
+const POST_PR_STEPS: [&str; 13] = [
+    "capture_pr_identity",
+    "post_pr_iteration_guard",
+    "watch_pr_checks",
+    "collect_ci_failures",
+    "collect_coderabbit_feedback",
+    "evaluate_coderabbit_feedback",
+    "build_remediation_plan",
+    "remediate_pr_followup",
+    "validate_remediation_result",
+    "run_post_pr_tests",
+    "push_remediation_changes",
+    "mark_coderabbit_feedback",
+    "post_pr_failure_terminal",
+];
+
+fn step(id: &str) -> StepDef {
+    StepDef {
+        step_id: id.to_string(),
+        step_type: "shell".to_string(),
+        description: None,
+        parameters: None,
+        produces: None,
+        consumes: None,
+        terminal: None,
+        recovery_policy: None,
+    }
+}
+
+fn transition(from: &str, to: &str, condition: Option<&str>) -> TransitionDef {
+    TransitionDef {
+        from: from.to_string(),
+        to: to.to_string(),
+        condition: condition.map(|c| c.to_string()),
+        max_iterations: None,
+    }
+}
+
+fn workflow(steps: Vec<StepDef>, transitions: Vec<TransitionDef>) -> WorkflowType {
+    WorkflowType {
+        workflow_type_id: "test".to_string(),
+        steps,
+        transitions,
+        guards: Default::default(),
+    }
+}
+
+/// A minimal well-formed (non post-PR) graph validates successfully.
+#[test]
+fn well_formed_graph_is_ok() {
+    let wf = workflow(vec![step("a"), step("b")], vec![transition("a", "b", None)]);
+    assert!(validate_workflow_graph(&wf).is_ok());
+}
+
+#[test]
+fn dangling_from_is_flagged() {
+    let wf = workflow(vec![step("a")], vec![transition("ghost", "a", None)]);
+    let errors = validate_workflow_graph(&wf).unwrap_err();
+    assert!(errors
+        .iter()
+        .any(|e| e.category == GraphErrorCategory::DanglingTransition
+            && e.detail.contains("dangling transition source")));
+}
+
+#[test]
+fn dangling_to_is_flagged() {
+    let wf = workflow(vec![step("a")], vec![transition("a", "ghost", None)]);
+    let errors = validate_workflow_graph(&wf).unwrap_err();
+    assert!(errors.iter().any(|e| {
+        e.category == GraphErrorCategory::DanglingTransition
+            && e.detail.contains("dangling transition target")
+            && e.detail.contains("ghost")
+    }));
+}
+
+#[test]
+fn duplicate_success_outcome_is_flagged() {
+    let wf = workflow(
+        vec![step("a"), step("b"), step("c")],
+        vec![transition("a", "b", None), transition("a", "c", None)],
+    );
+    let errors = validate_workflow_graph(&wf).unwrap_err();
+    assert!(errors.iter().any(|e| {
+        e.category == GraphErrorCategory::DuplicateOutcome
+            && e.detail.contains("outcome success")
+            && e.detail.contains("b")
+            && e.detail.contains("c")
+    }));
+}
+
+#[test]
+fn duplicate_fatal_outcome_is_flagged() {
+    let wf = workflow(
+        vec![step("a"), step("b"), step("c")],
+        vec![
+            transition("a", "b", Some("fatal")),
+            transition("a", "c", Some("fatal")),
+        ],
+    );
+    let errors = validate_workflow_graph(&wf).unwrap_err();
+    assert!(errors.iter().any(|e| {
+        e.category == GraphErrorCategory::DuplicateOutcome && e.detail.contains("outcome fatal")
+    }));
+}
+
+#[test]
+fn orphaned_non_terminal_step_is_flagged() {
+    // `c` has an outgoing edge but is unreachable from entry `a`.
+    let wf = workflow(
+        vec![step("a"), step("b"), step("c"), step("d")],
+        vec![transition("a", "b", None), transition("c", "d", None)],
+    );
+    let errors = validate_workflow_graph(&wf).unwrap_err();
+    assert!(errors.iter().any(|e| {
+        e.category == GraphErrorCategory::UnreachableStep && e.detail.contains("'c'")
+    }));
+}
+
+#[test]
+fn failure_cleanup_without_incoming_failure_route_is_rejected() {
+    let mut cleanup = step("cleanup");
+    cleanup.step_type = "failure_cleanup".to_string();
+    cleanup.terminal = Some(true);
+    let wf = workflow(vec![step("a"), cleanup], vec![]);
+    let errors = validate_workflow_graph(&wf).unwrap_err();
+    assert!(errors.iter().any(|error| {
+        error.category == GraphErrorCategory::InvalidFailureCleanup
+            && error
+                .detail
+                .contains("at least one incoming failure transition")
+    }));
+}
+
+#[test]
+fn isolated_terminal_step_is_not_flagged() {
+    // `term` has no edges at all and must not be flagged as unreachable.
+    let wf = workflow(
+        vec![step("a"), step("b"), step("term")],
+        vec![transition("a", "b", None)],
+    );
+    assert!(validate_workflow_graph(&wf).is_ok());
+}
+
+fn post_pr_steps_with(extra: Vec<StepDef>) -> Vec<StepDef> {
+    let mut steps: Vec<StepDef> = POST_PR_STEPS.iter().map(|id| step(id)).collect();
+    steps.push(step(PRE_PR_CLEANUP_TERMINAL));
+    steps.extend(extra);
+    steps
+}
+
+#[test]
+fn post_pr_fatal_to_abandon_is_flagged() {
+    let steps = post_pr_steps_with(vec![]);
+    let transitions = vec![
+        transition("capture_pr_identity", "watch_pr_checks", None),
+        transition("watch_pr_checks", "collect_ci_failures", None),
+        transition("collect_ci_failures", "collect_coderabbit_feedback", None),
+        // Unsafe: post-PR fatal routed to the pre-PR cleanup terminal.
+        transition("capture_pr_identity", "abandon_and_log", Some("fatal")),
+    ];
+    let wf = workflow(steps, transitions);
+    let errors = validate_workflow_graph(&wf).unwrap_err();
+    assert!(errors.iter().any(|e| {
+        e.category == GraphErrorCategory::UnsafePostPrRoute
+            && e.detail
+                .contains("capture_pr_identity -> abandon_and_log is forbidden")
+    }));
+}
+
+#[test]
+fn post_pr_abandon_condition_is_flagged() {
+    let steps = post_pr_steps_with(vec![]);
+    let transitions = vec![
+        transition("capture_pr_identity", "watch_pr_checks", None),
+        transition("watch_pr_checks", "collect_ci_failures", None),
+        transition("collect_ci_failures", "collect_coderabbit_feedback", None),
+        transition(
+            "capture_pr_identity",
+            "post_pr_failure_terminal",
+            Some("abandon"),
+        ),
+    ];
+    let wf = workflow(steps, transitions);
+    let errors = validate_workflow_graph(&wf).unwrap_err();
+    assert!(errors.iter().any(|e| {
+        e.category == GraphErrorCategory::UnsafePostPrRoute
+            && e.detail.contains("uses abandon outcome")
+    }));
+}
+
+#[test]
+fn missing_required_collector_is_flagged() {
+    // Build a post-PR graph that omits `collect_coderabbit_feedback`.
+    let mut steps: Vec<StepDef> = POST_PR_STEPS
+        .iter()
+        .filter(|id| **id != "collect_coderabbit_feedback")
+        .map(|id| step(id))
+        .collect();
+    steps.push(step(PRE_PR_CLEANUP_TERMINAL));
+    let transitions = vec![
+        transition("capture_pr_identity", "watch_pr_checks", None),
+        transition("watch_pr_checks", "collect_ci_failures", None),
+    ];
+    let wf = workflow(steps, transitions);
+    let errors = validate_workflow_graph(&wf).unwrap_err();
+    assert!(errors.iter().any(|e| {
+        e.category == GraphErrorCategory::MissingRequiredCollector
+            && e.detail.contains("collect_coderabbit_feedback")
+    }));
+}
+
+#[test]
+fn unreachable_required_collector_is_flagged() {
+    // Collector is declared but not reachable from `capture_pr_identity`.
+    let steps = post_pr_steps_with(vec![]);
+    let transitions = vec![
+        transition("capture_pr_identity", "watch_pr_checks", None),
+        transition("watch_pr_checks", "collect_ci_failures", None),
+        // `collect_coderabbit_feedback` has only an outgoing edge from an
+        // unrelated, unreachable source, so it is never reached.
+        transition(
+            "evaluate_coderabbit_feedback",
+            "collect_coderabbit_feedback",
+            None,
+        ),
+    ];
+    let wf = workflow(steps, transitions);
+    let errors = validate_workflow_graph(&wf).unwrap_err();
+    assert!(errors.iter().any(|e| {
+        e.category == GraphErrorCategory::MissingRequiredCollector
+            && e.detail.contains("unreachable")
+            && e.detail.contains("collect_coderabbit_feedback")
+    }));
+}
+
+/// A loop-back transition with an explicit cap.
+fn capped_loop_back(from: &str, to: &str, max: u32) -> TransitionDef {
+    TransitionDef {
+        from: from.to_string(),
+        to: to.to_string(),
+        condition: None,
+        max_iterations: Some(max),
+    }
+}
+
+fn terminal_step(id: &str) -> StepDef {
+    StepDef {
+        terminal: Some(true),
+        ..step(id)
+    }
+}
+
+fn guard_step(id: &str, params: Option<serde_json::Value>) -> StepDef {
+    StepDef {
+        step_type: "post_pr_iteration_guard".to_string(),
+        parameters: params,
+        ..step(id)
+    }
+}
+
+#[test]
+fn loop_back_without_max_iterations_is_flagged() {
+    // `b -> a` is a backward edge (a precedes b) with no cap.
+    let wf = workflow(
+        vec![step("a"), step("b")],
+        vec![transition("a", "b", None), transition("b", "a", None)],
+    );
+    let errors = validate_workflow_graph(&wf).unwrap_err();
+    assert!(errors.iter().any(|e| {
+        e.category == GraphErrorCategory::MissingLoopLimit
+            && e.detail.contains("loop-back transition")
+            && e.detail.contains("b --success--> a")
+    }));
+}
+
+#[test]
+fn loop_back_with_max_iterations_passes() {
+    let wf = workflow(
+        vec![step("a"), step("b")],
+        vec![transition("a", "b", None), capped_loop_back("b", "a", 5)],
+    );
+    assert!(validate_workflow_graph(&wf).is_ok());
+}
+
+#[test]
+fn forward_transition_without_max_iterations_passes() {
+    // Only loop-backs require an explicit cap; forward edges do not.
+    let wf = workflow(vec![step("a"), step("b")], vec![transition("a", "b", None)]);
+    assert!(validate_workflow_graph(&wf).is_ok());
+}
+
+#[test]
+fn terminal_step_with_outgoing_transition_is_flagged() {
+    let wf = workflow(
+        vec![step("a"), terminal_step("done")],
+        vec![transition("a", "done", None), transition("done", "a", None)],
+    );
+    let errors = validate_workflow_graph(&wf).unwrap_err();
+    assert!(errors.iter().any(|e| {
+        e.category == GraphErrorCategory::TerminalHasOutgoing
+            && e.detail.contains("terminal step 'done'")
+    }));
+}
+
+#[test]
+fn post_pr_failure_terminal_with_outgoing_transition_is_flagged() {
+    // Implicit terminal recognized solely by step_type.
+    let mut implicit = step("post_pr_failure_terminal");
+    implicit.step_type = "post_pr_failure_terminal".to_string();
+    let wf = workflow(
+        vec![step("a"), implicit],
+        vec![
+            transition("a", "post_pr_failure_terminal", None),
+            capped_loop_back("post_pr_failure_terminal", "a", 2),
+        ],
+    );
+    let errors = validate_workflow_graph(&wf).unwrap_err();
+    assert!(errors.iter().any(|e| {
+        e.category == GraphErrorCategory::TerminalHasOutgoing
+            && e.detail.contains("post_pr_failure_terminal")
+    }));
+}
+
+#[test]
+fn terminal_step_without_outgoing_transition_passes() {
+    let wf = workflow(
+        vec![step("a"), terminal_step("done")],
+        vec![transition("a", "done", None)],
+    );
+    assert!(validate_workflow_graph(&wf).is_ok());
+}
+
+#[test]
+fn non_terminal_step_with_outgoing_transition_passes() {
+    let wf = workflow(
+        vec![step("a"), step("b"), step("c")],
+        vec![transition("a", "b", None), transition("b", "c", None)],
+    );
+    assert!(validate_workflow_graph(&wf).is_ok());
+}
+
+#[test]
+fn iteration_guard_missing_cap_is_flagged() {
+    let wf = workflow(
+        vec![step("a"), guard_step("guard", None)],
+        vec![transition("a", "guard", None)],
+    );
+    let errors = validate_workflow_graph(&wf).unwrap_err();
+    assert!(errors.iter().any(|e| {
+        e.category == GraphErrorCategory::MissingRemediationCap
+            && e.detail.contains("post_pr_iteration_guard step 'guard'")
+    }));
+}
+
+#[test]
+fn iteration_guard_zero_cap_is_flagged() {
+    let params = serde_json::json!({ "max_post_pr_remediation_iterations": 0 });
+    let wf = workflow(
+        vec![step("a"), guard_step("guard", Some(params))],
+        vec![transition("a", "guard", None)],
+    );
+    let errors = validate_workflow_graph(&wf).unwrap_err();
+    assert!(errors.iter().any(|e| {
+        e.category == GraphErrorCategory::MissingRemediationCap
+            && e.detail.contains("must declare a positive")
+    }));
+}
+
+#[test]
+fn iteration_guard_positive_cap_passes() {
+    let params = serde_json::json!({ "max_post_pr_remediation_iterations": 3 });
+    let wf = workflow(
+        vec![step("a"), guard_step("guard", Some(params))],
+        vec![transition("a", "guard", None)],
+    );
+    assert!(validate_workflow_graph(&wf).is_ok());
+}
+
+// Reuses the existing helpers so this module does not restate the shape of
+// StepDef/WorkflowType, which have fields these tests do not care about.
+fn step_with_params(id: &str, params: serde_json::Value) -> StepDef {
+    StepDef {
+        parameters: Some(params),
+        ..step(id)
+    }
+}
+
+/// A misspelled outcome name is rejected at load rather than defaulting.
+///
+/// Before this check the two executors disagreed about what an unknown
+/// name meant - shell routed it to Success and llxprt to Fatal - so this
+/// exact typo passed a run under one and failed it under the other, with
+/// nothing reported. Neither default is reachable now.
+#[test]
+fn a_misspelled_outcome_name_is_rejected() {
+    let wf = workflow(
+        vec![step_with_params(
+            "build",
+            serde_json::json!({"exit_code_map": {"2": "fixxable"}}),
+        )],
+        Vec::new(),
+    );
+
+    let errors = validate_workflow_graph(&wf).expect_err("the typo must be rejected");
+    let unknown: Vec<_> = errors
+        .iter()
+        .filter(|e| e.category == GraphErrorCategory::UnknownOutcomeName)
+        .collect();
+    assert_eq!(unknown.len(), 1, "expected exactly one unknown-name error");
+    // The message must name the step and the offending value, or it sends
+    // the reader hunting through the file for it.
+    assert!(
+        unknown[0].detail.contains("build") && unknown[0].detail.contains("fixxable"),
+        "error must name the step and the bad value: {}",
+        unknown[0].detail
+    );
+}
+
+/// Case is not silently accepted either.
+///
+/// "Fixable" previously parsed in the shell executor, which lowercased,
+/// and fell through to Fatal in llxprt, which did not.
+#[test]
+fn a_differently_cased_outcome_name_is_rejected() {
+    let wf = workflow(
+        vec![step_with_params(
+            "build",
+            serde_json::json!({"outcome_on_stdout": {"READY": "Fixable"}}),
+        )],
+        Vec::new(),
+    );
+    let errors = validate_workflow_graph(&wf).expect_err("case variants must be rejected");
+    assert!(errors
+        .iter()
+        .any(|e| e.category == GraphErrorCategory::UnknownOutcomeName));
+}
+
+#[test]
+fn correctly_spelled_outcome_names_pass() {
+    let wf = workflow(
+        vec![step_with_params(
+            "build",
+            serde_json::json!({
+                "exit_code_map": {"2": "fixable", "3": "abandon"},
+                "outcome_on_stdout": {"READY": "retryable"}
+            }),
+        )],
+        Vec::new(),
+    );
+    let unknown = validate_workflow_graph(&wf)
+        .err()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|e| e.category == GraphErrorCategory::UnknownOutcomeName)
+        .count();
+    assert_eq!(unknown, 0, "valid names must not be flagged");
+}

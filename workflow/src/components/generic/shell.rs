@@ -360,7 +360,11 @@ fn mapped_nonzero_outcome(params: &serde_json::Value, exit_code: Option<i32>) ->
             .and_then(|map| map.get(&c.to_string()))
             .and_then(|v| v.as_str())
     }) {
-        return parse_outcome_name(outcome_name);
+        // Validation rejects unknown names at load, so this is the configured
+        // outcome or the exit code was not mapped at all.
+        if let Some(outcome) = StepOutcome::parse_condition_str(outcome_name) {
+            return outcome;
+        }
     }
     StepOutcome::Fixable
 }
@@ -376,7 +380,7 @@ fn match_outcome_on_stdout(params: &serde_json::Value, stdout_str: &str) -> Opti
             stdout_str.contains(pattern).then(|| {
                 outcome_value
                     .as_str()
-                    .map(parse_outcome_name)
+                    .and_then(StepOutcome::parse_condition_str)
                     .unwrap_or(StepOutcome::Success)
             })
         })
@@ -549,22 +553,6 @@ fn json_value_to_string(value: &serde_json::Value) -> String {
             serde_json::to_string(value).unwrap_or_default()
         }
         serde_json::Value::Null => String::new(),
-    }
-}
-
-/// Parse an outcome name string into a StepOutcome variant.
-/// Pseudocode lines 109-118
-/// @plan:PLAN-20260408-LLXPRT-FIRST.P03
-/// @plan:PLAN-20260408-LLXPRT-FIRST.P05
-/// @requirement:REQ-LF-SHELL-005,REQ-LF-SHELL-010
-fn parse_outcome_name(name: &str) -> StepOutcome {
-    match name.to_lowercase().as_str() {
-        "success" => StepOutcome::Success,
-        "fixable" => StepOutcome::Fixable,
-        "fatal" => StepOutcome::Fatal,
-        "retryable" => StepOutcome::Retryable,
-        "abandon" => StepOutcome::Abandon,
-        _ => StepOutcome::Success, // unknown name defaults to success
     }
 }
 

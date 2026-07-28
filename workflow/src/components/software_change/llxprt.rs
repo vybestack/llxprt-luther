@@ -934,14 +934,16 @@ fn match_exit_code_outcome(
         .as_object()?
         .get(&code)?
         .as_str()?;
-    Some(parse_outcome_name(outcome_name))
+    StepOutcome::parse_condition_str(outcome_name)
 }
 
 fn match_static_stdout_outcome(params: &serde_json::Value, stdout: &str) -> Option<StepOutcome> {
     let pattern_map = params.get("outcome_on_stdout")?.as_object()?;
     for (pattern, outcome_value) in pattern_map {
         if contains_outcome_marker_line(stdout, pattern) {
-            return outcome_value.as_str().map(parse_outcome_name);
+            return outcome_value
+                .as_str()
+                .and_then(StepOutcome::parse_condition_str);
         }
     }
     None
@@ -956,7 +958,9 @@ fn match_stdout_outcome(
     let pattern_map = params.get("outcome_on_stdout")?.as_object()?;
     for (pattern, outcome_value) in pattern_map {
         if contains_outcome_marker_line(&stdout, pattern) {
-            return outcome_value.as_str().map(parse_outcome_name);
+            return outcome_value
+                .as_str()
+                .and_then(StepOutcome::parse_condition_str);
         }
     }
     None
@@ -964,17 +968,6 @@ fn match_stdout_outcome(
 
 fn contains_outcome_marker_line(stdout: &str, marker: &str) -> bool {
     stdout.lines().any(|line| line.trim() == marker)
-}
-
-fn parse_outcome_name(name: &str) -> StepOutcome {
-    match name {
-        "success" => StepOutcome::Success,
-        "fixable" => StepOutcome::Fixable,
-        "fatal" => StepOutcome::Fatal,
-        "retryable" => StepOutcome::Retryable,
-        "abandon" => StepOutcome::Abandon,
-        _ => StepOutcome::Fatal,
-    }
 }
 
 #[cfg(test)]

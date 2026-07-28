@@ -12,8 +12,6 @@ use std::sync::{Arc, Mutex};
 
 use crate::engine::transition::StepOutcome;
 
-use super::parse_outcome_name;
-
 /// Shared, thread-safe scanner handle for concurrent feeding and querying.
 pub(super) type SharedScanner = Arc<Mutex<Option<OutcomeScanner>>>;
 
@@ -37,7 +35,8 @@ impl OutcomeScanner {
             .filter_map(|(pattern, outcome_value)| {
                 outcome_value
                     .as_str()
-                    .map(|name| (pattern.clone(), parse_outcome_name(name)))
+                    .and_then(StepOutcome::parse_condition_str)
+                    .map(|outcome| (pattern.clone(), outcome))
             })
             .collect::<Vec<_>>();
         if patterns.is_empty() {
