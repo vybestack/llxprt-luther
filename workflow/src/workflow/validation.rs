@@ -17,7 +17,30 @@ use crate::engine::transition::StepOutcome;
 use crate::workflow::schema::WorkflowType;
 
 /// Entry point of the post-PR portion of the graph.
-const POST_PR_ENTRY: &str = "capture_pr_identity";
+pub const POST_PR_ENTRY: &str = "capture_pr_identity";
+
+/// The steps that carry the post-PR contract.
+///
+/// Public because the integration suite asserts the same contract and cannot
+/// import a `#[cfg(test)]` module. Previously each side kept its own copy and
+/// a test parsed the other's source to compare them; the parser was fragile in
+/// ways review kept finding, and it existed only because this list was
+/// duplicated. One shared definition removes both problems.
+pub const POST_PR_STEPS: [&str; 13] = [
+    "capture_pr_identity",
+    "post_pr_iteration_guard",
+    "watch_pr_checks",
+    "collect_ci_failures",
+    "collect_coderabbit_feedback",
+    "evaluate_coderabbit_feedback",
+    "build_remediation_plan",
+    "remediate_pr_followup",
+    "validate_remediation_result",
+    "run_post_pr_tests",
+    "push_remediation_changes",
+    "mark_coderabbit_feedback",
+    "post_pr_failure_terminal",
+];
 
 /// The pre-PR cleanup terminal that post-PR routes must never target.
 const PRE_PR_CLEANUP_TERMINAL: &str = "abandon_and_log";
@@ -621,10 +644,10 @@ fn validate_configured_outcome_names(
                         step_id: Some(step.step_id.clone()),
                         detail: format!(
                             "step '{}' maps {param}['{key}'] to {}, which is not a string; \
-                             outcome names must be one of success, retryable, fatal, fixable, \
-                             abandon, wait",
+                             outcome names must be one of {}",
                             step.step_id,
-                            describe_value(value)
+                            describe_value(value),
+                            StepOutcome::CONDITION_NAMES.join(", ")
                         ),
                         category: GraphErrorCategory::UnknownOutcomeName,
                     });
@@ -637,8 +660,9 @@ fn validate_configured_outcome_names(
                     step_id: Some(step.step_id.clone()),
                     detail: format!(
                         "step '{}' maps {param}['{key}'] to '{name}', which is not an outcome; \
-                         expected one of success, retryable, fatal, fixable, abandon, wait",
-                        step.step_id
+                         expected one of {}",
+                        step.step_id,
+                        StepOutcome::CONDITION_NAMES.join(", ")
                     ),
                     category: GraphErrorCategory::UnknownOutcomeName,
                 });
