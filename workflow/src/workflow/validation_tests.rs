@@ -8,7 +8,7 @@ use super::*;
 
 use crate::workflow::schema::{StepDef, TransitionDef, WorkflowType};
 
-use super::POST_PR_STEPS;
+use super::{POST_PR_ENTRY, POST_PR_STEPS};
 
 fn step(id: &str) -> StepDef {
     StepDef {
@@ -573,21 +573,36 @@ fn a_non_string_outcome_value_is_rejected() {
     }
 }
 
-/// `POST_PR_STEPS` match the post-PR steps the shipped workflow declares.
+/// The shipped workflow, parsed once for the contract tests below.
 ///
-/// The list is duplicated here and in `tests/e2e_workflow_integration.rs`, so a
-/// post-PR step added to the workflow but not to the list would leave both
-/// copies asserting against a graph that no longer exists - passing while
-/// covering nothing. Anchoring to the shipped file makes that divergence fail
-/// here instead of going unnoticed.
-#[test]
-fn post_pr_steps_matches_the_shipped_workflow() {
+/// Reading the real file rather than a fixture is deliberate: these tests
+/// assert that the SHIPPED workflow satisfies the post-PR contract, and a
+/// fixture could satisfy it while the shipped file did not.
+fn shipped_workflow_source() -> String {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("config/workflows/llxprt-issue-fix-v1.toml");
-    let parsed: toml::Value =
-        toml::from_str(&std::fs::read_to_string(&path).expect("the shipped workflow is readable"))
-            .expect("the shipped workflow parses");
+    std::fs::read_to_string(&path).unwrap_or_else(|e| {
+        panic!(
+            "the shipped workflow at {} is readable: {e}",
+            path.display()
+        )
+    })
+}
 
+/// `log_completion` is reachable from the post-PR entry but deliberately not in
+/// `POST_PR_STEPS`: it satisfies none of the post-PR step contract - no
+/// `artifact_root`, no outgoing transitions, not marked terminal. Adding it
+/// makes two e2e contract tests fail for real reasons.
+///
+/// That is a defect in the shipped workflow rather than in the list, and the
+/// routing fix does not belong in a parser change. Tracked as #280.
+const KNOWN_UNCONTRACTED: [&str; 1] = ["log_completion"];
+
+/// Every name in `POST_PR_STEPS` is a step the shipped workflow declares.
+#[test]
+fn post_pr_steps_names_only_steps_that_exist() {
+    let parsed: toml::Value =
+        toml::from_str(&shipped_workflow_source()).expect("the shipped workflow parses");
     let declared: std::collections::BTreeSet<String> = parsed
         .get("steps")
         .and_then(|s| s.as_array())
@@ -596,7 +611,6 @@ fn post_pr_steps_matches_the_shipped_workflow() {
         .filter_map(|s| s.get("step_id").and_then(|v| v.as_str()))
         .map(str::to_string)
         .collect();
-
     assert!(
         !declared.is_empty(),
         "no steps parsed; this would pass vacuously"
@@ -609,39 +623,28 @@ fn post_pr_steps_matches_the_shipped_workflow() {
         .collect();
     assert!(
         missing.is_empty(),
-        "POST_PR_STEPS names steps the shipped workflow no longer declares: {missing:?}\n\
-         Update both this list and the copy in tests/e2e_workflow_integration.rs."
+        "POST_PR_STEPS names steps the shipped workflow no longer declares: {missing:?}"
     );
+}
 
-    // The reverse direction, which is the dangerous one. A post-PR step added
-    // to the workflow but not to this list is not merely uncovered: the post-PR
-    // validators (unsafe-route rejection, collector reachability, iteration cap)
-    // would not treat it as post-PR at all, so those checks would silently skip
-    // it while this test still passed.
-    //
-    // "Post-PR" is defined by reachability from POST_PR_ENTRY, not by a name
-    // convention, so the set is computed the same way validation computes it
-    // rather than guessed at here.
+/// Every post-PR step the shipped workflow declares is in `POST_PR_STEPS`.
+///
+/// This is the dangerous direction. A post-PR step absent from the list is not
+/// merely uncovered: the post-PR validators - unsafe-route rejection, collector
+/// reachability, iteration cap - would not treat it as post-PR at all, so those
+/// checks would skip it silently while the forward test above still passed.
+///
+/// "Post-PR" is reachability from `POST_PR_ENTRY`, not a naming convention, so
+/// the set is computed the way validation computes it rather than guessed.
+#[test]
+fn the_shipped_workflow_declares_no_post_pr_step_outside_the_list() {
     let workflow: WorkflowType =
-        toml::from_str(&std::fs::read_to_string(&path).expect("the shipped workflow is readable"))
-            .expect("the shipped workflow deserialises");
-    let reachable = compute_reachable_steps(&workflow, "capture_pr_identity");
+        toml::from_str(&shipped_workflow_source()).expect("the shipped workflow deserialises");
+    let reachable = compute_reachable_steps(&workflow, POST_PR_ENTRY);
     assert!(
         !reachable.is_empty(),
-        "no post-PR steps reachable; this half would pass vacuously"
+        "no post-PR steps reachable; this would pass vacuously"
     );
-
-    // `log_completion` is reachable from the post-PR entry but is deliberately
-    // not in POST_PR_STEPS, because it does not satisfy the post-PR step
-    // contract: it declares no `artifact_root`, has no outgoing transitions,
-    // and is not marked terminal. Adding it makes two e2e contract tests fail
-    // for real reasons rather than spuriously.
-    //
-    // That is a defect in the shipped workflow, not in this list, and fixing
-    // the workflow is a routing change that does not belong in a parser
-    // change. Tracked as #280; this exception keeps the reverse check
-    // useful in the meantime instead of deleting it.
-    const KNOWN_UNCONTRACTED: [&str; 1] = ["log_completion"];
 
     let missing: Vec<&str> = reachable
         .iter()
@@ -649,13 +652,13 @@ fn post_pr_steps_matches_the_shipped_workflow() {
         .filter(|id| !POST_PR_STEPS.contains(id))
         .collect();
 
-    // The exception must not outlive the defect. If a step named here is no
-    // longer missing, #280 has been fixed and leaving the entry in place would
-    // silently excuse a future regression of the same kind.
+    // The exception must not outlive the defect. A step named here that is no
+    // longer missing means #280 is fixed, and leaving the entry would silently
+    // excuse the next step that goes missing.
     for excused in KNOWN_UNCONTRACTED {
         assert!(
             missing.contains(&excused),
-            "'{excused}' is now covered by POST_PR_STEPS, so the #280 exception is obsolete; \
+            "{excused} is now covered by POST_PR_STEPS, so the #280 exception is obsolete; \
              remove it from KNOWN_UNCONTRACTED or it will excuse the next step that goes missing"
         );
     }
@@ -667,8 +670,7 @@ fn post_pr_steps_matches_the_shipped_workflow() {
     assert!(
         unlisted.is_empty(),
         "the shipped workflow has post-PR steps missing from POST_PR_STEPS: {unlisted:?}\n\
-         Post-PR validation would skip these entirely. Add them here and to the copy in \
-         tests/e2e_workflow_integration.rs."
+         Post-PR validation would skip these entirely."
     );
 }
 
